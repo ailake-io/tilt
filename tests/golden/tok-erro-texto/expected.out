@@ -1,0 +1,5 @@
+   1:1    IDENT         'a'
+   1:2    COLON         ':'
+   1:4    TEXT          'sem fim'
+   1:12   NEWLINE
+   2:1    EOF

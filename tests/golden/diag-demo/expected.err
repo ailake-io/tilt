@@ -1,0 +1,10 @@
+erro[T012]: forma de tensor incompativel
+  --> exemplo.tilt:2:6
+   |
+ 2 |   x: tensor[f32, 4]
+   |      ^^^^^^^^^^^^^^
+   |
+   = esperado tensor[f32, _, 1536], encontrado tensor[f32, 4]
+   = a primeira camada 'densa' foi declarada como [1536, 512]
+   = sugestao: ajuste a entrada para 1536 colunas ou a camada para [4, 512]
+

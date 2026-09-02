@@ -1,0 +1,23 @@
+   1:1    IDENT         'a'
+   1:2    COLON         ':'
+   1:3    NEWLINE
+   2:3    INDENT
+   2:3    IDENT         'b'
+   2:4    COLON         ':'
+   2:5    NEWLINE
+   3:5    INDENT
+   3:5    IDENT         'c'
+   3:6    COLON         ':'
+   3:8    INT           '1'
+   3:9    NEWLINE
+   4:3    DEDENT
+   4:3    IDENT         'd'
+   4:4    COLON         ':'
+   4:6    INT           '2'
+   4:7    NEWLINE
+   5:1    DEDENT
+   5:1    IDENT         'e'
+   5:2    COLON         ':'
+   5:4    INT           '3'
+   5:5    NEWLINE
+   6:1    EOF

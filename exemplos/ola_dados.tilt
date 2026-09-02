@@ -1,0 +1,5 @@
+pipeline ola_dados:
+  passos:
+    - tabela = ler_csv "dados/vendas.csv"
+    - resumo = tabela.agrupar_por "regiao", { total: somar "valor" }
+    - escrever_parquet resumo, "saida/vendas_por_regiao.parquet"

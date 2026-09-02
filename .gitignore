@@ -1,0 +1,5 @@
+/build/
+*.tiltc
+.env
+compile_commands.json
+tests/golden/*/.actual.*

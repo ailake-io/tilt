@@ -1,0 +1,8 @@
+erro[T002]: tab encontrado na indentacao
+  --> input.tilt:2:1
+   |
+ 2 | 	b: 1
+   | ^
+   |
+   = sugestao: troque tabs por 2 espacos
+

@@ -1,0 +1,7 @@
+valores:
+  t: "oi"
+  i: 42
+  d: 3.14
+  x: 1.5e-3
+  v: verdadeiro
+  n: nulo

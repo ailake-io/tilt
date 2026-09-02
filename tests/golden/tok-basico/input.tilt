@@ -1,0 +1,3 @@
+pipeline exemplo:
+  passos:
+    - x = ler_csv "dados.csv"

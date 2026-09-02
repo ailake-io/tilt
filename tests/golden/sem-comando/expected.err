@@ -1,0 +1,11 @@
+tilt 0.0.1
+
+uso: tilt <comando> [argumentos]
+
+comandos:
+  checar <arquivo>                   verifica sintaxe, indentacao e tipos
+  executar <arquivo> [--agendar]     roda o programa no interpretador
+  compilar <arquivo> --saida <bin>   gera binario nativo
+  tokens <arquivo>                   despeja o fluxo de tokens (debug)
+  versao                             mostra a versao
+  ajuda                              mostra esta mensagem

@@ -1,0 +1,10 @@
+   1:1    IDENT         'doc'
+   1:4    COLON         ':'
+   1:5    NEWLINE
+   2:3    INDENT
+   2:3    IDENT         'texto'
+   2:8    COLON         ':'
+   2:10   TEXT          '\nlinha um\nlinha dois\n'
+   5:4    NEWLINE
+   6:1    DEDENT
+   6:1    EOF

@@ -1,0 +1,18 @@
+   1:1    IDENT         'pipeline'
+   1:10   IDENT         'exemplo'
+   1:17   COLON         ':'
+   1:18   NEWLINE
+   2:3    INDENT
+   2:3    IDENT         'passos'
+   2:9    COLON         ':'
+   2:10   NEWLINE
+   3:5    INDENT
+   3:5    DASH          '-'
+   3:7    IDENT         'x'
+   3:9    EQ            '='
+   3:11   IDENT         'ler_csv'
+   3:19   TEXT          'dados.csv'
+   3:30   NEWLINE
+   4:1    DEDENT
+   4:1    DEDENT
+   4:1    EOF

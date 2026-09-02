@@ -1,0 +1,8 @@
+erro[T001]: indentacao de 3 espacos nao e multiplo de 2
+  --> input.tilt:2:1
+   |
+ 2 |    b: 1
+   | ^^^
+   |
+   = sugestao: use blocos de 2 espacos
+

@@ -1,0 +1,8 @@
+erro[T003]: texto nao terminado
+  --> input.tilt:1:4
+   |
+ 1 | a: "sem fim
+   |    ^^^^^^^^
+   |
+   = sugestao: feche o texto com aspas na mesma linha
+
