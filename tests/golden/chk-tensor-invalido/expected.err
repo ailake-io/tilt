@@ -1,0 +1,16 @@
+erro[T034]: dtype de tensor desconhecido 'f33'
+  --> input.tilt:2:13
+   |
+ 2 |   v: tensor[f33, 1536]
+   |             ^^^
+   |
+   = use f32, f16, bf16, f64, i8, i32, i64 ou u8
+
+erro[T034]: dimensao de tensor deve ser um inteiro ou '_'
+  --> input.tilt:3:18
+   |
+ 3 |   w: tensor[f32, abc]
+   |                  ^^^
+   |
+
+2 erro(s) em input.tilt

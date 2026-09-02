@@ -34,6 +34,16 @@ std::string_view diag_code_title(DiagCode code) {
       return "segredo deve usar env";
     case DiagCode::InvalidDevice:
       return "dispositivo invalido";
+    case DiagCode::UndefinedName:
+      return "nome nao definido";
+    case DiagCode::UnknownReference:
+      return "referencia desconhecida";
+    case DiagCode::DuplicateDeclaration:
+      return "declaracao duplicada";
+    case DiagCode::UnknownType:
+      return "tipo desconhecido";
+    case DiagCode::InvalidTensorType:
+      return "tipo de tensor invalido";
     case DiagCode::ConnectorNotImplemented:
       return "conector nao implementado";
     case DiagCode::DataQualityViolation:

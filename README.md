@@ -34,8 +34,12 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M0** — andaimes de build, CLI, módulo de diagnósticos, harness de teste. ✅
 - **M1** — lexer + motor de indentação (`tilt tokens <arquivo>`). ✅
 - **M2** — parser de descida recursiva + AST (`tilt ast <arquivo>`). ✅
-- **M3** — análise semântica e inferência de tipos. Próximo.
+- **M3** — análise semântica, 1ª passada (`tilt checar <arquivo>`). ✅
+- **M3.5 / M4** — resolução de nomes em `passos:`, `shape_solver` de tensores,
+  interpretador de árvore. Próximo.
 
-Semântica e interpretador ainda não implementados. A assinatura de `funcao`
-(parâmetros, `->` tipo de retorno) é reconhecida de forma frouxa em M2 e será
-reprocessada em M3.
+`tilt checar` hoje valida: declarações duplicadas (T032), tipos desconhecidos
+(T033), anotações de tensor malformadas (T034), segredos literais (T020),
+`dispositivo:` inválido (T021) e `ferramentas:` de `agente` não declaradas
+(T031). Resolução de variáveis dentro de `passos:`/`executar:` e o solver de
+dimensões de tensor ainda não estão implementados.

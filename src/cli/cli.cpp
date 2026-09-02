@@ -18,6 +18,7 @@
 #include "lexer/token.hpp"
 #include "parser/ast_dump.hpp"
 #include "parser/parser.hpp"
+#include "semantic/checker.hpp"
 #include "tilt/version.hpp"
 
 namespace tilt {
@@ -149,6 +150,26 @@ int cmd_ast(const std::vector<std::string_view>& args) {
   return kOk;
 }
 
+int cmd_checar(const std::vector<std::string_view>& args) {
+  std::optional<SourceFile> src = load_source(args, "tilt checar <arquivo>");
+  if (!src) return kUsage;
+
+  DiagnosticEngine diag(&src.value());
+  Lexer lexer(src.value(), diag);
+  const std::vector<Token> tokens = lexer.tokenize();
+  Parser parser(tokens, diag);
+  const ast::Program program = parser.parse_program();
+  check_program(program, diag);
+
+  if (diag.has_errors()) {
+    diag.render(std::cerr, want_color());
+    std::cerr << diag.error_count() << " erro(s) em " << args[1] << "\n";
+    return kDiagnostics;
+  }
+  std::cout << "ok: " << args[1] << " sem erros\n";
+  return kOk;
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -172,8 +193,9 @@ int run_cli(int argc, char** argv) {
   if (cmd == "_diag-demo") return cmd_diag_demo();
   if (cmd == "tokens") return cmd_tokens(args);
   if (cmd == "ast") return cmd_ast(args);
+  if (cmd == "checar") return cmd_checar(args);
 
-  if (cmd == "checar" || cmd == "executar" || cmd == "compilar") {
+  if (cmd == "executar" || cmd == "compilar") {
     std::cerr << "tilt: comando '" << cmd << "' ainda nao implementado (em desenvolvimento)\n";
     return kNotImplemented;
   }

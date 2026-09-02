@@ -35,6 +35,8 @@ add_library(tilt_core STATIC
   src/lexer/lexer.cpp
   src/parser/parser.cpp
   src/parser/ast_dump.cpp
+  src/semantic/type.cpp
+  src/semantic/checker.cpp
   src/cli/cli.cpp)
 target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

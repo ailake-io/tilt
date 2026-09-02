@@ -52,6 +52,7 @@ class Parser {
 
   // expressions
   ast::ExprPtr parse_expr();
+  ast::ExprPtr parse_union();
   ast::ExprPtr parse_or();
   ast::ExprPtr parse_and();
   ast::ExprPtr parse_equality();

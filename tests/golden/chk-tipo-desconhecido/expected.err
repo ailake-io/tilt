@@ -1,0 +1,9 @@
+erro[T033]: tipo desconhecido 'ClienteNaoExiste'
+  --> input.tilt:2:12
+   |
+ 2 |   cliente: ClienteNaoExiste
+   |            ^^^^^^^^^^^^^^^^
+   |
+   = tipos base: texto, inteiro, decimal, logico, tabela, tensor[...], lista[...]
+
+1 erro(s) em input.tilt

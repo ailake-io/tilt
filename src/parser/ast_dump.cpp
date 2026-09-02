@@ -263,9 +263,22 @@ struct Printer {
       case ItemKind::Decl: {
         os << "(decl " << quote(it.key);
         header(it.header);
+        if (!it.params.empty()) {
+          os << " (params";
+          for (const auto& p : it.params) {
+            os << " (" << p.name;
+            if (p.value) {
+              os << ": ";
+              expr(*p.value);
+            }
+            os << ")";
+          }
+          os << ")";
+        }
         if (it.value) {
-          os << " ";
+          os << (it.key == "funcao" ? " (retorna " : " ");
           expr(*it.value);
+          if (it.key == "funcao") os << ")";
         }
         bool nested = it.block || (it.value && has_call_block(*it.value));
         if (!nested) {

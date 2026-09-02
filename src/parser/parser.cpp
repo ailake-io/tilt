@@ -159,15 +159,26 @@ ItemPtr Parser::parse_funcao_decl() {
     name->text = std::string(advance().lexeme);
     it->header.push_back(std::move(name));
   }
-  // The rest of the signature (params, '->', return type) is skipped in M2;
-  // it is re-parsed with full fidelity during semantic analysis.
+  // Signature: `<param> [: <type>]` repeated, then optional `-> <return type>`,
+  // then the trailing ':' that opens the body.
   while (!at(TokenKind::Newline) && !at(TokenKind::EndOfFile)) {
-    if (at(TokenKind::Colon) && peek(1).kind == TokenKind::Newline) {
+    if (at(TokenKind::Colon) && peek(1).kind == TokenKind::Newline) break;
+    if (at(TokenKind::Dash) && peek(1).kind == TokenKind::Greater) {
       advance();
-      break;
+      advance();
+      it->value = parse_postfix();  // return type
+      continue;
     }
-    advance();
+    if (at(TokenKind::Identifier)) {
+      Arg p;
+      p.name = std::string(advance().lexeme);
+      if (accept(TokenKind::Colon)) p.value = parse_postfix();
+      it->params.push_back(std::move(p));
+      continue;
+    }
+    advance();  // tolerate a stray token
   }
+  accept(TokenKind::Colon);
   if (at(TokenKind::Newline)) {
     advance();
     if (at(TokenKind::Indent)) it->block = std::make_unique<Block>(parse_block());
@@ -418,7 +429,21 @@ StmtPtr Parser::parse_assign_or_expr_stmt() {
 
 // ----------------------------------------------------------------- expressions
 
-ExprPtr Parser::parse_expr() { return parse_or(); }
+ExprPtr Parser::parse_expr() { return parse_union(); }
+
+// Lowest precedence: '|' builds union-of-literals types ("a" | "b" | "c").
+ExprPtr Parser::parse_union() {
+  ExprPtr lhs = parse_or();
+  while (at(TokenKind::Pipe)) {
+    auto e = make_expr(ExprKind::Binary, lhs->span);
+    e->text = "|";
+    advance();
+    e->lhs = std::move(lhs);
+    e->rhs = parse_or();
+    lhs = std::move(e);
+  }
+  return lhs;
+}
 
 ExprPtr Parser::parse_or() {
   ExprPtr lhs = parse_and();

@@ -23,6 +23,11 @@ enum class DiagCode {
   TensorShapeMismatch = 12,
   SecretMustUseEnv = 20,
   InvalidDevice = 21,
+  UndefinedName = 30,
+  UnknownReference = 31,
+  DuplicateDeclaration = 32,
+  UnknownType = 33,
+  InvalidTensorType = 34,
 
   // Runtime: 900+
   ConnectorNotImplemented = 900,

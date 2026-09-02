@@ -1,0 +1,6 @@
+tipo X:
+  a: texto
+
+pipeline X:
+  passos:
+    - imprimir "oi"

@@ -1,0 +1,9 @@
+erro[T032]: 'X' ja foi declarado
+  --> input.tilt:4:1
+   |
+ 4 | pipeline X:
+   | ^^^^^^^^
+   |
+   = declaracao anterior na linha 1
+
+1 erro(s) em input.tilt

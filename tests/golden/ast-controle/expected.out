@@ -1,5 +1,5 @@
 (programa
-  (decl "funcao" (cabecalho (name "classificar"))
+  (decl "funcao" (cabecalho (name "classificar")) (params (p: (name "decimal"))) (retorna (name "texto"))
     (bloco
       (stmt
         (se (binary "GE" (name "p") (decimal "0.9"))

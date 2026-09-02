@@ -107,7 +107,8 @@ struct Item {
 
   std::string key;               // Decl keyword / Field key
   std::vector<ExprPtr> header;   // tokens between key and ':'  (e.g. `rota post "/x"`)
-  ExprPtr value;                 // inline value after ':' (Field); RHS expr (Decl `seja`)
+  std::vector<Arg> params;       // Decl `funcao`: parameters (name + optional type expr)
+  ExprPtr value;                 // inline value after ':' (Field); RHS (`seja`); `funcao` return type
   std::unique_ptr<Block> block;  // nested block (Decl / Field)
 
   StmtPtr stmt;   // Stmt

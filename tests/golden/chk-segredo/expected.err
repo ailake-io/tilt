@@ -1,0 +1,9 @@
+erro[T020]: segredo em 'chave' nao deve ser um literal
+  --> input.tilt:3:10
+   |
+ 3 |   chave: "sk-1234567890"
+   |          ^^^^^^^^^^^^^^^
+   |
+   = use chave: env "NOME_DA_VARIAVEL"
+
+1 erro(s) em input.tilt

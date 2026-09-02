@@ -1,0 +1,3 @@
+tipo E:
+  v: tensor[f33, 1536]
+  w: tensor[f32, abc]

@@ -1,0 +1,9 @@
+erro[T021]: dispositivo invalido 'tpu:9'
+  --> input.tilt:2:16
+   |
+ 2 |   dispositivo: "tpu:9"
+   |                ^^^^^^^
+   |
+   = use auto, cpu, gpu, metal ou "cuda:N"
+
+1 erro(s) em input.tilt

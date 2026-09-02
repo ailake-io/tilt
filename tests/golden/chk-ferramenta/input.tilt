@@ -1,0 +1,4 @@
+agente A:
+  llm: gpt
+  ferramentas:
+    - busca_web

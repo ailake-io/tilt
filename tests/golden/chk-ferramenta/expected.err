@@ -1,0 +1,8 @@
+erro[T031]: ferramenta 'busca_web' nao declarada
+  --> input.tilt:4:7
+   |
+ 4 |     - busca_web
+   |       ^^^^^^^^^
+   |
+
+1 erro(s) em input.tilt
