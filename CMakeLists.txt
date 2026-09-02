@@ -37,6 +37,8 @@ add_library(tilt_core STATIC
   src/parser/ast_dump.cpp
   src/semantic/type.cpp
   src/semantic/checker.cpp
+  src/runtime/value.cpp
+  src/interp/interpreter.cpp
   src/cli/cli.cpp)
 target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -1,0 +1,10 @@
+# Exemplo executavel: ler CSV, filtrar, agrupar e agregar.
+
+pipeline resumo_vendas:
+  passos:
+    - vendas = ler_csv "exemplos/dados/vendas.csv"
+    - imprimir "linhas lidas:", vendas.tamanho
+    - relevantes = vendas.filtrar linha.valor >= 50
+    - por_regiao = relevantes.agrupar_por "regiao", { receita: somar "valor", pedidos: contar }
+    - para cada r em por_regiao:
+        imprimir r.regiao, "receita", r.receita, "em", r.pedidos, "pedidos"

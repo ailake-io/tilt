@@ -610,10 +610,11 @@ ExprPtr Parser::parse_postfix() {
 }
 
 std::vector<Arg> Parser::parse_bare_args() {
+  const bool allow_named = map_depth_ == 0;
   std::vector<Arg> args;
   while (true) {
     Arg a;
-    if (at(TokenKind::Identifier) && peek(1).kind == TokenKind::Colon &&
+    if (allow_named && at(TokenKind::Identifier) && peek(1).kind == TokenKind::Colon &&
         peek(2).kind != TokenKind::Newline) {
       a.name = std::string(advance().lexeme);
       advance();  // ':'
@@ -622,9 +623,17 @@ std::vector<Arg> Parser::parse_bare_args() {
       a.value = parse_expr();
     }
     args.push_back(std::move(a));
-    if (!accept(TokenKind::Comma)) break;
+
+    if (!at(TokenKind::Comma)) break;
+    // Inside a `{ ... }` literal a following `ident:` is the next map key: the
+    // comma belongs to the map, not to this argument list.
+    if (map_depth_ > 0 && peek(1).kind == TokenKind::Identifier &&
+        peek(2).kind == TokenKind::Colon) {
+      break;
+    }
+    advance();  // consume the comma
     if (at(TokenKind::Newline) || at(TokenKind::Colon) || at(TokenKind::EndOfFile) ||
-        at(TokenKind::Dedent)) {
+        at(TokenKind::Dedent) || at(TokenKind::RBrace) || at(TokenKind::RBracket)) {
       break;
     }
   }
@@ -701,6 +710,7 @@ ExprPtr Parser::parse_primary() {
   }
   if (accept(TokenKind::LBrace)) {
     auto e = make_expr(ExprKind::MapLit, span);
+    ++map_depth_;
     skip_newlines();
     while (!at(TokenKind::RBrace) && !at(TokenKind::EndOfFile)) {
       MapEntry entry;
@@ -716,6 +726,7 @@ ExprPtr Parser::parse_primary() {
       skip_newlines();
     }
     expect(TokenKind::RBrace, "'}'");
+    --map_depth_;
     return e;
   }
 

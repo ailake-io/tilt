@@ -1,0 +1,16 @@
+# Exemplo executavel: computo puro, funcao e laco.
+
+funcao faixa n -> texto:
+  se n >= 100:
+    retornar "grande"
+  retornar "pequena"
+
+pipeline soma:
+  passos:
+    - a = 40
+    - b = 62
+    - total = a + b
+    - imprimir "a + b =", total
+    - imprimir "faixa:", faixa total
+    - para cada n em intervalo 3:
+        imprimir "  item", n

@@ -81,6 +81,7 @@ class Parser {
   const std::vector<Token>& toks_;
   DiagnosticEngine& diag_;
   std::size_t pos_ = 0;
+  int map_depth_ = 0;  // inside a `{ ... }` literal: `ident:` is a key, not a named arg
 };
 
 }  // namespace tilt

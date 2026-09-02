@@ -16,6 +16,7 @@
 #include "diagnostics/diagnostic.hpp"
 #include "lexer/lexer.hpp"
 #include "lexer/token.hpp"
+#include "interp/interpreter.hpp"
 #include "parser/ast_dump.hpp"
 #include "parser/parser.hpp"
 #include "semantic/checker.hpp"
@@ -170,6 +171,32 @@ int cmd_checar(const std::vector<std::string_view>& args) {
   return kOk;
 }
 
+int cmd_executar(const std::vector<std::string_view>& args) {
+  std::optional<SourceFile> src = load_source(args, "tilt executar <arquivo> [--agendar]");
+  if (!src) return kUsage;
+
+  DiagnosticEngine diag(&src.value());
+  Lexer lexer(src.value(), diag);
+  const std::vector<Token> tokens = lexer.tokenize();
+  Parser parser(tokens, diag);
+  const ast::Program program = parser.parse_program();
+  check_program(program, diag);
+
+  if (diag.has_errors()) {
+    diag.render(std::cerr, want_color());
+    std::cerr << "corrija os erros antes de executar\n";
+    return kDiagnostics;
+  }
+
+  Interpreter interp(program, diag, std::cout);
+  int rc = interp.run();
+  if (diag.has_errors()) {
+    diag.render(std::cerr, want_color());
+    return kDiagnostics;
+  }
+  return rc == 0 ? kOk : kDiagnostics;
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -194,8 +221,9 @@ int run_cli(int argc, char** argv) {
   if (cmd == "tokens") return cmd_tokens(args);
   if (cmd == "ast") return cmd_ast(args);
   if (cmd == "checar") return cmd_checar(args);
+  if (cmd == "executar") return cmd_executar(args);
 
-  if (cmd == "executar" || cmd == "compilar") {
+  if (cmd == "compilar") {
     std::cerr << "tilt: comando '" << cmd << "' ainda nao implementado (em desenvolvimento)\n";
     return kNotImplemented;
   }

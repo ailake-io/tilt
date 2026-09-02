@@ -46,6 +46,10 @@ std::string_view diag_code_title(DiagCode code) {
       return "tipo de tensor invalido";
     case DiagCode::ConnectorNotImplemented:
       return "conector nao implementado";
+    case DiagCode::RuntimeError:
+      return "erro de execucao";
+    case DiagCode::NotImplemented:
+      return "recurso nao implementado";
     case DiagCode::DataQualityViolation:
       return "violacao de qualidade de dados";
   }

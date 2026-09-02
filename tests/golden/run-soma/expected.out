@@ -1,0 +1,5 @@
+== pipeline soma ==
+dobro: 42
+concat: abc
+vinte e um
+soma 1..4: 10

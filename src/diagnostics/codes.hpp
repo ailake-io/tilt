@@ -31,6 +31,8 @@ enum class DiagCode {
 
   // Runtime: 900+
   ConnectorNotImplemented = 900,
+  RuntimeError = 901,
+  NotImplemented = 902,
   DataQualityViolation = 910,
 };
 

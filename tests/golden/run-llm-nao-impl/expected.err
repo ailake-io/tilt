@@ -1,0 +1,7 @@
+erro[T902]: runtime de LLM nao implementado (M8); use TILT_LLM=mock para simular
+  --> input.tilt:3:11
+   |
+ 3 |     - r = perguntar gpt, usuario: "oi"
+   |           ^^^^^^^^^
+   |
+

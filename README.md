@@ -35,11 +35,17 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M1** — lexer + motor de indentação (`tilt tokens <arquivo>`). ✅
 - **M2** — parser de descida recursiva + AST (`tilt ast <arquivo>`). ✅
 - **M3** — análise semântica, 1ª passada (`tilt checar <arquivo>`). ✅
-- **M3.5 / M4** — resolução de nomes em `passos:`, `shape_solver` de tensores,
-  interpretador de árvore. Próximo.
+- **M4** — interpretador de árvore (`tilt executar <arquivo>`). ✅
+- **M5+** — conectores de dados reais, tensores/DL, LLM, agentes, VM de bytecode.
 
-`tilt checar` hoje valida: declarações duplicadas (T032), tipos desconhecidos
-(T033), anotações de tensor malformadas (T034), segredos literais (T020),
-`dispositivo:` inválido (T021) e `ferramentas:` de `agente` não declaradas
-(T031). Resolução de variáveis dentro de `passos:`/`executar:` e o solver de
-dimensões de tensor ainda não estão implementados.
+### `tilt executar`
+
+Roda todo `pipeline` de topo (e uma `funcao principal` se não houver pipeline).
+Suportado hoje: cômputo puro, `se`/`para cada`/`enquanto`/`tentar`, `funcao`,
+`ler_csv`/`escrever_csv`, `.filtrar`/`.agrupar_por`/`.derivar`/`.selecionar`
+sobre tabelas, `imprimir`/`registrar`/`env`/`dividir`/`intervalo`/`somar`/…,
+interpolação `{{var}}` em textos.
+
+Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
+`incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução
+apontando o marco que os implementará (`TILT_LLM=mock` simula o LLM).

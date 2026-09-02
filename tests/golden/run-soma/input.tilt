@@ -1,0 +1,14 @@
+funcao dobro n -> inteiro:
+  retornar n * 2
+
+pipeline soma:
+  passos:
+    - x = 21
+    - imprimir "dobro:", dobro x
+    - imprimir "concat:", "a" + "b" + "c"
+    - se x == 21:
+        imprimir "vinte e um"
+    - acc = 0
+    - para cada k em intervalo 1, 5:
+        acc = acc + k
+    - imprimir "soma 1..4:", acc
