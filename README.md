@@ -33,6 +33,9 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 
 - **M0** — andaimes de build, CLI, módulo de diagnósticos, harness de teste. ✅
 - **M1** — lexer + motor de indentação (`tilt tokens <arquivo>`). ✅
-- **M2** — parser + AST. Próximo.
+- **M2** — parser de descida recursiva + AST (`tilt ast <arquivo>`). ✅
+- **M3** — análise semântica e inferência de tipos. Próximo.
 
-Parser, semântica e interpretador ainda não implementados.
+Semântica e interpretador ainda não implementados. A assinatura de `funcao`
+(parâmetros, `->` tipo de retorno) é reconhecida de forma frouxa em M2 e será
+reprocessada em M3.

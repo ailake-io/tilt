@@ -1,0 +1,20 @@
+fonte clientes:
+  tipo: postgres
+  url: env "DATABASE_URL"
+  consulta: "select * from clientes where ativo"
+
+pipeline etl_clientes:
+  agenda: "0 * * * *"
+  ao_falhar: repetir 3, espera: "30s"
+
+  passos:
+    - bruto = ler clientes
+    - limpo = bruto.filtrar linha.email contem "@"
+    - agregado = limpo.agrupar_por "dominio", { total: contar, receita: somar "valor" }
+    - escrever agregado, para: parquet "s3://bucket/clientes_por_dominio.parquet"
+
+verificar agregado:
+  - nao_nulo: [dominio, total]
+  - unico: dominio
+  - intervalo: receita >= 0
+  ao_violar: abortar

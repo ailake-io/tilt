@@ -1,0 +1,28 @@
+(programa
+  (decl "modelo" (cabecalho (name "Classificador"))
+    (bloco
+      (campo "dispositivo" (name "auto"))
+      (campo "camadas"
+        (bloco
+          (item
+            (bloco
+              (campo "densa" (int "512"))
+              (campo "ativacao" (name "relu"))
+            )
+          )
+          (item
+            (campo "abandono" (decimal "0.1"))
+          )
+          (item
+            (campo "densa" (int "10"))
+          )
+          (item
+            (stmt
+              (expr (name "softmax"))
+            )
+          )
+        )
+      )
+    )
+  )
+)

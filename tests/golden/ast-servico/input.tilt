@@ -1,0 +1,10 @@
+servico ApiPredicao:
+  porta: 8080
+  rota post "/v1/predizer":
+    entrada: EntradaInferencia
+    passos:
+      - saida = modelo Classificador.executar entrada.vetor_contexto
+      - responder:
+          status: 200
+          dados:
+            classe: saida.classe_top1

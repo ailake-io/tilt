@@ -1,0 +1,10 @@
+funcao classificar p: decimal -> texto:
+  se p >= 0.9:
+    rotulo = "alta"
+  senao se p >= 0.5:
+    rotulo = "media"
+  senao:
+    rotulo = "baixa"
+  para cada linha em tabela:
+    imprimir linha.email
+  retornar rotulo

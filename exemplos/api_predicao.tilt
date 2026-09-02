@@ -1,0 +1,29 @@
+tipo EntradaInferencia:
+  texto: texto
+  vetor_contexto: tensor[f32, 1536]
+  temperatura: decimal
+
+modelo Classificador:
+  dispositivo: auto
+  entrada: tensor[f32, 1536]
+  camadas:
+    - densa: 512
+      ativacao: relu
+    - abandono: 0.1
+    - densa: 10
+    - softmax
+  pesos: "modelos/classificador.pesos"
+
+servico ApiPredicao:
+  porta: 8080
+  dispositivo: "cuda:0"
+
+  rota post "/v1/predizer":
+    entrada: EntradaInferencia
+    passos:
+      - saida_modelo = modelo Classificador.executar entrada.vetor_contexto
+      - responder:
+          status: 200
+          dados:
+            classe: saida_modelo.classe_top1
+            probabilidade: saida_modelo.probabilidade

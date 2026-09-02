@@ -1,0 +1,4 @@
+tipo EntradaInferencia:
+  texto: texto
+  vetor_contexto: tensor[f32, 1536]
+  temperatura: decimal

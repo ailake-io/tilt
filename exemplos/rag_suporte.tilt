@@ -1,0 +1,26 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  temperatura: 0.2
+
+indice base_conhecimento:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "qdrant://localhost:6333/kb"
+  dimensao: 1536
+  metrica: cosseno
+
+pipeline indexar_docs:
+  passos:
+    - docs = ler_parquet "dados/artigos.parquet"
+    - pedacos = docs.dividir_texto "conteudo", tamanho: 800, sobreposicao: 100
+    - base_conhecimento.inserir pedacos
+
+fluxo responder:
+  entrada:
+    pergunta: texto
+  passos:
+    - trechos = base_conhecimento.buscar entrada.pergunta, top_k: 5
+    - resposta = perguntar gpt:
+        sistema: "Responda usando SOMENTE o contexto."
+        usuario: "Contexto: {{trechos}} Pergunta: {{pergunta}}"
+    - retornar resposta.texto

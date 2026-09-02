@@ -16,6 +16,8 @@
 #include "diagnostics/diagnostic.hpp"
 #include "lexer/lexer.hpp"
 #include "lexer/token.hpp"
+#include "parser/ast_dump.hpp"
+#include "parser/parser.hpp"
 #include "tilt/version.hpp"
 
 namespace tilt {
@@ -36,6 +38,7 @@ void print_usage(std::ostream& os) {
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "  tokens <arquivo>                   despeja o fluxo de tokens (debug)\n"
+     << "  ast <arquivo>                      despeja a arvore sintatica (debug)\n"
      << "  versao                             mostra a versao\n"
      << "  ajuda                              mostra esta mensagem\n";
 }
@@ -83,20 +86,23 @@ int cmd_diag_demo() {
   return kDiagnostics;
 }
 
-int cmd_tokens(const std::vector<std::string_view>& args) {
+std::optional<SourceFile> load_source(const std::vector<std::string_view>& args,
+                                      std::string_view usage) {
   if (args.size() < 2) {
-    std::cerr << "tilt: uso: tilt tokens <arquivo>\n";
-    return kUsage;
+    std::cerr << "tilt: uso: " << usage << "\n";
+    return std::nullopt;
   }
-
-  const std::string path(args[1]);
-  std::optional<SourceFile> src;
   try {
-    src = SourceFile::load(path);
+    return SourceFile::load(std::string(args[1]));
   } catch (const std::exception& e) {
     std::cerr << "tilt: " << e.what() << "\n";
-    return kUsage;
+    return std::nullopt;
   }
+}
+
+int cmd_tokens(const std::vector<std::string_view>& args) {
+  std::optional<SourceFile> src = load_source(args, "tilt tokens <arquivo>");
+  if (!src) return kUsage;
 
   DiagnosticEngine diag(&src.value());
   Lexer lexer(src.value(), diag);
@@ -116,6 +122,25 @@ int cmd_tokens(const std::vector<std::string_view>& args) {
     }
     std::cout << line << "\n";
   }
+
+  if (diag.has_errors()) {
+    diag.render(std::cerr, want_color());
+    return kDiagnostics;
+  }
+  return kOk;
+}
+
+int cmd_ast(const std::vector<std::string_view>& args) {
+  std::optional<SourceFile> src = load_source(args, "tilt ast <arquivo>");
+  if (!src) return kUsage;
+
+  DiagnosticEngine diag(&src.value());
+  Lexer lexer(src.value(), diag);
+  const std::vector<Token> tokens = lexer.tokenize();
+  Parser parser(tokens, diag);
+  const ast::Program program = parser.parse_program();
+
+  dump_program(std::cout, program);
 
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());
@@ -146,8 +171,9 @@ int run_cli(int argc, char** argv) {
   }
   if (cmd == "_diag-demo") return cmd_diag_demo();
   if (cmd == "tokens") return cmd_tokens(args);
+  if (cmd == "ast") return cmd_ast(args);
 
-  if (cmd == "checar" || cmd == "executar" || cmd == "compilar" || cmd == "ast") {
+  if (cmd == "checar" || cmd == "executar" || cmd == "compilar") {
     std::cerr << "tilt: comando '" << cmd << "' ainda nao implementado (em desenvolvimento)\n";
     return kNotImplemented;
   }

@@ -1,0 +1,41 @@
+(programa
+  (decl "funcao" (cabecalho (name "classificar"))
+    (bloco
+      (stmt
+        (se (binary "GE" (name "p") (decimal "0.9"))
+          (bloco
+            (stmt
+              (assign (name "rotulo") (text "alta"))
+            )
+          )
+          (senao-se (binary "GE" (name "p") (decimal "0.5"))
+            (bloco
+              (stmt
+                (assign (name "rotulo") (text "media"))
+              )
+            )
+          )
+          (senao
+            (bloco
+              (stmt
+                (assign (name "rotulo") (text "baixa"))
+              )
+            )
+          )
+        )
+      )
+      (stmt
+        (para-cada "linha" em (name "tabela")
+          (bloco
+            (stmt
+              (expr (call (name "imprimir") (member "email" (name "linha"))))
+            )
+          )
+        )
+      )
+      (stmt
+        (retornar (name "rotulo"))
+      )
+    )
+  )
+)

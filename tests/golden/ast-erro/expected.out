@@ -1,0 +1,12 @@
+(programa
+  (decl "tipo" (cabecalho (name "X"))
+    (bloco
+      (campo "a" (name "texto"))
+    )
+  )
+  (decl "tipo" (cabecalho (name "Y"))
+    (bloco
+      (campo "b" (name "inteiro"))
+    )
+  )
+)

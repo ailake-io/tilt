@@ -1,0 +1,4 @@
+importar rede
+de agentes importar memoria_vetorial
+seja taxa = 0.001
+constante MAX = 4096

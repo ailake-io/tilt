@@ -1,0 +1,33 @@
+(programa
+  (decl "servico" (cabecalho (name "ApiPredicao"))
+    (bloco
+      (campo "porta" (int "8080"))
+      (campo "rota" (cabecalho (name "post") (text "/v1/predizer"))
+        (bloco
+          (campo "entrada" (name "EntradaInferencia"))
+          (campo "passos"
+            (bloco
+              (item
+                (stmt
+                  (assign (name "saida") (call (name "modelo") (call (member "executar" (name "Classificador")) (member "vetor_contexto" (name "entrada")))))
+                )
+              )
+              (item
+                (campo "responder"
+                  (bloco
+                    (campo "status" (int "200"))
+                    (campo "dados"
+                      (bloco
+                        (campo "classe" (member "classe_top1" (name "saida")))
+                      )
+                    )
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)

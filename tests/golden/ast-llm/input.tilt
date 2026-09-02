@@ -1,0 +1,8 @@
+fluxo resumir:
+  entrada:
+    documento: texto
+  passos:
+    - resposta = perguntar gpt:
+        sistema: "Voce resume."
+        usuario: "Resuma: {{documento}}"
+    - retornar resposta.texto

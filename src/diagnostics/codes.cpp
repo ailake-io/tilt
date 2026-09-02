@@ -22,6 +22,10 @@ std::string_view diag_code_title(DiagCode code) {
       return "caractere invalido";
     case DiagCode::UnexpectedIndent:
       return "indentacao inesperada";
+    case DiagCode::ExpectedToken:
+      return "token esperado";
+    case DiagCode::UnexpectedToken:
+      return "token inesperado";
     case DiagCode::TypeMismatch:
       return "tipo incompativel";
     case DiagCode::TensorShapeMismatch:

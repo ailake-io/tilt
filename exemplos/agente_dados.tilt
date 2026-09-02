@@ -1,0 +1,26 @@
+ferramenta busca_documentos:
+  descricao: "Busca trechos relevantes na base de conhecimento."
+  entrada:
+    termo: texto
+    limite: inteiro
+  executar:
+    vetor = incorporar "text-embedding-3-small", termo
+    retornar base_conhecimento.buscar vetor, top_k: limite
+
+agente AssistenteTecnico:
+  llm: gpt
+  papel: "Especialista em analise preditiva e dados estruturados."
+  ferramentas:
+    - busca_documentos
+  memoria: conversa
+  max_passos: 8
+
+servico Agente:
+  porta: 8080
+  rota post "/chat":
+    entrada:
+      mensagem: texto
+    passos:
+      - r = AssistenteTecnico.responder entrada.mensagem
+      - responder:
+          texto: r.texto

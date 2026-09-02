@@ -15,6 +15,8 @@ enum class DiagCode {
 
   // Parser: 10-19
   UnexpectedIndent = 10,
+  ExpectedToken = 13,
+  UnexpectedToken = 14,
 
   // Semantic: 11-99
   TypeMismatch = 11,

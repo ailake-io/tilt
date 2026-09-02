@@ -1,0 +1,9 @@
+(programa
+  (decl "tipo" (cabecalho (name "EntradaInferencia"))
+    (bloco
+      (campo "texto" (name "texto"))
+      (campo "vetor_contexto" (index (name "tensor") (name "f32") (int "1536")))
+      (campo "temperatura" (name "decimal"))
+    )
+  )
+)

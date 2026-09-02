@@ -1,0 +1,6 @@
+(programa
+  (decl "importar" (cabecalho (name "rede")))
+  (decl "de" (cabecalho (name "agentes") (name "importar") (name "memoria_vetorial")))
+  (decl "seja" (cabecalho (name "taxa")) (decimal "0.001"))
+  (decl "constante" (cabecalho (name "MAX")) (int "4096"))
+)

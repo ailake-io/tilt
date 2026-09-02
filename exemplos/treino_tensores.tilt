@@ -1,0 +1,19 @@
+modelo Classificador:
+  arquitetura: "rede_neural"
+  dispositivo: gpu
+  camadas:
+    - linear: [1536, 512]
+    - ativacao: relu
+    - dropout: 0.1
+    - linear: [512, 10]
+    - softmax
+
+tarefa treinar_passo:
+  entrada:
+    lote_x: tensor[f32, 64, 1536] no dispositivo gpu
+    alvos: tensor[i32, 64] no dispositivo gpu
+  executar:
+    - predicoes = modelo Classificador.para_frente lote_x
+    - perda = perda_entropia_cruzada predicoes, alvos
+    - perda.retropropagar
+    - otimizador_adam.passo taxa: 0.001

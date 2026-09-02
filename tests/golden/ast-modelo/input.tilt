@@ -1,0 +1,8 @@
+modelo Classificador:
+  dispositivo: auto
+  camadas:
+    - densa: 512
+      ativacao: relu
+    - abandono: 0.1
+    - densa: 10
+    - softmax

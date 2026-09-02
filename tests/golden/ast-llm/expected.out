@@ -1,0 +1,29 @@
+(programa
+  (decl "fluxo" (cabecalho (name "resumir"))
+    (bloco
+      (campo "entrada"
+        (bloco
+          (campo "documento" (name "texto"))
+        )
+      )
+      (campo "passos"
+        (bloco
+          (item
+            (stmt
+              (assign (name "resposta") (call (name "perguntar") (name "gpt")))
+                (bloco
+                  (campo "sistema" (text "Voce resume."))
+                  (campo "usuario" (text "Resuma: {{documento}}"))
+                )
+            )
+          )
+          (item
+            (stmt
+              (retornar (member "texto" (name "resposta")))
+            )
+          )
+        )
+      )
+    )
+  )
+)
