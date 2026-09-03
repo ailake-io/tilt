@@ -1,0 +1,5 @@
+== pipeline p ==
+[mock] resposta para: valendo 21
+passos: 2
+1 dobro 0
+2 cumprimentar oi, valendo 21

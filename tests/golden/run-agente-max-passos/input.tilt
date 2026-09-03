@@ -1,0 +1,29 @@
+llm gpt:
+  provedor: "openai"
+  modelo: "m"
+  chave: env "K"
+
+ferramenta um:
+  descricao: "primeira"
+  executar:
+    retornar 1
+
+ferramenta dois:
+  descricao: "segunda"
+  executar:
+    retornar 2
+
+agente Apressado:
+  llm: gpt
+  papel: "teste"
+  ferramentas:
+    - um
+    - dois
+  memoria: nenhuma
+  max_passos: 1
+
+pipeline p:
+  passos:
+    - r = Apressado.responder "va!"
+    - imprimir r.texto
+    - imprimir "passos:", r.rastro.tamanho

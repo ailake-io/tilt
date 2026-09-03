@@ -1,0 +1,34 @@
+llm gpt:
+  provedor: "openai"
+  modelo: "m"
+  chave: env "K"
+
+ferramenta dobro:
+  descricao: "dobra um numero"
+  entrada:
+    n: inteiro
+  executar:
+    retornar n * 2
+
+ferramenta cumprimentar:
+  descricao: "cumprimenta um texto"
+  entrada:
+    nome: texto
+  executar:
+    retornar "oi, " + nome
+
+agente Assistente:
+  llm: gpt
+  papel: "assistente de teste"
+  ferramentas:
+    - dobro
+    - cumprimentar
+  memoria: nenhuma
+
+pipeline p:
+  passos:
+    - r = Assistente.responder "valendo 21"
+    - imprimir r.texto
+    - imprimir "passos:", r.rastro.tamanho
+    - para cada s em r.rastro:
+        imprimir s.passo, s.ferramenta, s.observacao

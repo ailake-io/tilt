@@ -1,0 +1,12 @@
+agente A:
+  memoria: nenhuma
+
+equipe E:
+  agentes:
+    - unico: A
+  estrategia: supervisor
+
+pipeline p:
+  passos:
+    - r = E.executar "oi"
+    - imprimir r.texto

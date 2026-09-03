@@ -1068,6 +1068,100 @@ rt::Value Interpreter::run_tool(const Item& tool_decl, const rt::ValueMap& args,
   return Value::nulo();
 }
 
+namespace {
+
+struct PlannerAction {
+  enum Kind { Tool, Answer } kind = Answer;
+  std::string tool;
+  rt::ValueMap args;
+  std::string answer;
+};
+
+std::string trim_copy(const std::string& s) {
+  std::size_t a = 0, b = s.size();
+  while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+  while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+  return s.substr(a, b - a);
+}
+
+// Protocolo do planner (uma linha por turno):
+//   chamar <nome> {<json de argumentos>}  — executa uma ferramenta
+//   responder: <resposta final>           — encerra o loop
+// Qualquer outro texto vira resposta final (LLMs reais ignoram protocolo com
+// frequencia; e' o fallback tolerante).
+PlannerAction parse_planner_action(const std::string& raw) {
+  PlannerAction a;
+  const std::string s = trim_copy(raw);
+  if (s.rfind("chamar ", 0) == 0) {
+    const std::string rest = trim_copy(s.substr(7));
+    const std::size_t brace = rest.find('{');
+    PlannerAction tool;
+    tool.kind = PlannerAction::Tool;
+    tool.tool = trim_copy(rest.substr(0, brace));
+    if (brace != std::string::npos) {
+      try {
+        const Value v = rt::json_parse(rest.substr(brace));
+        if (v.kind == ValueKind::Mapa && v.map) {
+          for (const auto& [k, val] : v.map->items) tool.args.set(k, val);
+        }
+      } catch (...) {
+        // argumentos malformados: o interpretador completa com best-effort
+      }
+    }
+    if (!tool.tool.empty()) return tool;
+  }
+  if (s.rfind("responder:", 0) == 0) {
+    a.answer = trim_copy(s.substr(10));
+  } else {
+    a.answer = s;
+  }
+  return a;
+}
+
+Value args_to_value(const rt::ValueMap& args) {
+  Value out = Value::mapa();
+  for (const auto& [k, v] : args.items) out.map->set(k, v);
+  return out;
+}
+
+// Entradas best-effort: campos 'texto' recebem a mensagem; os demais, o
+// padrao do tipo declarado.
+rt::ValueMap best_effort_args(const Item& tool_decl, const std::string& message) {
+  rt::ValueMap targs;
+  if (tool_decl.block) {
+    if (const Item* entrada = find_field(*tool_decl.block, "entrada"); entrada && entrada->block) {
+      for (const auto& f : entrada->block->items) {
+        if (!f || f->kind != ItemKind::Field) continue;
+        if (f->value && f->value->kind == ExprKind::Name && f->value->text == "texto") {
+          targs.set(f->key, Value::texto(message));
+        } else {
+          targs.set(f->key, default_for_type(f->value.get()));
+        }
+      }
+    }
+  }
+  return targs;
+}
+
+std::string tool_params_desc(const Item& tool_decl) {
+  std::string out;
+  if (tool_decl.block) {
+    if (const Item* entrada = find_field(*tool_decl.block, "entrada"); entrada && entrada->block) {
+      bool first = true;
+      for (const auto& f : entrada->block->items) {
+        if (!f || f->kind != ItemKind::Field) continue;
+        if (!first) out += ", ";
+        out += f->key;
+        if (f->value && f->value->kind == ExprKind::Name) out += ": " + f->value->text;
+        first = false;
+      }
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
 rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, const Expr& call,
                                              Env& env) {
   auto it = entities_.find(agent_name);
@@ -1084,12 +1178,13 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   const std::string memoria = field_word(cfg, "memoria", "nenhuma");
   const int max_passos = field_int(cfg, "max_passos", 6);
 
-  // Collect the declared tools.
-  std::vector<std::string> tools;
+  // Ferramentas declaradas, ja resolvidas e validadas.
+  std::vector<std::pair<std::string, const Item*>> tools;
   if (const Item* tf = find_field(cfg, "ferramentas")) {
+    std::vector<std::string> names;
     if (tf->value && tf->value->kind == ExprKind::ListLit) {
       for (const auto& e : tf->value->elems) {
-        if (e && e->kind == ExprKind::Name) tools.push_back(e->text);
+        if (e && e->kind == ExprKind::Name) names.push_back(e->text);
       }
     }
     if (tf->block) {
@@ -1099,67 +1194,123 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         if (!c) continue;
         if (c->kind == ItemKind::Stmt && c->stmt && c->stmt->a &&
             c->stmt->a->kind == ExprKind::Name) {
-          tools.push_back(c->stmt->a->text);
+          names.push_back(c->stmt->a->text);
         } else if (c->kind == ItemKind::Field) {
-          tools.push_back(c->key);
+          names.push_back(c->key);
         }
       }
     }
-  }
-
-  // Deterministic loop: run each tool once with best-effort inputs, collect
-  // observations, then ask the LLM to compose the answer. The real iterative
-  // planner (LLM picks the next action) lands in M9.2.
-  Value rastro = Value::lista();
-  std::string observations;
-  int step = 0;
-  for (const std::string& tname : tools) {
-    if (step >= max_passos) break;
-    auto tit = entities_.find(tname);
-    if (tit == entities_.end() || tit->second->key != "ferramenta") {
-      fail(call.span, "agente '" + agent_name + "': ferramenta '" + tname + "' nao declarada");
-    }
-    rt::ValueMap targs;
-    if (tit->second->block) {
-      if (const Item* entrada = find_field(*tit->second->block, "entrada"); entrada && entrada->block) {
-        for (const auto& f : entrada->block->items) {
-          if (!f || f->kind != ItemKind::Field) continue;
-          if (f->value && f->value->kind == ExprKind::Name && f->value->text == "texto") {
-            targs.set(f->key, Value::texto(message));
-          } else {
-            targs.set(f->key, default_for_type(f->value.get()));
-          }
-        }
+    for (const std::string& name : names) {
+      auto tit = entities_.find(name);
+      if (tit == entities_.end() || tit->second->key != "ferramenta") {
+        fail(call.span, "agente '" + agent_name + "': ferramenta '" + name + "' nao declarada");
       }
+      tools.emplace_back(name, tit->second);
     }
-    Value obs = run_tool(*tit->second, targs, call.span);
-    ++step;
-
-    Value entry = Value::mapa();
-    entry.map->set("passo", Value::inteiro(step));
-    entry.map->set("ferramenta", Value::texto(tname));
-    entry.map->set("observacao", Value::texto(to_display(obs)));
-    rastro.list->push_back(std::move(entry));
-    observations += "- " + tname + ": " + to_display(obs) + "\n";
   }
 
   std::string prompt = message;
   if (memoria == "conversa" && !agent_memory_[agent_name].empty()) {
     prompt = agent_memory_[agent_name] + "\n" + message;
   }
-  std::string system = papel;
-  if (!observations.empty()) system += "\n\nObservacoes das ferramentas:\n" + observations;
 
+  Value rastro = Value::lista();
   std::string answer;
-  if (!llm_name.empty()) {
-    rt::LlmConfig lc = llm_config(llm_name, call.span);
-    try {
-      answer = rt::llm_chat(lc, system, prompt);
-    } catch (const std::exception& e) {
-      fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+
+  if (llm_name.empty()) {
+    // Sem LLM: cada ferramenta roda uma vez com entradas best-effort e a
+    // resposta e' local.
+    int step = 0;
+    for (const auto& [tname, tdecl] : tools) {
+      if (step >= max_passos) break;
+      rt::ValueMap targs = best_effort_args(*tdecl, prompt);
+      Value obs = run_tool(*tdecl, targs, call.span);
+      ++step;
+      Value entry = Value::mapa();
+      entry.map->set("passo", Value::inteiro(step));
+      entry.map->set("ferramenta", Value::texto(tname));
+      entry.map->set("argumentos", args_to_value(targs));
+      entry.map->set("observacao", Value::texto(to_display(obs)));
+      rastro.list->push_back(std::move(entry));
     }
-  } else {
     answer = "[sem llm] " + message;
+  } else {
+    rt::LlmConfig lc = llm_config(llm_name, call.span);
+    std::string system = papel;
+
+    if (tools.empty()) {
+      try {
+        answer = rt::llm_chat(lc, system, prompt);
+      } catch (const std::exception& e) {
+        fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+      }
+    } else {
+      // Planner iterativo (M9.2): a cada passo o LLM escolhe a proxima acao
+      // — chamar uma ferramenta (com argumentos em JSON) ou responder.
+      // O bloco "Ferramentas disponiveis:" seguido de linhas "- <nome>:"
+      // tambem e' o que o modo mock usa para simular o planner.
+      system += "\n\nFerramentas disponiveis:\n";
+      for (const auto& [tname, tdecl] : tools) {
+        system += "- " + tname + ": " + field_str(*tdecl->block, "descricao");
+        const std::string params = tool_params_desc(*tdecl);
+        if (!params.empty()) system += " (parametros: " + params + ")";
+        system += "\n";
+      }
+      system += "\nResponda EXATAMENTE uma linha por turno:\n";
+      system += "chamar <nome> {<json de argumentos>}  — usa uma ferramenta\n";
+      system += "responder: <resposta final>           — quando nao precisar mais de ferramentas\n";
+
+      std::string observations;
+      for (int step = 1; step <= max_passos && answer.empty(); ++step) {
+        std::string user = "Pedido do usuario: " + prompt + "\n";
+        if (!observations.empty()) user += "\nObservacoes ate agora:\n" + observations;
+        std::string raw;
+        try {
+          raw = rt::llm_chat(lc, system, user);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+        }
+        const PlannerAction action = parse_planner_action(raw);
+        if (action.kind == PlannerAction::Answer) {
+          answer = action.answer;
+          break;
+        }
+        auto tit = entities_.find(action.tool);
+        if (tit == entities_.end() || tit->second->key != "ferramenta") {
+          fail(call.span, "agente '" + agent_name + "': o LLM pediu a ferramenta '" +
+                              action.tool + "', que nao esta declarada");
+        }
+        rt::ValueMap targs = best_effort_args(*tit->second, prompt);
+        for (const auto& [k, v] : action.args.items) targs.set(k, v);  // JSON sobrescreve
+        Value obs = run_tool(*tit->second, targs, call.span);
+
+        Value entry = Value::mapa();
+        entry.map->set("passo", Value::inteiro(step));
+        entry.map->set("ferramenta", Value::texto(action.tool));
+        entry.map->set("argumentos", args_to_value(targs));
+        entry.map->set("observacao", Value::texto(to_display(obs)));
+        rastro.list->push_back(std::move(entry));
+        observations += "- " + action.tool + ": " + to_display(obs) + "\n";
+      }
+
+      if (answer.empty()) {
+        // Estourou max_passos sem resposta final: uma ultima chamada pede a
+        // sintese com o que foi observado.
+        try {
+          const std::string user = "Pedido do usuario: " + prompt + "\n\nObservacoes ate agora:\n" +
+                                   observations;
+          const std::string raw = rt::llm_chat(
+              lc, system + "\n\nLimite de passos atingido. Responda agora no formato responder: <sintese>.",
+              user);
+          const PlannerAction action = parse_planner_action(raw);
+          answer = action.kind == PlannerAction::Answer
+                       ? action.answer
+                       : "[agente] limite de passos atingido sem resposta final";
+        } catch (...) {
+          answer = "[agente] limite de passos atingido sem resposta final";
+        }
+      }
+    }
   }
 
   if (memoria == "conversa") {
@@ -1199,7 +1350,93 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
   }
 
   if (estrategia == "supervisor") {
-    fail(call.span, "equipe '" + team_name + "': estrategia 'supervisor' chega no M9.2");
+    // Supervisor (M9.2): um LLM orquestra, delegando tarefas aos agentes por
+    // rotulo ate decidir responder.
+    const std::string sup_name = field_word(cfg, "supervisor", "");
+    if (sup_name.empty()) {
+      fail(call.span, "equipe '" + team_name + "': estrategia 'supervisor' exige 'supervisor: <llm>'");
+    }
+    const std::string objetivo = field_str(cfg, "objetivo");
+    const int max_passos = field_int(cfg, "max_passos", 6);
+    rt::LlmConfig lc = llm_config(sup_name, call.span);
+
+    std::string system = objetivo;
+    system += "\n\nAgentes disponiveis:\n";
+    for (const auto& [rotulo, agente] : members) {
+      std::string papel_membro;
+      if (auto ait = entities_.find(agente); ait != entities_.end() && ait->second->block) {
+        papel_membro = field_str(*ait->second->block, "papel");
+      }
+      system += "- " + rotulo + ": " + agente;
+      if (!papel_membro.empty()) system += " — " + papel_membro;
+      system += "\n";
+    }
+    system += "\nResponda EXATAMENTE uma linha por turno:\n";
+    system += "delegar <rotulo> <tarefa>  — delega a tarefa ao agente\n";
+    system += "responder: <resposta final>\n";
+
+    Value sup_rastro = Value::lista();
+    std::string history;
+    std::string final_text;
+    std::string last_raw;
+    for (int step = 1; step <= max_passos; ++step) {
+      std::string user = "Pedido: " + message + "\n";
+      if (!history.empty()) user += "\nResultados ate agora:\n" + history;
+      std::string raw;
+      try {
+        raw = rt::llm_chat(lc, system, user);
+      } catch (const std::exception& e) {
+        fail(call.span, std::string("equipe '") + team_name + "': supervisor: " + e.what());
+      }
+      last_raw = raw;
+      const std::string line = trim_copy(raw);
+      if (line.rfind("delegar ", 0) == 0) {
+        const std::string rest = trim_copy(line.substr(8));
+        const std::size_t sp = rest.find(' ');
+        const std::string rotulo = rest.substr(0, sp);
+        const std::string tarefa = sp == std::string::npos ? message : trim_copy(rest.substr(sp + 1));
+        auto mit = std::find_if(members.begin(), members.end(),
+                                [&](const auto& m) { return m.first == rotulo; });
+        if (mit == members.end()) {
+          fail(call.span, "equipe '" + team_name + "': o supervisor delegou para o rotulo '" +
+                              rotulo + "', que nao esta em 'agentes:'");
+        }
+        Expr fake;  // synthesize a `<agente>.responder <tarefa>` call
+        fake.kind = ExprKind::Call;
+        fake.span = call.span;
+        ast::Arg arg;
+        arg.value = std::make_unique<Expr>();
+        arg.value->kind = ExprKind::TextLit;
+        arg.value->text = tarefa;
+        fake.args.push_back(std::move(arg));
+
+        Value r = eval_agente_responder(mit->second, fake, env);
+        std::string texto = (r.kind == ValueKind::Mapa && r.map && r.map->find("texto"))
+                                ? r.map->find("texto")->s
+                                : "";
+        Value entry = Value::mapa();
+        entry.map->set("agente", Value::texto(rotulo));
+        entry.map->set("tarefa", Value::texto(tarefa));
+        entry.map->set("texto", Value::texto(texto));
+        sup_rastro.list->push_back(std::move(entry));
+        history += "- " + rotulo + ": " + texto + "\n";
+        continue;
+      }
+      if (line.rfind("responder:", 0) == 0) {
+        final_text = trim_copy(line.substr(10));
+      } else {
+        final_text = line;  // resposta nao estruturada: usa o texto cru
+      }
+      break;
+    }
+    if (final_text.empty()) {
+      final_text = last_raw.empty() ? "[supervisor] nenhuma resposta" : last_raw;
+    }
+
+    Value out = Value::mapa();
+    out.map->set("texto", Value::texto(final_text));
+    out.map->set("rastro", std::move(sup_rastro));
+    return out;
   }
 
   Value rastro = Value::lista();

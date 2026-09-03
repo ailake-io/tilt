@@ -49,9 +49,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## Agentes
 
-- O laço do `agente` é determinístico (roda cada ferramenta uma vez); não há
-  planner iterativo guiado pelo LLM.
-- `equipe` com `estrategia: supervisor` → erro.
+- O planner usa um protocolo simples (uma linha por turno: `chamar ...` /
+  `responder: ...`); LLMs reais podem ignorá-lo — a resposta fora do
+  protocolo vira a resposta final, sem garantia de que as ferramentas certas
+  foram chamadas. No modo `mock` o planner é determinístico (cada ferramenta
+  uma vez, na ordem declarada).
+- Supervisor delega por rótulo; um rótulo sugerido pelo LLM que não está em
+  `agentes:` é erro de execução (`T901`).
 
 ## HTTP
 

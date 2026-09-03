@@ -1,0 +1,31 @@
+llm gpt:
+  provedor: "openai"
+  modelo: "m"
+  chave: env "K"
+
+agente Pesquisador:
+  llm: gpt
+  papel: "pesquisa fatos"
+  memoria: nenhuma
+
+agente Redator:
+  llm: gpt
+  papel: "escreve o relatorio"
+  memoria: nenhuma
+
+equipe Equipe:
+  agentes:
+    - pesquisa: Pesquisador
+    - escrita: Redator
+  estrategia: supervisor
+  supervisor: gpt
+  objetivo: "Produzir um relatorio."
+  max_passos: 4
+
+pipeline p:
+  passos:
+    - r = Equipe.executar "relatorio de vendas"
+    - imprimir r.texto
+    - imprimir "delegacoes:", r.rastro.tamanho
+    - para cada s em r.rastro:
+        imprimir s.agente, "->", s.texto

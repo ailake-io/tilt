@@ -1,0 +1,5 @@
+== pipeline p ==
+[mock] resposta para: relatorio de vendas
+delegacoes: 2
+pesquisa -> [mock] resposta para: relatorio de vendas
+escrita -> [mock] resposta para: relatorio de vendas

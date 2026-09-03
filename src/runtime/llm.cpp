@@ -11,6 +11,8 @@
 #include <cstring>
 #include <initializer_list>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "runtime/json.hpp"
 #include "runtime/value.hpp"
@@ -110,9 +112,86 @@ const Value* dig(const Value& v, std::initializer_list<const char*> path) {
 
 bool llm_is_mock() { return env_mode() == "mock"; }
 
+// Lines "- <name>:" that follow the exact `marker` line (protocol blocks
+// emitted by the agent planner / team supervisor).
+std::vector<std::string> block_names(const std::string& text, const std::string& marker) {
+  std::vector<std::string> names;
+  bool in_block = false;
+  std::string line;
+  for (char c : text) {
+    if (c != '\n') {
+      line += c;
+      continue;
+    }
+    if (!in_block) {
+      if (line == marker) in_block = true;
+    } else if (line.rfind("- ", 0) == 0) {
+      const std::size_t colon = line.find(':');
+      if (colon != std::string::npos) names.push_back(line.substr(2, colon - 2));
+    } else if (!line.empty()) {
+      break;
+    }
+    line.clear();
+  }
+  return names;
+}
+
+// Content of the line that starts with `prefix` (e.g. "Pedido do usuario:"),
+// without leading/trailing whitespace.
+std::string field_line(const std::string& text, const std::string& prefix) {
+  std::string line;
+  auto trim = [](const std::string& s) {
+    std::size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+  };
+  for (char c : text) {
+    if (c != '\n') {
+      line += c;
+      continue;
+    }
+    if (line.rfind(prefix, 0) == 0) return trim(line.substr(prefix.size()));
+    line.clear();
+  }
+  if (line.rfind(prefix, 0) == 0) return trim(line.substr(prefix.size()));
+  return "";
+}
+
+bool contains(const std::vector<std::string>& v, const std::string& s) {
+  for (const std::string& e : v) {
+    if (e == s) return true;
+  }
+  return false;
+}
+
+// Mock for the iterative planner protocol: calls each tool listed in the
+// system prompt exactly once (in order), then answers. Same shape for the
+// team supervisor, delegating to each member once.
+std::string mock_chat(const std::string& system, const std::string& user) {
+  if (system.find("Ferramentas disponiveis:") != std::string::npos) {
+    const auto tools = block_names(system, "Ferramentas disponiveis:");
+    const auto done = block_names(user, "Observacoes ate agora:");
+    for (const std::string& t : tools) {
+      if (!contains(done, t)) return "chamar " + t;
+    }
+    return "responder: [mock] resposta para: " + truncate(field_line(user, "Pedido do usuario:"), 200);
+  }
+  if (system.find("Agentes disponiveis:") != std::string::npos) {
+    const auto members = block_names(system, "Agentes disponiveis:");
+    const auto done = block_names(user, "Resultados ate agora:");
+    const std::string pedido = field_line(user, "Pedido:");
+    for (const std::string& m : members) {
+      if (!contains(done, m)) return "delegar " + m + " " + pedido;
+    }
+    return "responder: [mock] resposta para: " + truncate(pedido, 200);
+  }
+  return "[mock] resposta para: " + truncate(user, 200);
+}
+
 std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std::string& user) {
   if (llm_is_mock()) {
-    return "[mock] resposta para: " + truncate(user, 200);
+    return mock_chat(system, user);
   }
 
   Value body = Value::mapa();

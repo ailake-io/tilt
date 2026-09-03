@@ -1,0 +1,7 @@
+erro[T901]: equipe 'E': estrategia 'supervisor' exige 'supervisor: <llm>'
+  --> input.tilt:11:11
+    |
+ 11 |     - r = E.executar "oi"
+    |           ^
+    |
+
