@@ -43,6 +43,7 @@ add_library(tilt_core STATIC
   src/runtime/llm.cpp
   src/runtime/vectorstore.cpp
   src/runtime/http_server.cpp
+  src/runtime/gpu_runtime.cpp
   src/vm/compiler.cpp
   src/vm/vm.cpp
   src/codegen/codegen_x86_64.cpp
@@ -51,6 +52,7 @@ add_library(tilt_core STATIC
 target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(tilt_core PUBLIC ${CMAKE_DL_LIBS})
 
 add_executable(tilt src/main.cpp)
 target_link_libraries(tilt PRIVATE tilt_core)

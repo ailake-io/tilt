@@ -1,0 +1,14 @@
+modelo M:
+  dispositivo: "cuda:0"
+  camadas:
+    - linear: [3, 4]
+    - ativacao: relu
+    - linear: [4, 2]
+    - softmax
+
+pipeline p:
+  passos:
+    - lote = tensor [[1, 0, 1], [0, 1, 0]]
+    - y = modelo M.executar lote
+    - imprimir "forma:", y.forma
+    - imprimir "linhas somam 1:", y.soma

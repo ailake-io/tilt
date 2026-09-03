@@ -10,6 +10,7 @@
 #include "diagnostics/diagnostic.hpp"
 #include "parser/ast.hpp"
 #include "runtime/llm.hpp"
+#include "runtime/gpu_runtime.hpp"
 #include "runtime/tensor.hpp"
 #include "runtime/value.hpp"
 #include "runtime/vectorstore.hpp"
@@ -88,6 +89,9 @@ class Interpreter {
     rt::Tensor m_w, v_w, m_b, v_b;
   };
   rt::Tensor value_to_tensor(const rt::Value& v, Span span);
+  void set_device(const ast::Item& decl);  // reads `dispositivo:` -> gpu on/off
+  rt::Tensor mm(const rt::Tensor& a, const rt::Tensor& b);
+  rt::Tensor act_relu(const rt::Tensor& x);
   std::vector<Layer> build_layers(const ast::Item& model_decl, std::int64_t in_dim);
   const std::vector<Layer>& build_model(const ast::Item& decl, std::int64_t in_dim, Span span);
   rt::Tensor forward_layers(const std::vector<Layer>& layers, rt::Tensor x);
@@ -119,6 +123,8 @@ class Interpreter {
   std::unordered_map<const ast::Item*, std::shared_ptr<vm::Chunk>> vm_chunks_;  // null = not compilable
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
+  bool use_gpu_ = false;        // active for the current model/treino call
+  bool gpu_announced_ = false;  // printed the backend banner once
 
   struct RouteResponse {
     int status = 200;

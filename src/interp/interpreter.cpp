@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "runtime/gpu_runtime.hpp"
 #include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
@@ -523,6 +524,45 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
   return layers;
 }
 
+void Interpreter::set_device(const Item& decl) {
+  use_gpu_ = false;
+  if (!decl.block) return;
+  const Item* f = find_field(*decl.block, "dispositivo");
+  std::string dev = "cpu";
+  if (f && f->value && (f->value->kind == ExprKind::TextLit || f->value->kind == ExprKind::Name)) {
+    dev = f->value->text;
+  }
+  if (rt::GpuRuntime::instance().ensure(dev)) {
+    use_gpu_ = true;
+    if (!gpu_announced_) {
+      out_ << "[gpu] " << rt::GpuRuntime::instance().info() << "\n";
+      gpu_announced_ = true;
+    }
+  }
+}
+
+rt::Tensor Interpreter::mm(const rt::Tensor& a, const rt::Tensor& b) {
+  if (use_gpu_ && a.rank() == 2 && b.rank() == 2 && a.shape[1] == b.shape[0]) {
+    rt::Tensor c;
+    c.shape = {a.shape[0], b.shape[1]};
+    c.data.resize(static_cast<std::size_t>(a.shape[0] * b.shape[1]));
+    if (rt::GpuRuntime::instance().gemm(a.data.data(), b.data.data(), c.data.data(),
+                                        static_cast<int>(a.shape[0]), static_cast<int>(a.shape[1]),
+                                        static_cast<int>(b.shape[1]))) {
+      return c;
+    }
+  }
+  return rt::matmul(a, b);
+}
+
+rt::Tensor Interpreter::act_relu(const rt::Tensor& x) {
+  if (use_gpu_) {
+    rt::Tensor out = x;
+    if (rt::GpuRuntime::instance().relu(out.data.data(), out.data.size())) return out;
+  }
+  return rt::apply_unary(x, "relu");
+}
+
 const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl,
                                                                std::int64_t in_dim, Span span) {
   const std::string name = decl_name(decl);
@@ -540,10 +580,10 @@ rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Ten
   for (const Layer& l : layers) {
     switch (l.kind) {
       case Layer::Dense:
-        x = rt::add(rt::matmul(x, l.w), l.b);
+        x = rt::add(mm(x, l.w), l.b);
         break;
       case Layer::Activation:
-        x = rt::apply_unary(x, l.act);
+        x = l.act == "relu" ? act_relu(x) : rt::apply_unary(x, l.act);
         break;
       case Layer::Softmax:
         x = rt::softmax_last(x);
@@ -556,6 +596,7 @@ rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Ten
 }
 
 rt::Value Interpreter::model_forward(const Item& decl, const Value& input, Span span) {
+  set_device(decl);
   rt::Tensor x = value_to_tensor(input, span);
   std::int64_t in_dim = x.shape.empty() ? static_cast<std::int64_t>(x.data.size()) : x.shape.back();
   const std::vector<Layer>& layers = build_model(decl, in_dim, span);
@@ -669,6 +710,7 @@ void Interpreter::run_treino(const Item& decl) {
   const Item* vf = find_field(cfg, "verboso");
   const bool verbose = vf && vf->value && vf->value->kind == ExprKind::BoolLit && vf->value->boolean;
 
+  set_device(*mit->second);
   std::vector<Layer> layers = build_layers(*mit->second, f);
   if (layers.empty() || layers.back().kind != Layer::Softmax || perda != "entropia_cruzada") {
     fail(decl.span,
@@ -696,8 +738,10 @@ void Interpreter::run_treino(const Item& decl) {
       for (const Layer& l : layers) {
         ins.push_back(cur);
         switch (l.kind) {
-          case Layer::Dense: cur = rt::add(rt::matmul(cur, l.w), l.b); break;
-          case Layer::Activation: cur = rt::apply_unary(cur, l.act); break;
+          case Layer::Dense: cur = rt::add(mm(cur, l.w), l.b); break;
+          case Layer::Activation:
+            cur = l.act == "relu" ? act_relu(cur) : rt::apply_unary(cur, l.act);
+            break;
           case Layer::Softmax: cur = rt::softmax_last(cur); break;
           case Layer::Dropout: break;
         }

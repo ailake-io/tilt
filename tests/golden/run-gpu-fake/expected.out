@@ -1,0 +1,4 @@
+== pipeline p ==
+[gpu] fake (kernels de CPU pelo caminho de dispatch da GPU)
+forma: [2, 2]
+linhas somam 1: 2
