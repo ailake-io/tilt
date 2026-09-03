@@ -55,8 +55,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## HTTP
 
-- Servidor bloqueante, uma requisição por vez. Sem epoll, keep-alive nem
-  arena por requisição. `meio:` (middleware) só é reconhecido.
+- As rotas executam em série (na thread do event loop) — o interpretador não
+  é reentrante; execução paralela de rotas fica para uma próxima passada.
+- `meio:` (middleware) só é reconhecido.
+- No Linux: epoll + keep-alive + arena por requisição (M10.2 entregue).
+  Em outros sistemas, o servidor é bloqueante, uma conexão por vez,
+  `Connection: close`.
 
 ## VM / nativo
 

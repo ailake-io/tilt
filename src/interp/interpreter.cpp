@@ -1297,82 +1297,78 @@ int Interpreter::serve(int port_override, int max_requests) {
     diag_.report(std::move(d));
     return 1;
   }
-  out_ << "servico " << decl_name(*svc) << ": escutando 127.0.0.1:" << port << "\n";
+  out_ << "servico " << decl_name(*svc) << ": escutando 127.0.0.1:" << port << "\n" << std::flush;
 
-  int served = 0;
-  while (max_requests <= 0 || served < max_requests) {
-    auto got = server.accept_one();
-    if (!got) continue;
-    const int cfd = got->first;
-    const rt::HttpRequest& req = got->second;
-
-    const Route* match = nullptr;
-    for (const Route& r : routes) {
-      if (r.method == req.method && r.path == req.path) {
-        match = &r;
-        break;
-      }
-    }
-    int status = 200;
-    std::string body;
-
-    if (!match) {
-      status = 404;
-      body = R"({"erro":"rota nao encontrada"})";
-    } else {
-      Value parsed = Value::mapa();
-      bool bad = false;
-      if (!req.body.empty()) {
-        try {
-          parsed = rt::json_parse(req.body);
-        } catch (...) {
-          bad = true;
-        }
-      }
-      const Item* entrada = match->field->block ? find_field(*match->field->block, "entrada") : nullptr;
-      if (!bad && entrada && entrada->value && entrada->value->kind == ExprKind::Name) {
-        if (auto t = entities_.find(entrada->value->text);
-            t != entities_.end() && t->second->key == "tipo" && t->second->block &&
-            parsed.kind == ValueKind::Mapa) {
-          for (const auto& f : t->second->block->items) {
-            if (f && f->kind == ItemKind::Field && parsed.map && !parsed.map->find(f->key)) {
-              status = 400;
-              body = R"({"erro":"campo ')" + f->key + R"(' ausente"})";
-              bad = true;
-              break;
-            }
+  // As rotas executam em serie (o interpretador nao e reentrante); a camada
+  // de rede (epoll/keep-alive) ja atende varias conexoes concorrentes.
+  const int served = server.run(
+      [&](const rt::HttpRequest& req) -> rt::HttpResponse {
+        rt::HttpResponse resp;
+        const Route* match = nullptr;
+        for (const Route& r : routes) {
+          if (r.method == req.method && r.path == req.path) {
+            match = &r;
+            break;
           }
         }
-      }
-      if (bad && status != 400) {
-        status = 400;
-        body = R"({"erro":"corpo JSON invalido"})";
-      }
 
-      if (!bad) {
-        RouteResponse resp;
-        route_resp_ = &resp;
-        Env env;
-        env.parent = &root_;
-        env.vars["entrada"] = parsed;
-        const Item* passos = match->field->block ? find_field(*match->field->block, "passos") : nullptr;
-        try {
-          if (passos && passos->block) exec_block(*passos->block, env);
-          status = resp.set ? resp.status : 200;
-          body = json_dump(resp.dados.kind == ValueKind::Nulo ? Value::mapa() : resp.dados);
-        } catch (const RuntimeAbort& a) {
-          status = 500;
-          body = R"({"erro":)" + std::string("\"") + a.message + "\"}";
+        if (!match) {
+          resp.status = 404;
+          resp.body = R"({"erro":"rota nao encontrada"})";
+        } else {
+          Value parsed = Value::mapa();
+          bool bad = false;
+          if (!req.body.empty()) {
+            try {
+              parsed = rt::json_parse(req.body);
+            } catch (...) {
+              bad = true;
+            }
+          }
+          const Item* entrada = match->field->block ? find_field(*match->field->block, "entrada") : nullptr;
+          if (!bad && entrada && entrada->value && entrada->value->kind == ExprKind::Name) {
+            if (auto t = entities_.find(entrada->value->text);
+                t != entities_.end() && t->second->key == "tipo" && t->second->block &&
+                parsed.kind == ValueKind::Mapa) {
+              for (const auto& f : t->second->block->items) {
+                if (f && f->kind == ItemKind::Field && parsed.map && !parsed.map->find(f->key)) {
+                  resp.status = 400;
+                  resp.body = R"({"erro":"campo ')" + f->key + R"(' ausente"})";
+                  bad = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (bad && resp.status != 400) {
+            resp.status = 400;
+            resp.body = R"({"erro":"corpo JSON invalido"})";
+          }
+
+          if (!bad) {
+            RouteResponse rr;
+            route_resp_ = &rr;
+            Env env;
+            env.parent = &root_;
+            env.vars["entrada"] = parsed;
+            const Item* passos = match->field->block ? find_field(*match->field->block, "passos") : nullptr;
+            try {
+              if (passos && passos->block) exec_block(*passos->block, env);
+              resp.status = rr.set ? rr.status : 200;
+              resp.body = json_dump(rr.dados.kind == ValueKind::Nulo ? Value::mapa() : rr.dados);
+            } catch (const RuntimeAbort& a) {
+              resp.status = 500;
+              resp.body = R"({"erro":)" + std::string("\"") + a.message + "\"}";
+            }
+            route_resp_ = nullptr;
+          }
         }
-        route_resp_ = nullptr;
-      }
-    }
 
-    rt::HttpServer::respond(cfd, status, "application/json", body);
-    out_ << req.method << " " << req.path << " -> " << status << "\n";
-    ++served;
-  }
-  return 0;
+        out_ << req.method << " " << req.path << " -> " << resp.status << "\n" << std::flush;
+        return resp;
+      },
+      max_requests);
+  return served < 0 ? 1 : 0;
 }
 
 // ------------------------------------------------------------------ statements

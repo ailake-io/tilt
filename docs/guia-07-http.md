@@ -40,9 +40,15 @@ tilt servir servico.tilt --porta 8080
 tilt servir servico.tilt --porta 8080 --requisicoes 3   # atende 3 e sai (testes)
 ```
 
-Servidor TCP bloqueante, uma requisição por vez, `Connection: close`. epoll +
-keep-alive + arena por requisição chegam numa próxima passada. Log
-determinístico:
+No Linux, o servidor usa epoll com sockets não-bloqueantes: várias conexões
+simultâneas (uma cliente lenta não trava as outras), HTTP/1.1 com keep-alive
+(`Connection: close` honrado), escrita não-bloqueante, timeout de ociosidade
+de 30 s e uma `TiltArena` de scratch por requisição — resetada assim que a
+resposta é despachada. O parsing de headers aloca nessa arena. Em outros
+sistemas, um fallback bloqueante atende uma conexão por vez.
+
+As rotas ainda executam em série, na thread do event loop (o interpretador
+não é reentrante). Log determinístico:
 
 ```
 servico Loja: escutando 127.0.0.1:8080

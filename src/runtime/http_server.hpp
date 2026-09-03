@@ -1,8 +1,7 @@
 #pragma once
 
-#include <optional>
+#include <functional>
 #include <string>
-#include <utility>
 
 namespace tilt::rt {
 
@@ -10,10 +9,26 @@ struct HttpRequest {
   std::string method;
   std::string path;
   std::string body;
+  bool keep_alive = false;  // negotiated from the request line + Connection header
 };
 
-// Minimal blocking HTTP/1.1 server: one request at a time, Connection: close.
-// epoll + keep-alive + per-request arenas arrive in M10.2.
+struct HttpResponse {
+  int status = 200;
+  std::string content_type = "application/json";
+  std::string body;
+};
+
+// HTTP/1.1 server.
+//
+// Linux: epoll event loop with non-blocking sockets — many concurrent
+// connections (a slow client cannot stall the others), keep-alive with
+// per-connection loops, non-blocking writes, idle timeout, and a TiltArena
+// of scratch per request (reset right after the response is queued).
+// Route handling itself runs serially in the event-loop thread; the
+// interpreter is not reentrant.
+//
+// Other platforms: blocking fallback, one connection at a time,
+// Connection: close.
 class HttpServer {
  public:
   ~HttpServer();
@@ -21,15 +36,17 @@ class HttpServer {
   // Returns "" on success, otherwise an error message.
   std::string listen_on(const std::string& host, int port);
 
-  // Blocks for the next request. Returns {client_fd, request}, or nullopt on
-  // a transient accept error.
-  std::optional<std::pair<int, HttpRequest>> accept_one();
+  // Runs the accept/serve loop; `handler` is invoked once per complete
+  // request and must not throw. Stops once `max_requests` (> 0) requests
+  // have been served. Returns the number of requests served, or -1 on a
+  // fatal error (see last_error()).
+  int run(const std::function<HttpResponse(const HttpRequest&)>& handler, int max_requests);
 
-  static void respond(int client_fd, int status, const std::string& content_type,
-                      const std::string& body);
+  const std::string& last_error() const { return last_error_; }
 
  private:
   int fd_ = -1;
+  std::string last_error_;
 };
 
 }  // namespace tilt::rt

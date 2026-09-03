@@ -37,7 +37,7 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 | ML/DL | tensores f32 CPU, `modelo` (inferência), `treino` (backprop + SGD/Adam), `carregador` | GPU só validado em `fake`; carga de `pesos:` de arquivo |
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno) | `qdrant`/`pgvector`; rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder`, `equipe` (sequencial/paralelo) | planner iterativo, `estrategia: supervisor` |
-| HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` | epoll + keep-alive, `meio:` (middleware) |
+| HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` (epoll + keep-alive + arena por requisição, Linux) | execução paralela de rotas, `meio:` (middleware) |
 | Execução | VM de bytecode p/ `funcao` pura, codegen nativo x86-64 (subconjunto inteiro) | VM/codegen para o programa inteiro |
 | Tooling | `checar --json`, `referencia`, `tilt lsp` + `completar`, `checar_tilt` | extensão de editor publicada |
 
@@ -213,7 +213,8 @@ CI: `.github/workflows/ci.yml` (Linux gcc + macOS + sanitizers) e
 
 `M0`–`M12` + instalador + GPU + tooling de IA concluídos (1ª passada). A seguir:
 conectores de rede reais, VM/codegen para o programa inteiro (texto, decimal,
-tabelas), planner iterativo de agente, epoll no `servico`, extensão de editor.
+tabelas), planner iterativo de agente, execução paralela de rotas no `servico`,
+extensão de editor.
 
 ## Licença
 
