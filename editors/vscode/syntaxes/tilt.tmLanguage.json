@@ -1,0 +1,82 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Tilt",
+  "scopeName": "source.tilt",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#number" },
+    { "include": "#decl" },
+    { "include": "#control" },
+    { "include": "#operator-word" },
+    { "include": "#constant" },
+    { "include": "#builtin" },
+    { "include": "#call" },
+    { "include": "#key" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.tilt"
+    },
+    "string": {
+      "patterns": [
+        {
+          "name": "string.quoted.triple.tilt",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [{ "include": "#interpolation" }]
+        },
+        {
+          "name": "string.quoted.double.tilt",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.tilt", "match": "\\\\." },
+            { "include": "#interpolation" }
+          ]
+        }
+      ]
+    },
+    "interpolation": {
+      "name": "meta.interpolation.tilt",
+      "begin": "\\{\\{",
+      "end": "\\}\\}",
+      "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.tilt" } },
+      "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.tilt" } },
+      "patterns": [{ "name": "variable.other.tilt", "match": "[A-Za-z_][A-Za-z0-9_]*" }]
+    },
+    "number": {
+      "name": "constant.numeric.tilt",
+      "match": "\\b[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?\\b"
+    },
+    "decl": {
+      "match": "\\b(tipo|funcao|seja|constante|importar|de|fonte|pipeline|verificar|modelo|treino|tarefa|experimento|llm|indice|fluxo|ferramenta|agente|equipe|servico|rota)\\b",
+      "name": "keyword.declaration.tilt"
+    },
+    "control": {
+      "match": "\\b(se|senao|para|cada|em|enquanto|tentar|capturar|retornar)\\b",
+      "name": "keyword.control.tilt"
+    },
+    "operator-word": {
+      "match": "\\b(e|ou|nao|contem|no|dispositivo)\\b",
+      "name": "keyword.operator.word.tilt"
+    },
+    "constant": {
+      "match": "\\b(verdadeiro|falso|nulo)\\b",
+      "name": "constant.language.tilt"
+    },
+    "builtin": {
+      "match": "\\b(imprimir|registrar|env|tamanho|contar|somar|media|min|max|intervalo|dividir|dividir_texto|ler|ler_csv|ler_json|escrever_csv|escrever_json|escrever_parquet|carregador|perguntar|perguntar_em_fluxo|incorporar|responder|tensor|zeros|uns|aleatorio|checar_tilt)\\b",
+      "name": "support.function.builtin.tilt"
+    },
+    "call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.tilt" } }
+    },
+    "key": {
+      "match": "^\\s*(-\\s*)?([A-Za-z_][A-Za-z0-9_]*)\\s*:",
+      "captures": { "2": { "name": "variable.other.key.tilt" } }
+    }
+  }
+}

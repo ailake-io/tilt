@@ -24,9 +24,18 @@ require("lspconfig").tilt.setup({})
 
 ## VS Code
 
-Sem extensão publicada ainda. Use um cliente LSP genérico apontando
-`tilt lsp` para arquivos `*.tilt`, ou chame `tilt completar <arquivo>
---linha L --coluna C --json` a partir de um script.
+Extensão em [`vscode/`](vscode/) — realce de sintaxe + cliente LSP.
+
+```bash
+cd editors/vscode
+npm install
+npm run package                      # tilt-0.1.0.vsix
+code --install-extension tilt-0.1.0.vsix
+```
+
+Ou abra `editors/vscode/` no VS Code e pressione **F5**. Requer o binário
+`tilt` no `PATH` (ou ajuste `tilt.path`). Detalhes em
+[`vscode/README.md`](vscode/README.md).
 
 ## Sem editor
 

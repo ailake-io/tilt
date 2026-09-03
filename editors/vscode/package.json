@@ -1,0 +1,55 @@
+{
+  "name": "tilt",
+  "displayName": "Tilt",
+  "description": "Realce de sintaxe e Language Server para a linguagem Tilt (ML, DL, dados, LLMs, agentes).",
+  "version": "0.1.0",
+  "publisher": "ailake-io",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/ailake-io/tilt" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:tilt"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "tilt",
+        "aliases": ["Tilt", "tilt"],
+        "extensions": [".tilt"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tilt",
+        "scopeName": "source.tilt",
+        "path": "./syntaxes/tilt.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Tilt",
+      "properties": {
+        "tilt.path": {
+          "type": "string",
+          "default": "tilt",
+          "description": "Caminho do binário `tilt` usado para `tilt lsp`."
+        },
+        "tilt.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ativar o servidor Language Server (diagnósticos + autocomplete)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "package": "vsce package",
+    "vscode:prepublish": "echo ok"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.0"
+  }
+}
