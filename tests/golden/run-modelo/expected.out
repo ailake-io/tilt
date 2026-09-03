@@ -1,0 +1,4 @@
+== pipeline p ==
+forma: [2]
+soma: 1
+lote: [2, 2]

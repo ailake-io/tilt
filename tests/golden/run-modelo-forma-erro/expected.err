@@ -1,0 +1,7 @@
+erro[T901]: modelo M: tensor: matmul: dimensao interna incompativel
+  --> input.tilt:8:23
+   |
+ 8 |     - imprimir modelo M.executar x
+   |                       ^
+   |
+

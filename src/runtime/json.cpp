@@ -5,6 +5,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "runtime/tensor.hpp"
+
 namespace tilt::rt {
 namespace {
 
@@ -217,6 +219,26 @@ void dump_value(const Value& v, std::string& out, int indent) {
         out += '\n';
       }
       out += pad + "]";
+      break;
+    }
+    case ValueKind::Tensor: {
+      out += "{ \"forma\": [";
+      if (v.tensor) {
+        for (std::size_t k = 0; k < v.tensor->shape.size(); ++k) {
+          if (k) out += ", ";
+          out += std::to_string(v.tensor->shape[k]);
+        }
+      }
+      out += "], \"dados\": [";
+      if (v.tensor) {
+        for (std::size_t k = 0; k < v.tensor->data.size(); ++k) {
+          if (k) out += ", ";
+          std::ostringstream ss;
+          ss << v.tensor->data[k];
+          out += ss.str();
+        }
+      }
+      out += "] }";
       break;
     }
     case ValueKind::Mapa: {

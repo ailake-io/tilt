@@ -1,0 +1,14 @@
+pipeline p:
+  passos:
+    - a = tensor [[1, 2, 3], [4, 5, 6]]
+    - imprimir "forma:", a.forma
+    - imprimir "soma:", a.soma
+    - imprimir "media:", a.media
+    - b = a.transposta
+    - imprimir "T forma:", b.forma
+    - c = a.matmul b
+    - imprimir "a@aT forma:", c.forma
+    - imprimir "escalar:", (a * 10).soma
+    - v = tensor [1, 2, 3]
+    - imprimir "relu(-):", (v - 5).relu.soma
+    - imprimir "softmax soma:", v.softmax.soma

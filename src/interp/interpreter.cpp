@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <ostream>
 #include <sstream>
@@ -385,6 +386,180 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
        DiagCode::ConnectorNotImplemented);
 }
 
+// ------------------------------------------------------------------ deep learning
+
+namespace {
+
+void flatten_nested(const Value& v, std::vector<std::int64_t>& shape, std::vector<float>& data,
+                    std::size_t depth) {
+  if (v.kind == ValueKind::Lista && v.list) {
+    if (shape.size() == depth) shape.push_back(static_cast<std::int64_t>(v.list->size()));
+    for (const Value& e : *v.list) flatten_nested(e, shape, data, depth + 1);
+  } else {
+    data.push_back(static_cast<float>(v.as_number()));
+  }
+}
+
+// Walks `camadas:` items (including folded `- densa: N` / `ativacao: relu` blocks).
+void each_layer_spec(const ast::Block& block,
+                     const std::function<void(const std::string&, const ast::Expr*)>& emit) {
+  for (const auto& raw : block.items) {
+    if (!raw) continue;
+    if (raw->kind == ItemKind::ListEntry) {
+      if (raw->block) {
+        each_layer_spec(*raw->block, emit);
+        continue;
+      }
+      const Item* c = raw->child.get();
+      if (!c) continue;
+      if (c->kind == ItemKind::Field) {
+        emit(c->key, c->value.get());
+      } else if (c->kind == ItemKind::Stmt && c->stmt && c->stmt->a &&
+                 c->stmt->a->kind == ExprKind::Name) {
+        emit(c->stmt->a->text, nullptr);
+      }
+    } else if (raw->kind == ItemKind::Field) {
+      emit(raw->key, raw->value.get());
+    }
+  }
+}
+
+}  // namespace
+
+rt::Tensor Interpreter::value_to_tensor(const Value& v, Span span) {
+  if (v.kind == ValueKind::Tensor && v.tensor) return *v.tensor;
+  if (v.kind == ValueKind::Lista) {
+    std::vector<std::int64_t> shape;
+    std::vector<float> data;
+    flatten_nested(v, shape, data, 0);
+    rt::Tensor t;
+    t.shape = shape;
+    t.data = std::move(data);
+    if (t.size() != static_cast<std::int64_t>(t.data.size())) {
+      fail(span, "lista aninhada irregular; nao forma um tensor");
+    }
+    return t;
+  }
+  if (v.is_number()) return rt::Tensor::filled({1}, static_cast<float>(v.as_number()));
+  fail(span, std::string("nao e possivel converter '") + v.type_name() + "' em tensor");
+}
+
+const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl,
+                                                               std::int64_t in_dim, Span span) {
+  const std::string name = decl_name(decl);
+  if (auto it = model_cache_.find(name); it != model_cache_.end()) return it->second;
+
+  std::vector<Layer> layers;
+  std::int64_t dim = in_dim;
+  std::uint64_t seed = 0xC1A5;
+  bool noted_skip = false;
+
+  if (decl.block) {
+    const Item* camadas = find_field(*decl.block, "camadas");
+    if (camadas && camadas->block) {
+      each_layer_spec(*camadas->block, [&](const std::string& key, const ast::Expr* value) {
+        if (key == "densa" && value && value->kind == ExprKind::IntLit) {
+          std::int64_t n = std::strtoll(value->text.c_str(), nullptr, 10);
+          Layer l;
+          l.kind = Layer::Dense;
+          l.w = rt::Tensor::xavier({dim, n}, dim, n, seed++);
+          l.b = rt::Tensor::zeros({n});
+          layers.push_back(std::move(l));
+          dim = n;
+        } else if (key == "linear" && value && value->kind == ExprKind::ListLit &&
+                   value->elems.size() == 2) {
+          std::int64_t a = std::strtoll(value->elems[0]->text.c_str(), nullptr, 10);
+          std::int64_t b = std::strtoll(value->elems[1]->text.c_str(), nullptr, 10);
+          Layer l;
+          l.kind = Layer::Dense;
+          l.w = rt::Tensor::xavier({a, b}, a, b, seed++);
+          l.b = rt::Tensor::zeros({b});
+          layers.push_back(std::move(l));
+          dim = b;
+        } else if (key == "ativacao" && value && value->kind == ExprKind::Name) {
+          Layer l;
+          l.kind = Layer::Activation;
+          l.act = value->text;
+          layers.push_back(std::move(l));
+        } else if (key == "softmax") {
+          Layer l;
+          l.kind = Layer::Softmax;
+          layers.push_back(std::move(l));
+        } else if (key == "abandono" || key == "dropout") {
+          Layer l;
+          l.kind = Layer::Dropout;
+          layers.push_back(std::move(l));
+        } else if (word_in(key, {"relu", "gelu", "silu", "sigmoide", "tanh"})) {
+          Layer l;
+          l.kind = Layer::Activation;
+          l.act = key;
+          layers.push_back(std::move(l));
+        } else if (!noted_skip && (key == "norma_lote" || key == "norma_camada" || key == "conv2d")) {
+          out_ << "[nota] modelo " << name << ": camada '" << key
+               << "' ainda nao suportada na inferencia (M6.2); ignorada\n";
+          noted_skip = true;
+        }
+      });
+    }
+  }
+  (void)span;
+  if (find_field(*decl.block, "pesos")) {
+    out_ << "[nota] modelo " << name
+         << ": pesos inicializados (Xavier, semente fixa); carga de 'pesos:' e treino no M6.2\n";
+  }
+  return model_cache_.emplace(name, std::move(layers)).first->second;
+}
+
+rt::Value Interpreter::model_forward(const Item& decl, const Value& input, Span span) {
+  rt::Tensor x = value_to_tensor(input, span);
+  std::int64_t in_dim = x.shape.empty() ? static_cast<std::int64_t>(x.data.size()) : x.shape.back();
+  const std::vector<Layer>& layers = build_model(decl, in_dim, span);
+  try {
+    for (const Layer& l : layers) {
+      switch (l.kind) {
+        case Layer::Dense:
+          x = rt::add(rt::matmul(x, l.w), l.b);
+          break;
+        case Layer::Activation:
+          x = rt::apply_unary(x, l.act);
+          break;
+        case Layer::Softmax:
+          x = rt::softmax_last(x);
+          break;
+        case Layer::Dropout:
+          break;  // identity at inference
+      }
+    }
+  } catch (const std::exception& e) {
+    fail(span, std::string("modelo ") + decl_name(decl) + ": " + e.what());
+  }
+  return Value::tensor_de(std::move(x));
+}
+
+rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
+  if (call.args.size() != 1 || call.args[0].value->kind != ExprKind::Call) {
+    fail(call.span, "uso: modelo <Nome>.executar <entrada>");
+  }
+  const Expr& inner = *call.args[0].value;
+  if (!inner.lhs || inner.lhs->kind != ExprKind::Member || !inner.lhs->lhs ||
+      inner.lhs->lhs->kind != ExprKind::Name) {
+    fail(inner.span, "uso: modelo <Nome>.executar <entrada>");
+  }
+  const std::string mname = inner.lhs->lhs->text;
+  const std::string method = inner.lhs->text;
+
+  auto it = entities_.find(mname);
+  if (it == entities_.end() || it->second->key != "modelo") {
+    fail(inner.span, "'" + mname + "' nao e um modelo declarado");
+  }
+  if (method == "executar" || method == "para_frente") {
+    if (inner.args.empty()) fail(inner.span, method + " precisa de uma entrada");
+    Value input = eval(*inner.args[0].value, env);
+    return model_forward(*it->second, input, inner.span);
+  }
+  fail(inner.span, "metodo de modelo '" + method + "' chega no M6.2/M8");
+}
+
 // ------------------------------------------------------------------ statements
 
 void Interpreter::exec_block(const ast::Block& block, Env& env) {
@@ -544,6 +719,32 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
     }
     case ExprKind::Member: {
       Value base = eval(*expr.lhs, env);
+      if (base.kind == ValueKind::Tensor && base.tensor) {
+        const rt::Tensor& t = *base.tensor;
+        const std::string& m = expr.text;
+        try {
+          if (m == "forma") {
+            rt::ValueList dims;
+            for (std::int64_t d : t.shape) dims.push_back(Value::inteiro(d));
+            return Value::lista(std::move(dims));
+          }
+          if (m == "soma") return Value::decimal(rt::sum_all(t));
+          if (m == "media") return Value::decimal(rt::mean_all(t));
+          if (m == "argmax") return Value::inteiro(rt::argmax_last(t));
+          if (m == "transposta") return Value::tensor_de(rt::transpose2d(t));
+          if (m == "softmax") return Value::tensor_de(rt::softmax_last(t));
+          if (word_in(m, {"relu", "gelu", "silu", "sigmoide", "tanh"})) {
+            return Value::tensor_de(rt::apply_unary(t, m));
+          }
+          if (m == "item") {
+            if (t.size() != 1) fail(expr.span, "item espera um tensor de 1 elemento");
+            return Value::decimal(t.data[0]);
+          }
+          if (m == "tamanho") return Value::inteiro(t.size());
+        } catch (const std::exception& e) {
+          fail(expr.span, std::string(e.what()));
+        }
+      }
       if ((base.kind == ValueKind::Mapa || base.kind == ValueKind::Tabela) && base.map) {
         if (Value* f = base.map->find(expr.text)) return *f;
       }
@@ -562,6 +763,22 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
       fail(expr.span, std::string("'") + base.type_name() + "' nao tem o campo '" + expr.text + "'");
     }
     case ExprKind::Index: {
+      // `tensor [ ... ]` / `zeros [ ... ]` etc. — constructor sugar, unambiguous
+      // because these names are never bound as variables.
+      if (expr.lhs->kind == ExprKind::Name &&
+          (expr.lhs->text == "tensor" || expr.lhs->text == "zeros" || expr.lhs->text == "uns" ||
+           expr.lhs->text == "aleatorio")) {
+        Value elems = Value::lista();
+        for (const auto& el : expr.elems) elems.list->push_back(eval(*el, env));
+        const std::string& n = expr.lhs->text;
+        if (n == "tensor") return Value::tensor_de(value_to_tensor(elems, expr.span));
+        std::vector<std::int64_t> shape;
+        for (const Value& v : *elems.list) shape.push_back(static_cast<std::int64_t>(v.as_number()));
+        if (shape.empty()) fail(expr.span, n + " precisa de uma forma");
+        if (n == "zeros") return Value::tensor_de(rt::Tensor::zeros(shape));
+        if (n == "uns") return Value::tensor_de(rt::Tensor::ones(shape));
+        return Value::tensor_de(rt::Tensor::xavier(shape, shape.front(), shape.back(), 42));
+      }
       Value base = eval(*expr.lhs, env);
       if (expr.elems.empty()) fail(expr.span, "indice vazio");
       Value idx = eval(*expr.elems[0], env);
@@ -635,6 +852,32 @@ Value Interpreter::eval_binary(const Expr& expr, Env& env) {
 
   Value a = eval(*expr.lhs, env);
   Value b = eval(*expr.rhs, env);
+
+  if ((a.kind == ValueKind::Tensor || b.kind == ValueKind::Tensor) &&
+      (op == "+" || op == "-" || op == "*" || op == "/")) {
+    try {
+      if (a.kind == ValueKind::Tensor && b.kind == ValueKind::Tensor) {
+        const rt::Tensor& x = *a.tensor;
+        const rt::Tensor& y = *b.tensor;
+        if (op == "+") return Value::tensor_de(rt::add(x, y));
+        if (op == "-") return Value::tensor_de(rt::sub(x, y));
+        if (op == "*") return Value::tensor_de(rt::mul(x, y));
+        return Value::tensor_de(rt::div(x, y));
+      }
+      const bool tensor_left = a.kind == ValueKind::Tensor;
+      const rt::Tensor& t = tensor_left ? *a.tensor : *b.tensor;
+      const float s = tensor_left ? static_cast<float>(b.as_number())
+                                  : static_cast<float>(a.as_number());
+      if (!tensor_left && (op == "-" || op == "/")) {
+        // scalar (op) tensor
+        rt::Tensor lhs = rt::Tensor::filled(t.shape, s);
+        return Value::tensor_de(op == "-" ? rt::sub(lhs, t) : rt::div(lhs, t));
+      }
+      return Value::tensor_de(rt::scalar_op(t, s, op[0]));
+    } catch (const std::exception& e) {
+      fail(expr.span, std::string(e.what()));
+    }
+  }
 
   if (op == "==") return Value::logico(equals(a, b));
   if (op == "!=") return Value::logico(!equals(a, b));
@@ -836,6 +1079,31 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::lista(std::move(out));
   }
+  if (name == "tensor" || name == "zeros" || name == "uns" || name == "aleatorio") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    auto to_shape = [&](const Value& v) {
+      std::vector<std::int64_t> shape;
+      if (v.kind == ValueKind::Lista && v.list) {
+        for (const Value& e : *v.list) shape.push_back(static_cast<std::int64_t>(e.as_number()));
+      }
+      return shape;
+    };
+    if (name == "tensor" && !a.empty() && a[0].kind == ValueKind::Lista) {
+      return Value::tensor_de(value_to_tensor(a[0], call.span));
+    }
+    std::vector<std::int64_t> shape = a.empty() ? std::vector<std::int64_t>{} : to_shape(a[0]);
+    if (const Value* f = kw.find("forma")) shape = to_shape(*f);
+    if (shape.empty()) fail(call.span, name + " espera uma forma, ex.: " + name + " [2, 3]");
+    if (name == "zeros" || name == "tensor") {
+      const Value* fill = kw.find("valor");
+      return Value::tensor_de(rt::Tensor::filled(shape, fill ? static_cast<float>(fill->as_number()) : 0.0F));
+    }
+    if (name == "uns") return Value::tensor_de(rt::Tensor::ones(shape));
+    const Value* seed = kw.find("semente");
+    std::uint64_t s = seed ? static_cast<std::uint64_t>(seed->as_number()) : 42;
+    return Value::tensor_de(rt::Tensor::xavier(shape, shape.front(), shape.back(), s));
+  }
   if (name == "ler_csv") {
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_csv espera um caminho");
@@ -921,8 +1189,9 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     fail(call.span, "'" + name + "': conector/formato nao implementado (M5.2)",
          DiagCode::ConnectorNotImplemented);
   }
-  if (word_in(name, {"modelo", "agente", "ferramenta", "treinar", "incorporador"})) {
-    fail(call.span, "execucao de '" + name + "' nao implementada (M6-M9)",
+  if (name == "modelo") return eval_modelo_call(call, env);
+  if (word_in(name, {"agente", "ferramenta", "treinar", "incorporador"})) {
+    fail(call.span, "execucao de '" + name + "' nao implementada (M8-M9)",
          DiagCode::NotImplemented);
   }
 
@@ -1095,6 +1364,48 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       }
     }
     return Value::tabela(std::move(out));
+  }
+
+  if (receiver.kind == ValueKind::Tensor && receiver.tensor) {
+    const rt::Tensor& t = *receiver.tensor;
+    try {
+      if (method == "forma") {
+        rt::ValueList dims;
+        for (std::int64_t d : t.shape) dims.push_back(Value::inteiro(d));
+        return Value::lista(std::move(dims));
+      }
+      if (method == "matmul" || method == "mais") {
+        auto a = eval_args(call, env);
+        if (a.empty() || a[0].kind != ValueKind::Tensor) {
+          fail(call.span, method + " espera outro tensor");
+        }
+        return Value::tensor_de(method == "matmul" ? rt::matmul(t, *a[0].tensor)
+                                                   : rt::add(t, *a[0].tensor));
+      }
+      if (method == "transposta") return Value::tensor_de(rt::transpose2d(t));
+      if (method == "reformar") {
+        auto a = eval_args(call, env);
+        std::vector<std::int64_t> shape;
+        if (!a.empty() && a[0].kind == ValueKind::Lista && a[0].list) {
+          for (const Value& e : *a[0].list) shape.push_back(static_cast<std::int64_t>(e.as_number()));
+        }
+        return Value::tensor_de(rt::reshape(t, shape));
+      }
+      if (word_in(method, {"relu", "gelu", "silu", "sigmoide", "tanh"})) {
+        return Value::tensor_de(rt::apply_unary(t, method));
+      }
+      if (method == "softmax") return Value::tensor_de(rt::softmax_last(t));
+      if (method == "soma") return Value::decimal(rt::sum_all(t));
+      if (method == "media") return Value::decimal(rt::mean_all(t));
+      if (method == "argmax") return Value::inteiro(rt::argmax_last(t));
+      if (method == "item") {
+        if (t.size() != 1) fail(call.span, "item espera um tensor de 1 elemento");
+        return Value::decimal(t.data[0]);
+      }
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    fail(call.span, "tensor nao tem o metodo '" + method + "'");
   }
 
   if (receiver.kind == ValueKind::Texto) {

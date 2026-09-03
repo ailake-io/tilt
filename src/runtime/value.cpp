@@ -4,6 +4,8 @@
 #include <sstream>
 #include <utility>
 
+#include "runtime/tensor.hpp"
+
 namespace tilt::rt {
 
 Value* ValueMap::find(const std::string& key) {
@@ -70,6 +72,12 @@ Value Value::tabela(ValueList rows) {
   x.list = std::make_shared<ValueList>(std::move(rows));
   return x;
 }
+Value Value::tensor_de(Tensor t) {
+  Value x;
+  x.kind = ValueKind::Tensor;
+  x.tensor = std::make_shared<Tensor>(std::move(t));
+  return x;
+}
 
 bool Value::truthy() const {
   switch (kind) {
@@ -88,6 +96,8 @@ bool Value::truthy() const {
       return list && !list->empty();
     case ValueKind::Mapa:
       return map && !map->items.empty();
+    case ValueKind::Tensor:
+      return tensor && tensor->size() > 0;
   }
   return false;
 }
@@ -117,6 +127,8 @@ const char* Value::type_name() const {
       return "mapa";
     case ValueKind::Tabela:
       return "tabela";
+    case ValueKind::Tensor:
+      return "tensor";
   }
   return "?";
 }
@@ -170,6 +182,8 @@ std::string to_display(const Value& v) {
       std::size_t n = v.list ? v.list->size() : 0;
       return "tabela(" + std::to_string(n) + " linha" + (n == 1 ? "" : "s") + ")";
     }
+    case ValueKind::Tensor:
+      return v.tensor ? "tensor[" + v.tensor->shape_str() + "]" : "tensor[]";
   }
   return "?";
 }

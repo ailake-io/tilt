@@ -1,0 +1,15 @@
+modelo M:
+  camadas:
+    - linear: [3, 4]
+    - ativacao: relu
+    - linear: [4, 2]
+    - softmax
+
+pipeline p:
+  passos:
+    - x = tensor [0.5, 0.5, 0.5]
+    - y = modelo M.executar x
+    - imprimir "forma:", y.forma
+    - imprimir "soma:", y.soma
+    - lote = tensor [[1, 0, 0], [0, 1, 0]]
+    - imprimir "lote:", (modelo M.executar lote).forma

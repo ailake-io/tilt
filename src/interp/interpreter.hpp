@@ -9,6 +9,7 @@
 #include "common/source.hpp"
 #include "diagnostics/diagnostic.hpp"
 #include "parser/ast.hpp"
+#include "runtime/tensor.hpp"
 #include "runtime/value.hpp"
 
 namespace tilt {
@@ -70,6 +71,18 @@ class Interpreter {
   rt::Value read_csv_file(const std::string& path, Span span);
   rt::Value read_fonte(const std::string& name, Span span);
 
+  // Deep-learning inference.
+  struct Layer {
+    enum Kind { Dense, Activation, Softmax, Dropout } kind = Dense;
+    rt::Tensor w;
+    rt::Tensor b;
+    std::string act;
+  };
+  rt::Tensor value_to_tensor(const rt::Value& v, Span span);
+  const std::vector<Layer>& build_model(const ast::Item& decl, std::int64_t in_dim, Span span);
+  rt::Value model_forward(const ast::Item& decl, const rt::Value& input, Span span);
+  rt::Value eval_modelo_call(const ast::Expr& call, Env& env);
+
   const ast::Program& program_;
   DiagnosticEngine& diag_;
   std::ostream& out_;
@@ -78,6 +91,7 @@ class Interpreter {
   std::unordered_map<std::string, const ast::Item*> functions_;
   std::unordered_map<std::string, const ast::Item*> entities_;
   std::vector<const ast::Item*> pipelines_;
+  std::unordered_map<std::string, std::vector<Layer>> model_cache_;
   bool schedule_mode_ = false;
 };
 

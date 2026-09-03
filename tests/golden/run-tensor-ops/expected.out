@@ -1,0 +1,9 @@
+== pipeline p ==
+forma: [2, 3]
+soma: 21
+media: 3.5
+T forma: [3, 2]
+a@aT forma: [2, 2]
+escalar: 210
+relu(-): 0
+softmax soma: 1

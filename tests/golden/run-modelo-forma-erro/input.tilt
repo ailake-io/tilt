@@ -1,0 +1,8 @@
+modelo M:
+  camadas:
+    - linear: [3, 4]
+
+pipeline p:
+  passos:
+    - x = tensor [1, 2]
+    - imprimir modelo M.executar x

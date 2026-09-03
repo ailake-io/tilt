@@ -1,0 +1,20 @@
+# Inferencia com tensores (CPU). Pesos: init Xavier com semente fixa.
+
+modelo Classificador:
+  dispositivo: auto
+  camadas:
+    - linear: [4, 8]
+    - ativacao: relu
+    - linear: [8, 3]
+    - softmax
+
+pipeline predicao:
+  passos:
+    - entrada = tensor [0.2, 0.5, 0.1, 0.9]
+    - probs = modelo Classificador.executar entrada
+    - imprimir "forma da saida:", probs.forma
+    - imprimir "soma das probabilidades:", probs.soma
+    - imprimir "classe prevista:", probs.argmax
+    - lote = tensor [[0.1, 0.2, 0.3, 0.4], [0.9, 0.8, 0.7, 0.6]]
+    - saida_lote = modelo Classificador.executar lote
+    - imprimir "forma do lote:", saida_lote.forma

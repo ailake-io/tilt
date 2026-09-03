@@ -38,8 +38,9 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M4** — interpretador de árvore (`tilt executar <arquivo>`). ✅
 - **M5** — executor de `pipeline`: `verificar`, `ao_falhar`, `agenda`. ✅
 - **M5.2** — conector JSON + wiring de `fonte` para arquivos locais (csv/json). ✅
-- **M5.3+** — conectores de rede (Postgres/Kafka/S3), Parquet via Arrow, streaming,
-  tensores/DL, LLM, agentes, VM de bytecode.
+- **M6** — tensores + inferência de `modelo` (CPU). ✅ (1ª passada)
+- **M6.2 / M7+** — `treino` + autograd, carga de `pesos:`, GPU, conectores de
+  rede, LLM, agentes, VM de bytecode.
 
 ### `tilt executar`
 
@@ -58,6 +59,13 @@ validada e, com `--agendar`, reconhecida. Métodos de tabela: `.ordenar_por` (co
 Conector local: `ler_json`/`escrever_json` (parser/writer próprios) e
 `fonte X: tipo: csv|json, caminho: "..."` lido por `ler X` num pipeline
 (`caminho:` aceita `env "VAR"`). `tipo: postgres|kafka|s3` → `T900` (M5.3).
+
+Tensores (f32, CPU): `tensor [..]` / `zeros [..]` / `uns [..]` / `aleatorio [..]`;
+`+ - * /` elementwise e com escalar; `.forma .matmul .transposta .reformar
+.relu/.gelu/.sigmoide/.tanh .softmax .soma .media .argmax`. `modelo M:` com
+`camadas:` (`densa: N` / `linear: [e, s]` / `ativacao:` / `softmax` / `abandono:`)
+roda via `modelo M.executar <tensor>` — init Xavier com semente fixa; carga de
+`pesos:` e `treino` chegam no M6.2.
 
 Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
 `incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução
