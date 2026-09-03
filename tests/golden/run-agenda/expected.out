@@ -1,0 +1,3 @@
+== pipeline noturno ==
+agenda: '0 3 * * *' registrada (execucao unica neste modo; o loop real chega no M5.2)
+executado

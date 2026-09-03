@@ -172,8 +172,30 @@ int cmd_checar(const std::vector<std::string_view>& args) {
 }
 
 int cmd_executar(const std::vector<std::string_view>& args) {
-  std::optional<SourceFile> src = load_source(args, "tilt executar <arquivo> [--agendar]");
-  if (!src) return kUsage;
+  std::string_view path;
+  bool schedule = false;
+  for (std::size_t k = 1; k < args.size(); ++k) {
+    if (args[k] == "--agendar") {
+      schedule = true;
+    } else if (args[k].rfind("--", 0) == 0) {
+      std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
+      return kUsage;
+    } else if (path.empty()) {
+      path = args[k];
+    }
+  }
+  if (path.empty()) {
+    std::cerr << "tilt: uso: tilt executar <arquivo> [--agendar]\n";
+    return kUsage;
+  }
+
+  std::optional<SourceFile> src;
+  try {
+    src = SourceFile::load(std::string(path));
+  } catch (const std::exception& e) {
+    std::cerr << "tilt: " << e.what() << "\n";
+    return kUsage;
+  }
 
   DiagnosticEngine diag(&src.value());
   Lexer lexer(src.value(), diag);
@@ -189,6 +211,7 @@ int cmd_executar(const std::vector<std::string_view>& args) {
   }
 
   Interpreter interp(program, diag, std::cout);
+  interp.set_schedule_mode(schedule);
   int rc = interp.run();
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());

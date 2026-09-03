@@ -1,0 +1,7 @@
+pipeline p:
+  passos:
+    - t = ler_csv "d.csv"
+    - verificar t:
+        - unico: cat
+        ao_violar: avisar
+    - imprimir "seguiu em frente"

@@ -21,6 +21,9 @@ class Interpreter {
  public:
   Interpreter(const ast::Program& program, DiagnosticEngine& diag, std::ostream& out);
 
+  // `tilt executar --agendar`: acknowledge `agenda:` cron on pipelines.
+  void set_schedule_mode(bool on) { schedule_mode_ = on; }
+
   // Returns 0 on success, 1 if a runtime error was reported.
   int run();
 
@@ -40,12 +43,14 @@ class Interpreter {
     Span span;
     std::string message;
     DiagCode code;
+    std::vector<std::string> notes;
   };
 
   [[noreturn]] void fail(Span span, std::string message,
                          DiagCode code = DiagCode::RuntimeError);
 
   void run_pipeline(const ast::Item& pipeline);
+  void run_verificar(const ast::Item& field, Env& env);
   void exec_block(const ast::Block& block, Env& env);
   void exec_item(const ast::Item& item, Env& env);
   void exec_stmt(const ast::Stmt& stmt, Env& env);
@@ -70,6 +75,7 @@ class Interpreter {
   std::unordered_map<std::string, const ast::Item*> functions_;
   std::unordered_map<std::string, const ast::Item*> entities_;
   std::vector<const ast::Item*> pipelines_;
+  bool schedule_mode_ = false;
 };
 
 }  // namespace tilt

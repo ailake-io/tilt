@@ -1,0 +1,9 @@
+erro[T910]: verificar t: 2 violacao(oes)
+  --> input.tilt:4:7
+   |
+ 4 |     - verificar t:
+   |       ^^^^^^^^^
+   |
+   = valor repetido em 'cat' na linha 2
+   = condicao de intervalo falhou na linha 2
+

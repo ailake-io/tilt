@@ -1,0 +1,13 @@
+# Executor de pipeline: verificar (qualidade), ordenar, agrupar.
+
+pipeline qualidade_vendas:
+  passos:
+    - vendas = ler_csv "exemplos/dados/vendas.csv"
+    - verificar vendas:
+        - nao_nulo: [regiao, valor]
+        - intervalo: linha.valor >= 0
+        ao_violar: abortar
+    - por_regiao = vendas.agrupar_por "regiao", { receita: somar "valor", pedidos: contar }
+    - ranking = por_regiao.ordenar_por "receita", desc: verdadeiro
+    - para cada r em ranking:
+        imprimir r.regiao, "->", r.receita

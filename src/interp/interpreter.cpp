@@ -114,7 +114,7 @@ Interpreter::Interpreter(const ast::Program& program, DiagnosticEngine& diag, st
     : program_(program), diag_(diag), out_(out) {}
 
 void Interpreter::fail(Span span, std::string message, DiagCode code) {
-  throw RuntimeAbort{span, std::move(message), code};
+  throw RuntimeAbort{span, std::move(message), code, {}};
 }
 
 int Interpreter::run() {
@@ -148,22 +148,165 @@ int Interpreter::run() {
     d.code = a.code;
     d.span = a.span;
     d.message = a.message;
+    d.notes = a.notes;
     diag_.report(std::move(d));
     return 1;
   }
 }
 
+namespace {
+
+// Extracts N from `ao_falhar: repetir N[, espera: "..."]`. Returns 0 if absent.
+int retry_count(const Item& pipeline) {
+  const Item* f = find_field(*pipeline.block, "ao_falhar");
+  if (!f || !f->value) return 0;
+  const Expr* v = f->value.get();
+  if (v->kind == ExprKind::Call && v->lhs && v->lhs->kind == ExprKind::Name &&
+      v->lhs->text == "repetir" && !v->args.empty() &&
+      v->args[0].value->kind == ExprKind::IntLit) {
+    return static_cast<int>(std::strtol(v->args[0].value->text.c_str(), nullptr, 10));
+  }
+  return 0;
+}
+
+// A cron expression is valid here if it has exactly five whitespace fields.
+bool valid_cron(const std::string& expr) {
+  int fields = 0;
+  bool in_field = false;
+  for (char c : expr) {
+    if (c == ' ' || c == '\t') {
+      in_field = false;
+    } else if (!in_field) {
+      in_field = true;
+      ++fields;
+    }
+  }
+  return fields == 5;
+}
+
+}  // namespace
+
 void Interpreter::run_pipeline(const Item& pipeline) {
   out_ << "== pipeline " << decl_name(pipeline) << " ==\n";
   if (!pipeline.block) return;
+
+  if (const Item* ag = find_field(*pipeline.block, "agenda");
+      ag && ag->value && ag->value->kind == ExprKind::TextLit) {
+    const std::string& cron = ag->value->text;
+    if (!valid_cron(cron)) {
+      fail(ag->value->span, "agenda '" + cron + "' nao e um cron de 5 campos");
+    }
+    if (schedule_mode_) {
+      out_ << "agenda: '" << cron << "' registrada (execucao unica neste modo; "
+           << "o loop real chega no M5.2)\n";
+    }
+  }
+
   const Item* passos = find_field(*pipeline.block, "passos");
   if (!passos || !passos->block) {
     out_ << "  (sem passos)\n";
     return;
   }
-  Env env;
-  env.parent = &root_;
-  exec_block(*passos->block, env);
+
+  const int retries = retry_count(pipeline);
+  for (int attempt = 0; attempt <= retries; ++attempt) {
+    try {
+      Env env;
+      env.parent = &root_;
+      exec_block(*passos->block, env);
+      return;
+    } catch (const RuntimeAbort& a) {
+      if (attempt >= retries) throw;
+      out_ << "[retry] passo falhou (" << a.message << "); tentativa " << (attempt + 2) << "/"
+           << (retries + 1) << "\n";
+    }
+  }
+}
+
+void Interpreter::run_verificar(const Item& field, Env& env) {
+  const std::string var =
+      (!field.header.empty() && field.header[0] && field.header[0]->kind == ExprKind::Name)
+          ? field.header[0]->text
+          : "";
+  Value* target = env.lookup(var);
+  if (!target || (target->kind != ValueKind::Tabela && target->kind != ValueKind::Lista) ||
+      !target->list) {
+    fail(field.span, "verificar: '" + var + "' nao e uma tabela");
+  }
+  const rt::ValueList& rows = *target->list;
+
+  std::string on_violate = "abortar";
+  std::vector<std::string> violations;
+  auto note = [&](std::string m) {
+    if (violations.size() < 5) violations.push_back(std::move(m));
+  };
+
+  if (field.block) {
+    for (const auto& raw : field.block->items) {
+      if (!raw) continue;
+      const Item* rule = (raw->kind == ItemKind::ListEntry && raw->child) ? raw->child.get()
+                                                                          : raw.get();
+      if (rule->kind != ItemKind::Field) continue;
+      const std::string& k = rule->key;
+
+      if (k == "ao_violar") {
+        if (rule->value && rule->value->kind == ExprKind::Name) on_violate = rule->value->text;
+        continue;
+      }
+      if (k == "nao_nulo" && rule->value) {
+        std::vector<std::string> cols;
+        if (rule->value->kind == ExprKind::ListLit) {
+          for (const auto& el : rule->value->elems) {
+            if (el && el->kind == ExprKind::Name) cols.push_back(el->text);
+          }
+        } else if (rule->value->kind == ExprKind::Name) {
+          cols.push_back(rule->value->text);
+        }
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+          for (const std::string& c : cols) {
+            const Value* cell = rows[r].map ? rows[r].map->find(c) : nullptr;
+            if (!cell || cell->kind == ValueKind::Nulo) {
+              note("coluna '" + c + "' nula na linha " + std::to_string(r + 1));
+            }
+          }
+        }
+      } else if (k == "unico" && rule->value && rule->value->kind == ExprKind::Name) {
+        const std::string col = rule->value->text;
+        std::vector<std::string> seen;
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+          const Value* cell = rows[r].map ? rows[r].map->find(col) : nullptr;
+          std::string key = cell ? to_display(*cell) : "";
+          if (std::find(seen.begin(), seen.end(), key) != seen.end()) {
+            note("valor repetido em '" + col + "' na linha " + std::to_string(r + 1));
+          } else {
+            seen.push_back(key);
+          }
+        }
+      } else if (k == "intervalo" && rule->value) {
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+          Env inner;
+          inner.parent = &env;
+          inner.vars["linha"] = rows[r];
+          if (!eval(*rule->value, inner).truthy()) {
+            note("condicao de intervalo falhou na linha " + std::to_string(r + 1));
+          }
+        }
+      }
+    }
+  }
+
+  if (violations.empty()) {
+    out_ << "verificar " << var << ": ok (" << rows.size() << " linhas)\n";
+    return;
+  }
+  const std::string summary = "verificar " + var + ": " + std::to_string(violations.size()) +
+                              (violations.size() >= 5 ? "+ violacao(oes)" : " violacao(oes)");
+  if (on_violate == "avisar") {
+    out_ << "[aviso] " << summary << "\n";
+    for (const std::string& v : violations) out_ << "  - " << v << "\n";
+    return;
+  }
+  throw RuntimeAbort{field.span, summary, DiagCode::DataQualityViolation, violations};
 }
 
 // ------------------------------------------------------------------ statements
@@ -184,6 +327,10 @@ void Interpreter::exec_item(const Item& item, Env& env) {
       if (item.child) exec_item(*item.child, env);
       return;
     case ItemKind::Field:
+      if (item.key == "verificar") {
+        run_verificar(item, env);
+        return;
+      }
       if (item.value) eval(*item.value, env);
       if (item.block) {
         // e.g. `- responder:` inside `passos:` — evaluate nested field values
@@ -804,6 +951,59 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         }
       }
       out.push_back(std::move(nr));
+    }
+    return Value::tabela(std::move(out));
+  }
+  if (is_table && method == "ordenar_por") {
+    auto a = eval_args(call, env);
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ordenar_por espera uma coluna");
+    const std::string col = a[0].s;
+    const Value* desc = kw.find("desc");
+    const bool descending = desc && desc->truthy();
+    rt::ValueList out = receiver.list ? *receiver.list : rt::ValueList{};
+    std::stable_sort(out.begin(), out.end(), [&](const Value& x, const Value& y) {
+      const Value* xa = x.map ? x.map->find(col) : nullptr;
+      const Value* ya = y.map ? y.map->find(col) : nullptr;
+      bool less;
+      if (xa && ya && xa->is_number() && ya->is_number()) {
+        less = xa->as_number() < ya->as_number();
+      } else {
+        less = (xa ? to_display(*xa) : "") < (ya ? to_display(*ya) : "");
+      }
+      return descending ? !less : less;
+    });
+    return Value::tabela(std::move(out));
+  }
+  if (is_table && (method == "limite" || method == "primeiros")) {
+    auto a = eval_args(call, env);
+    std::int64_t n = a.empty() ? 0 : static_cast<std::int64_t>(a[0].as_number());
+    rt::ValueList out;
+    if (receiver.list) {
+      for (const Value& row : *receiver.list) {
+        if (static_cast<std::int64_t>(out.size()) >= n) break;
+        out.push_back(row);
+      }
+    }
+    return Value::tabela(std::move(out));
+  }
+  if (is_table && method == "distinto") {
+    auto a = eval_args(call, env);
+    const std::string col = (!a.empty() && a[0].kind == ValueKind::Texto) ? a[0].s : "";
+    rt::ValueList out;
+    std::vector<std::string> seen;
+    for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
+      std::string key;
+      if (col.empty()) {
+        key = to_display(row);
+      } else {
+        const Value* c = row.map ? row.map->find(col) : nullptr;
+        key = c ? to_display(*c) : "";
+      }
+      if (std::find(seen.begin(), seen.end(), key) == seen.end()) {
+        seen.push_back(key);
+        out.push_back(row);
+      }
     }
     return Value::tabela(std::move(out));
   }

@@ -1,0 +1,4 @@
+pipeline noturno:
+  agenda: "0 3 * * *"
+  passos:
+    - imprimir "executado"

@@ -1,0 +1,7 @@
+pipeline p:
+  passos:
+    - t = ler_csv "d.csv"
+    - top = t.ordenar_por "v", desc: verdadeiro
+    - primeiros = top.limite 2
+    - para cada r em primeiros:
+        imprimir r.nome, r.v

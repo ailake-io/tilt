@@ -1,0 +1,4 @@
+== pipeline p ==
+[aviso] verificar t: 1 violacao(oes)
+  - valor repetido em 'cat' na linha 2
+seguiu em frente

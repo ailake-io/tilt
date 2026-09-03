@@ -1,0 +1,9 @@
+pipeline p:
+  passos:
+    - t = ler_csv "d.csv"
+    - verificar t:
+        - nao_nulo: [cat, n]
+        - unico: id
+        - intervalo: linha.n >= 0
+        ao_violar: abortar
+    - imprimir "verificacao passou"
