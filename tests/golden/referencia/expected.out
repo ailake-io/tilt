@@ -1,0 +1,51 @@
+TILT -- referencia compacta (para consumo por ferramentas e assistentes de IA)
+
+DECLARACOES DE TOPO
+  tipo Nome:            registro; campos `chave: <tipo> [= padrao]`; uniao "a" | "b"
+  funcao f p: T -> R:   funcao; corpo com `retornar`
+  seja x = <expr>       variavel de topo;  constante NOME = <expr>
+  importar mod          / de mod importar nome
+  fonte X:              tipo: csv|json|postgres|kafka|s3 ; caminho:/url: (env "VAR")
+  pipeline X:           passos: (lista `-`); agenda: "<cron>"; ao_falhar: repetir N
+  verificar (passo):    regras nao_nulo:/unico:/intervalo:  ; ao_violar: abortar|avisar
+  modelo X:             camadas: (densa:/linear:[e,s]/ativacao:/softmax/abandono:)
+                        dispositivo: auto|cpu|gpu|"cuda:N"
+  treino X:             treina `modelo X`; dados: carregador; perda:; otimizador: sgd|adam
+  llm X:                provedor:/modelo:/temperatura:/chave: env "..."
+  indice X:             embeddings:/armazenamento: "memoria"
+  ferramenta X:         descricao:/entrada:/executar:
+  agente X:             llm:/papel:/ferramentas:/memoria:/max_passos:
+  equipe X:             agentes:/estrategia: sequencial|paralelo
+  servico X:            porta:/ rota <metodo> "/rota": entrada:/passos:
+
+EXPRESSOES
+  literais: 42  3.14  "texto {{var}}"  verdadeiro/falso  nulo
+  operadores: + - * / %   == != < <= > >=   e  ou  nao  contem   |(uniao)
+  f(a, b)  (nao ambiguo)   |   f a, b   (estilo declarativo)
+  x.campo   x?.campo   x[i]   x[a..b]   [..lista..]   { chave: valor }
+  tensor [..]   zeros [..]   uns [..]   aleatorio [..]
+
+INSTRUCOES (passos:/executar:/funcao)
+  x = <expr>   |   se .. / senao se .. / senao   |   para cada k em <it>
+  enquanto <cond>   |   tentar / capturar e   |   retornar <expr>
+
+BUILTINS
+  imprimir registrar env tamanho contar somar media min max intervalo dividir
+  ler_csv escrever_csv ler_json escrever_json ler <fonte> carregador
+  perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)
+  modelo X.executar <tensor>   |   <indice>.inserir / .buscar
+  checar_tilt "<arquivo>"  -> { ok, erros: [{codigo,linha,coluna,mensagem,notas}] }
+
+CLI
+  tilt checar <a> [--json]   ast <a>   executar <a> [--agendar]
+  tilt servir <a> [--porta N]   compilar <a> --saida <bin> [--asm]
+  tilt tokens <a>   referencia   versao
+
+DIAGNOSTICOS (codigo estavel Tnnn)
+  T001 indent nao-multiplo-de-2   T002 tab   T003 texto aberto   T004 char invalido
+  T010 indent inesperada   T013 token esperado   T014 token inesperado
+  T020 segredo literal (use env)   T021 dispositivo invalido
+  T030 nome nao definido   T031 referencia desconhecida   T032 declaracao duplicada
+  T033 tipo desconhecido   T034 tensor malformado
+  T900 conector nao implementado   T901 erro de execucao   T902 recurso nao implementado
+  T910 violacao de qualidade de dados

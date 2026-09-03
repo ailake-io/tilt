@@ -15,11 +15,14 @@
 #include <unordered_set>
 #include <utility>
 
+#include "lexer/lexer.hpp"
+#include "parser/parser.hpp"
 #include "runtime/gpu_runtime.hpp"
 #include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
 #include "runtime/vectorstore.hpp"
+#include "semantic/checker.hpp"
 #include "vm/compiler.hpp"
 #include "vm/vm.hpp"
 
@@ -2051,6 +2054,43 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     } catch (const std::exception& e) {
       fail(call.span, std::string("incorporar: ") + e.what());
     }
+  }
+  if (name == "checar_tilt") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "checar_tilt espera o caminho de um arquivo .tilt");
+    }
+    Value result = Value::mapa();
+    std::optional<SourceFile> src;
+    try {
+      src = SourceFile::load(a[0].s);
+    } catch (const std::exception& e) {
+      result.map->set("ok", Value::logico(false));
+      result.map->set("erro", Value::texto(std::string(e.what())));
+      return result;
+    }
+    DiagnosticEngine d(&src.value());
+    Lexer lx(src.value(), d);
+    std::vector<Token> toks = lx.tokenize();
+    Parser ps(toks, d);
+    ast::Program prog = ps.parse_program();
+    check_program(prog, d);
+
+    result.map->set("ok", Value::logico(!d.has_errors()));
+    Value errs = Value::lista();
+    for (const Diagnostic& e : d.all()) {
+      Value m = Value::mapa();
+      m.map->set("codigo", Value::texto(std::string(diag_code_string(e.code))));
+      m.map->set("linha", Value::inteiro(e.span.line));
+      m.map->set("coluna", Value::inteiro(e.span.column));
+      m.map->set("mensagem", Value::texto(e.message));
+      Value ns = Value::lista();
+      for (const std::string& n : e.notes) ns.list->push_back(Value::texto(n));
+      m.map->set("notas", std::move(ns));
+      errs.list->push_back(std::move(m));
+    }
+    result.map->set("erros", std::move(errs));
+    return result;
   }
   if (name == "dividir_texto") {
     auto a = args();

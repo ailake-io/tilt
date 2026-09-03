@@ -1,0 +1,5 @@
+tipo P:
+  a: Desconhecido
+
+modelo P:
+  dispositivo: "tpu:0"

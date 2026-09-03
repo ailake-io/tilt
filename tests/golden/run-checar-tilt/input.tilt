@@ -1,0 +1,6 @@
+pipeline p:
+  passos:
+    - r = checar_tilt("alvo.tilt")
+    - imprimir "ok:", r.ok, "erros:", r.erros.tamanho
+    - para cada d em r.erros:
+        imprimir d.codigo, d.linha, d.mensagem

@@ -31,6 +31,10 @@ bool is_operator_word(std::string_view w) {
   return word_in(w, {"e", "ou", "nao", "contem", "em", "no"});
 }
 
+bool is_reserved_word(std::string_view w) {
+  return word_in(w, {"e", "ou", "nao", "contem"});
+}
+
 ExprPtr make_expr(ExprKind kind, Span span) {
   auto e = std::make_unique<Expr>();
   e->kind = kind;
@@ -369,7 +373,13 @@ StmtPtr Parser::parse_for_each() {
   } else {
     report(DiagCode::ExpectedToken, cur().span, "esperado 'cada' apos 'para'");
   }
-  if (at(TokenKind::Identifier)) s->name = std::string(advance().lexeme);
+  if (at(TokenKind::Identifier)) {
+    if (is_reserved_word(cur().lexeme)) {
+      report(DiagCode::UnexpectedToken, cur().span,
+             "'" + std::string(cur().lexeme) + "' e palavra reservada; use outro nome");
+    }
+    s->name = std::string(advance().lexeme);
+  }
   if (at_keyword("em")) {
     advance();
   } else {

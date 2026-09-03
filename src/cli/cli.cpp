@@ -21,6 +21,8 @@
 #include "interp/interpreter.hpp"
 #include "parser/ast_dump.hpp"
 #include "parser/parser.hpp"
+#include "runtime/json.hpp"
+#include "runtime/value.hpp"
 #include "semantic/checker.hpp"
 #include "tilt/version.hpp"
 
@@ -42,6 +44,7 @@ void print_usage(std::ostream& os) {
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
+     << "  referencia                         referencia compacta da linguagem\n"
      << "  tokens <arquivo>                   despeja o fluxo de tokens (debug)\n"
      << "  ast <arquivo>                      despeja a arvore sintatica (debug)\n"
      << "  versao                             mostra a versao\n"
@@ -154,9 +157,56 @@ int cmd_ast(const std::vector<std::string_view>& args) {
   return kOk;
 }
 
+rt::Value diagnostics_to_json(std::string_view path, const DiagnosticEngine& diag) {
+  rt::Value out = rt::Value::mapa();
+  out.map->set("arquivo", rt::Value::texto(std::string(path)));
+  out.map->set("ok", rt::Value::logico(!diag.has_errors()));
+  rt::Value arr = rt::Value::lista();
+  for (const Diagnostic& d : diag.all()) {
+    rt::Value e = rt::Value::mapa();
+    e.map->set("codigo", rt::Value::texto(std::string(diag_code_string(d.code))));
+    e.map->set("severidade",
+               rt::Value::texto(d.severity == Severity::Error     ? "erro"
+                                : d.severity == Severity::Warning ? "aviso"
+                                                                  : "nota"));
+    e.map->set("linha", rt::Value::inteiro(d.span.line));
+    e.map->set("coluna", rt::Value::inteiro(d.span.column));
+    e.map->set("mensagem", rt::Value::texto(d.message));
+    rt::Value notes = rt::Value::lista();
+    for (const std::string& n : d.notes) notes.list->push_back(rt::Value::texto(n));
+    e.map->set("notas", std::move(notes));
+    if (d.suggestion) e.map->set("sugestao", rt::Value::texto(*d.suggestion));
+    arr.list->push_back(std::move(e));
+  }
+  out.map->set("erros", std::move(arr));
+  return out;
+}
+
 int cmd_checar(const std::vector<std::string_view>& args) {
-  std::optional<SourceFile> src = load_source(args, "tilt checar <arquivo>");
-  if (!src) return kUsage;
+  std::string_view path;
+  bool as_json = false;
+  for (std::size_t k = 1; k < args.size(); ++k) {
+    if (args[k] == "--json") {
+      as_json = true;
+    } else if (args[k].rfind("--", 0) == 0) {
+      std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
+      return kUsage;
+    } else if (path.empty()) {
+      path = args[k];
+    }
+  }
+  if (path.empty()) {
+    std::cerr << "tilt: uso: tilt checar <arquivo> [--json]\n";
+    return kUsage;
+  }
+
+  std::optional<SourceFile> src;
+  try {
+    src = SourceFile::load(std::string(path));
+  } catch (const std::exception& e) {
+    std::cerr << "tilt: " << e.what() << "\n";
+    return kUsage;
+  }
 
   DiagnosticEngine diag(&src.value());
   Lexer lexer(src.value(), diag);
@@ -165,12 +215,16 @@ int cmd_checar(const std::vector<std::string_view>& args) {
   const ast::Program program = parser.parse_program();
   check_program(program, diag);
 
+  if (as_json) {
+    std::cout << rt::json_dump(diagnostics_to_json(path, diag));
+    return diag.has_errors() ? kDiagnostics : kOk;
+  }
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());
-    std::cerr << diag.error_count() << " erro(s) em " << args[1] << "\n";
+    std::cerr << diag.error_count() << " erro(s) em " << path << "\n";
     return kDiagnostics;
   }
-  std::cout << "ok: " << args[1] << " sem erros\n";
+  std::cout << "ok: " << path << " sem erros\n";
   return kOk;
 }
 
@@ -221,6 +275,63 @@ int cmd_executar(const std::vector<std::string_view>& args) {
     return kDiagnostics;
   }
   return rc == 0 ? kOk : kDiagnostics;
+}
+
+int cmd_referencia() {
+  std::cout <<
+      R"(TILT -- referencia compacta (para consumo por ferramentas e assistentes de IA)
+
+DECLARACOES DE TOPO
+  tipo Nome:            registro; campos `chave: <tipo> [= padrao]`; uniao "a" | "b"
+  funcao f p: T -> R:   funcao; corpo com `retornar`
+  seja x = <expr>       variavel de topo;  constante NOME = <expr>
+  importar mod          / de mod importar nome
+  fonte X:              tipo: csv|json|postgres|kafka|s3 ; caminho:/url: (env "VAR")
+  pipeline X:           passos: (lista `-`); agenda: "<cron>"; ao_falhar: repetir N
+  verificar (passo):    regras nao_nulo:/unico:/intervalo:  ; ao_violar: abortar|avisar
+  modelo X:             camadas: (densa:/linear:[e,s]/ativacao:/softmax/abandono:)
+                        dispositivo: auto|cpu|gpu|"cuda:N"
+  treino X:             treina `modelo X`; dados: carregador; perda:; otimizador: sgd|adam
+  llm X:                provedor:/modelo:/temperatura:/chave: env "..."
+  indice X:             embeddings:/armazenamento: "memoria"
+  ferramenta X:         descricao:/entrada:/executar:
+  agente X:             llm:/papel:/ferramentas:/memoria:/max_passos:
+  equipe X:             agentes:/estrategia: sequencial|paralelo
+  servico X:            porta:/ rota <metodo> "/rota": entrada:/passos:
+
+EXPRESSOES
+  literais: 42  3.14  "texto {{var}}"  verdadeiro/falso  nulo
+  operadores: + - * / %   == != < <= > >=   e  ou  nao  contem   |(uniao)
+  f(a, b)  (nao ambiguo)   |   f a, b   (estilo declarativo)
+  x.campo   x?.campo   x[i]   x[a..b]   [..lista..]   { chave: valor }
+  tensor [..]   zeros [..]   uns [..]   aleatorio [..]
+
+INSTRUCOES (passos:/executar:/funcao)
+  x = <expr>   |   se .. / senao se .. / senao   |   para cada k em <it>
+  enquanto <cond>   |   tentar / capturar e   |   retornar <expr>
+
+BUILTINS
+  imprimir registrar env tamanho contar somar media min max intervalo dividir
+  ler_csv escrever_csv ler_json escrever_json ler <fonte> carregador
+  perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)
+  modelo X.executar <tensor>   |   <indice>.inserir / .buscar
+  checar_tilt "<arquivo>"  -> { ok, erros: [{codigo,linha,coluna,mensagem,notas}] }
+
+CLI
+  tilt checar <a> [--json]   ast <a>   executar <a> [--agendar]
+  tilt servir <a> [--porta N]   compilar <a> --saida <bin> [--asm]
+  tilt tokens <a>   referencia   versao
+
+DIAGNOSTICOS (codigo estavel Tnnn)
+  T001 indent nao-multiplo-de-2   T002 tab   T003 texto aberto   T004 char invalido
+  T010 indent inesperada   T013 token esperado   T014 token inesperado
+  T020 segredo literal (use env)   T021 dispositivo invalido
+  T030 nome nao definido   T031 referencia desconhecida   T032 declaracao duplicada
+  T033 tipo desconhecido   T034 tensor malformado
+  T900 conector nao implementado   T901 erro de execucao   T902 recurso nao implementado
+  T910 violacao de qualidade de dados
+)";
+  return kOk;
 }
 
 int cmd_compilar(const std::vector<std::string_view>& args) {
@@ -368,6 +479,7 @@ int run_cli(int argc, char** argv) {
   if (cmd == "_diag-demo") return cmd_diag_demo();
   if (cmd == "tokens") return cmd_tokens(args);
   if (cmd == "ast") return cmd_ast(args);
+  if (cmd == "referencia" || cmd == "ref") return cmd_referencia();
   if (cmd == "checar") return cmd_checar(args);
   if (cmd == "executar") return cmd_executar(args);
   if (cmd == "servir") return cmd_servir(args);

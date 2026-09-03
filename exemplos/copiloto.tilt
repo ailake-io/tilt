@@ -1,0 +1,29 @@
+# Tilt para IA no auxilio a programacao: um agente que revisa codigo Tilt
+# usando o proprio verificador (checar_tilt). Rode com TILT_LLM=mock.
+
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+ferramenta revisar_arquivo:
+  descricao: "Roda o verificador Tilt e devolve os diagnosticos."
+  entrada:
+    caminho: texto
+  executar:
+    retornar checar_tilt(caminho)
+
+agente Copiloto:
+  llm: gpt
+  papel: "Revisor de codigo Tilt. Explique cada erro e proponha a correcao."
+  ferramentas:
+    - revisar_arquivo
+  memoria: nenhuma
+  max_passos: 3
+
+pipeline revisao:
+  passos:
+    - limpo = revisar_arquivo(caminho: "exemplos/soma.tilt")
+    - imprimir "soma.tilt ok:", limpo.ok, " erros:", limpo.erros.tamanho
+    - resposta = Copiloto.responder "revise o arquivo"
+    - imprimir "copiloto:", resposta.texto

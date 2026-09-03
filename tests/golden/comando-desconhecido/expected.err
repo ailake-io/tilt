@@ -9,6 +9,7 @@ comandos:
   executar <arquivo> [--agendar]     roda o programa no interpretador
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
   compilar <arquivo> --saida <bin>   gera binario nativo
+  referencia                         referencia compacta da linguagem
   tokens <arquivo>                   despeja o fluxo de tokens (debug)
   ast <arquivo>                      despeja a arvore sintatica (debug)
   versao                             mostra a versao

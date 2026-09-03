@@ -1,0 +1,36 @@
+{
+  "arquivo": "input.tilt",
+  "ok": false,
+  "erros": [
+    {
+      "codigo": "T032",
+      "severidade": "erro",
+      "linha": 4,
+      "coluna": 1,
+      "mensagem": "'P' ja foi declarado",
+      "notas": [
+        "declaracao anterior na linha 1"
+      ]
+    },
+    {
+      "codigo": "T033",
+      "severidade": "erro",
+      "linha": 2,
+      "coluna": 6,
+      "mensagem": "tipo desconhecido 'Desconhecido'",
+      "notas": [
+        "tipos base: texto, inteiro, decimal, logico, tabela, tensor[...], lista[...]"
+      ]
+    },
+    {
+      "codigo": "T021",
+      "severidade": "erro",
+      "linha": 5,
+      "coluna": 16,
+      "mensagem": "dispositivo invalido 'tpu:0'",
+      "notas": [
+        "use auto, cpu, gpu, metal ou \"cuda:N\""
+      ]
+    }
+  ]
+}
