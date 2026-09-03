@@ -5,6 +5,7 @@ uso: tilt <comando> [argumentos]
 comandos:
   checar <arquivo>                   verifica sintaxe, indentacao e tipos
   executar <arquivo> [--agendar]     roda o programa no interpretador
+  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
   compilar <arquivo> --saida <bin>   gera binario nativo
   tokens <arquivo>                   despeja o fluxo de tokens (debug)
   ast <arquivo>                      despeja a arvore sintatica (debug)

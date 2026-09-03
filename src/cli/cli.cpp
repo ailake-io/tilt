@@ -38,6 +38,7 @@ void print_usage(std::ostream& os) {
      << "comandos:\n"
      << "  checar <arquivo>                   verifica sintaxe, indentacao e tipos\n"
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
+     << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "  tokens <arquivo>                   despeja o fluxo de tokens (debug)\n"
      << "  ast <arquivo>                      despeja a arvore sintatica (debug)\n"
@@ -220,6 +221,55 @@ int cmd_executar(const std::vector<std::string_view>& args) {
   return rc == 0 ? kOk : kDiagnostics;
 }
 
+int cmd_servir(const std::vector<std::string_view>& args) {
+  std::string_view path;
+  int port = 0;
+  int max_requests = 0;
+  for (std::size_t k = 1; k < args.size(); ++k) {
+    if (args[k] == "--porta" && k + 1 < args.size()) {
+      port = std::atoi(std::string(args[++k]).c_str());
+    } else if (args[k] == "--requisicoes" && k + 1 < args.size()) {
+      max_requests = std::atoi(std::string(args[++k]).c_str());
+    } else if (args[k].rfind("--", 0) == 0) {
+      std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
+      return kUsage;
+    } else if (path.empty()) {
+      path = args[k];
+    }
+  }
+  if (path.empty()) {
+    std::cerr << "tilt: uso: tilt servir <arquivo> [--porta N] [--requisicoes N]\n";
+    return kUsage;
+  }
+
+  std::optional<SourceFile> src;
+  try {
+    src = SourceFile::load(std::string(path));
+  } catch (const std::exception& e) {
+    std::cerr << "tilt: " << e.what() << "\n";
+    return kUsage;
+  }
+
+  DiagnosticEngine diag(&src.value());
+  Lexer lexer(src.value(), diag);
+  const std::vector<Token> tokens = lexer.tokenize();
+  Parser parser(tokens, diag);
+  const ast::Program program = parser.parse_program();
+  check_program(program, diag);
+  if (diag.has_errors()) {
+    diag.render(std::cerr, want_color());
+    return kDiagnostics;
+  }
+
+  Interpreter interp(program, diag, std::cout);
+  const int rc = interp.serve(port, max_requests);
+  if (diag.has_errors()) {
+    diag.render(std::cerr, want_color());
+    return kDiagnostics;
+  }
+  return rc == 0 ? kOk : kDiagnostics;
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -245,6 +295,7 @@ int run_cli(int argc, char** argv) {
   if (cmd == "ast") return cmd_ast(args);
   if (cmd == "checar") return cmd_checar(args);
   if (cmd == "executar") return cmd_executar(args);
+  if (cmd == "servir") return cmd_servir(args);
 
   if (cmd == "compilar") {
     std::cerr << "tilt: comando '" << cmd << "' ainda nao implementado (em desenvolvimento)\n";

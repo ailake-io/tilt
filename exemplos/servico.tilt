@@ -1,0 +1,24 @@
+# Servico HTTP. Suba com:  tilt servir exemplos/servico.tilt --porta 8080
+
+tipo NovoPedido:
+  cliente: texto
+  valor: decimal
+
+servico Loja:
+  porta: 8080
+  rota post "/pedidos":
+    entrada: NovoPedido
+    passos:
+      - imposto = entrada.valor * 0.1
+      - responder:
+          status: 201
+          dados:
+            cliente: entrada.cliente
+            valor: entrada.valor
+            imposto: imposto
+            total: entrada.valor + imposto
+  rota get "/saude":
+    passos:
+      - responder:
+          dados:
+            status: "ok"

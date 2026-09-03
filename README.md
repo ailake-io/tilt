@@ -42,8 +42,9 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M6.2** — `treino`: backprop + SGD/Adam + `carregador`. ✅
 - **M8** — cliente LLM (`perguntar`/`incorporar`), saída estruturada, RAG (`indice`). ✅
 - **M9** — `ferramenta` executável, `agente.responder`, `equipe`. ✅ (1ª passada)
-- **M7 / M9.2 / M10+** — GPU, planner iterativo, `estrategia: supervisor`,
-  `servico` async, VM de bytecode.
+- **M10** — `servico` / `rota` HTTP (`tilt servir`). ✅ (1ª passada)
+- **M7 / M9.2 / M10.2 / M11+** — GPU, planner iterativo, `supervisor`, epoll +
+  keep-alive + `meio:`, VM de bytecode, codegen nativo.
 
 ### `tilt executar`
 
@@ -99,6 +100,15 @@ ferramentas (laço determinístico no `mock`), junta as observações e pede a
 resposta ao LLM → `{ texto, rastro: [{ passo, ferramenta, observacao }] }`.
 `equipe E: agentes: [-rotulo: A], estrategia: sequencial|paralelo` —
 `E.executar "msg"`. Planner iterativo e `supervisor`: M9.2.
+
+### Serviço HTTP
+
+`tilt servir <arquivo> [--porta N] [--requisicoes N]` sobe o `servico` declarado
+(servidor TCP bloqueante; epoll + keep-alive + `meio:` no M10.2). Cada `rota
+<metodo> "/caminho":` casa método+caminho; o corpo JSON vira `entrada` no escopo;
+se a rota declara `entrada: <Tipo>`, campos ausentes → `400`; `- responder:
+status:, dados:` monta a resposta JSON; rota não encontrada → `404`; exceção no
+handler → `500`.
 
 Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
 `incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução

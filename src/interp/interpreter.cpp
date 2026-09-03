@@ -13,6 +13,7 @@
 #include <string_view>
 #include <utility>
 
+#include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
 #include "runtime/vectorstore.hpp"
@@ -124,24 +125,28 @@ void Interpreter::fail(Span span, std::string message, DiagCode code) {
   throw RuntimeAbort{span, std::move(message), code, {}};
 }
 
+void Interpreter::register_decls() {
+  for (const auto& item : program_.items) {
+    if (!item || item->kind != ItemKind::Decl) continue;
+    const std::string& kw = item->key;
+    const std::string name = decl_name(*item);
+    if (kw == "seja" || kw == "constante") {
+      if (!name.empty()) root_.vars[name] = item->value ? eval(*item->value, root_) : Value::nulo();
+    } else if (kw == "funcao") {
+      if (!name.empty()) functions_[name] = item.get();
+    } else if (kw == "pipeline") {
+      pipelines_.push_back(item.get());
+    } else if (kw == "treino") {
+      // handled by the dedicated training loop; must not shadow `modelo <name>`
+    } else if (!name.empty()) {
+      entities_[name] = item.get();
+    }
+  }
+}
+
 int Interpreter::run() {
   try {
-    for (const auto& item : program_.items) {
-      if (!item || item->kind != ItemKind::Decl) continue;
-      const std::string& kw = item->key;
-      const std::string name = decl_name(*item);
-      if (kw == "seja" || kw == "constante") {
-        if (!name.empty()) root_.vars[name] = item->value ? eval(*item->value, root_) : Value::nulo();
-      } else if (kw == "funcao") {
-        if (!name.empty()) functions_[name] = item.get();
-      } else if (kw == "pipeline") {
-        pipelines_.push_back(item.get());
-      } else if (kw == "treino") {
-        // handled by the dedicated training loop; must not shadow `modelo <name>`
-      } else if (!name.empty()) {
-        entities_[name] = item.get();
-      }
-    }
+    register_decls();
 
     bool did_something = false;
     for (const auto& item : program_.items) {
@@ -1179,6 +1184,146 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
   return out;
 }
 
+// ------------------------------------------------------------------ HTTP service
+
+namespace {
+
+struct Route {
+  std::string method;
+  std::string path;
+  const Item* field = nullptr;  // the `rota` Field (has `entrada:` / `passos:`)
+};
+
+std::vector<Route> collect_routes(const ast::Block& block) {
+  std::vector<Route> routes;
+  for (const auto& it : block.items) {
+    if (!it || it->kind != ItemKind::Field || it->key != "rota") continue;
+    Route r;
+    r.field = it.get();
+    if (it->header.size() >= 1 && it->header[0] && it->header[0]->kind == ExprKind::Name) {
+      r.method = it->header[0]->text;
+      for (char& c : r.method) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    if (it->header.size() >= 2 && it->header[1] && it->header[1]->kind == ExprKind::TextLit) {
+      r.path = it->header[1]->text;
+    }
+    routes.push_back(std::move(r));
+  }
+  return routes;
+}
+
+}  // namespace
+
+int Interpreter::serve(int port_override, int max_requests) {
+  register_decls();
+
+  const Item* svc = nullptr;
+  for (const auto& item : program_.items) {
+    if (item && item->kind == ItemKind::Decl && item->key == "servico") {
+      svc = item.get();
+      break;
+    }
+  }
+  if (!svc || !svc->block) {
+    out_ << "nenhum 'servico' declarado\n";
+    return 1;
+  }
+
+  int port = port_override > 0 ? port_override : field_int(*svc->block, "porta", 8080);
+  const std::vector<Route> routes = collect_routes(*svc->block);
+  if (find_field(*svc->block, "meio")) {
+    out_ << "[nota] 'meio:' (middleware) chega no M10.2\n";
+  }
+
+  rt::HttpServer server;
+  const std::string err = server.listen_on("127.0.0.1", port);
+  if (!err.empty()) {
+    Diagnostic d;
+    d.severity = Severity::Error;
+    d.code = DiagCode::RuntimeError;
+    d.span = svc->span;
+    d.message = "servico " + decl_name(*svc) + ": " + err;
+    diag_.report(std::move(d));
+    return 1;
+  }
+  out_ << "servico " << decl_name(*svc) << ": escutando 127.0.0.1:" << port << "\n";
+
+  int served = 0;
+  while (max_requests <= 0 || served < max_requests) {
+    auto got = server.accept_one();
+    if (!got) continue;
+    const int cfd = got->first;
+    const rt::HttpRequest& req = got->second;
+
+    const Route* match = nullptr;
+    for (const Route& r : routes) {
+      if (r.method == req.method && r.path == req.path) {
+        match = &r;
+        break;
+      }
+    }
+    int status = 200;
+    std::string body;
+
+    if (!match) {
+      status = 404;
+      body = R"({"erro":"rota nao encontrada"})";
+    } else {
+      Value parsed = Value::mapa();
+      bool bad = false;
+      if (!req.body.empty()) {
+        try {
+          parsed = rt::json_parse(req.body);
+        } catch (...) {
+          bad = true;
+        }
+      }
+      const Item* entrada = match->field->block ? find_field(*match->field->block, "entrada") : nullptr;
+      if (!bad && entrada && entrada->value && entrada->value->kind == ExprKind::Name) {
+        if (auto t = entities_.find(entrada->value->text);
+            t != entities_.end() && t->second->key == "tipo" && t->second->block &&
+            parsed.kind == ValueKind::Mapa) {
+          for (const auto& f : t->second->block->items) {
+            if (f && f->kind == ItemKind::Field && parsed.map && !parsed.map->find(f->key)) {
+              status = 400;
+              body = R"({"erro":"campo ')" + f->key + R"(' ausente"})";
+              bad = true;
+              break;
+            }
+          }
+        }
+      }
+      if (bad && status != 400) {
+        status = 400;
+        body = R"({"erro":"corpo JSON invalido"})";
+      }
+
+      if (!bad) {
+        RouteResponse resp;
+        route_resp_ = &resp;
+        Env env;
+        env.parent = &root_;
+        env.vars["entrada"] = parsed;
+        const Item* passos = match->field->block ? find_field(*match->field->block, "passos") : nullptr;
+        try {
+          if (passos && passos->block) exec_block(*passos->block, env);
+          status = resp.set ? resp.status : 200;
+          body = json_dump(resp.dados.kind == ValueKind::Nulo ? Value::mapa() : resp.dados);
+        } catch (const RuntimeAbort& a) {
+          status = 500;
+          body = R"({"erro":)" + std::string("\"") + a.message + "\"}";
+        }
+        route_resp_ = nullptr;
+      }
+    }
+
+    rt::HttpServer::respond(cfd, status, "application/json", body);
+    out_ << req.method << " " << req.path << " -> " << status << "\n";
+    ++served;
+  }
+  return 0;
+}
+
 // ------------------------------------------------------------------ statements
 
 void Interpreter::exec_block(const ast::Block& block, Env& env) {
@@ -1199,6 +1344,29 @@ void Interpreter::exec_item(const Item& item, Env& env) {
     case ItemKind::Field:
       if (item.key == "verificar") {
         run_verificar(item, env);
+        return;
+      }
+      if ((item.key == "responder" || item.key == "responder_em_fluxo") && route_resp_ &&
+          item.block) {
+        for (const auto& sub : item.block->items) {
+          if (!sub || sub->kind != ItemKind::Field) continue;
+          if (sub->key == "status" && sub->value) {
+            route_resp_->status = static_cast<int>(eval(*sub->value, env).as_number());
+          } else if (sub->key == "dados") {
+            if (sub->block) {
+              Value m = Value::mapa();
+              for (const auto& d : sub->block->items) {
+                if (d && d->kind == ItemKind::Field && d->value) {
+                  m.map->set(d->key, eval(*d->value, env));
+                }
+              }
+              route_resp_->dados = std::move(m);
+            } else if (sub->value) {
+              route_resp_->dados = eval(*sub->value, env);
+            }
+          }
+        }
+        route_resp_->set = true;
         return;
       }
       if (item.value) eval(*item.value, env);

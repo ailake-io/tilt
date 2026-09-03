@@ -1,0 +1,11 @@
+servico Teste:
+  rota post "/eco":
+    passos:
+      - responder:
+          dados:
+            recebido: entrada.msg
+  rota get "/saude":
+    passos:
+      - responder:
+          dados:
+            ok: verdadeiro

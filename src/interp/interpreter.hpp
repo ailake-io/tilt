@@ -30,6 +30,9 @@ class Interpreter {
   // Returns 0 on success, 1 if a runtime error was reported.
   int run();
 
+  // Serves the first `servico` declaration. `max_requests <= 0` runs forever.
+  int serve(int port_override, int max_requests);
+
  private:
   struct Env {
     std::unordered_map<std::string, rt::Value> vars;
@@ -52,6 +55,7 @@ class Interpreter {
   [[noreturn]] void fail(Span span, std::string message,
                          DiagCode code = DiagCode::RuntimeError);
 
+  void register_decls();
   void run_pipeline(const ast::Item& pipeline);
   void run_verificar(const ast::Item& field, Env& env);
   void exec_block(const ast::Block& block, Env& env);
@@ -113,6 +117,14 @@ class Interpreter {
   std::unordered_map<std::string, std::vector<Layer>> model_cache_;
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
+
+  struct RouteResponse {
+    int status = 200;
+    rt::Value dados;
+    bool set = false;
+  };
+  RouteResponse* route_resp_ = nullptr;  // non-null only while handling a request
+
   bool schedule_mode_ = false;
 };
 
