@@ -5,8 +5,6 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## Sintaxe / parser
 
-- Listas `[...]` e mapas `{...}` literais precisam caber em **uma linha**.
-  Linhas de continuação indentadas dentro de `[` quebram o parser.
 - `e` / `ou` / `nao` / `contem` são reservadas — não servem como nome de
   variável, parâmetro ou loop var.
 - Assinatura de `funcao` com parâmetros compostos é reconhecida de forma
@@ -14,11 +12,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## Semântica
 
-- `tilt checar` **não** resolve nomes dentro de `passos:` / `executar:` (evita
-  falso-positivo com variáveis implícitas como `linha`, `epoca`). `T030` só
-  aparece em contextos limitados.
-- O solver de dimensões de matmul/`densa` (`T012` completo) ainda não existe —
-  só a validação da anotação `tensor[...]` (`T034`).
+- `tilt checar` resolve nomes dentro de `passos:` / `executar:` (`T030`):
+  escopo global mais variáveis implícitas (`linha`, `entrada`, `epoca`,
+  `metricas`, `passo`, `resultado`) e campos de `entrada:`. Nomes fora
+  disso são reportados.
+- O solver de formas (`T012`) cobre a cadeia `densa`/`linear` — propaga a
+  dimensão corrente a partir da anotação `entrada: tensor[...]` e rejeita
+  `linear: [a, b]` com `a` incompatível. `conv2d`, `norma_lote` e
+  `norma_camada` ficam fora do solver.
+- Não há inferência completa de tipos: anotações são validadas como
+  contratos, mas os tipos não são propagados entre expressões.
 
 ## Dados
 

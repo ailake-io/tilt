@@ -16,8 +16,8 @@ namespace tilt {
 // First semantic pass: builds the global symbol table and runs the checks
 // that do not need full type inference — duplicate declarations, unknown type
 // names, malformed tensor annotations, hard-coded secrets, invalid devices,
-// and agent tool references. Statement-level name resolution and the tensor
-// shape solver arrive in a later milestone.
+// agent tool references, statement-level name resolution (T030) and the
+// densa/linear shape solver (T012).
 class SemanticChecker {
  public:
   SemanticChecker(const ast::Program& program, DiagnosticEngine& diag);

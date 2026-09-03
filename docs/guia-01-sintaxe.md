@@ -126,7 +126,9 @@ primeiro = nomes[0]
 fatia = nomes[0..2]        # ["ana", "bruno"]
 ```
 
-> Listas e mapas literais precisam caber em **uma linha** (limitação da 1ª passada).
+> Listas e mapas literais podem ocupar várias linhas (as quebras de linha
+> dentro de `[`/`{`/`(` são ignoradas); comentários `#` também podem aparecer
+> dentro.
 
 ## Importar
 

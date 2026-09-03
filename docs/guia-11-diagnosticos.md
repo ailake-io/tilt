@@ -26,10 +26,10 @@ entrega tudo em JSON.
 | Código | Significado |
 |---|---|
 | `T011` | tipo incompatível com a anotação |
-| `T012` | forma de tensor incompatível (solver completo: futuro) |
+| `T012` | forma de tensor incompatível — solver de `densa`/`linear`; demais camadas: futuro |
 | `T020` | segredo literal em `chave`/`token`/`senha`/`segredo`/`api_key` — use `env "VAR"` |
 | `T021` | `dispositivo:` fora de `auto`, `cpu`, `gpu`, `metal`, `"cuda:N"` |
-| `T030` | nome não definido (checagem em `passos:`: futuro) |
+| `T030` | nome não definido — resolvido em `passos:`/`executar:` com escopo global + variáveis implícitas |
 | `T031` | `ferramentas:` de `agente` referencia `ferramenta` não declarada |
 | `T032` | declaração duplicada — aponta a linha da anterior (exceto `treino X`/`modelo X`) |
 | `T033` | tipo desconhecido em campo de `tipo`, param/retorno de `funcao`, `entrada:`/`saida:` |

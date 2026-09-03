@@ -74,7 +74,12 @@ primeiro literal da união.
 - `tensor[...]` malformado — dtype ou dimensão inválidos (`T034`);
 - segredo literal em `chave`/`token`/`senha`/`segredo`/`api_key` (`T020`);
 - `dispositivo:` fora de `auto|cpu|gpu|metal|"cuda:N"` (`T021`);
-- `ferramentas:` de `agente` apontando `ferramenta` não declarada (`T031`).
+- `ferramentas:` de `agente` apontando `ferramenta` não declarada (`T031`);
+- nomes dentro de `passos:` / `executar:` (`T030`) — escopo global mais
+  variáveis implícitas (`linha`, `entrada`, `epoca`, `metricas`, `passo`,
+  `resultado`) e campos de `entrada:`;
+- dimensões da cadeia de camadas `densa`/`linear` de `modelo` (`T012`) —
+  propaga a dimensão corrente a partir de `entrada: tensor[...]`.
 
-> Resolução de nomes dentro de `passos:` e o solver de dimensões de matmul
-> ainda não fazem parte do `checar` (chegam numa próxima passada).
+> O solver de formas ainda não cobre `conv2d`, `norma_lote` nem `norma_camada`,
+> e não há inferência completa de tipos entre expressões.

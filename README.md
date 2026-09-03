@@ -31,7 +31,8 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 
 | Área | Funciona | Ainda é stub |
 |---|---|---|
-| Sintaxe | lexer, parser, semântica (`checar`), interpretador de árvore | literais `[...]`/`{...}` multilinha |
+| Sintaxe | lexer, parser, semântica (`checar`), interpretador de árvore, literais `[...]`/`{...}` multilinha | assinaturas exóticas de `funcao` |
+| Semântica | tipos, segredos, dispositivos, referências de ferramenta, resolução de nomes em `passos:`/`executar:` (`T030`), shape solver de `densa`/`linear` (`T012`) | shape solver fora de `densa`/`linear`, inferência completa de tipos |
 | Dados | CSV e JSON (leitura/escrita), `fonte` de arquivo local, `pipeline`, `verificar`, `ao_falhar`, `agenda` (validação) | Postgres/Kafka/S3/Parquet, streaming `janela`, loop de agenda |
 | ML/DL | tensores f32 CPU, `modelo` (inferência), `treino` (backprop + SGD/Adam), `carregador` | GPU só validado em `fake`; carga de `pesos:` de arquivo |
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno) | `qdrant`/`pgvector`; rede real precisa de `curl` |
