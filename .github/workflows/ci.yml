@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure (Release, -Werror)
+        run: cmake --preset release -DTILT_WERROR=ON
+
+      - name: build
+        run: cmake --build --preset release
+
+      - name: test
+        run: ctest --preset release --output-on-failure
+
+      - name: smoke
+        run: |
+          ./build/release/bin/tilt versao
+          ./build/release/bin/tilt checar exemplos/soma.tilt
+          ./build/release/bin/tilt executar exemplos/resumo_vendas.tilt
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure (Debug, ASan/UBSan)
+        run: cmake --preset debug
+      - name: build
+        run: cmake --build --preset debug
+      - name: test
+        run: ctest --preset debug --output-on-failure

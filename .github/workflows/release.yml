@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: linux-x86_64
+          - os: macos-latest
+            asset: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure
+        run: cmake --preset release
+
+      - name: build
+        run: cmake --build --preset release
+
+      - name: test
+        run: ctest --preset release --output-on-failure
+
+      - name: package
+        env:
+          TAG: ${{ github.ref_name }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          version="${TAG#v}"
+          dist="tilt-${version}-${ASSET}"
+          mkdir -p "$dist/bin" "$dist/share/tilt"
+          cp build/release/bin/tilt "$dist/bin/"
+          strip "$dist/bin/tilt" || true
+          cp -r exemplos "$dist/share/tilt/"
+          cp README.md LICENSE CLAUDE.md "$dist/share/tilt/"
+          tar czf "${dist}.tar.gz" "$dist"
+          sha256sum "${dist}.tar.gz" > "${dist}.tar.gz.sha256" || \
+            shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tilt-*.tar.gz
+            tilt-*.tar.gz.sha256
+          generate_release_notes: true

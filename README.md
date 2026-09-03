@@ -7,7 +7,36 @@ Escrito em C++20, sem LLVM e sem Rust.
 - Especificação da linguagem: [`CLAUDE.md`](CLAUDE.md)
 - Plano de implementação: seção 14 do `CLAUDE.md`
 
-## Build
+## Instalação
+
+### Do código-fonte
+
+```bash
+git clone https://github.com/ailake-io/tilt
+cd tilt
+sh scripts/install.sh                 # instala em ~/.local
+# ou:  sh scripts/install.sh --prefix=/usr/local   (talvez com sudo)
+```
+
+Precisa de `cmake >= 3.20` e um compilador C++20 (GCC 11+/Clang 14+).
+Coloca `tilt` em `<prefix>/bin` e os exemplos em `<prefix>/share/tilt`.
+Remoção: `sh scripts/install.sh --uninstall`.
+
+### Binários pré-compilados
+
+Cada tag `v*` publica `tilt-<versao>-<os>-<arch>.tar.gz` em
+[Releases](https://github.com/ailake-io/tilt/releases) (Linux x86_64 estático,
+macOS arm64). Extraia e ponha `bin/tilt` no `PATH`. `curl` é necessário em
+tempo de execução apenas para chamadas reais de LLM.
+
+### Pacote local
+
+```bash
+cmake --preset release && cmake --build --preset release
+cd build/release && cpack          # gera tilt-<versao>-<os>-<arch>.tar.gz
+```
+
+## Build (desenvolvimento)
 
 ```bash
 cmake --preset release

@@ -3,3 +3,6 @@
 .env
 compile_commands.json
 tests/golden/*/.actual.*
+*.tar.gz
+*.tar.gz.sha256
+CPack*.cmake
