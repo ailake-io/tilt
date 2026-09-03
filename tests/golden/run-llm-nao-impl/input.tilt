@@ -1,4 +1,0 @@
-pipeline p:
-  passos:
-    - r = perguntar gpt, usuario: "oi"
-    - imprimir r

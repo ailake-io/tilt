@@ -1,7 +1,0 @@
-erro[T901]: nome 'gpt' nao definido
-  --> input.tilt:3:21
-   |
- 3 |     - r = perguntar gpt, usuario: "oi"
-   |                     ^^^
-   |
-

@@ -1,0 +1,7 @@
+modelo M:
+  entrada: tensor[f32, 4]
+  camadas:
+    - linear: [4, 8]
+    - ativacao: relu
+    - linear: [10, 2]
+    - softmax

@@ -3,6 +3,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/source.hpp"
@@ -33,6 +34,14 @@ class SemanticChecker {
   void collect();
   void resolve_types();
   void audit_blocks();
+  void check_bodies();
+  void check_model_shapes();
+
+  using Scope = std::unordered_set<std::string>;
+  void scan_for_bodies(const ast::Block& block, Scope scope);
+  void walk_stmt_block(const ast::Block& block, Scope scope);
+  void walk_stmt(const ast::Stmt& stmt, Scope& scope);
+  void check_expr(const ast::Expr& expr, const Scope& scope);
 
   void define(const std::string& name, std::string kind, sema::Type type, Span span);
   const Symbol* lookup(std::string_view name) const;

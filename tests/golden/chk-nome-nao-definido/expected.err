@@ -1,0 +1,8 @@
+erro[T030]: nome 'c' nao definido
+  --> input.tilt:4:15
+   |
+ 4 |     - b = a + c
+   |               ^
+   |
+
+1 erro(s) em input.tilt

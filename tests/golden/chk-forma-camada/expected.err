@@ -1,0 +1,9 @@
+erro[T012]: camada 'linear' espera entrada de 10 mas a camada anterior produz 8
+  --> input.tilt:6:15
+   |
+ 6 |     - linear: [10, 2]
+   |               ^
+   |
+   = ajuste para linear: [8, 2]
+
+1 erro(s) em input.tilt

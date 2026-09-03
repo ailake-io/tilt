@@ -1,19 +1,26 @@
+# Operacoes de tensor de baixo nivel (forward manual, sem autograd).
+
 modelo Classificador:
   arquitetura: "rede_neural"
   dispositivo: gpu
+  entrada: tensor[f32, 4]
   camadas:
-    - linear: [1536, 512]
+    - linear: [4, 8]
     - ativacao: relu
-    - dropout: 0.1
-    - linear: [512, 10]
+    - linear: [8, 3]
     - softmax
 
-tarefa treinar_passo:
+tarefa passo_manual:
   entrada:
-    lote_x: tensor[f32, 64, 1536] no dispositivo gpu
-    alvos: tensor[i32, 64] no dispositivo gpu
+    lote_x: tensor[f32, 64, 4] no dispositivo gpu
+    pesos: tensor[f32, 4, 3] no dispositivo gpu
   executar:
-    - predicoes = modelo Classificador.para_frente lote_x
-    - perda = perda_entropia_cruzada predicoes, alvos
-    - perda.retropropagar
-    - otimizador_adam.passo taxa: 0.001
+    logits = lote_x.matmul(pesos)
+    probs = logits.softmax
+    retornar probs.forma
+
+pipeline demonstracao:
+  passos:
+    - entrada = tensor [0.1, 0.2, 0.3, 0.4]
+    - probs = modelo Classificador.executar entrada
+    - imprimir "forma:", probs.forma, "classe:", probs.argmax

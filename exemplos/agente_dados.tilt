@@ -1,11 +1,19 @@
 ferramenta busca_documentos:
-  descricao: "Busca trechos relevantes na base de conhecimento."
+  descricao: "Recupera o trecho mais relevante da base."
   entrada:
     termo: texto
-    limite: inteiro
   executar:
     vetor = incorporar "text-embedding-3-small", termo
-    retornar base_conhecimento.buscar vetor, top_k: limite
+    retornar base_conhecimento.buscar vetor, top_k: 3
+
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+indice base_conhecimento:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
 
 agente AssistenteTecnico:
   llm: gpt
@@ -23,4 +31,5 @@ servico Agente:
     passos:
       - r = AssistenteTecnico.responder entrada.mensagem
       - responder:
-          texto: r.texto
+          dados:
+            texto: r.texto

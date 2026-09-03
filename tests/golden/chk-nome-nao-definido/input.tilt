@@ -1,0 +1,5 @@
+pipeline p:
+  passos:
+    - a = 1
+    - b = a + c
+    - imprimir b
