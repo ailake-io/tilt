@@ -1,0 +1,18 @@
+# Subconjunto compilavel para binario nativo (inteiros).
+#   tilt compilar exemplos/nativo.tilt --saida ./nativo && ./nativo
+
+funcao fatorial n -> inteiro:
+  se n <= 1:
+    retornar 1
+  retornar n * fatorial(n - 1)
+
+funcao ackermann m, n -> inteiro:
+  se m == 0:
+    retornar n + 1
+  se n == 0:
+    retornar ackermann(m - 1, 1)
+  retornar ackermann(m - 1, ackermann(m, n - 1))
+
+funcao principal:
+  imprimir fatorial(10)
+  imprimir ackermann(2, 3), ackermann(3, 3)

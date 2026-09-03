@@ -73,8 +73,9 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M9** — `ferramenta` executável, `agente.responder`, `equipe`. ✅ (1ª passada)
 - **M10** — `servico` / `rota` HTTP (`tilt servir`). ✅ (1ª passada)
 - **M11** — VM de bytecode para o subconjunto puro de `funcao`. ✅ (1ª passada)
-- **M7 / M9.2 / M10.2 / M11.2 / M12** — GPU, planner iterativo, `supervisor`,
-  epoll + keep-alive, VM para todo o programa, codegen nativo.
+- **M12** — codegen nativo x86-64 (`tilt compilar`). ✅ (1ª passada)
+- **M7 / M9.2 / M10.2 / M11.2 / M12.2** — GPU, planner iterativo, `supervisor`,
+  epoll + keep-alive, VM/codegen para todo o programa (texto, decimal, tabelas).
 
 ### `tilt executar`
 
@@ -151,6 +152,17 @@ transparente e com cache por função. Fora do subconjunto (`para cada`,
 não fazem curto-circuito (1ª passada). `TILT_VM_DEBUG=1` despeja o bytecode.
 Chamadas com parênteses — `f(a, b)` — sempre foram a forma não ambígua;
 `f a, b` (sem parênteses) continua válido para o estilo declarativo.
+
+### Codegen nativo
+
+`tilt compilar <arquivo> --saida <bin> [--asm]` gera Assembly x86-64 (AT&T)
+para o subconjunto **inteiro puro** — `funcao`s com literais inteiros,
+aritmética/comparação/lógica, `se`/`enquanto`/`retornar`, recursão, `imprimir`
+de inteiros — e monta/linka com o `cc` do sistema + um runtime C de uma função
+(`tilt_print_row`). Exige uma `funcao principal` (ponto de entrada). Fora do
+subconjunto (texto, decimal, tabelas, tensores, LLM, …) → erro. `/` no nativo é
+divisão inteira. O teste `native` compara a saída do binário com a de
+`tilt executar` para um programa inteiro.
 
 Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
 `incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução

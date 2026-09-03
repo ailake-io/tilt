@@ -1,0 +1,20 @@
+funcao fib n -> inteiro:
+  se n < 2:
+    retornar n
+  retornar fib(n - 1) + fib(n - 2)
+
+funcao ack m, n -> inteiro:
+  se m == 0:
+    retornar n + 1
+  se n == 0:
+    retornar ack(m - 1, 1)
+  retornar ack(m - 1, ack(m, n - 1))
+
+funcao sub_ordem a, b -> inteiro:
+  retornar a - b * 10
+
+funcao principal:
+  imprimir fib(15)
+  imprimir ack(2, 3), ack(3, 3)
+  imprimir sub_ordem(7, 2)
+  imprimir 12 * 12, 2 * (3 + 4)

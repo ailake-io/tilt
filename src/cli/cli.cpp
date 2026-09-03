@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -16,6 +17,7 @@
 #include "diagnostics/diagnostic.hpp"
 #include "lexer/lexer.hpp"
 #include "lexer/token.hpp"
+#include "codegen/codegen_x86_64.hpp"
 #include "interp/interpreter.hpp"
 #include "parser/ast_dump.hpp"
 #include "parser/parser.hpp"
@@ -221,6 +223,79 @@ int cmd_executar(const std::vector<std::string_view>& args) {
   return rc == 0 ? kOk : kDiagnostics;
 }
 
+int cmd_compilar(const std::vector<std::string_view>& args) {
+  std::string_view path;
+  std::string out_bin = "a.out";
+  bool keep_asm = false;
+  for (std::size_t k = 1; k < args.size(); ++k) {
+    if ((args[k] == "--saida" || args[k] == "-o") && k + 1 < args.size()) {
+      out_bin = std::string(args[++k]);
+    } else if (args[k] == "--asm") {
+      keep_asm = true;
+    } else if (args[k].rfind("--", 0) == 0) {
+      std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
+      return kUsage;
+    } else if (path.empty()) {
+      path = args[k];
+    }
+  }
+  if (path.empty()) {
+    std::cerr << "tilt: uso: tilt compilar <arquivo> --saida <bin> [--asm]\n";
+    return kUsage;
+  }
+
+  std::optional<SourceFile> src;
+  try {
+    src = SourceFile::load(std::string(path));
+  } catch (const std::exception& e) {
+    std::cerr << "tilt: " << e.what() << "\n";
+    return kUsage;
+  }
+
+  DiagnosticEngine diag(&src.value());
+  Lexer lexer(src.value(), diag);
+  const std::vector<Token> tokens = lexer.tokenize();
+  Parser parser(tokens, diag);
+  const ast::Program program = parser.parse_program();
+  check_program(program, diag);
+  if (diag.has_errors()) {
+    diag.render(std::cerr, want_color());
+    return kDiagnostics;
+  }
+
+  codegen::Result r = codegen::emit_program(program);
+  if (!r.ok) {
+    std::cerr << "tilt: codegen nativo: " << r.error << "\n";
+    return kNotImplemented;
+  }
+
+  const std::string base = out_bin + ".tilt";
+  const std::string asm_path = base + ".s";
+  const std::string rt_path = base + ".rt.c";
+  {
+    std::ofstream a(asm_path);
+    a << r.asm_text;
+    std::ofstream c(rt_path);
+    c << codegen::runtime_source();
+  }
+
+  const char* cc_env = std::getenv("CC");
+  const std::string cc = cc_env ? cc_env : "cc";
+  const std::string cmd = cc + " -O2 -no-pie -o " + out_bin + " " + asm_path + " " + rt_path;
+  const int rc = std::system(cmd.c_str());
+
+  if (!keep_asm) {
+    std::remove(asm_path.c_str());
+    std::remove(rt_path.c_str());
+  }
+  if (rc != 0) {
+    std::cerr << "tilt: falha ao montar/linkar (" << cc << ")\n";
+    return kDiagnostics;
+  }
+  std::cout << "binario nativo: " << out_bin << "\n";
+  return kOk;
+}
+
 int cmd_servir(const std::vector<std::string_view>& args) {
   std::string_view path;
   int port = 0;
@@ -297,10 +372,7 @@ int run_cli(int argc, char** argv) {
   if (cmd == "executar") return cmd_executar(args);
   if (cmd == "servir") return cmd_servir(args);
 
-  if (cmd == "compilar") {
-    std::cerr << "tilt: comando '" << cmd << "' ainda nao implementado (em desenvolvimento)\n";
-    return kNotImplemented;
-  }
+  if (cmd == "compilar") return cmd_compilar(args);
 
   std::cerr << "tilt: comando desconhecido '" << cmd << "'\n\n";
   print_usage(std::cerr);
