@@ -1,0 +1,12 @@
+seja docs = [
+  { id: "a", n: 1 },
+  { id: "b", n: 2 }
+]
+
+pipeline p:
+  passos:
+    - m = [
+        [1, 2],
+        [3, 4]
+      ]
+    - imprimir m.tamanho

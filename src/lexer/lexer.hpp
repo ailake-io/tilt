@@ -45,6 +45,7 @@ class Lexer {
   std::uint32_t line_ = 1;
   std::uint32_t col_ = 1;
   bool at_line_start_ = true;
+  int bracket_depth_ = 0;  // inside ( [ { : newlines/indentation are not significant
   std::vector<int> indent_stack_;
   std::vector<Token> out_;
 };

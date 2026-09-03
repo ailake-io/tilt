@@ -1,0 +1,21 @@
+(programa
+  (decl "seja" (cabecalho (name "docs")) (list (map (id: (text "a")) (n: (int "1"))) (map (id: (text "b")) (n: (int "2")))))
+  (decl "pipeline" (cabecalho (name "p"))
+    (bloco
+      (campo "passos"
+        (bloco
+          (item
+            (stmt
+              (assign (name "m") (list (list (int "1") (int "2")) (list (int "3") (int "4"))))
+            )
+          )
+          (item
+            (stmt
+              (expr (call (name "imprimir") (member "tamanho" (name "m"))))
+            )
+          )
+        )
+      )
+    )
+  )
+)

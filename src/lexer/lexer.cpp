@@ -88,7 +88,7 @@ std::vector<Token> Lexer::tokenize() {
     const char c = peek();
     if (c == '\0') break;
     if (c == '\n') {
-      if (!out_.empty() && out_.back().kind != TokenKind::Newline) {
+      if (bracket_depth_ == 0 && !out_.empty() && out_.back().kind != TokenKind::Newline) {
         push_structural(TokenKind::Newline);
       }
       advance();
@@ -138,6 +138,12 @@ void Lexer::handle_line_start() {
     return;
   }
 
+  // Inside ( [ { the indentation of a continuation line is not significant.
+  if (bracket_depth_ > 0) {
+    at_line_start_ = false;
+    return;
+  }
+
   if (tab_seen) {
     report(DiagCode::TabInIndent,
            Span{static_cast<std::uint32_t>(ws_start), static_cast<std::uint32_t>(pos_ - ws_start),
@@ -183,6 +189,20 @@ void Lexer::lex_token() {
   };
 
   const char c = advance();
+  switch (c) {
+    case '(':
+    case '[':
+    case '{':
+      ++bracket_depth_;
+      break;
+    case ')':
+    case ']':
+    case '}':
+      if (bracket_depth_ > 0) --bracket_depth_;
+      break;
+    default:
+      break;
+  }
   switch (c) {
     case ':':
       tok(TokenKind::Colon);
