@@ -3,6 +3,7 @@
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace tilt::rt {
@@ -116,7 +117,8 @@ Tensor scalar_op(const Tensor& a, float s, char op) {
 }
 
 Tensor matmul(const Tensor& a, const Tensor& b) {
-  // Accept [k]x[k,n], [m,k]x[k], [m,k]x[k,n].
+  // Accept [k]x[k,n], [m,k]x[k,n], [m,k]x[k]. 2D x 2D splits rows across
+  // threads above a work threshold.
   std::int64_t m = 1;
   std::int64_t k = 0;
   std::int64_t n = 1;
@@ -144,16 +146,40 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
 
   Tensor out;
   out.shape = {m, n};
-  out.data.assign(static_cast<std::size_t>(m * n), 0.0F);
-  for (std::int64_t i = 0; i < m; ++i) {
-    for (std::int64_t p = 0; p < k; ++p) {
-      const float av = a.data[static_cast<std::size_t>(i * k + p)];
-      for (std::int64_t j = 0; j < n; ++j) {
-        out.data[static_cast<std::size_t>(i * n + j)] +=
-            av * b.data[static_cast<std::size_t>(p * n + j)];
+  out.data.assign(static_cast<size_t>(m * n), 0.0F);
+
+  auto block = [&](std::int64_t i0, std::int64_t i1) {
+    for (std::int64_t i = i0; i < i1; ++i) {
+      for (std::int64_t p = 0; p < k; ++p) {
+        const float av = a.data[static_cast<size_t>(i * k + p)];
+        for (std::int64_t j = 0; j < n; ++j) {
+          out.data[static_cast<size_t>(i * n + j)] +=
+              av * b.data[static_cast<size_t>(p * n + j)];
+        }
       }
     }
+  };
+
+  // ikj acima de ~256k FLOPs: divide as linhas entre as threads disponiveis.
+  const std::int64_t work = m * n * k;
+  unsigned hw = std::thread::hardware_concurrency();
+  if (hw == 0) hw = 1;
+  const int nthreads = static_cast<int>(std::min<unsigned>(hw, 8));
+  if (!drop_row && !drop_col && work > (1 << 18) && nthreads > 1) {
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(nthreads));
+    const std::int64_t chunk = (m + nthreads - 1) / nthreads;
+    for (int t = 0; t < nthreads; ++t) {
+      const std::int64_t i0 = t * chunk;
+      const std::int64_t i1 = std::min(m, i0 + chunk);
+      if (i0 >= i1) break;
+      pool.emplace_back(block, i0, i1);
+    }
+    for (std::thread& th : pool) th.join();
+  } else {
+    block(0, m);
   }
+
   if (drop_row) out.shape = {n};
   if (drop_col) out.shape = {m};
   return out;
@@ -214,6 +240,26 @@ Tensor softmax_last(const Tensor& a) {
       sum += out.data[base + k];
     }
     for (std::size_t k = 0; k < n; ++k) out.data[base + k] /= sum;
+  }
+  return out;
+}
+
+Tensor layer_norm_last(const Tensor& a) {
+  if (a.shape.empty()) die("norma_camada espera um tensor nao escalar");
+  const auto n = static_cast<std::size_t>(a.shape.back());
+  Tensor out = a;
+  for (std::size_t base = 0; base < out.data.size(); base += n) {
+    float mean = 0.0F;
+    for (std::size_t k = 0; k < n; ++k) mean += out.data[base + k];
+    mean /= static_cast<float>(n);
+    float var = 0.0F;
+    for (std::size_t k = 0; k < n; ++k) {
+      const float d = out.data[base + k] - mean;
+      var += d * d;
+    }
+    var /= static_cast<float>(n);
+    const float inv = 1.0F / std::sqrt(var + 1e-5F);
+    for (std::size_t k = 0; k < n; ++k) out.data[base + k] = (out.data[base + k] - mean) * inv;
   }
   return out;
 }

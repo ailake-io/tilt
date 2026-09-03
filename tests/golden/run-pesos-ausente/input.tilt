@@ -1,0 +1,10 @@
+modelo M:
+  camadas:
+    - linear: [2, 2]
+    - softmax
+  pesos: "nao-existe.json"
+
+pipeline p:
+  passos:
+    - a = modelo M.executar tensor([1.0, 1.0])
+    - imprimir "a:", a.argmax

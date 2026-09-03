@@ -1,0 +1,13 @@
+modelo M:
+  entrada: tensor[f32, 2]
+  camadas:
+    - linear: [2, 2]
+    - softmax
+  pesos: "pesos.json"
+
+pipeline p:
+  passos:
+    - a = modelo M.executar tensor([1.0, 1.0])
+    - b = modelo M.executar tensor([0.0, 3.0])
+    - imprimir "a:", a.argmax, "b:", b.argmax
+    - imprimir "forma:", a.forma

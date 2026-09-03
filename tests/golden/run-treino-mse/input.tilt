@@ -1,0 +1,18 @@
+modelo R:
+  entrada: tensor[f32, 1]
+  camadas:
+    - linear: [1, 8]
+    - ativacao: relu
+    - linear: [8, 1]
+
+treino R:
+  dados: carregador "d.csv", alvo: "y"
+  perda: quadratica
+  otimizador: adam
+  taxa: 0.01
+  epocas: 100
+
+pipeline usar:
+  passos:
+    - a = modelo R.executar tensor([2.0])
+    - imprimir "forma:", a.forma

@@ -1,0 +1,7 @@
+{
+  "formato": "tilt-pesos",
+  "versao": 1,
+  "camadas": [
+    { "tipo": "densa", "w": { "forma": [2, 2], "dados": [2, 0, 0, 1] }, "b": { "forma": [2], "dados": [0.1, -0.2] } }
+  ]
+}

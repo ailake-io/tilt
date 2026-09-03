@@ -6,7 +6,8 @@
 
 namespace tilt::rt {
 
-// Dense row-major f32 tensor. Naive scalar kernels (SIMD/threads: M6.2).
+// Dense row-major f32 tensor. matmul 2D x 2D divide linhas entre threads
+// acima de um limiar; demais kernels sao escalares (SIMD: futuro).
 // Shape-mismatched operations throw std::runtime_error.
 struct Tensor {
   std::vector<std::int64_t> shape;
@@ -36,6 +37,7 @@ Tensor reshape(const Tensor& a, std::vector<std::int64_t> shape);
 
 Tensor apply_unary(const Tensor& a, const std::string& fn);  // relu/gelu/silu/sigmoide/tanh
 Tensor softmax_last(const Tensor& a);
+Tensor layer_norm_last(const Tensor& a);  // normaliza sobre a ultima dimensao (sem affine)
 
 float sum_all(const Tensor& a);
 float mean_all(const Tensor& a);

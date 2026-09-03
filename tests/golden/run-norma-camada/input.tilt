@@ -1,0 +1,13 @@
+modelo N:
+  entrada: tensor[f32, 3]
+  camadas:
+    - norma_camada
+    - linear: [3, 2]
+    - softmax
+
+pipeline p:
+  passos:
+    - y = modelo N.executar tensor([1.0, 2.0, 3.0])
+    - imprimir "forma:", y.forma, "soma:", y.soma
+    - lote = tensor [[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]]
+    - imprimir "lote:", (modelo N.executar lote).forma

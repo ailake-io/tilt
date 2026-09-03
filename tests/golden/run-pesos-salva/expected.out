@@ -1,0 +1,4 @@
+treino M: perda caiu sim | acuracia 80/80
+== pipeline usar ==
+modelo M: pesos salvos em saida.json (2 camadas)
+a: 0

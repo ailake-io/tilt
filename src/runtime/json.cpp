@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 
@@ -234,7 +235,7 @@ void dump_value(const Value& v, std::string& out, int indent) {
         for (std::size_t k = 0; k < v.tensor->data.size(); ++k) {
           if (k) out += ", ";
           std::ostringstream ss;
-          ss << v.tensor->data[k];
+          ss << std::setprecision(9) << v.tensor->data[k];  // round-trip exato de f32
           out += ss.str();
         }
       }

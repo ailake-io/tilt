@@ -1,0 +1,11 @@
+modelo C:
+  entrada: tensor[f32, 1, 28, 28]
+  camadas:
+    - conv2d: 16
+      nucleo: 3
+    - softmax
+
+pipeline p:
+  passos:
+    - y = modelo C.executar tensor([1.0])
+    - imprimir y.forma

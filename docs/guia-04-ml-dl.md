@@ -51,12 +51,24 @@ modelo Classificador:
     - abandono: 0.1                  # identidade na inferência
     - linear: [8, 3]
     - softmax
-  pesos: "modelos/clf.pesos"         # carga de arquivo: futuro; hoje usa init Xavier
+  pesos: "modelos/clf.pesos"         # carregados se existirem; ausente -> Xavier + nota
 ```
 
 Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmoide|tanh`,
-`softmax`, `abandono: p` / `dropout: p`. `norma_lote`/`norma_camada`/`conv2d`
-são ignoradas com nota (chegam adiante).
+`softmax`, `abandono: p` / `dropout: p`, `norma_camada` (normalização sobre a
+última dimensão, sem affine, só inferência). `norma_lote`/`conv2d` ainda não
+são suportadas — erro claro em vez de ignorar silenciosamente.
+
+### Pesos de arquivo
+
+`pesos: "caminho"` carrega pesos no formato **tilt-pesos** (JSON gerado por
+`modelo <Nome>.salvar_pesos`, com `w`/`b` por camada densa). Forma
+incompatível com o modelo → erro `T901` mostrando o esperado vs. o encontrado;
+arquivo ausente → init Xavier com `[nota]`.
+
+```tilt
+- modelo Classificador.salvar_pesos "modelos/clf.pesos"
+```
 
 ### Inferência
 
@@ -79,14 +91,16 @@ sem arquivo de pesos.
 treino Classificador:
   dados: carregador "flores.csv", alvo: "especie"
   perda: entropia_cruzada           # exige `softmax` na última camada
+  # perda: quadratica              # regressão escalar: saída largura 1, sem softmax
   otimizador: adam                  # sgd | adam
   taxa: 0.05                         # ou taxa_aprendizado:
   epocas: 150
   verboso: verdadeiro               # imprime a perda a cada ~epocas/10
 ```
 
-Backprop escrito à mão para a pilha densa + ativação (`relu`/`sigmoide`/`tanh`/`silu`)
-+ softmax. Resumo determinístico:
+Perdas: `entropia_cruzada` (classificação, exige `softmax` final) e
+`quadratica` (regressão escalar — a saída deve ter largura 1 e não ter
+`softmax`). Resumo determinístico:
 
 ```
 treino Classificador: perda caiu sim | acuracia 90/90

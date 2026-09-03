@@ -32,11 +32,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## ML / DL
 
-- `pesos: "arquivo"` não carrega — o `modelo` sempre inicia com Xavier
-  (semente fixa). Não há `.salvar_pesos`.
-- `treino` só suporta `perda: entropia_cruzada` com `softmax` na última camada;
-  `gelu` no backward é aproximada como identidade.
-- Camadas `conv2d`, `norma_lote`, `norma_camada` são ignoradas na inferência.
+- `pesos: "arquivo"` carrega no formato tilt-pesos (ver guia 04); arquivo
+  ausente mantém o init Xavier com `[nota]`.
+- `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
+  `perda: quadratica` (regressão escalar); `gelu` no backward é aproximada
+  como identidade.
+- `norma_camada` funciona na inferência (sem affine); `treino` com ela →
+  erro (backward ainda não existe). `conv2d`/`norma_lote` → erro claro.
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.
 

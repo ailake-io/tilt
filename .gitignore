@@ -6,3 +6,4 @@ tests/golden/*/.actual.*
 *.tar.gz
 *.tar.gz.sha256
 CPack*.cmake
+tests/golden/run-pesos-salva/saida.json

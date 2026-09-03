@@ -1,0 +1,7 @@
+erro[T901]: modelo 'M': forma de pesos incompativel na camada densa 0 (modelo espera w f32, 2, 2 b f32, 2, arquivo tem w f32, 3, 3 b f32, 3)
+  --> input.tilt:10:18
+    |
+ 10 |     - a = modelo M.executar tensor([1.0, 1.0])
+    |                  ^
+    |
+

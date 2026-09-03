@@ -415,6 +415,22 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
 
 namespace {
 
+// Extracts a tensor from its JSON form { "forma": [...], "dados": [...] }.
+bool tensor_from_json(const Value& v, rt::Tensor& out) {
+  if (v.kind != ValueKind::Mapa || !v.map) return false;
+  const Value* forma = v.map->find("forma");
+  const Value* dados = v.map->find("dados");
+  if (!forma || !dados || forma->kind != ValueKind::Lista || dados->kind != ValueKind::Lista ||
+      !forma->list || !dados->list) {
+    return false;
+  }
+  out.shape.clear();
+  for (const Value& d : *forma->list) out.shape.push_back(static_cast<std::int64_t>(d.as_number()));
+  out.data.clear();
+  for (const Value& d : *dados->list) out.data.push_back(static_cast<float>(d.as_number()));
+  return out.size() == static_cast<std::int64_t>(out.data.size());
+}
+
 void flatten_nested(const Value& v, std::vector<std::int64_t>& shape, std::vector<float>& data,
                     std::size_t depth) {
   if (v.kind == ValueKind::Lista && v.list) {
@@ -474,7 +490,6 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
   std::vector<Layer> layers;
   std::int64_t dim = in_dim;
   std::uint64_t seed = 0xC1A5;
-  bool noted_skip = false;
 
   if (decl.block) {
     const Item* camadas = find_field(*decl.block, "camadas");
@@ -511,15 +526,18 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
           Layer l;
           l.kind = Layer::Dropout;
           layers.push_back(std::move(l));
+        } else if (key == "norma_camada") {
+          Layer l;
+          l.kind = Layer::LayerNorm;
+          layers.push_back(std::move(l));
+        } else if (key == "norma_lote" || key == "conv2d") {
+          fail(decl.span, "modelo '" + name + "': camada '" + key +
+                              "' ainda nao suportada (M6.3); remova-a do modelo por ora");
         } else if (word_in(key, {"relu", "gelu", "silu", "sigmoide", "tanh"})) {
           Layer l;
           l.kind = Layer::Activation;
           l.act = key;
           layers.push_back(std::move(l));
-        } else if (!noted_skip && (key == "norma_lote" || key == "norma_camada" || key == "conv2d")) {
-          out_ << "[nota] modelo " << name << ": camada '" << key
-               << "' ainda nao suportada na inferencia (M6.2); ignorada\n";
-          noted_skip = true;
         }
       });
     }
@@ -570,11 +588,59 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
                                                                std::int64_t in_dim, Span span) {
   const std::string name = decl_name(decl);
   if (auto it = model_cache_.find(name); it != model_cache_.end()) return it->second;
-  (void)span;
   std::vector<Layer> layers = build_layers(decl, in_dim);
-  if (decl.block && find_field(*decl.block, "pesos")) {
-    out_ << "[nota] modelo " << name
-         << ": carga de 'pesos:' ainda nao implementada; usando init Xavier\n";
+
+  // Carga de 'pesos: "arquivo"' (formato tilt-pesos, gerado por
+  // modelo <Nome>.salvar_pesos). Arquivo ausente mantem o init Xavier.
+  if (decl.block) {
+    if (const Item* pw = find_field(*decl.block, "pesos");
+        pw && pw->value && pw->value->kind == ExprKind::TextLit) {
+      const std::string& path = pw->value->text;
+      std::ifstream f(path);
+      if (!f) {
+        out_ << "[nota] modelo " << name << ": arquivo de pesos '" << path
+             << "' nao encontrado; usando init Xavier\n";
+      } else {
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        Value doc = Value::nulo();
+        try {
+          doc = rt::json_parse(ss.str());
+        } catch (...) {
+          doc = Value::nulo();
+        }
+        const Value* camadas =
+            doc.kind == ValueKind::Mapa && doc.map ? doc.map->find("camadas") : nullptr;
+        if (!camadas || camadas->kind != ValueKind::Lista || !camadas->list) {
+          fail(span, "modelo '" + name + "': arquivo de pesos '" + path +
+                         "' invalido (esperado JSON tilt-pesos com 'camadas')");
+        }
+        std::size_t li = 0;
+        for (const Value& c : *camadas->list) {
+          while (li < layers.size() && layers[li].kind != Layer::Dense) ++li;
+          if (li >= layers.size()) {
+            fail(span, "modelo '" + name + "': o arquivo '" + path +
+                           "' tem mais camadas de pesos do que o modelo tem camadas densa");
+          }
+          rt::Tensor w, b;
+          const Value* wv = c.kind == ValueKind::Mapa && c.map ? c.map->find("w") : nullptr;
+          const Value* bv = c.kind == ValueKind::Mapa && c.map ? c.map->find("b") : nullptr;
+          if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b)) {
+            fail(span, "modelo '" + name + "': arquivo de pesos '" + path +
+                           "' invalido (cada camada precisa de 'w' e 'b' com forma e dados)");
+          }
+          if (w.shape != layers[li].w.shape || b.shape != layers[li].b.shape) {
+            fail(span, "modelo '" + name + "': forma de pesos incompativel na camada densa " +
+                           std::to_string(li) + " (modelo espera w " + layers[li].w.shape_str() +
+                           " b " + layers[li].b.shape_str() + ", arquivo tem w " + w.shape_str() +
+                           " b " + b.shape_str() + ")");
+          }
+          layers[li].w = std::move(w);
+          layers[li].b = std::move(b);
+          ++li;
+        }
+      }
+    }
   }
   return model_cache_.emplace(name, std::move(layers)).first->second;
 }
@@ -590,6 +656,9 @@ rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Ten
         break;
       case Layer::Softmax:
         x = rt::softmax_last(x);
+        break;
+      case Layer::LayerNorm:
+        x = rt::layer_norm_last(x);
         break;
       case Layer::Dropout:
         break;
@@ -631,7 +700,47 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
     Value input = eval(*inner.args[0].value, env);
     return model_forward(*it->second, input, inner.span);
   }
-  fail(inner.span, "metodo de modelo '" + method + "' chega no M8");
+  if (method == "salvar_pesos") {
+    if (inner.args.empty() || inner.args[0].value->kind != ExprKind::TextLit) {
+      fail(inner.span, "uso: modelo " + mname + ".salvar_pesos \"caminho\"");
+    }
+    const std::string& path = inner.args[0].value->text;
+    // A dimensao de entrada vem da anotacao 'entrada: tensor[..., N]'.
+    std::int64_t in_dim = -1;
+    if (it->second->block) {
+      if (const Item* ent = find_field(*it->second->block, "entrada");
+          ent && ent->value && ent->value->kind == ExprKind::Index && !ent->value->elems.empty()) {
+        const Expr* last = ent->value->elems.back().get();
+        if (last && last->kind == ExprKind::IntLit) in_dim = std::stoll(last->text);
+      }
+    }
+    if (in_dim < 0) {
+      fail(inner.span, "modelo '" + mname +
+                           "': 'salvar_pesos' precisa de 'entrada: tensor[..., N]' anotado "
+                           "para inferir a dimensao de entrada");
+    }
+    const std::vector<Layer>& layers = build_model(*it->second, in_dim, inner.span);
+    Value cl = Value::lista();
+    for (const Layer& l : layers) {
+      if (l.kind != Layer::Dense) continue;
+      Value c = Value::mapa();
+      c.map->set("tipo", Value::texto("densa"));
+      c.map->set("w", Value::tensor_de(l.w));
+      c.map->set("b", Value::tensor_de(l.b));
+      cl.list->push_back(std::move(c));
+    }
+    Value doc = Value::mapa();
+    doc.map->set("formato", Value::texto("tilt-pesos"));
+    doc.map->set("versao", Value::inteiro(1));
+    doc.map->set("camadas", cl);
+    std::ofstream out(path, std::ios::trunc);
+    if (!out) fail(inner.span, "modelo '" + mname + "': nao foi possivel gravar '" + path + "'");
+    out << rt::json_dump(doc) << "\n";
+    out_ << "modelo " << mname << ": pesos salvos em " << path << " (" << cl.list->size()
+         << " camadas)\n";
+    return Value::logico(true);
+  }
+  fail(inner.span, "metodo de modelo '" + method + "' desconhecido (use executar / para_frente / salvar_pesos)");
 }
 
 namespace {
@@ -697,16 +806,23 @@ void Interpreter::run_treino(const Item& decl) {
   const std::int64_t n = x.shape[0];
   const std::int64_t f = x.shape[1];
 
-  std::vector<int> y;
+  const std::string perda = field_word(cfg, "perda", "entropia_cruzada");
+  const bool ce = perda == "entropia_cruzada";
+  const bool mse = perda == "quadratica";
+
+  std::vector<double> yf;
   const Value* yv = data.map->find("y");
   if (yv->kind == ValueKind::Lista && yv->list) {
-    for (const Value& e : *yv->list) y.push_back(static_cast<int>(e.as_number()));
+    for (const Value& e : *yv->list) yf.push_back(e.as_number());
   }
-  if (static_cast<std::int64_t>(y.size()) != n) fail(decl.span, "treino: |x| != |y|");
+  if (static_cast<std::int64_t>(yf.size()) != n) fail(decl.span, "treino: |x| != |y|");
+  std::vector<int> y;
   int classes = 1;
-  for (int v : y) classes = std::max(classes, v + 1);
+  for (double v : yf) {
+    y.push_back(static_cast<int>(v));
+    classes = std::max(classes, static_cast<int>(v) + 1);
+  }
 
-  const std::string perda = field_word(cfg, "perda", "entropia_cruzada");
   const std::string otim = field_word(cfg, "otimizador", "sgd");
   double lr = field_num(cfg, "taxa", field_num(cfg, "taxa_aprendizado", 0.1));
   const int epocas = field_int(cfg, "epocas", 50);
@@ -715,9 +831,36 @@ void Interpreter::run_treino(const Item& decl) {
 
   set_device(*mit->second);
   std::vector<Layer> layers = build_layers(*mit->second, f);
-  if (layers.empty() || layers.back().kind != Layer::Softmax || perda != "entropia_cruzada") {
-    fail(decl.span,
-         "treino (M6.2): suportado apenas perda 'entropia_cruzada' com 'softmax' na ultima camada");
+  if (!ce && !mse) {
+    fail(decl.span, "treino: perda '" + perda +
+                        "' nao suportada (use 'entropia_cruzada' | 'quadratica')");
+  }
+  for (const Layer& l : layers) {
+    if (l.kind == Layer::LayerNorm) {
+      fail(decl.span, "treino: 'norma_camada' ainda nao tem backward (M6.3); remova-a para treinar");
+    }
+  }
+  if (layers.empty()) fail(decl.span, "treino '" + name + "': modelo sem camadas");
+  if (ce && layers.back().kind != Layer::Softmax) {
+    fail(decl.span, "treino: perda 'entropia_cruzada' exige 'softmax' na ultima camada");
+  }
+  if (mse) {
+    if (layers.back().kind == Layer::Softmax) {
+      fail(decl.span,
+           "treino: perda 'quadratica' exige ultima camada 'densa'/'linear' sem 'softmax'");
+    }
+    std::int64_t width = 1;
+    for (auto rit = layers.rbegin(); rit != layers.rend(); ++rit) {
+      if (rit->kind == Layer::Dense) {
+        width = rit->w.shape[1];
+        break;
+      }
+    }
+    if (width != 1) {
+      fail(decl.span, "treino: perda 'quadratica' e regressao escalar; a saida do modelo deve ter "
+                      "largura 1 (tem " +
+                          std::to_string(width) + ")");
+    }
   }
   for (Layer& l : layers) {
     if (l.kind != Layer::Dense) continue;
@@ -746,24 +889,37 @@ void Interpreter::run_treino(const Item& decl) {
             cur = l.act == "relu" ? act_relu(cur) : rt::apply_unary(cur, l.act);
             break;
           case Layer::Softmax: cur = rt::softmax_last(cur); break;
+          case Layer::LayerNorm: cur = rt::layer_norm_last(cur); break;
           case Layer::Dropout: break;
         }
       }
-      const rt::Tensor& probs = cur;  // [N, C]
+      const rt::Tensor& probs = cur;  // [N, C] (probs no CE, valores no MSE)
 
-      // Cross-entropy loss and dL/d(logits) = probs - onehot(y), averaged.
+      // Perda e gradiente da saida.
       float loss = 0.0F;
-      rt::Tensor grad = probs;  // becomes gradient w.r.t. softmax input
-      for (std::int64_t i = 0; i < n; ++i) {
-        const int label = y[static_cast<std::size_t>(i)];
-        const auto idx = static_cast<std::size_t>(i * classes + label);
-        loss -= std::log(std::max(probs.data[idx], 1e-9F));
-        for (std::int64_t c = 0; c < classes; ++c) {
-          auto g = static_cast<std::size_t>(i * classes + c);
-          grad.data[g] = (grad.data[g] - (c == label ? 1.0F : 0.0F)) * inv_n;
+      rt::Tensor grad = probs;
+      if (ce) {
+        // entropia_cruzada + softmax: dL/d(logits) = probs - onehot(y), medio.
+        for (std::int64_t i = 0; i < n; ++i) {
+          const int label = y[static_cast<std::size_t>(i)];
+          const auto idx = static_cast<std::size_t>(i * classes + label);
+          loss -= std::log(std::max(probs.data[idx], 1e-9F));
+          for (std::int64_t c = 0; c < classes; ++c) {
+            auto g = static_cast<std::size_t>(i * classes + c);
+            grad.data[g] = (grad.data[g] - (c == label ? 1.0F : 0.0F)) * inv_n;
+          }
         }
+        loss *= inv_n;
+      } else {
+        // quadratica (regressao escalar): saida [N, 1], dL/dy = 2*(pred - alvo)/n.
+        for (std::int64_t i = 0; i < n; ++i) {
+          const float d = probs.data[static_cast<std::size_t>(i)] -
+                          static_cast<float>(yf[static_cast<std::size_t>(i)]);
+          loss += d * d;
+          grad.data[static_cast<std::size_t>(i)] = 2.0F * d * inv_n;
+        }
+        loss *= inv_n;
       }
-      loss *= inv_n;
       if (epoch == 1) first_loss = loss;
       last_loss = loss;
       if (verbose && (epoch == 1 || epoch % std::max(1, epocas / 10) == 0)) {
@@ -818,21 +974,26 @@ void Interpreter::run_treino(const Item& decl) {
       }
     }
 
-    // Final training-set accuracy.
-    rt::Tensor probs = forward_layers(layers, x);
-    int correct = 0;
-    for (std::int64_t i = 0; i < n; ++i) {
-      std::int64_t best = 0;
-      for (std::int64_t c = 1; c < classes; ++c) {
-        if (probs.data[static_cast<std::size_t>(i * classes + c)] >
-            probs.data[static_cast<std::size_t>(i * classes + best)]) {
-          best = c;
+    if (ce) {
+      // Final training-set accuracy.
+      rt::Tensor probs = forward_layers(layers, x);
+      int correct = 0;
+      for (std::int64_t i = 0; i < n; ++i) {
+        std::int64_t best = 0;
+        for (std::int64_t c = 1; c < classes; ++c) {
+          if (probs.data[static_cast<std::size_t>(i * classes + c)] >
+              probs.data[static_cast<std::size_t>(i * classes + best)]) {
+            best = c;
+          }
         }
+        if (best == y[static_cast<std::size_t>(i)]) ++correct;
       }
-      if (best == y[static_cast<std::size_t>(i)]) ++correct;
+      out_ << "treino " << name << ": perda caiu " << (last_loss < first_loss ? "sim" : "nao")
+           << " | acuracia " << correct << "/" << n << "\n";
+    } else {
+      out_ << "treino " << name << ": perda caiu " << (last_loss < first_loss ? "sim" : "nao")
+           << " | mse " << last_loss << "\n";
     }
-    out_ << "treino " << name << ": perda caiu " << (last_loss < first_loss ? "sim" : "nao")
-         << " | acuracia " << correct << "/" << n << "\n";
   } catch (const std::exception& e) {
     fail(decl.span, std::string("treino ") + name + ": " + e.what());
   }

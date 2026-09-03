@@ -81,7 +81,7 @@ class Interpreter {
 
   // Deep learning.
   struct Layer {
-    enum Kind { Dense, Activation, Softmax, Dropout } kind = Dense;
+    enum Kind { Dense, Activation, Softmax, Dropout, LayerNorm } kind = Dense;
     rt::Tensor w;
     rt::Tensor b;
     std::string act;

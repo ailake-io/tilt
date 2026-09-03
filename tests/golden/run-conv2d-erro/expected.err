@@ -1,0 +1,7 @@
+erro[T901]: modelo 'C': camada 'conv2d' ainda nao suportada (M6.3); remova-a do modelo por ora
+  --> input.tilt:1:1
+   |
+ 1 | modelo C:
+   | ^^^^^^
+   |
+
