@@ -1,0 +1,16 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "m"
+  chave: env "K"
+
+tipo Ficha:
+  nome: texto
+  idade: inteiro
+  ativo: logico
+  nivel: "baixo" | "medio" | "alto"
+
+pipeline p:
+  passos:
+    - f = perguntar gpt, formato: Ficha:
+        usuario: "extraia"
+    - imprimir f.nome, f.idade, f.ativo, f.nivel

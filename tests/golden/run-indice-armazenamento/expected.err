@@ -1,0 +1,7 @@
+erro[T900]: indice 'kb': armazenamento 'qdrant://localhost:6333/kb' nao implementado (M8.2); use "memoria"
+  --> input.tilt:7:7
+   |
+ 7 |     - kb.inserir "x"
+   |       ^^
+   |
+

@@ -1,0 +1,7 @@
+indice kb:
+  embeddings: "m"
+  armazenamento: "qdrant://localhost:6333/kb"
+
+pipeline p:
+  passos:
+    - kb.inserir "x"

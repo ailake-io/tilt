@@ -26,8 +26,15 @@ for case_dir in "$DIR"/*/; do
   # shellcheck disable=SC2046
   set -- $(cat "$case_dir/cmd")
 
+  # optional per-case environment (e.g. TILT_LLM=mock), one KEY=VALUE per line
+  env_args=""
+  if [ -f "$case_dir/env" ]; then
+    env_args=$(tr '\n' ' ' <"$case_dir/env")
+  fi
+
   code=0
-  ( cd "$case_dir" && "$BIN" "$@" ) >"$case_dir/.actual.out" 2>"$case_dir/.actual.err" || code=$?
+  ( cd "$case_dir" && env $env_args "$BIN" "$@" ) \
+    >"$case_dir/.actual.out" 2>"$case_dir/.actual.err" || code=$?
   printf '%s' "$code" >"$case_dir/.actual.code"
 
   if [ "$UPDATE" = "1" ]; then

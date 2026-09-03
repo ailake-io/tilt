@@ -40,7 +40,8 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M5.2** — conector JSON + wiring de `fonte` para arquivos locais (csv/json). ✅
 - **M6** — tensores + inferência de `modelo` (CPU). ✅
 - **M6.2** — `treino`: backprop + SGD/Adam + `carregador`. ✅
-- **M7+** — GPU, carga de `pesos:`, conectores de rede, LLM, agentes, VM de bytecode.
+- **M8** — cliente LLM (`perguntar`/`incorporar`), saída estruturada, RAG (`indice`). ✅
+- **M7 / M9+** — GPU, carga de `pesos:`, agentes, `servico` async, VM de bytecode.
 
 ### `tilt executar`
 
@@ -69,8 +70,23 @@ roda via `modelo M.executar <tensor>` — init Xavier com semente fixa.
 `treino M:` treina o `modelo M` de mesmo nome: `dados: carregador "d.csv",
 alvo: "col"`, `perda: entropia_cruzada`, `otimizador: sgd|adam`, `taxa:`,
 `epocas:`, `verboso:`. Backprop escrito à mão para a pilha densa+ativação+softmax
-(relu/sigmoide/tanh/silu). Pós-treino os pesos ficam no `modelo`. Carga de
-`pesos:` de arquivo e GPU: M7. Conectores de rede, LLM, agentes: adiante.
+(relu/sigmoide/tanh/silu). Pós-treino os pesos ficam no `modelo`.
+
+### LLM e RAG
+
+`llm gpt: provedor: ..., modelo: ..., chave: env "..."` + `perguntar gpt:
+sistema: ..., usuario: ...` → `{ texto, modelo }`. Saída estruturada:
+`perguntar gpt, formato: MeuTipo:` → `Mapa` com os campos de `tipo MeuTipo`.
+`incorporar "modelo", texto` → `tensor[f32, D]`. `dividir_texto texto,
+tamanho:, sobreposicao:` → `lista` de trechos.
+
+`indice kb: embeddings: "...", armazenamento: "memoria"` — `kb.inserir <lista|
+texto>` e `kb.buscar "consulta", top_k: N` → `lista` de `{ id, texto, score }`
+(cosseno). `armazenamento: qdrant://…` / `pgvector` → `T900` (M8.2).
+
+Transporte: `TILT_LLM=mock` dá respostas/embeddings determinísticos (offline,
+usado nos testes); sem a variável, chamadas reais via `curl` (Anthropic/OpenAI/
+local). GPU e carga de `pesos:`: M7.
 
 Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
 `incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução

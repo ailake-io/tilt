@@ -1,0 +1,6 @@
+pipeline p:
+  passos:
+    - partes = dividir_texto "abcdefghij", tamanho: 4, sobreposicao: 1
+    - imprimir partes.tamanho
+    - para cada c em partes:
+        imprimir c

@@ -1,0 +1,23 @@
+# RAG + LLM. Rode com TILT_LLM=mock para modo offline deterministico.
+
+llm assistente:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+
+pipeline suporte:
+  passos:
+    - base.inserir "para reiniciar a senha use a pagina de recuperacao"
+    - base.inserir "o suporte funciona de segunda a sexta das 9h as 18h"
+    - base.inserir "a fatura e emitida no primeiro dia util do mes"
+    - trechos = base.buscar "quando sai a fatura", top_k: 1
+    - para cada t em trechos:
+        imprimir "contexto:", t.texto
+    - r = perguntar assistente:
+        sistema: "Responda em uma frase usando o contexto."
+        usuario: "Quando a fatura e emitida?"
+    - imprimir "resposta:", r.texto

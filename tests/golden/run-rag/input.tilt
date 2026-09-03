@@ -1,0 +1,12 @@
+indice kb:
+  embeddings: "m"
+  armazenamento: "memoria"
+
+pipeline p:
+  passos:
+    - kb.inserir "o gato subiu no telhado"
+    - kb.inserir "o compilador gera codigo de maquina"
+    - kb.inserir "tokens vem do lexer"
+    - r = kb.buscar "quem gera codigo de maquina", top_k: 2
+    - para cada h em r:
+        imprimir h.id, h.texto

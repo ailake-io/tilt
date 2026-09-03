@@ -14,6 +14,8 @@
 #include <utility>
 
 #include "runtime/json.hpp"
+#include "runtime/llm.hpp"
+#include "runtime/vectorstore.hpp"
 
 namespace tilt {
 
@@ -782,6 +784,208 @@ void Interpreter::run_treino(const Item& decl) {
   model_cache_[name] = std::move(layers);
 }
 
+// ------------------------------------------------------------------ LLM + RAG
+
+namespace {
+
+std::string field_str(const ast::Block& block, std::string_view key) {
+  const Item* f = find_field(block, key);
+  return (f && f->value && f->value->kind == ExprKind::TextLit) ? f->value->text : std::string();
+}
+
+std::string field_env_or_text(const ast::Block& block, std::string_view key) {
+  const Item* f = find_field(block, key);
+  if (!f || !f->value) return {};
+  const Expr* v = f->value.get();
+  if (v->kind == ExprKind::TextLit || v->kind == ExprKind::Name) return v->text;
+  if (v->kind == ExprKind::Call && v->lhs && v->lhs->kind == ExprKind::Name &&
+      v->lhs->text == "env" && !v->args.empty() && v->args[0].value->kind == ExprKind::TextLit) {
+    const char* e = std::getenv(v->args[0].value->text.c_str());
+    return e ? std::string(e) : std::string();
+  }
+  return {};
+}
+
+std::string row_text(const Value& item) {
+  if (item.kind == ValueKind::Mapa && item.map) {
+    for (const char* key : {"texto", "conteudo", "text", "trecho", "content"}) {
+      if (const Value* v = item.map->find(key); v && v->kind == ValueKind::Texto) return v->s;
+    }
+  }
+  return item.kind == ValueKind::Texto ? item.s : to_display(item);
+}
+
+Value default_for_type(const Expr* type_expr) {
+  if (!type_expr) return Value::nulo();
+  if (type_expr->kind == ExprKind::Name) {
+    const std::string& w = type_expr->text;
+    if (w == "texto") return Value::texto("exemplo");
+    if (w == "inteiro") return Value::inteiro(0);
+    if (w == "decimal") return Value::decimal(0.0);
+    if (w == "logico") return Value::logico(false);
+    return Value::nulo();
+  }
+  if (type_expr->kind == ExprKind::TextLit) return Value::texto(type_expr->text);
+  if (type_expr->kind == ExprKind::Binary && type_expr->text == "|") {
+    const Expr* e = type_expr;
+    while (e && e->kind == ExprKind::Binary) e = e->lhs.get();
+    return Value::texto(e && e->kind == ExprKind::TextLit ? e->text : "");
+  }
+  if (type_expr->kind == ExprKind::Index && type_expr->lhs &&
+      type_expr->lhs->kind == ExprKind::Name && type_expr->lhs->text == "lista") {
+    return Value::lista();
+  }
+  return Value::nulo();
+}
+
+}  // namespace
+
+rt::LlmConfig Interpreter::llm_config(const std::string& name, Span span) {
+  auto it = entities_.find(name);
+  if (it == entities_.end() || it->second->key != "llm" || !it->second->block) {
+    fail(span, "'" + name + "' nao e um 'llm' declarado");
+  }
+  const ast::Block& b = *it->second->block;
+  rt::LlmConfig cfg;
+  cfg.provider = field_word(b, "provedor", "anthropic");
+  cfg.model = field_str(b, "modelo");
+  cfg.api_key = field_env_or_text(b, "chave");
+  cfg.base_url = field_env_or_text(b, "base_url");
+  cfg.temperature = field_num(b, "temperatura", 0.2);
+  cfg.max_tokens = field_int(b, "max_tokens", 1024);
+  return cfg;
+}
+
+rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env) {
+  std::string llm_name;
+  if (!call.args.empty() && call.args[0].name.empty()) {
+    Value v = eval(*call.args[0].value, env);
+    llm_name = v.kind == ValueKind::Texto ? v.s : "";
+  }
+
+  rt::ValueMap kw;
+  for (const auto& a : call.args) {
+    if (!a.name.empty()) kw.set(a.name, eval(*a.value, env));
+  }
+  if (call.block) {
+    for (const auto& it : call.block->items) {
+      if (it && it->kind == ItemKind::Field && it->value) kw.set(it->key, eval(*it->value, env));
+    }
+  }
+
+  auto text_of = [](const Value* v) { return v && v->kind == ValueKind::Texto ? v->s : std::string(); };
+  std::string system = text_of(kw.find("sistema"));
+  std::string user = text_of(kw.find("usuario"));
+  if (user.empty()) user = text_of(kw.find("prompt"));
+
+  rt::LlmConfig cfg = llm_config(llm_name, call.span);
+  std::string raw;
+  try {
+    raw = rt::llm_chat(cfg, system, user);
+  } catch (const std::exception& e) {
+    fail(call.span, std::string("LLM: ") + e.what());
+  }
+
+  if (const Value* fmt = kw.find("formato"); fmt && fmt->kind == ValueKind::Texto) {
+    return structured_from_tipo(fmt->s, raw, call.span);
+  }
+  Value out = Value::mapa();
+  out.map->set("texto", Value::texto(raw));
+  out.map->set("modelo", Value::texto(cfg.model));
+  return out;
+}
+
+rt::Value Interpreter::structured_from_tipo(const std::string& tipo_name, const std::string& raw,
+                                           Span span) {
+  auto it = entities_.find(tipo_name);
+  if (it == entities_.end() || it->second->key != "tipo" || !it->second->block) {
+    fail(span, "formato: '" + tipo_name + "' nao e um 'tipo' declarado");
+  }
+  Value parsed;
+  bool have_parsed = false;
+  if (!rt::llm_is_mock()) {
+    try {
+      parsed = rt::json_parse(raw);
+      have_parsed = parsed.kind == ValueKind::Mapa;
+    } catch (...) {
+      fail(span, "a resposta do LLM nao e um JSON valido para o tipo '" + tipo_name + "'");
+    }
+  }
+
+  Value out = Value::mapa();
+  for (const auto& f : it->second->block->items) {
+    if (!f || f->kind != ItemKind::Field) continue;
+    Value v;
+    if (have_parsed && parsed.map) {
+      const Value* got = parsed.map->find(f->key);
+      v = got ? *got : default_for_type(f->value.get());
+    } else {
+      v = default_for_type(f->value.get());
+    }
+    out.map->set(f->key, std::move(v));
+  }
+  return out;
+}
+
+rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const std::string& method,
+                                         const Expr& call, Env& env) {
+  auto it = entities_.find(indice_name);
+  const ast::Block& b = *it->second->block;
+  const std::string armazenamento = field_str(b, "armazenamento");
+  if (!armazenamento.empty() && armazenamento != "memoria") {
+    fail(call.span, "indice '" + indice_name + "': armazenamento '" + armazenamento +
+                        "' nao implementado (M8.2); use \"memoria\"",
+         DiagCode::ConnectorNotImplemented);
+  }
+  const std::string emb_model = field_str(b, "embeddings");
+  rt::MemoryIndex& store = index_stores_[indice_name];
+
+  if (method == "inserir") {
+    if (call.args.empty()) fail(call.span, "inserir espera uma lista ou tabela");
+    Value v = eval(*call.args[0].value, env);
+    int added = 0;
+    auto add_one = [&](const Value& item) {
+      const std::string text = row_text(item);
+      std::string id = std::to_string(store.size() + 1);
+      if (item.kind == ValueKind::Mapa && item.map) {
+        if (const Value* i = item.map->find("id")) id = to_display(*i);
+      }
+      store.insert(id, text, rt::llm_embed(emb_model, text));
+      ++added;
+    };
+    if ((v.kind == ValueKind::Lista || v.kind == ValueKind::Tabela) && v.list) {
+      for (const Value& e : *v.list) add_one(e);
+    } else {
+      add_one(v);
+    }
+    return Value::inteiro(added);
+  }
+
+  if (method == "buscar") {
+    if (call.args.empty()) fail(call.span, "buscar espera um texto de consulta");
+    Value q = eval(*call.args[0].value, env);
+    rt::ValueMap kw;
+    for (const auto& a : call.args) {
+      if (!a.name.empty()) kw.set(a.name, eval(*a.value, env));
+    }
+    std::size_t k = 5;
+    if (const Value* tk = kw.find("top_k")) k = static_cast<std::size_t>(tk->as_number());
+    const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
+    auto hits = store.search(rt::llm_embed(emb_model, qt), k);
+    Value out = Value::lista();
+    for (const auto& h : hits) {
+      Value row = Value::mapa();
+      row.map->set("id", Value::texto(h.id));
+      row.map->set("texto", Value::texto(h.text));
+      row.map->set("score", Value::decimal(h.score));
+      out.list->push_back(std::move(row));
+    }
+    return out;
+  }
+
+  fail(call.span, "indice: metodo '" + method + "' desconhecido (use inserir / buscar)");
+}
+
 // ------------------------------------------------------------------ statements
 
 void Interpreter::exec_block(const ast::Block& block, Env& env) {
@@ -1424,14 +1628,41 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     return Value::nulo();
   }
 
-  if (word_in(name, {"perguntar", "perguntar_em_fluxo", "incorporar"})) {
-    const char* mode = std::getenv("TILT_LLM");
-    if (mode && std::string_view(mode) == "mock") {
-      return name == "incorporar" ? Value::lista({Value::decimal(0.0)})
-                                  : Value::texto("[resposta simulada]");
+  if (name == "perguntar" || name == "perguntar_em_fluxo") {
+    return eval_perguntar(call, env);
+  }
+  if (name == "incorporar") {
+    auto a = args();
+    const std::string model = !a.empty() && a[0].kind == ValueKind::Texto ? a[0].s : "";
+    std::string text;
+    if (a.size() > 1) text = a[1].kind == ValueKind::Texto ? a[1].s : to_display(a[1]);
+    try {
+      std::vector<float> v = rt::llm_embed(model, text);
+      rt::Tensor t;
+      t.shape = {static_cast<std::int64_t>(v.size())};
+      t.data = std::move(v);
+      return Value::tensor_de(std::move(t));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string("incorporar: ") + e.what());
     }
-    fail(call.span, "runtime de LLM nao implementado (M8); use TILT_LLM=mock para simular",
-         DiagCode::NotImplemented);
+  }
+  if (name == "dividir_texto") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    const std::string src = !a.empty() && a[0].kind == ValueKind::Texto ? a[0].s : "";
+    std::size_t win = 800;
+    std::size_t overlap = 100;
+    if (const Value* t = kw.find("tamanho")) win = static_cast<std::size_t>(t->as_number());
+    if (const Value* o = kw.find("sobreposicao")) overlap = static_cast<std::size_t>(o->as_number());
+    if (win == 0) win = 1;
+    const std::size_t step = win > overlap ? win - overlap : 1;
+    rt::ValueList chunks;
+    for (std::size_t start = 0; start < src.size(); start += step) {
+      chunks.push_back(Value::texto(src.substr(start, win)));
+      if (start + win >= src.size()) break;
+    }
+    if (chunks.empty()) chunks.push_back(Value::texto(src));
+    return Value::lista(std::move(chunks));
   }
   if (name == "ler") {
     auto a = args();
@@ -1440,7 +1671,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     fail(call.span, "ler: esperava uma 'fonte' declarada", DiagCode::ConnectorNotImplemented);
   }
-  if (word_in(name, {"escrever"}) || name == "dividir_texto" || (name.rfind("ler_", 0) == 0) ||
+  if (word_in(name, {"escrever"}) || (name.rfind("ler_", 0) == 0) ||
       (name.rfind("escrever_", 0) == 0)) {
     fail(call.span, "'" + name + "': conector/formato nao implementado (M5.2)",
          DiagCode::ConnectorNotImplemented);
@@ -1458,6 +1689,13 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
 
 Value Interpreter::eval_method(const std::string& method, Value receiver, const Expr& call,
                                Env& env) {
+  if (receiver.kind == ValueKind::Texto) {
+    if (auto e = entities_.find(receiver.s);
+        e != entities_.end() && e->second->key == "indice" && e->second->block) {
+      return eval_indice_method(receiver.s, method, call, env);
+    }
+  }
+
   const bool is_table = receiver.kind == ValueKind::Tabela || receiver.kind == ValueKind::Lista;
 
   if (is_table && method == "filtrar") {

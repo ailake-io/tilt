@@ -9,8 +9,10 @@
 #include "common/source.hpp"
 #include "diagnostics/diagnostic.hpp"
 #include "parser/ast.hpp"
+#include "runtime/llm.hpp"
 #include "runtime/tensor.hpp"
 #include "runtime/value.hpp"
+#include "runtime/vectorstore.hpp"
 
 namespace tilt {
 
@@ -88,6 +90,13 @@ class Interpreter {
   rt::Value eval_modelo_call(const ast::Expr& call, Env& env);
   void run_treino(const ast::Item& decl);
 
+  // LLM + RAG.
+  rt::LlmConfig llm_config(const std::string& name, Span span);
+  rt::Value eval_perguntar(const ast::Expr& call, Env& env);
+  rt::Value structured_from_tipo(const std::string& tipo_name, const std::string& raw, Span span);
+  rt::Value eval_indice_method(const std::string& indice_name, const std::string& method,
+                               const ast::Expr& call, Env& env);
+
   const ast::Program& program_;
   DiagnosticEngine& diag_;
   std::ostream& out_;
@@ -97,6 +106,7 @@ class Interpreter {
   std::unordered_map<std::string, const ast::Item*> entities_;
   std::vector<const ast::Item*> pipelines_;
   std::unordered_map<std::string, std::vector<Layer>> model_cache_;
+  std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   bool schedule_mode_ = false;
 };
 

@@ -1,0 +1,12 @@
+llm gpt:
+  provedor: "openai"
+  modelo: "gpt-x"
+  chave: env "K"
+
+pipeline p:
+  passos:
+    - r = perguntar gpt:
+        sistema: "s"
+        usuario: "diga oi"
+    - imprimir r.texto
+    - imprimir r.modelo
