@@ -1,0 +1,10 @@
+fonte itens:
+  tipo: csv
+  caminho: "d.csv"
+
+pipeline p:
+  passos:
+    - t = ler itens
+    - g = t.agrupar_por "cat", { total: somar "v" }
+    - para cada r em g:
+        imprimir r.cat, r.total

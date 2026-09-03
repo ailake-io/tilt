@@ -1,0 +1,15 @@
+# Conector de arquivo local via `fonte`.
+
+fonte produtos:
+  tipo: json
+  caminho: "exemplos/dados/produtos.json"
+
+pipeline catalogo:
+  passos:
+    - itens = ler produtos
+    - imprimir "itens:", itens.tamanho
+    - por_cat = itens.agrupar_por "categoria", { qtd: contar, preco_total: somar "preco" }
+    - ordenado = por_cat.ordenar_por "preco_total", desc: verdadeiro
+    - para cada c em ordenado:
+        imprimir c.categoria, "->", c.qtd, "itens,", c.preco_total
+    - escrever_json ordenado, "/tmp/tilt_cat.json"

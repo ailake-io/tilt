@@ -67,6 +67,9 @@ class Interpreter {
   rt::ValueMap eval_kwargs(const ast::Expr& call, Env& env);
   std::string interpolate(const std::string& text, Env& env);
 
+  rt::Value read_csv_file(const std::string& path, Span span);
+  rt::Value read_fonte(const std::string& name, Span span);
+
   const ast::Program& program_;
   DiagnosticEngine& diag_;
   std::ostream& out_;

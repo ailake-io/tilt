@@ -1,0 +1,7 @@
+erro[T900]: fonte 'db': conector 'postgres' nao implementado (M5.2)
+  --> input.tilt:7:11
+   |
+ 7 |     - t = ler db
+   |           ^^^
+   |
+

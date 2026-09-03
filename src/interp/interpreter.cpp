@@ -4,11 +4,15 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <initializer_list>
 #include <ostream>
+#include <sstream>
 #include <string_view>
 #include <utility>
+
+#include "runtime/json.hpp"
 
 namespace tilt {
 
@@ -307,6 +311,78 @@ void Interpreter::run_verificar(const Item& field, Env& env) {
     return;
   }
   throw RuntimeAbort{field.span, summary, DiagCode::DataQualityViolation, violations};
+}
+
+Value Interpreter::read_csv_file(const std::string& path, Span span) {
+  std::ifstream in(path);
+  if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
+  std::string line;
+  std::vector<std::string> headers;
+  rt::ValueList rows;
+  bool first = true;
+  while (std::getline(in, line)) {
+    if (line.empty()) continue;
+    auto cells = split_csv_line(line);
+    if (first) {
+      headers = cells;
+      first = false;
+      continue;
+    }
+    Value row = Value::mapa();
+    for (std::size_t k = 0; k < headers.size(); ++k) {
+      row.map->set(headers[k], k < cells.size() ? parse_scalar(cells[k]) : Value::nulo());
+    }
+    rows.push_back(std::move(row));
+  }
+  return Value::tabela(std::move(rows));
+}
+
+Value Interpreter::read_fonte(const std::string& name, Span span) {
+  const Item* decl = entities_.at(name);
+  if (!decl->block) fail(span, "fonte '" + name + "' sem configuracao");
+
+  auto field_text = [&](std::string_view key) -> std::string {
+    const Item* f = find_field(*decl->block, key);
+    if (!f || !f->value) return "";
+    const Expr* v = f->value.get();
+    if (v->kind == ExprKind::TextLit || v->kind == ExprKind::Name) return v->text;
+    if (v->kind == ExprKind::Call && v->lhs && v->lhs->kind == ExprKind::Name &&
+        v->lhs->text == "env" && !v->args.empty() &&
+        v->args[0].value->kind == ExprKind::TextLit) {
+      const char* e = std::getenv(v->args[0].value->text.c_str());
+      return e ? std::string(e) : "";
+    }
+    return "";
+  };
+
+  const std::string tipo = field_text("tipo");
+  std::string path = field_text("caminho");
+  if (path.empty()) path = field_text("arquivo");
+  if (path.empty()) path = field_text("url");
+  if (path.rfind("file://", 0) == 0) path = path.substr(7);
+
+  if (tipo == "csv") {
+    if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
+    return read_csv_file(path, span);
+  }
+  if (tipo == "json") {
+    if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
+    std::ifstream in(path);
+    if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    Value parsed;
+    try {
+      parsed = rt::json_parse(ss.str());
+    } catch (const std::exception& e) {
+      fail(span, std::string(e.what()));
+    }
+    if (parsed.kind == ValueKind::Lista) parsed.kind = ValueKind::Tabela;
+    return parsed;
+  }
+  fail(span, "fonte '" + name + "': conector '" + (tipo.empty() ? "?" : tipo) +
+                 "' nao implementado (M5.2)",
+       DiagCode::ConnectorNotImplemented);
 }
 
 // ------------------------------------------------------------------ statements
@@ -763,27 +839,33 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   if (name == "ler_csv") {
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_csv espera um caminho");
+    return read_csv_file(a[0].s, call.span);
+  }
+  if (name == "ler_json") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_json espera um caminho");
     std::ifstream in(a[0].s);
-    if (!in) fail(call.span, "nao foi possivel abrir '" + a[0].s + "'", DiagCode::RuntimeError);
-    std::string line;
-    std::vector<std::string> headers;
-    rt::ValueList rows;
-    bool first = true;
-    while (std::getline(in, line)) {
-      if (line.empty()) continue;
-      auto cells = split_csv_line(line);
-      if (first) {
-        headers = cells;
-        first = false;
-        continue;
-      }
-      Value row = Value::mapa();
-      for (std::size_t k = 0; k < headers.size(); ++k) {
-        row.map->set(headers[k], k < cells.size() ? parse_scalar(cells[k]) : Value::nulo());
-      }
-      rows.push_back(std::move(row));
+    if (!in) fail(call.span, "nao foi possivel abrir '" + a[0].s + "'");
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    Value parsed;
+    try {
+      parsed = rt::json_parse(ss.str());
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
     }
-    return Value::tabela(std::move(rows));
+    if (parsed.kind == ValueKind::Lista) parsed.kind = ValueKind::Tabela;
+    return parsed;
+  }
+  if (name == "escrever_json") {
+    auto a = args();
+    if (a.size() < 2 || a[1].kind != ValueKind::Texto) {
+      fail(call.span, "escrever_json espera (valor, caminho)");
+    }
+    std::ofstream out(a[1].s);
+    if (!out) fail(call.span, "nao foi possivel escrever '" + a[1].s + "'");
+    out << rt::json_dump(a[0]);
+    return Value::nulo();
   }
   if (name == "escrever_csv" || name == "escrever_parquet") {
     auto a = args();
@@ -827,9 +909,16 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     fail(call.span, "runtime de LLM nao implementado (M8); use TILT_LLM=mock para simular",
          DiagCode::NotImplemented);
   }
-  if (word_in(name, {"ler", "escrever"}) || name == "dividir_texto" ||
-      (name.rfind("ler_", 0) == 0) || (name.rfind("escrever_", 0) == 0)) {
-    fail(call.span, "'" + name + "': conector/formato nao implementado (M5)",
+  if (name == "ler") {
+    auto a = args();
+    if (!a.empty() && a[0].kind == ValueKind::Texto && entities_.count(a[0].s)) {
+      return read_fonte(a[0].s, call.span);
+    }
+    fail(call.span, "ler: esperava uma 'fonte' declarada", DiagCode::ConnectorNotImplemented);
+  }
+  if (word_in(name, {"escrever"}) || name == "dividir_texto" || (name.rfind("ler_", 0) == 0) ||
+      (name.rfind("escrever_", 0) == 0)) {
+    fail(call.span, "'" + name + "': conector/formato nao implementado (M5.2)",
          DiagCode::ConnectorNotImplemented);
   }
   if (word_in(name, {"modelo", "agente", "ferramenta", "treinar", "incorporador"})) {

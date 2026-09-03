@@ -1,0 +1,6 @@
+pipeline p:
+  passos:
+    - t = ler_json "d.json"
+    - imprimir "n:", t.tamanho
+    - para cada r em t:
+        imprimir r.nome, r.qtd

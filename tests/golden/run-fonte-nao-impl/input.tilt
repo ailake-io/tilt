@@ -1,0 +1,8 @@
+fonte db:
+  tipo: postgres
+  url: env "DATABASE_URL"
+
+pipeline p:
+  passos:
+    - t = ler db
+    - imprimir t

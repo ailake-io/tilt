@@ -1,0 +1,5 @@
+[
+  { "sku": "A1", "categoria": "ferramenta", "preco": 40 },
+  { "sku": "B2", "categoria": "ferramenta", "preco": 25 },
+  { "sku": "C3", "categoria": "insumo", "preco": 12 }
+]

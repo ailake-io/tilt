@@ -38,6 +38,7 @@ add_library(tilt_core STATIC
   src/semantic/type.cpp
   src/semantic/checker.cpp
   src/runtime/value.cpp
+  src/runtime/json.cpp
   src/interp/interpreter.cpp
   src/cli/cli.cpp)
 target_include_directories(tilt_core PUBLIC
