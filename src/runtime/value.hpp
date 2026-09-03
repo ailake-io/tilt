@@ -53,4 +53,9 @@ struct Value {
 std::string to_display(const Value& v);  // human form used by `imprimir`
 bool equals(const Value& a, const Value& b);
 
+// Strict (non-lazy, non-tensor) binary operators shared by the tree interpreter
+// and the bytecode VM. `op` is one of + - * / % == != < <= > >= contem.
+// Sets *ok = false and returns Nulo if `op` is not one of these.
+Value apply_binop(const std::string& op, const Value& a, const Value& b, bool* ok);
+
 }  // namespace tilt::rt

@@ -43,6 +43,8 @@ add_library(tilt_core STATIC
   src/runtime/llm.cpp
   src/runtime/vectorstore.cpp
   src/runtime/http_server.cpp
+  src/vm/compiler.cpp
+  src/vm/vm.cpp
   src/interp/interpreter.cpp
   src/cli/cli.cpp)
 target_include_directories(tilt_core PUBLIC

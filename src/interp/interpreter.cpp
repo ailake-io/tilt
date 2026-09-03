@@ -8,15 +8,19 @@
 #include <fstream>
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <ostream>
 #include <sstream>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 #include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
 #include "runtime/vectorstore.hpp"
+#include "vm/compiler.hpp"
+#include "vm/vm.hpp"
 
 namespace tilt {
 
@@ -1666,53 +1670,12 @@ Value Interpreter::eval_binary(const Expr& expr, Env& env) {
     }
   }
 
-  if (op == "==") return Value::logico(equals(a, b));
-  if (op == "!=") return Value::logico(!equals(a, b));
-  if (op == "contem") {
-    if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) {
-      return Value::logico(a.s.find(b.s) != std::string::npos);
-    }
-    if (a.kind == ValueKind::Lista && a.list) {
-      for (const Value& el : *a.list) {
-        if (equals(el, b)) return Value::logico(true);
-      }
-    }
-    return Value::logico(false);
-  }
   if (op == "|") return Value::texto(to_display(a) + " | " + to_display(b));
 
-  if (op == "+" && (a.kind == ValueKind::Texto || b.kind == ValueKind::Texto)) {
-    return Value::texto(to_display(a) + to_display(b));
-  }
-
-  const bool comparison = word_in(op, {"LT", "LE", "GT", "GE", "<", "<=", ">", ">="});
-  if (comparison) {
-    double x = a.as_number();
-    double y = b.as_number();
-    if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) {
-      int c = a.s.compare(b.s);
-      x = c;
-      y = 0;
-    }
-    if (op == "LT" || op == "<") return Value::logico(x < y);
-    if (op == "LE" || op == "<=") return Value::logico(x <= y);
-    if (op == "GT" || op == ">") return Value::logico(x > y);
-    return Value::logico(x >= y);
-  }
-
-  double x = a.as_number();
-  double y = b.as_number();
-  double r = 0;
-  if (op == "+") r = x + y;
-  else if (op == "-") r = x - y;
-  else if (op == "*") r = x * y;
-  else if (op == "/") r = y == 0 ? 0 : x / y;
-  else if (op == "%") r = y == 0 ? 0 : std::fmod(x, y);
-  else fail(expr.span, "operador desconhecido '" + op + "'");
-
-  const bool both_int = a.kind == ValueKind::Inteiro && b.kind == ValueKind::Inteiro;
-  if (both_int && op != "/") return Value::inteiro(static_cast<std::int64_t>(r));
-  return Value::decimal(r);
+  bool ok = false;
+  Value r = rt::apply_binop(op, a, b, &ok);
+  if (!ok) fail(expr.span, "operador desconhecido '" + op + "'");
+  return r;
 }
 
 std::vector<Value> Interpreter::eval_args(const Expr& call, Env& env) {
@@ -1758,6 +1721,44 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
 }
 
 Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span) {
+  // Try the bytecode VM for functions in its pure subset; fall back otherwise.
+  auto cit = vm_chunks_.find(&fn);
+  if (cit == vm_chunks_.end()) {
+    std::shared_ptr<vm::Chunk> chunk;
+    try {
+      std::unordered_set<std::string> names;
+      for (const auto& kv : functions_) names.insert(kv.first);
+      chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
+    } catch (const vm::NotCompilable&) {
+      chunk = nullptr;
+    }
+    cit = vm_chunks_.emplace(&fn, std::move(chunk)).first;
+    if (std::getenv("TILT_VM_DEBUG") && cit->second) {
+      const vm::Chunk& c = *cit->second;
+      out_ << "; chunk " << decl_name(fn) << " locals=" << c.num_locals << "\n";
+      for (std::size_t i = 0; i < c.code.size(); ++i) {
+        out_ << ";  " << i << ": op=" << static_cast<int>(c.code[i].op) << " a=" << c.code[i].a
+             << " b=" << c.code[i].b << "\n";
+      }
+    }
+  }
+  if (cit->second) {
+    vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
+      auto f = functions_.find(name);
+      if (f == functions_.end()) {
+        *handled = false;
+        return Value::nulo();
+      }
+      *handled = true;
+      return call_function(*f->second, std::move(a), Span{});
+    });
+    try {
+      return machine.run(*cit->second, std::move(args));
+    } catch (const std::exception& e) {
+      fail(fn.span, std::string("VM: ") + e.what());
+    }
+  }
+
   Env env;
   env.parent = &root_;
   for (std::size_t k = 0; k < fn.params.size(); ++k) {

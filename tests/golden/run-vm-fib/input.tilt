@@ -1,0 +1,10 @@
+funcao fib n -> inteiro:
+  se n < 2:
+    retornar n
+  retornar fib(n - 1) + fib(n - 2)
+
+pipeline p:
+  passos:
+    - imprimir "fib 0..10:"
+    - para cada k em intervalo 11:
+        imprimir k, fib(k)

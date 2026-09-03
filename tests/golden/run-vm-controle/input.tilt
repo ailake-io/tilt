@@ -1,0 +1,20 @@
+funcao sinal x -> texto:
+  se x > 0:
+    retornar "positivo"
+  se x < 0:
+    retornar "negativo"
+  retornar "zero"
+
+funcao soma_ate n -> inteiro:
+  total = 0
+  i = 1
+  enquanto i <= n:
+    total = total + i
+    i = i + 1
+  retornar total
+
+pipeline p:
+  passos:
+    - imprimir sinal(5), sinal(-3), sinal(0)
+    - imprimir "soma 1..10 =", soma_ate(10)
+    - imprimir "e/ou:", (1 < 2) e (3 > 2), (1 > 2) ou nao (5 == 5)

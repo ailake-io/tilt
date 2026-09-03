@@ -1,0 +1,4 @@
+== pipeline p ==
+positivo negativo zero
+soma 1..10 = 55
+e/ou: verdadeiro falso

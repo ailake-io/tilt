@@ -72,8 +72,9 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M8** — cliente LLM (`perguntar`/`incorporar`), saída estruturada, RAG (`indice`). ✅
 - **M9** — `ferramenta` executável, `agente.responder`, `equipe`. ✅ (1ª passada)
 - **M10** — `servico` / `rota` HTTP (`tilt servir`). ✅ (1ª passada)
-- **M7 / M9.2 / M10.2 / M11+** — GPU, planner iterativo, `supervisor`, epoll +
-  keep-alive + `meio:`, VM de bytecode, codegen nativo.
+- **M11** — VM de bytecode para o subconjunto puro de `funcao`. ✅ (1ª passada)
+- **M7 / M9.2 / M10.2 / M11.2 / M12** — GPU, planner iterativo, `supervisor`,
+  epoll + keep-alive, VM para todo o programa, codegen nativo.
 
 ### `tilt executar`
 
@@ -138,6 +139,18 @@ resposta ao LLM → `{ texto, rastro: [{ passo, ferramenta, observacao }] }`.
 se a rota declara `entrada: <Tipo>`, campos ausentes → `400`; `- responder:
 status:, dados:` monta a resposta JSON; rota não encontrada → `404`; exceção no
 handler → `500`.
+
+### VM de bytecode
+
+Toda `funcao` cujo corpo cabe no subconjunto puro — literais, locais,
+aritmética/comparação/lógica, `se`/`enquanto`/`retornar`, chamadas a outras
+`funcao`s e a `imprimir`/`tamanho` — é compilada para bytecode de pilha
+(`src/vm/`) e executada pela VM em vez do interpretador de árvore, de forma
+transparente e com cache por função. Fora do subconjunto (`para cada`,
+`tentar`, tensores, métodos, LLM/agente…) cai no interpretador. `e`/`ou` na VM
+não fazem curto-circuito (1ª passada). `TILT_VM_DEBUG=1` despeja o bytecode.
+Chamadas com parênteses — `f(a, b)` — sempre foram a forma não ambígua;
+`f a, b` (sem parênteses) continua válido para o estilo declarativo.
 
 Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
 `incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução

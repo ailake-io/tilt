@@ -492,7 +492,10 @@ ExprPtr Parser::parse_comparison() {
   while (at(TokenKind::Less) || at(TokenKind::LessEqual) || at(TokenKind::Greater) ||
          at(TokenKind::GreaterEqual)) {
     auto e = make_expr(ExprKind::Binary, lhs->span);
-    e->text = token_kind_name(cur().kind);
+    e->text = at(TokenKind::Less)        ? "<"
+              : at(TokenKind::LessEqual) ? "<="
+              : at(TokenKind::Greater)   ? ">"
+                                         : ">=";
     advance();
     e->lhs = std::move(lhs);
     e->rhs = parse_additive();
@@ -542,6 +545,30 @@ ExprPtr Parser::parse_postfix() {
   ExprPtr e = parse_primary();
 
   while (true) {
+    if (at(TokenKind::LParen) &&
+        (e->kind == ExprKind::Name || e->kind == ExprKind::Member)) {
+      // Parenthesized call: `f(a, b)` / `x.m(a)`. Unambiguous, unlike the
+      // paren-less bare-call form.
+      advance();
+      auto call = make_expr(ExprKind::Call, e->span);
+      call->lhs = std::move(e);
+      skip_newlines();
+      while (!at(TokenKind::RParen) && !at(TokenKind::EndOfFile)) {
+        Arg a;
+        if (at(TokenKind::Identifier) && peek(1).kind == TokenKind::Colon &&
+            peek(2).kind != TokenKind::Newline && peek(2).kind != TokenKind::RParen) {
+          a.name = std::string(advance().lexeme);
+          advance();  // ':'
+        }
+        a.value = parse_expr();
+        call->args.push_back(std::move(a));
+        if (!accept(TokenKind::Comma)) break;
+        skip_newlines();
+      }
+      expect(TokenKind::RParen, "')'");
+      e = std::move(call);
+      continue;
+    }
     if (at(TokenKind::Dot) || at(TokenKind::QuestionDot)) {
       bool optional = at(TokenKind::QuestionDot);
       advance();

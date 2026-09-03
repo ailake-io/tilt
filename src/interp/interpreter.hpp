@@ -13,6 +13,7 @@
 #include "runtime/tensor.hpp"
 #include "runtime/value.hpp"
 #include "runtime/vectorstore.hpp"
+#include "vm/bytecode.hpp"
 
 namespace tilt {
 
@@ -115,6 +116,7 @@ class Interpreter {
   std::unordered_map<std::string, const ast::Item*> entities_;
   std::vector<const ast::Item*> pipelines_;
   std::unordered_map<std::string, std::vector<Layer>> model_cache_;
+  std::unordered_map<const ast::Item*, std::shared_ptr<vm::Chunk>> vm_chunks_;  // null = not compilable
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
 

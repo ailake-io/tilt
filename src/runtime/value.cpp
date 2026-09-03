@@ -188,6 +188,61 @@ std::string to_display(const Value& v) {
   return "?";
 }
 
+Value apply_binop(const std::string& op, const Value& a, const Value& b, bool* ok) {
+  *ok = true;
+
+  if (op == "==") return Value::logico(equals(a, b));
+  if (op == "!=") return Value::logico(!equals(a, b));
+  if (op == "contem") {
+    if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) {
+      return Value::logico(a.s.find(b.s) != std::string::npos);
+    }
+    if (a.kind == ValueKind::Lista && a.list) {
+      for (const Value& el : *a.list) {
+        if (equals(el, b)) return Value::logico(true);
+      }
+    }
+    return Value::logico(false);
+  }
+  if (op == "+" && (a.kind == ValueKind::Texto || b.kind == ValueKind::Texto)) {
+    return Value::texto(to_display(a) + to_display(b));
+  }
+
+  const bool cmp = op == "<" || op == "<=" || op == ">" || op == ">=";
+  if (cmp) {
+    double x;
+    double y;
+    if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) {
+      x = static_cast<double>(a.s.compare(b.s));
+      y = 0.0;
+    } else {
+      x = a.as_number();
+      y = b.as_number();
+    }
+    if (op == "<") return Value::logico(x < y);
+    if (op == "<=") return Value::logico(x <= y);
+    if (op == ">") return Value::logico(x > y);
+    return Value::logico(x >= y);
+  }
+
+  if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%") {
+    const double x = a.as_number();
+    const double y = b.as_number();
+    double r = 0.0;
+    if (op == "+") r = x + y;
+    else if (op == "-") r = x - y;
+    else if (op == "*") r = x * y;
+    else if (op == "/") r = y == 0.0 ? 0.0 : x / y;
+    else r = y == 0.0 ? 0.0 : std::fmod(x, y);
+    const bool both_int = a.kind == ValueKind::Inteiro && b.kind == ValueKind::Inteiro;
+    if (both_int && op != "/") return Value::inteiro(static_cast<std::int64_t>(r));
+    return Value::decimal(r);
+  }
+
+  *ok = false;
+  return Value::nulo();
+}
+
 bool equals(const Value& a, const Value& b) {
   if (a.is_number() && b.is_number()) return a.as_number() == b.as_number();
   if (a.kind != b.kind) return false;
