@@ -7,6 +7,14 @@ Escrito em C++20, sem LLVM e sem Rust.
 - Especificação da linguagem: [`CLAUDE.md`](CLAUDE.md)
 - Plano de implementação: seção 14 do `CLAUDE.md`
 
+## Para assistentes de IA / editores
+
+- `tilt checar <a> --json` — diagnósticos estruturados (`{codigo, linha, coluna, mensagem, notas}`).
+- `tilt referencia` — referência compacta da linguagem para contexto de LLM.
+- `tilt completar <a> --linha L --coluna C [--json]` — candidatos de autocomplete sensíveis a contexto.
+- `tilt lsp` — servidor Language Server (stdio): diagnósticos + autocomplete. Config de editor em [`editors/`](editors/).
+- builtin `checar_tilt("<arq>")` — Tilt revisando Tilt de dentro de um `agente`/`ferramenta` (ver `exemplos/copiloto.tilt`).
+
 ## Instalação
 
 ### Do código-fonte

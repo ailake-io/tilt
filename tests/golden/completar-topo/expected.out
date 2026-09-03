@@ -1,0 +1,102 @@
+[
+  {
+    "label": "tipo",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "funcao",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "seja",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "constante",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "importar",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "de",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "fonte",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "pipeline",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "verificar",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "modelo",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "treino",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "tarefa",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "experimento",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "llm",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "indice",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "fluxo",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "ferramenta",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "agente",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "equipe",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "servico",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  }
+]

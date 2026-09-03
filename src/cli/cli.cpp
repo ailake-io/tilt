@@ -19,6 +19,8 @@
 #include "lexer/token.hpp"
 #include "codegen/codegen_x86_64.hpp"
 #include "interp/interpreter.hpp"
+#include "lsp/completion.hpp"
+#include "lsp/lsp_server.hpp"
 #include "parser/ast_dump.hpp"
 #include "parser/parser.hpp"
 #include "runtime/json.hpp"
@@ -45,6 +47,8 @@ void print_usage(std::ostream& os) {
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "  referencia                         referencia compacta da linguagem\n"
+     << "  completar <arq> --linha L --coluna C   candidatos de autocomplete\n"
+     << "  lsp                                servidor Language Server (stdio)\n"
      << "  tokens <arquivo>                   despeja o fluxo de tokens (debug)\n"
      << "  ast <arquivo>                      despeja a arvore sintatica (debug)\n"
      << "  versao                             mostra a versao\n"
@@ -277,6 +281,56 @@ int cmd_executar(const std::vector<std::string_view>& args) {
   return rc == 0 ? kOk : kDiagnostics;
 }
 
+int cmd_completar(const std::vector<std::string_view>& args) {
+  std::string_view path;
+  long lin = 0;
+  long col = 0;
+  bool as_json = false;
+  for (std::size_t k = 1; k < args.size(); ++k) {
+    if (args[k] == "--linha" && k + 1 < args.size()) {
+      lin = std::atol(std::string(args[++k]).c_str());
+    } else if (args[k] == "--coluna" && k + 1 < args.size()) {
+      col = std::atol(std::string(args[++k]).c_str());
+    } else if (args[k] == "--json") {
+      as_json = true;
+    } else if (args[k].rfind("--", 0) == 0) {
+      std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
+      return kUsage;
+    } else if (path.empty()) {
+      path = args[k];
+    }
+  }
+  if (path.empty() || lin < 1 || col < 1) {
+    std::cerr << "tilt: uso: tilt completar <arquivo> --linha L --coluna C [--json]\n";
+    return kUsage;
+  }
+
+  std::optional<SourceFile> src;
+  try {
+    src = SourceFile::load(std::string(path));
+  } catch (const std::exception& e) {
+    std::cerr << "tilt: " << e.what() << "\n";
+    return kUsage;
+  }
+
+  const auto items = lsp::complete(src.value(), static_cast<std::uint32_t>(lin),
+                                   static_cast<std::uint32_t>(col));
+  if (as_json) {
+    rt::Value arr = rt::Value::lista();
+    for (const auto& it : items) {
+      rt::Value m = rt::Value::mapa();
+      m.map->set("label", rt::Value::texto(it.label));
+      m.map->set("kind", rt::Value::texto(it.kind));
+      m.map->set("detail", rt::Value::texto(it.detail));
+      arr.list->push_back(std::move(m));
+    }
+    std::cout << rt::json_dump(arr);
+  } else {
+    for (const auto& it : items) std::cout << it.label << "\t" << it.kind << "\t" << it.detail << "\n";
+  }
+  return kOk;
+}
+
 int cmd_referencia() {
   std::cout <<
       R"(TILT -- referencia compacta (para consumo por ferramentas e assistentes de IA)
@@ -480,6 +534,8 @@ int run_cli(int argc, char** argv) {
   if (cmd == "tokens") return cmd_tokens(args);
   if (cmd == "ast") return cmd_ast(args);
   if (cmd == "referencia" || cmd == "ref") return cmd_referencia();
+  if (cmd == "completar") return cmd_completar(args);
+  if (cmd == "lsp") return tilt::lsp::run_lsp(std::cin, std::cout);
   if (cmd == "checar") return cmd_checar(args);
   if (cmd == "executar") return cmd_executar(args);
   if (cmd == "servir") return cmd_servir(args);
