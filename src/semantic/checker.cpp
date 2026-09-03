@@ -79,8 +79,13 @@ void SemanticChecker::define(const std::string& name, std::string kind, Type typ
   if (name.empty()) return;
   auto it = globals_.find(name);
   if (it != globals_.end()) {
-    report(DiagCode::DuplicateDeclaration, span, "'" + name + "' ja foi declarado",
-           {"declaracao anterior na linha " + std::to_string(it->second.span.line)});
+    // `treino X` intentionally shares its name with `modelo X`.
+    const bool treino_pair = (kind == "treino" && it->second.kind == "modelo") ||
+                             (kind == "modelo" && it->second.kind == "treino");
+    if (!treino_pair) {
+      report(DiagCode::DuplicateDeclaration, span, "'" + name + "' ja foi declarado",
+             {"declaracao anterior na linha " + std::to_string(it->second.span.line)});
+    }
     return;
   }
   globals_.emplace(name, Symbol{name, std::move(kind), std::move(type), span});

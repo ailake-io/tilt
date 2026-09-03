@@ -134,8 +134,18 @@ int Interpreter::run() {
         if (!name.empty()) functions_[name] = item.get();
       } else if (kw == "pipeline") {
         pipelines_.push_back(item.get());
+      } else if (kw == "treino") {
+        // handled by the dedicated training loop; must not shadow `modelo <name>`
       } else if (!name.empty()) {
         entities_[name] = item.get();
+      }
+    }
+
+    bool did_something = false;
+    for (const auto& item : program_.items) {
+      if (item && item->kind == ItemKind::Decl && item->key == "treino") {
+        run_treino(*item);
+        did_something = true;
       }
     }
 
@@ -143,8 +153,8 @@ int Interpreter::run() {
       for (const Item* p : pipelines_) run_pipeline(*p);
     } else if (auto it = functions_.find("principal"); it != functions_.end()) {
       call_function(*it->second, {}, it->second->span);
-    } else {
-      out_ << "nada para executar: nenhum 'pipeline' nem 'funcao principal'\n";
+    } else if (!did_something) {
+      out_ << "nada para executar: nenhum 'pipeline', 'treino' nem 'funcao principal'\n";
     }
     return 0;
   } catch (const RuntimeAbort& a) {
@@ -444,11 +454,8 @@ rt::Tensor Interpreter::value_to_tensor(const Value& v, Span span) {
   fail(span, std::string("nao e possivel converter '") + v.type_name() + "' em tensor");
 }
 
-const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl,
-                                                               std::int64_t in_dim, Span span) {
+std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std::int64_t in_dim) {
   const std::string name = decl_name(decl);
-  if (auto it = model_cache_.find(name); it != model_cache_.end()) return it->second;
-
   std::vector<Layer> layers;
   std::int64_t dim = in_dim;
   std::uint64_t seed = 0xC1A5;
@@ -502,12 +509,39 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
       });
     }
   }
+  return layers;
+}
+
+const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl,
+                                                               std::int64_t in_dim, Span span) {
+  const std::string name = decl_name(decl);
+  if (auto it = model_cache_.find(name); it != model_cache_.end()) return it->second;
   (void)span;
-  if (find_field(*decl.block, "pesos")) {
+  std::vector<Layer> layers = build_layers(decl, in_dim);
+  if (decl.block && find_field(*decl.block, "pesos")) {
     out_ << "[nota] modelo " << name
-         << ": pesos inicializados (Xavier, semente fixa); carga de 'pesos:' e treino no M6.2\n";
+         << ": carga de 'pesos:' ainda nao implementada; usando init Xavier\n";
   }
   return model_cache_.emplace(name, std::move(layers)).first->second;
+}
+
+rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Tensor x) {
+  for (const Layer& l : layers) {
+    switch (l.kind) {
+      case Layer::Dense:
+        x = rt::add(rt::matmul(x, l.w), l.b);
+        break;
+      case Layer::Activation:
+        x = rt::apply_unary(x, l.act);
+        break;
+      case Layer::Softmax:
+        x = rt::softmax_last(x);
+        break;
+      case Layer::Dropout:
+        break;
+    }
+  }
+  return x;
 }
 
 rt::Value Interpreter::model_forward(const Item& decl, const Value& input, Span span) {
@@ -515,25 +549,10 @@ rt::Value Interpreter::model_forward(const Item& decl, const Value& input, Span 
   std::int64_t in_dim = x.shape.empty() ? static_cast<std::int64_t>(x.data.size()) : x.shape.back();
   const std::vector<Layer>& layers = build_model(decl, in_dim, span);
   try {
-    for (const Layer& l : layers) {
-      switch (l.kind) {
-        case Layer::Dense:
-          x = rt::add(rt::matmul(x, l.w), l.b);
-          break;
-        case Layer::Activation:
-          x = rt::apply_unary(x, l.act);
-          break;
-        case Layer::Softmax:
-          x = rt::softmax_last(x);
-          break;
-        case Layer::Dropout:
-          break;  // identity at inference
-      }
-    }
+    return Value::tensor_de(forward_layers(layers, std::move(x)));
   } catch (const std::exception& e) {
     fail(span, std::string("modelo ") + decl_name(decl) + ": " + e.what());
   }
-  return Value::tensor_de(std::move(x));
 }
 
 rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
@@ -557,7 +576,210 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
     Value input = eval(*inner.args[0].value, env);
     return model_forward(*it->second, input, inner.span);
   }
-  fail(inner.span, "metodo de modelo '" + method + "' chega no M6.2/M8");
+  fail(inner.span, "metodo de modelo '" + method + "' chega no M8");
+}
+
+namespace {
+
+int field_int(const ast::Block& block, std::string_view key, int fallback) {
+  const Item* f = find_field(block, key);
+  if (f && f->value && f->value->kind == ExprKind::IntLit) {
+    return static_cast<int>(std::strtol(f->value->text.c_str(), nullptr, 10));
+  }
+  return fallback;
+}
+double field_num(const ast::Block& block, std::string_view key, double fallback) {
+  const Item* f = find_field(block, key);
+  if (f && f->value && (f->value->kind == ExprKind::DecimalLit || f->value->kind == ExprKind::IntLit)) {
+    return std::strtod(f->value->text.c_str(), nullptr);
+  }
+  return fallback;
+}
+std::string field_word(const ast::Block& block, std::string_view key, std::string fallback) {
+  const Item* f = find_field(block, key);
+  if (f && f->value && f->value->kind == ExprKind::Name) return f->value->text;
+  return fallback;
+}
+
+// Sum a [B, C] gradient over the batch dimension -> [C].
+rt::Tensor col_sum(const rt::Tensor& g) {
+  const auto c = static_cast<std::size_t>(g.shape.size() == 2 ? g.shape[1] : g.data.size());
+  rt::Tensor out = rt::Tensor::zeros({static_cast<std::int64_t>(c)});
+  for (std::size_t k = 0; k < g.data.size(); ++k) out.data[k % c] += g.data[k];
+  return out;
+}
+
+float activation_deriv(const std::string& fn, float pre, float post) {
+  if (fn == "relu") return pre > 0.0F ? 1.0F : 0.0F;
+  if (fn == "sigmoide") return post * (1.0F - post);
+  if (fn == "tanh") return 1.0F - post * post;
+  if (fn == "silu") {
+    float s = 1.0F / (1.0F + std::exp(-pre));
+    return s * (1.0F + pre * (1.0F - s));
+  }
+  return 1.0F;  // gelu et al.: approximated as identity during training (M6.3)
+}
+
+}  // namespace
+
+void Interpreter::run_treino(const Item& decl) {
+  const std::string name = decl_name(decl);
+  auto mit = entities_.find(name);
+  if (mit == entities_.end() || mit->second->key != "modelo") {
+    fail(decl.span, "treino '" + name + "': nao existe 'modelo " + name + "'");
+  }
+  if (!decl.block) return;
+  const ast::Block& cfg = *decl.block;
+
+  const Item* dados = find_field(cfg, "dados");
+  if (!dados || !dados->value) fail(decl.span, "treino '" + name + "': falta 'dados:'");
+  Value data = eval(*dados->value, root_);
+  if (data.kind != ValueKind::Mapa || !data.map || !data.map->find("x") || !data.map->find("y")) {
+    fail(dados->value->span, "treino: 'dados' deve produzir { x: <tensor>, y: <lista> }");
+  }
+  rt::Tensor x = value_to_tensor(*data.map->find("x"), decl.span);
+  if (x.rank() != 2) fail(decl.span, "treino: 'x' deve ser 2D [amostras, atributos]");
+  const std::int64_t n = x.shape[0];
+  const std::int64_t f = x.shape[1];
+
+  std::vector<int> y;
+  const Value* yv = data.map->find("y");
+  if (yv->kind == ValueKind::Lista && yv->list) {
+    for (const Value& e : *yv->list) y.push_back(static_cast<int>(e.as_number()));
+  }
+  if (static_cast<std::int64_t>(y.size()) != n) fail(decl.span, "treino: |x| != |y|");
+  int classes = 1;
+  for (int v : y) classes = std::max(classes, v + 1);
+
+  const std::string perda = field_word(cfg, "perda", "entropia_cruzada");
+  const std::string otim = field_word(cfg, "otimizador", "sgd");
+  double lr = field_num(cfg, "taxa", field_num(cfg, "taxa_aprendizado", 0.1));
+  const int epocas = field_int(cfg, "epocas", 50);
+  const Item* vf = find_field(cfg, "verboso");
+  const bool verbose = vf && vf->value && vf->value->kind == ExprKind::BoolLit && vf->value->boolean;
+
+  std::vector<Layer> layers = build_layers(*mit->second, f);
+  if (layers.empty() || layers.back().kind != Layer::Softmax || perda != "entropia_cruzada") {
+    fail(decl.span,
+         "treino (M6.2): suportado apenas perda 'entropia_cruzada' com 'softmax' na ultima camada");
+  }
+  for (Layer& l : layers) {
+    if (l.kind != Layer::Dense) continue;
+    l.m_w = rt::Tensor::zeros(l.w.shape);
+    l.v_w = rt::Tensor::zeros(l.w.shape);
+    l.m_b = rt::Tensor::zeros(l.b.shape);
+    l.v_b = rt::Tensor::zeros(l.b.shape);
+  }
+
+  const float inv_n = 1.0F / static_cast<float>(n);
+  float first_loss = 0.0F;
+  float last_loss = 0.0F;
+  int adam_t = 0;
+
+  try {
+    for (int epoch = 1; epoch <= epocas; ++epoch) {
+      // Forward with cached inputs per layer.
+      std::vector<rt::Tensor> ins;
+      ins.reserve(layers.size() + 1);
+      rt::Tensor cur = x;
+      for (const Layer& l : layers) {
+        ins.push_back(cur);
+        switch (l.kind) {
+          case Layer::Dense: cur = rt::add(rt::matmul(cur, l.w), l.b); break;
+          case Layer::Activation: cur = rt::apply_unary(cur, l.act); break;
+          case Layer::Softmax: cur = rt::softmax_last(cur); break;
+          case Layer::Dropout: break;
+        }
+      }
+      const rt::Tensor& probs = cur;  // [N, C]
+
+      // Cross-entropy loss and dL/d(logits) = probs - onehot(y), averaged.
+      float loss = 0.0F;
+      rt::Tensor grad = probs;  // becomes gradient w.r.t. softmax input
+      for (std::int64_t i = 0; i < n; ++i) {
+        const int label = y[static_cast<std::size_t>(i)];
+        const auto idx = static_cast<std::size_t>(i * classes + label);
+        loss -= std::log(std::max(probs.data[idx], 1e-9F));
+        for (std::int64_t c = 0; c < classes; ++c) {
+          auto g = static_cast<std::size_t>(i * classes + c);
+          grad.data[g] = (grad.data[g] - (c == label ? 1.0F : 0.0F)) * inv_n;
+        }
+      }
+      loss *= inv_n;
+      if (epoch == 1) first_loss = loss;
+      last_loss = loss;
+      if (verbose && (epoch == 1 || epoch % std::max(1, epocas / 10) == 0)) {
+        out_ << "  epoca " << epoch << " perda " << loss << "\n";
+      }
+
+      // Backward: skip the softmax layer (fused above); update Dense/Activation.
+      ++adam_t;
+      for (std::int64_t li = static_cast<std::int64_t>(layers.size()) - 1; li >= 0; --li) {
+        Layer& l = layers[static_cast<std::size_t>(li)];
+        const rt::Tensor& in = ins[static_cast<std::size_t>(li)];
+        if (l.kind == Layer::Softmax || l.kind == Layer::Dropout) continue;
+        if (l.kind == Layer::Activation) {
+          const rt::Tensor& out_act = ins[static_cast<std::size_t>(li) + 1 < ins.size()
+                                              ? static_cast<std::size_t>(li) + 1
+                                              : static_cast<std::size_t>(li)];
+          for (std::size_t k = 0; k < grad.data.size(); ++k) {
+            grad.data[k] *= activation_deriv(l.act, in.data[k],
+                                             k < out_act.data.size() ? out_act.data[k] : 0.0F);
+          }
+          continue;
+        }
+        // Dense
+        rt::Tensor dw = rt::matmul(rt::transpose2d(in), grad);  // [F_in, C]
+        rt::Tensor db = col_sum(grad);
+        rt::Tensor grad_in = rt::matmul(grad, rt::transpose2d(l.w));
+
+        if (otim == "adam") {
+          const float b1 = 0.9F, b2 = 0.999F, eps = 1e-8F;
+          const float c1 = 1.0F - std::pow(b1, static_cast<float>(adam_t));
+          const float c2 = 1.0F - std::pow(b2, static_cast<float>(adam_t));
+          auto step = [&](rt::Tensor& w, rt::Tensor& m, rt::Tensor& v, const rt::Tensor& g) {
+            for (std::size_t k = 0; k < w.data.size(); ++k) {
+              m.data[k] = b1 * m.data[k] + (1.0F - b1) * g.data[k];
+              v.data[k] = b2 * v.data[k] + (1.0F - b2) * g.data[k] * g.data[k];
+              float mh = m.data[k] / c1;
+              float vh = v.data[k] / c2;
+              w.data[k] -= static_cast<float>(lr) * mh / (std::sqrt(vh) + eps);
+            }
+          };
+          step(l.w, l.m_w, l.v_w, dw);
+          step(l.b, l.m_b, l.v_b, db);
+        } else {
+          for (std::size_t k = 0; k < l.w.data.size(); ++k) {
+            l.w.data[k] -= static_cast<float>(lr) * dw.data[k];
+          }
+          for (std::size_t k = 0; k < l.b.data.size(); ++k) {
+            l.b.data[k] -= static_cast<float>(lr) * db.data[k];
+          }
+        }
+        grad = std::move(grad_in);
+      }
+    }
+
+    // Final training-set accuracy.
+    rt::Tensor probs = forward_layers(layers, x);
+    int correct = 0;
+    for (std::int64_t i = 0; i < n; ++i) {
+      std::int64_t best = 0;
+      for (std::int64_t c = 1; c < classes; ++c) {
+        if (probs.data[static_cast<std::size_t>(i * classes + c)] >
+            probs.data[static_cast<std::size_t>(i * classes + best)]) {
+          best = c;
+        }
+      }
+      if (best == y[static_cast<std::size_t>(i)]) ++correct;
+    }
+    out_ << "treino " << name << ": perda caiu " << (last_loss < first_loss ? "sim" : "nao")
+         << " | acuracia " << correct << "/" << n << "\n";
+  } catch (const std::exception& e) {
+    fail(decl.span, std::string("treino ") + name + ": " + e.what());
+  }
+
+  model_cache_[name] = std::move(layers);
 }
 
 // ------------------------------------------------------------------ statements
@@ -1108,6 +1330,40 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_csv espera um caminho");
     return read_csv_file(a[0].s, call.span);
+  }
+  if (name == "carregador") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "carregador espera um caminho");
+    const Value* alvo = kw.find("alvo");
+    if (!alvo || alvo->kind != ValueKind::Texto) fail(call.span, "carregador espera 'alvo: \"coluna\"'");
+    Value tbl = read_csv_file(a[0].s, call.span);
+    const rt::ValueList& rows = tbl.list ? *tbl.list : rt::ValueList{};
+    std::vector<std::string> feats;
+    if (!rows.empty() && rows[0].map) {
+      for (const auto& kv : rows[0].map->items) {
+        if (kv.first != alvo->s) feats.push_back(kv.first);
+      }
+    }
+    rt::Tensor x;
+    x.shape = {static_cast<std::int64_t>(rows.size()), static_cast<std::int64_t>(feats.size())};
+    x.data.reserve(rows.size() * feats.size());
+    Value ys = Value::lista();
+    for (const Value& row : rows) {
+      for (const std::string& c : feats) {
+        const Value* cell = row.map ? row.map->find(c) : nullptr;
+        x.data.push_back(cell ? static_cast<float>(cell->as_number()) : 0.0F);
+      }
+      const Value* t = row.map ? row.map->find(alvo->s) : nullptr;
+      ys.list->push_back(Value::inteiro(t ? static_cast<std::int64_t>(t->as_number()) : 0));
+    }
+    Value out = Value::mapa();
+    out.map->set("x", Value::tensor_de(std::move(x)));
+    out.map->set("y", std::move(ys));
+    rt::ValueList fl;
+    for (const std::string& c : feats) fl.push_back(Value::texto(c));
+    out.map->set("atributos", Value::lista(std::move(fl)));
+    return out;
   }
   if (name == "ler_json") {
     auto a = args();

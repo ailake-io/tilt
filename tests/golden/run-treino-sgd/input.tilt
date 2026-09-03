@@ -1,0 +1,12 @@
+modelo M:
+  camadas:
+    - linear: [1, 4]
+    - ativacao: relu
+    - linear: [4, 2]
+    - softmax
+
+treino M:
+  dados: carregador "d.csv", alvo: "classe"
+  otimizador: sgd
+  taxa: 0.3
+  epocas: 100

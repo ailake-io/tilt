@@ -307,7 +307,12 @@ ItemPtr Parser::parse_field() {
     it->block = std::make_unique<Block>(parse_body());
   } else {
     it->value = parse_expr();
-    if (!attach_trailing_block(it->value.get())) accept(TokenKind::Newline);
+    if (!attach_trailing_block(it->value.get())) {
+      accept(TokenKind::Newline);
+      // `chave: tag` followed by a deeper block is a tagged config section
+      // (e.g. `otimizador: adam` / `taxa: 0.001`).
+      if (at(TokenKind::Indent)) it->block = std::make_unique<Block>(parse_block());
+    }
   }
   return it;
 }

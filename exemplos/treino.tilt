@@ -1,0 +1,22 @@
+# Treino (CPU): backprop + Adam sobre uma pilha densa + softmax.
+
+modelo Florista:
+  camadas:
+    - linear: [2, 6]
+    - ativacao: relu
+    - linear: [6, 2]
+    - softmax
+
+treino Florista:
+  dados: carregador "exemplos/dados/flores.csv", alvo: "especie"
+  perda: entropia_cruzada
+  otimizador: adam
+  taxa: 0.05
+  epocas: 150
+
+pipeline classificar:
+  passos:
+    - pequena = modelo Florista.executar tensor([2.0, 1.0])
+    - grande = modelo Florista.executar tensor([5.0, 2.2])
+    - imprimir "amostra pequena -> especie", pequena.argmax
+    - imprimir "amostra grande  -> especie", grande.argmax

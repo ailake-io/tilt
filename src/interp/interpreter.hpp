@@ -71,17 +71,22 @@ class Interpreter {
   rt::Value read_csv_file(const std::string& path, Span span);
   rt::Value read_fonte(const std::string& name, Span span);
 
-  // Deep-learning inference.
+  // Deep learning.
   struct Layer {
     enum Kind { Dense, Activation, Softmax, Dropout } kind = Dense;
     rt::Tensor w;
     rt::Tensor b;
     std::string act;
+    // Adam moment estimates (allocated lazily during training).
+    rt::Tensor m_w, v_w, m_b, v_b;
   };
   rt::Tensor value_to_tensor(const rt::Value& v, Span span);
+  std::vector<Layer> build_layers(const ast::Item& model_decl, std::int64_t in_dim);
   const std::vector<Layer>& build_model(const ast::Item& decl, std::int64_t in_dim, Span span);
+  rt::Tensor forward_layers(const std::vector<Layer>& layers, rt::Tensor x);
   rt::Value model_forward(const ast::Item& decl, const rt::Value& input, Span span);
   rt::Value eval_modelo_call(const ast::Expr& call, Env& env);
+  void run_treino(const ast::Item& decl);
 
   const ast::Program& program_;
   DiagnosticEngine& diag_;

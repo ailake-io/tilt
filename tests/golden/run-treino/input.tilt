@@ -1,0 +1,19 @@
+modelo M:
+  camadas:
+    - linear: [2, 6]
+    - ativacao: relu
+    - linear: [6, 2]
+    - softmax
+
+treino M:
+  dados: carregador "d.csv", alvo: "y"
+  perda: entropia_cruzada
+  otimizador: adam
+  taxa: 0.05
+  epocas: 150
+
+pipeline usar:
+  passos:
+    - a = modelo M.executar tensor([0.0, 0.0])
+    - b = modelo M.executar tensor([5.0, 5.0])
+    - imprimir "a:", a.argmax, "b:", b.argmax

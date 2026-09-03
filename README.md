@@ -38,9 +38,9 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M4** — interpretador de árvore (`tilt executar <arquivo>`). ✅
 - **M5** — executor de `pipeline`: `verificar`, `ao_falhar`, `agenda`. ✅
 - **M5.2** — conector JSON + wiring de `fonte` para arquivos locais (csv/json). ✅
-- **M6** — tensores + inferência de `modelo` (CPU). ✅ (1ª passada)
-- **M6.2 / M7+** — `treino` + autograd, carga de `pesos:`, GPU, conectores de
-  rede, LLM, agentes, VM de bytecode.
+- **M6** — tensores + inferência de `modelo` (CPU). ✅
+- **M6.2** — `treino`: backprop + SGD/Adam + `carregador`. ✅
+- **M7+** — GPU, carga de `pesos:`, conectores de rede, LLM, agentes, VM de bytecode.
 
 ### `tilt executar`
 
@@ -64,8 +64,13 @@ Tensores (f32, CPU): `tensor [..]` / `zeros [..]` / `uns [..]` / `aleatorio [..]
 `+ - * /` elementwise e com escalar; `.forma .matmul .transposta .reformar
 .relu/.gelu/.sigmoide/.tanh .softmax .soma .media .argmax`. `modelo M:` com
 `camadas:` (`densa: N` / `linear: [e, s]` / `ativacao:` / `softmax` / `abandono:`)
-roda via `modelo M.executar <tensor>` — init Xavier com semente fixa; carga de
-`pesos:` e `treino` chegam no M6.2.
+roda via `modelo M.executar <tensor>` — init Xavier com semente fixa.
+
+`treino M:` treina o `modelo M` de mesmo nome: `dados: carregador "d.csv",
+alvo: "col"`, `perda: entropia_cruzada`, `otimizador: sgd|adam`, `taxa:`,
+`epocas:`, `verboso:`. Backprop escrito à mão para a pilha densa+ativação+softmax
+(relu/sigmoide/tanh/silu). Pós-treino os pesos ficam no `modelo`. Carga de
+`pesos:` de arquivo e GPU: M7. Conectores de rede, LLM, agentes: adiante.
 
 Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
 `incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução
