@@ -986,6 +986,199 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
   fail(call.span, "indice: metodo '" + method + "' desconhecido (use inserir / buscar)");
 }
 
+// ------------------------------------------------------------------ agents
+
+rt::Value Interpreter::run_tool(const Item& tool_decl, const rt::ValueMap& args, Span span) {
+  Env env;
+  env.parent = &root_;
+  if (tool_decl.block) {
+    if (const Item* entrada = find_field(*tool_decl.block, "entrada"); entrada && entrada->block) {
+      for (const auto& f : entrada->block->items) {
+        if (f && f->kind == ItemKind::Field) {
+          const Value* a = args.find(f->key);
+          env.vars[f->key] = a ? *a : Value::nulo();
+        }
+      }
+    }
+    if (const Item* exec = find_field(*tool_decl.block, "executar"); exec && exec->block) {
+      try {
+        exec_block(*exec->block, env);
+      } catch (const ReturnSignal& r) {
+        return r.value;
+      }
+    }
+  }
+  (void)span;
+  return Value::nulo();
+}
+
+rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, const Expr& call,
+                                             Env& env) {
+  auto it = entities_.find(agent_name);
+  const ast::Block& cfg = *it->second->block;
+
+  std::string message;
+  if (!call.args.empty()) {
+    Value m = eval(*call.args[0].value, env);
+    message = m.kind == ValueKind::Texto ? m.s : to_display(m);
+  }
+
+  const std::string papel = field_str(cfg, "papel");
+  const std::string llm_name = field_word(cfg, "llm", "");
+  const std::string memoria = field_word(cfg, "memoria", "nenhuma");
+  const int max_passos = field_int(cfg, "max_passos", 6);
+
+  // Collect the declared tools.
+  std::vector<std::string> tools;
+  if (const Item* tf = find_field(cfg, "ferramentas")) {
+    if (tf->value && tf->value->kind == ExprKind::ListLit) {
+      for (const auto& e : tf->value->elems) {
+        if (e && e->kind == ExprKind::Name) tools.push_back(e->text);
+      }
+    }
+    if (tf->block) {
+      for (const auto& raw : tf->block->items) {
+        const Item* c = (raw && raw->kind == ItemKind::ListEntry && raw->child) ? raw->child.get()
+                                                                                : raw.get();
+        if (!c) continue;
+        if (c->kind == ItemKind::Stmt && c->stmt && c->stmt->a &&
+            c->stmt->a->kind == ExprKind::Name) {
+          tools.push_back(c->stmt->a->text);
+        } else if (c->kind == ItemKind::Field) {
+          tools.push_back(c->key);
+        }
+      }
+    }
+  }
+
+  // Deterministic loop: run each tool once with best-effort inputs, collect
+  // observations, then ask the LLM to compose the answer. The real iterative
+  // planner (LLM picks the next action) lands in M9.2.
+  Value rastro = Value::lista();
+  std::string observations;
+  int step = 0;
+  for (const std::string& tname : tools) {
+    if (step >= max_passos) break;
+    auto tit = entities_.find(tname);
+    if (tit == entities_.end() || tit->second->key != "ferramenta") {
+      fail(call.span, "agente '" + agent_name + "': ferramenta '" + tname + "' nao declarada");
+    }
+    rt::ValueMap targs;
+    if (tit->second->block) {
+      if (const Item* entrada = find_field(*tit->second->block, "entrada"); entrada && entrada->block) {
+        for (const auto& f : entrada->block->items) {
+          if (!f || f->kind != ItemKind::Field) continue;
+          if (f->value && f->value->kind == ExprKind::Name && f->value->text == "texto") {
+            targs.set(f->key, Value::texto(message));
+          } else {
+            targs.set(f->key, default_for_type(f->value.get()));
+          }
+        }
+      }
+    }
+    Value obs = run_tool(*tit->second, targs, call.span);
+    ++step;
+
+    Value entry = Value::mapa();
+    entry.map->set("passo", Value::inteiro(step));
+    entry.map->set("ferramenta", Value::texto(tname));
+    entry.map->set("observacao", Value::texto(to_display(obs)));
+    rastro.list->push_back(std::move(entry));
+    observations += "- " + tname + ": " + to_display(obs) + "\n";
+  }
+
+  std::string prompt = message;
+  if (memoria == "conversa" && !agent_memory_[agent_name].empty()) {
+    prompt = agent_memory_[agent_name] + "\n" + message;
+  }
+  std::string system = papel;
+  if (!observations.empty()) system += "\n\nObservacoes das ferramentas:\n" + observations;
+
+  std::string answer;
+  if (!llm_name.empty()) {
+    rt::LlmConfig lc = llm_config(llm_name, call.span);
+    try {
+      answer = rt::llm_chat(lc, system, prompt);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+    }
+  } else {
+    answer = "[sem llm] " + message;
+  }
+
+  if (memoria == "conversa") {
+    agent_memory_[agent_name] += (agent_memory_[agent_name].empty() ? "" : "\n") + ("usuario: " + message) +
+                                 "\nagente: " + answer;
+  }
+
+  Value out = Value::mapa();
+  out.map->set("texto", Value::texto(answer));
+  out.map->set("rastro", std::move(rastro));
+  return out;
+}
+
+rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr& call, Env& env) {
+  auto it = entities_.find(team_name);
+  const ast::Block& cfg = *it->second->block;
+  const std::string estrategia = field_word(cfg, "estrategia", "sequencial");
+
+  std::vector<std::pair<std::string, std::string>> members;  // (rotulo, agente)
+  if (const Item* af = find_field(cfg, "agentes"); af && af->block) {
+    for (const auto& raw : af->block->items) {
+      const Item* c = (raw && raw->kind == ItemKind::ListEntry && raw->child) ? raw->child.get()
+                                                                              : raw.get();
+      if (c && c->kind == ItemKind::Field && c->value && c->value->kind == ExprKind::Name) {
+        members.emplace_back(c->key, c->value->text);
+      } else if (c && c->kind == ItemKind::Stmt && c->stmt && c->stmt->a &&
+                 c->stmt->a->kind == ExprKind::Name) {
+        members.emplace_back(c->stmt->a->text, c->stmt->a->text);
+      }
+    }
+  }
+
+  std::string message;
+  if (!call.args.empty()) {
+    Value m = eval(*call.args[0].value, env);
+    message = m.kind == ValueKind::Texto ? m.s : to_display(m);
+  }
+
+  if (estrategia == "supervisor") {
+    fail(call.span, "equipe '" + team_name + "': estrategia 'supervisor' chega no M9.2");
+  }
+
+  Value rastro = Value::lista();
+  std::string current = message;
+  std::string combined;
+
+  for (const auto& [rotulo, agente] : members) {
+    Expr fake;  // synthesize a `<agente>.responder <texto>` call
+    fake.kind = ExprKind::Call;
+    fake.span = call.span;
+    ast::Arg arg;
+    arg.value = std::make_unique<Expr>();
+    arg.value->kind = ExprKind::TextLit;
+    arg.value->text = (estrategia == "paralelo") ? message : current;
+    fake.args.push_back(std::move(arg));
+
+    Value r = eval_agente_responder(agente, fake, env);
+    std::string texto = (r.kind == ValueKind::Mapa && r.map && r.map->find("texto"))
+                            ? r.map->find("texto")->s
+                            : "";
+    Value entry = Value::mapa();
+    entry.map->set("agente", Value::texto(rotulo));
+    entry.map->set("texto", Value::texto(texto));
+    rastro.list->push_back(std::move(entry));
+
+    current = texto;
+    combined += rotulo + ": " + texto + "\n";
+  }
+
+  Value out = Value::mapa();
+  out.map->set("texto", Value::texto(estrategia == "paralelo" ? combined : current));
+  out.map->set("rastro", std::move(rastro));
+  return out;
+}
+
 // ------------------------------------------------------------------ statements
 
 void Interpreter::exec_block(const ast::Block& block, Env& env) {
@@ -1677,9 +1870,23 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
          DiagCode::ConnectorNotImplemented);
   }
   if (name == "modelo") return eval_modelo_call(call, env);
-  if (word_in(name, {"agente", "ferramenta", "treinar", "incorporador"})) {
-    fail(call.span, "execucao de '" + name + "' nao implementada (M8-M9)",
-         DiagCode::NotImplemented);
+
+  // Direct tool call: `<ferramenta> arg: valor`.
+  if (auto tit = entities_.find(name);
+      tit != entities_.end() && tit->second->key == "ferramenta") {
+    rt::ValueMap targs;
+    for (const auto& a : call.args) {
+      if (!a.name.empty()) targs.set(a.name, eval(*a.value, env));
+    }
+    if (call.block) {
+      for (const auto& it : call.block->items) {
+        if (it && it->kind == ItemKind::Field && it->value) targs.set(it->key, eval(*it->value, env));
+      }
+    }
+    return run_tool(*tit->second, targs, call.span);
+  }
+  if (word_in(name, {"treinar", "incorporador"})) {
+    fail(call.span, "execucao de '" + name + "' nao implementada", DiagCode::NotImplemented);
   }
 
   fail(call.span, "funcao '" + name + "' nao definida");
@@ -1690,9 +1897,29 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
 Value Interpreter::eval_method(const std::string& method, Value receiver, const Expr& call,
                                Env& env) {
   if (receiver.kind == ValueKind::Texto) {
-    if (auto e = entities_.find(receiver.s);
-        e != entities_.end() && e->second->key == "indice" && e->second->block) {
-      return eval_indice_method(receiver.s, method, call, env);
+    if (auto e = entities_.find(receiver.s); e != entities_.end() && e->second->block) {
+      const std::string& ekind = e->second->key;
+      if (ekind == "indice") return eval_indice_method(receiver.s, method, call, env);
+      if (ekind == "agente" && (method == "responder" || method == "perguntar")) {
+        return eval_agente_responder(receiver.s, call, env);
+      }
+      if (ekind == "equipe" && (method == "executar" || method == "responder")) {
+        return eval_equipe_call(receiver.s, call, env);
+      }
+      if (ekind == "ferramenta" && method == "executar") {
+        rt::ValueMap targs;
+        for (const auto& a : call.args) {
+          if (!a.name.empty()) targs.set(a.name, eval(*a.value, env));
+        }
+        if (call.block) {
+          for (const auto& it : call.block->items) {
+            if (it && it->kind == ItemKind::Field && it->value) {
+              targs.set(it->key, eval(*it->value, env));
+            }
+          }
+        }
+        return run_tool(*e->second, targs, call.span);
+      }
     }
   }
 

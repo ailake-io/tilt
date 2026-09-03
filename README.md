@@ -41,7 +41,9 @@ UPDATE=1 sh tests/run_golden.sh ./build/release/bin/tilt tests/golden
 - **M6** — tensores + inferência de `modelo` (CPU). ✅
 - **M6.2** — `treino`: backprop + SGD/Adam + `carregador`. ✅
 - **M8** — cliente LLM (`perguntar`/`incorporar`), saída estruturada, RAG (`indice`). ✅
-- **M7 / M9+** — GPU, carga de `pesos:`, agentes, `servico` async, VM de bytecode.
+- **M9** — `ferramenta` executável, `agente.responder`, `equipe`. ✅ (1ª passada)
+- **M7 / M9.2 / M10+** — GPU, planner iterativo, `estrategia: supervisor`,
+  `servico` async, VM de bytecode.
 
 ### `tilt executar`
 
@@ -87,6 +89,16 @@ texto>` e `kb.buscar "consulta", top_k: N` → `lista` de `{ id, texto, score }`
 Transporte: `TILT_LLM=mock` dá respostas/embeddings determinísticos (offline,
 usado nos testes); sem a variável, chamadas reais via `curl` (Anthropic/OpenAI/
 local). GPU e carga de `pesos:`: M7.
+
+### Agentes
+
+`ferramenta T: entrada: {...}, executar: <passos com retornar>` — chamável
+direto (`T arg: v`) ou por um agente. `agente A: llm:, papel:, ferramentas:,
+memoria: nenhuma|conversa, max_passos:` — `A.responder "msg"` roda as
+ferramentas (laço determinístico no `mock`), junta as observações e pede a
+resposta ao LLM → `{ texto, rastro: [{ passo, ferramenta, observacao }] }`.
+`equipe E: agentes: [-rotulo: A], estrategia: sequencial|paralelo` —
+`E.executar "msg"`. Planner iterativo e `supervisor`: M9.2.
 
 Conectores (`postgres`, `kafka`, `s3`, `parquet`), LLM (`perguntar`,
 `incorporar`), agentes, `modelo`/`treino` e GPU levantam um erro de execução

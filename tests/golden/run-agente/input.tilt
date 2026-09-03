@@ -1,0 +1,28 @@
+llm gpt:
+  provedor: "openai"
+  modelo: "m"
+  chave: env "K"
+
+ferramenta soma_dois:
+  descricao: "soma dois numeros"
+  entrada:
+    a: inteiro
+    b: inteiro
+  executar:
+    retornar a + b
+
+agente Calc:
+  llm: gpt
+  papel: "assistente"
+  ferramentas:
+    - soma_dois
+  memoria: nenhuma
+  max_passos: 2
+
+pipeline p:
+  passos:
+    - r = Calc.responder "quanto e 2 mais 3?"
+    - imprimir r.texto
+    - imprimir "passos:", r.rastro.tamanho
+    - para cada s em r.rastro:
+        imprimir s.passo, s.ferramenta, s.observacao

@@ -1,0 +1,4 @@
+== pipeline p ==
+[mock] resposta para: quanto e 2 mais 3?
+passos: 1
+1 soma_dois 0

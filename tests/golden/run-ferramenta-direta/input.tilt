@@ -1,0 +1,11 @@
+ferramenta saudacao:
+  descricao: "monta uma saudacao"
+  entrada:
+    nome: texto
+  executar:
+    retornar "ola " + nome
+
+pipeline p:
+  passos:
+    - msg = saudacao nome: "mundo"
+    - imprimir msg

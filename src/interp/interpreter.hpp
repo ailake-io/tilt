@@ -97,6 +97,11 @@ class Interpreter {
   rt::Value eval_indice_method(const std::string& indice_name, const std::string& method,
                                const ast::Expr& call, Env& env);
 
+  // Agents.
+  rt::Value run_tool(const ast::Item& tool_decl, const rt::ValueMap& args, Span span);
+  rt::Value eval_agente_responder(const std::string& agent_name, const ast::Expr& call, Env& env);
+  rt::Value eval_equipe_call(const std::string& team_name, const ast::Expr& call, Env& env);
+
   const ast::Program& program_;
   DiagnosticEngine& diag_;
   std::ostream& out_;
@@ -107,6 +112,7 @@ class Interpreter {
   std::vector<const ast::Item*> pipelines_;
   std::unordered_map<std::string, std::vector<Layer>> model_cache_;
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
+  std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
   bool schedule_mode_ = false;
 };
 

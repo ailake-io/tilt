@@ -1,0 +1,26 @@
+llm gpt:
+  provedor: "openai"
+  modelo: "m"
+  chave: env "K"
+
+agente A:
+  llm: gpt
+  papel: "primeiro"
+  memoria: nenhuma
+
+agente B:
+  llm: gpt
+  papel: "segundo"
+  memoria: nenhuma
+
+equipe Fluxo:
+  agentes:
+    - etapa1: A
+    - etapa2: B
+  estrategia: sequencial
+
+pipeline p:
+  passos:
+    - r = Fluxo.executar "comece"
+    - imprimir r.texto
+    - imprimir "membros:", r.rastro.tamanho

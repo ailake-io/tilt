@@ -1,0 +1,35 @@
+# Agente com ferramenta + RAG. Rode com TILT_LLM=mock.
+
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+
+ferramenta consultar_base:
+  descricao: "Recupera o trecho mais relevante da base."
+  entrada:
+    pergunta: texto
+  executar:
+    achados = base.buscar pergunta, top_k: 1
+    retornar achados
+
+agente Suporte:
+  llm: gpt
+  papel: "Assistente de suporte tecnico. Responda com base nas observacoes."
+  ferramentas:
+    - consultar_base
+  memoria: nenhuma
+  max_passos: 3
+
+pipeline atendimento:
+  passos:
+    - base.inserir "o horario de suporte e de segunda a sexta"
+    - base.inserir "faturas sao emitidas no primeiro dia util do mes"
+    - r = Suporte.responder "quando sai a fatura?"
+    - imprimir "texto:", r.texto
+    - para cada passo em r.rastro:
+        imprimir "  usou", passo.ferramenta
