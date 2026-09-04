@@ -63,7 +63,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## LLM / RAG
 
 - Sem `TILT_LLM`, a chamada real depende do `curl` no `PATH`.
-- `indice` só com `armazenamento: "memoria"`; `qdrant://` / `pgvector` → `T900`.
+- `indice` roda com `armazenamento: "memoria"` (cosseno local) e
+  `"qdrant://host:porta/colecao"` (REST via curl); `pgvector` → `T900`.
 - Os embeddings do modo `mock` são um bag-of-tokens hasheado (16 dimensões) —
   bons para testes determinísticos, não para relevância real.
 
