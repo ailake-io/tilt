@@ -350,6 +350,67 @@ int Interpreter::run() {
   }
 }
 
+int Interpreter::run_vm() {
+  try {
+    register_decls();
+
+    bool did_something = false;
+    for (const auto& item : program_.items) {
+      if (item && item->kind == ItemKind::Decl && item->key == "treino") {
+        run_treino(*item);
+        did_something = true;
+      }
+    }
+
+    if (!pipelines_.empty()) {
+      std::unordered_set<std::string> names;
+      for (const auto& kv : functions_) names.insert(kv.first);
+      for (const Item* p : pipelines_) {
+        // Pipeline no subconjunto -> bytecode VM; fora dele -> arvore.
+        std::shared_ptr<vm::Chunk> chunk;
+        try {
+          chunk = std::make_shared<vm::Chunk>(vm::compile_pipeline(*p, names));
+        } catch (const vm::NotCompilable&) {
+          chunk = nullptr;
+        }
+        if (!chunk) {
+          run_pipeline(*p);
+          continue;
+        }
+        out_ << "== pipeline " << decl_name(*p) << " ==\n";
+        vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
+          auto f = functions_.find(name);
+          if (f == functions_.end()) {
+            *handled = false;
+            return Value::nulo();
+          }
+          *handled = true;
+          return call_function(*f->second, std::move(a), Span{});
+        });
+        try {
+          machine.run(*chunk, {});
+        } catch (const std::exception& e) {
+          fail(p->span, std::string("VM: ") + e.what());
+        }
+      }
+    } else if (auto it = functions_.find("principal"); it != functions_.end()) {
+      call_function(*it->second, {}, it->second->span);
+    } else if (!did_something) {
+      out_ << "nada para executar: nenhum 'pipeline', 'treino' nem 'funcao principal'\n";
+    }
+    return 0;
+  } catch (const RuntimeAbort& a) {
+    Diagnostic d;
+    d.severity = Severity::Error;
+    d.code = a.code;
+    d.span = a.span;
+    d.message = a.message;
+    d.notes = a.notes;
+    diag_.report(std::move(d));
+    return 1;
+  }
+}
+
 int Interpreter::run_scheduled() {
   try {
     register_decls();
@@ -2082,8 +2143,44 @@ int Interpreter::serve(int port_override, int max_requests) {
 // ------------------------------------------------------------------ statements
 
 void Interpreter::exec_block(const ast::Block& block, Env& env) {
-  for (const auto& it : block.items) {
-    if (it) exec_item(*it, env);
+  // Desembrulha item de lista (`- x`) ate o conteudo.
+  auto unwrap = [](const Item* it) -> const Item* {
+    while (it && it->kind == ItemKind::ListEntry) {
+      it = it->child ? it->child.get()
+                     : (it->block && !it->block->items.empty() ? it->block->items[0].get()
+                                                               : nullptr);
+    }
+    return it;
+  };
+  const auto& items = block.items;
+  for (std::size_t k = 0; k < items.size(); ++k) {
+    const Item* it = items[k].get();
+    if (!it) continue;
+    // `- senao:` solto em 'passos:' (o parser nao o anexa ao 'se' quando ele
+    // vem como item de lista separado): trata como o 'senao' do 'se' imediato
+    // anterior — mas so se esse 'se' nao pegou nenhum ramo. Fora desse par,
+    // mantem o legado: executa o bloco incondicionalmente.
+    const Item* bare = unwrap(it);
+    const Item* prev = k > 0 ? unwrap(items[k - 1].get()) : nullptr;
+    const bool prev_if_bare =
+        prev && prev->kind == ItemKind::Stmt && prev->stmt &&
+        prev->stmt->kind == StmtKind::If && !prev->stmt->else_body;
+    if (bare && bare->kind == ItemKind::Field && bare->key == "senao" &&
+        bare->header.empty() && bare->block) {
+      if (prev_if_bare) {
+        if (!last_if_taken_) {
+          Env inner;
+          inner.parent = &env;
+          exec_block(*bare->block, inner);
+        }
+      } else {
+        Env inner;
+        inner.parent = &env;
+        exec_block(*bare->block, inner);
+      }
+      continue;
+    }
+    exec_item(*it, env);
   }
 }
 
@@ -2158,6 +2255,7 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
         Env inner;
         inner.parent = &env;
         exec_block(stmt.body, inner);
+        last_if_taken_ = true;
         return;
       }
       for (const auto& ei : stmt.elifs) {
@@ -2165,9 +2263,11 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
           Env inner;
           inner.parent = &env;
           exec_block(ei.body, inner);
+          last_if_taken_ = true;
           return;
         }
       }
+      last_if_taken_ = false;
       if (stmt.else_body) {
         Env inner;
         inner.parent = &env;

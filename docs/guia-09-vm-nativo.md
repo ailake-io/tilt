@@ -8,20 +8,30 @@ cache por função. É transparente — não há flag.
 
 Subconjunto suportado:
 
-- literais `inteiro`, `decimal`, `texto` (sem `{{ }}`), `logico`, `nulo`;
+- literais `inteiro`, `decimal`, `texto` (sem `{{ }}`), `logico`, `nulo` e
+  **listas** (`[...]`);
 - variáveis locais e parâmetros;
-- `+ - * / %`, comparações, `e` / `ou` / `nao`;
-- `se` / `senao se` / `senao`, `enquanto`, `retornar`;
+- `+ - * / %`, comparações, `contem`, `e` / `ou` / `nao`;
+- **índice** `lista[i]`;
+- `se` / `senao se` / `senao`, `enquanto`, **`para cada`**, `retornar`;
 - chamadas a outras `funcao`s (recursão inclusive) e a `imprimir` / `tamanho`.
 
-Fora disso (`para cada`, `tentar`, membros, índices, tensores, LLM, agente,
-tabelas, interpolação, …) a função cai no interpretador de árvore.
+Fora disso (`tentar`, membros, tensores, LLM, agente, tabelas, interpolação,
+…) a função cai no interpretador de árvore.
 
 Diferença observável: **`e` / `ou` na VM não fazem curto-circuito** nesta
 passada (avaliam os dois lados). Como o subconjunto não tem efeitos colaterais
 em expressão além de `imprimir`, o *valor* é o mesmo.
 
 `TILT_VM_DEBUG=1 tilt executar prog.tilt` despeja o bytecode gerado.
+
+## `tilt executar --vm`
+
+Roda **pipelines pelo bytecode VM**: cada pipeline cujo `passos:` cabe no
+subconjunto acima (sem `agenda:` / `ao_falhar:`) é compilado para bytecode e
+executado pela VM; os demais caem no interpretador de árvore, pipeline a
+pipeline. A saída é idêntica à de `tilt executar` — todo o suíte de golden
+`run-*` passa nos dois modos.
 
 ## Codegen nativo — `tilt compilar`
 
@@ -30,25 +40,34 @@ tilt compilar prog.tilt --saida ./prog        # ELF x86-64
 ./prog
 ```
 
-Compila o **subconjunto inteiro puro**:
+Compila o **programa inteiro** quando ele cabe no subconjunto da VM:
 
-- `funcao`s com literais **inteiros**, `+ - * / %` e comparações/lógica;
-- `se` / `enquanto` / `retornar`, recursão, chamadas entre `funcao`s (≤ 6 args);
-- `imprimir` de inteiros;
-- **exige** uma `funcao principal` (ponto de entrada).
+- `funcao`s (com `funcao principal`) **ou** programas de `pipeline`s — o
+  ponto de entrada espelha o interpretador: pipelines rodam em ordem com o
+  cabeçalho `== pipeline N ==`, senão `funcao principal`;
+- valores completos: `inteiro`, `decimal`, `texto`, `logico`, `nulo`,
+  **listas** com índice e `tamanho`;
+- `se` / `senao` / `enquanto` / `para cada`, recursão e chamadas entre
+  `funcao`s, `imprimir` com qualquer valor do subconjunto.
 
-Emite Assembly AT&T (máquina de pilha em slots de 16 bytes, `%rsp` 16-alinhado
-para `call`), grava um `.s` e um `.rt.c` (runtime de uma função,
-`tilt_print_row`) e chama `$CC -O2 -no-pie`. `--asm` mantém os intermediários.
+Emite Assembly AT&T (máquina de pilha em slots de 48 bytes com o valor
+empacotado, `%rsp` 16-alinhado para `call`), grava um `.s` e um `.rt.c`
+(runtime em C espelhando `runtime/value.cpp`: operadores, `to_display`,
+igualdade) e chama `$CC -O2 -no-pie … -lm`. `--asm` mantém os intermediários.
 
-Rejeita, com mensagem clara: constante não inteira, operador não suportado,
-`tamanho`, chamada fora do subconjunto, ausência de `funcao principal`.
+Rejeita, com mensagem clara: passo fora do subconjunto (chamadas builtin como
+`ler_csv`, interpolação, membros), constante/operador fora do subconjunto,
+pipeline com `agenda:` / `ao_falhar:`, e programas sem pipeline nem
+`funcao principal`.
 
-### Diferença conhecida
+### Semântica idêntica ao interpretador
 
-No nativo `/` é **divisão inteira** (`100 / 7 == 14`); no interpretador `/`
-promove para `decimal` (`100 / 7 == 14.2857`). Programas que passam pelo
-`native` de teste evitam `/` ou usam valores exatos.
+O runtime C replica `apply_binop` / `to_display` / `truthy` de
+`runtime/value.cpp` (concatenação de texto via `+`, `contem`, comparação
+lexicográfica de textos, divisão por zero → 0, `/` sempre `decimal`, formatação
+`%g` de decimais). O teste `native` do `ctest` é **diferencial**: compara a
+saída do binário nativa com a do interpretador para cada fixture
+(`tests/fixtures/nativo.tilt`, `nativo2.tilt`).
 
 ### Exemplo
 
@@ -58,8 +77,15 @@ funcao fib n -> inteiro:
     retornar n
   retornar fib(n - 1) + fib(n - 2)
 
-funcao principal:
-  imprimir fib(20)          # 6765
+pipeline calcular:
+  passos:
+    - imprimir fib(20)                 # 6765
+    - precos = [9.5, 4.25]
+    - total = 0.0
+    - para cada p em precos:
+        total = total + p
+    - imprimir "total:", total         # total: 13.75
 ```
 
-Ver [`../exemplos/nativo.tilt`](../exemplos/nativo.tilt).
+Ver [`../exemplos/nativo.tilt`](../exemplos/nativo.tilt) e
+[`../tests/fixtures/nativo2.tilt`](../tests/fixtures/nativo2.tilt).

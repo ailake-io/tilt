@@ -44,6 +44,7 @@ void print_usage(std::ostream& os) {
      << "comandos:\n"
      << "  checar <arquivo>                   verifica sintaxe, indentacao e tipos\n"
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
+     << "  executar --vm <arquivo>            roda pipelines pelo bytecode VM\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "  referencia                         referencia compacta da linguagem\n"
@@ -235,9 +236,12 @@ int cmd_checar(const std::vector<std::string_view>& args) {
 int cmd_executar(const std::vector<std::string_view>& args) {
   std::string_view path;
   bool schedule = false;
+  bool vm = false;
   for (std::size_t k = 1; k < args.size(); ++k) {
     if (args[k] == "--agendar") {
       schedule = true;
+    } else if (args[k] == "--vm") {
+      vm = true;
     } else if (args[k].rfind("--", 0) == 0) {
       std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
       return kUsage;
@@ -246,7 +250,7 @@ int cmd_executar(const std::vector<std::string_view>& args) {
     }
   }
   if (path.empty()) {
-    std::cerr << "tilt: uso: tilt executar <arquivo> [--agendar]\n";
+    std::cerr << "tilt: uso: tilt executar <arquivo> [--agendar] [--vm]\n";
     return kUsage;
   }
 
@@ -273,7 +277,7 @@ int cmd_executar(const std::vector<std::string_view>& args) {
 
   Interpreter interp(program, diag, std::cout);
   interp.set_schedule_mode(schedule);
-  int rc = schedule ? interp.run_scheduled() : interp.run();
+  int rc = schedule ? interp.run_scheduled() : (vm ? interp.run_vm() : interp.run());
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());
     return kDiagnostics;
@@ -374,7 +378,7 @@ BUILTINS
   checar_tilt "<arquivo>"  -> { ok, erros: [{codigo,linha,coluna,mensagem,notas}] }
 
 CLI
-  tilt checar <a> [--json]   ast <a>   executar <a> [--agendar]
+  tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
   tilt servir <a> [--porta N]   compilar <a> --saida <bin> [--asm]
   tilt tokens <a>   referencia   versao
 
@@ -448,7 +452,7 @@ int cmd_compilar(const std::vector<std::string_view>& args) {
 
   const char* cc_env = std::getenv("CC");
   const std::string cc = cc_env ? cc_env : "cc";
-  const std::string cmd = cc + " -O2 -no-pie -o " + out_bin + " " + asm_path + " " + rt_path;
+  const std::string cmd = cc + " -O2 -no-pie -o " + out_bin + " " + asm_path + " " + rt_path + " -lm";
   const int rc = std::system(cmd.c_str());
 
   if (!keep_asm) {

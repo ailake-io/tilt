@@ -1,0 +1,25 @@
+funcao dobro x -> inteiro:
+  retornar x * 2
+
+funcao saudacao nome -> texto:
+  retornar "ola, " + nome
+
+pipeline processar:
+  passos:
+    - precos = [9.5, 4.25, 7.0]
+    - total = 0.0
+    - para cada p em precos:
+        total = total + p
+    - imprimir "total:", total, "itens:", tamanho(precos)
+    - imprimir precos[0], precos[2]
+    - imprimir dobro 21
+    - imprimir saudacao("tilt")
+    - imprimir 7 / 2, "b" > "a", 3 <= 3
+    - se total > 20.0:
+        imprimir "acima de 20"
+    - senao:
+        imprimir "abaixo de 20"
+    - i = 0
+    - enquanto i < 2:
+        imprimir "i=", i
+        i = i + 1

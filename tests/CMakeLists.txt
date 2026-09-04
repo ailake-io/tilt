@@ -14,7 +14,8 @@ add_test(
   NAME native
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/native_test.sh
           $<TARGET_FILE:tilt>
-          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo.tilt)
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo.tilt
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo2.tilt)
 
 find_program(PYTHON3 python3)
 if(PYTHON3)

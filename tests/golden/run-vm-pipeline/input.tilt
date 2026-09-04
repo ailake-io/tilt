@@ -1,0 +1,17 @@
+funcao dobro x -> inteiro:
+  retornar x * 2
+
+pipeline calcular:
+  passos:
+    - itens = [1, 2, 3, 4]
+    - total = 0
+    - para cada n em itens:
+        total = total + n * 2
+    - preco = 9.5
+    - imprimir "soma:", total, "preco:", preco
+    - imprimir itens[1], itens[3], tamanho(itens)
+    - imprimir dobro 21, "b" > "a"
+    - se total > 10 e preco <= 10.0:
+        imprimir "ok", total / 4
+    - senao:
+        imprimir "falhou"

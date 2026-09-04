@@ -39,7 +39,7 @@ BUILTINS
   checar_tilt "<arquivo>"  -> { ok, erros: [{codigo,linha,coluna,mensagem,notas}] }
 
 CLI
-  tilt checar <a> [--json]   ast <a>   executar <a> [--agendar]
+  tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
   tilt servir <a> [--porta N]   compilar <a> --saida <bin> [--asm]
   tilt tokens <a>   referencia   versao
 

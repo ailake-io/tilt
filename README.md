@@ -38,7 +38,7 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno), no **Qdrant** (REST via `curl`) e no **pgvector** (SQL sobre libpq, cosseno `<=>`) | rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder` (planner iterativo), `equipe` (sequencial/paralelo/supervisor) | planner tolerante a protocolo (1 linha/turno) |
 | HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` (epoll + keep-alive + arena por requisição, Linux) | execução paralela de rotas, `meio:` (middleware) |
-| Execução | VM de bytecode p/ `funcao` pura, codegen nativo x86-64 (subconjunto inteiro) | VM/codegen para o programa inteiro |
+| Execução | VM de bytecode p/ `funcao` pura **e pipelines** (`tilt executar --vm`), codegen nativo x86-64 p/ **programa inteiro** (texto, decimal, listas, `para cada`, pipelines; saída idêntica ao interpretador) | curto-circuito de `e`/`ou` na VM, builtins fora do subconjunto nativo |
 | Tooling | `checar --json`, `referencia`, `tilt lsp` + `completar`, `checar_tilt`, extensão VS Code (realce + LSP, vsix empacotável com `npm run package`) | publicação no Marketplace |
 
 Detalhes em [`docs/guia-12-limitacoes.md`](docs/guia-12-limitacoes.md).
@@ -114,8 +114,9 @@ total: 102 -> grande
 |---|---|
 | `tilt checar <a> [--json]` | valida sintaxe, indentação, tipos, segredos, dispositivos, referências |
 | `tilt executar <a> [--agendar]` | roda no interpretador (VM para `funcao` pura) |
+| `tilt executar --vm <a>` | roda pipelines pelo bytecode VM (fall-back por pipeline) |
 | `tilt servir <a> [--porta N] [--requisicoes N]` | sobe o `servico` HTTP declarado |
-| `tilt compilar <a> --saida <bin> [--asm]` | binário nativo x86-64 (subconjunto inteiro) |
+| `tilt compilar <a> --saida <bin> [--asm]` | binário nativo x86-64 (programa inteiro no subconjunto da VM) |
 | `tilt completar <a> --linha L --coluna C [--json]` | candidatos de autocomplete |
 | `tilt lsp` | servidor Language Server (stdio) |
 | `tilt referencia` | referência compacta da linguagem |
@@ -184,8 +185,8 @@ Fonte .tilt
    ▼  src/parser/      -> AST (descida recursiva, std::unique_ptr)
    ▼  src/semantic/    -> símbolos, tipos, formas de tensor  (tilt checar)
    ▼  src/interp/      -> interpretador de árvore            (tilt executar)
-   │     └─ src/vm/       funcao pura -> bytecode -> VM de pilha
-   │     └─ src/codegen/  subconjunto inteiro -> Assembly x86-64  (tilt compilar)
+   │     └─ src/vm/       funcao/pipeline -> bytecode -> VM de pilha
+   │     └─ src/codegen/  subconjunto da VM -> Assembly x86-64  (tilt compilar)
    └─ src/runtime/     value, tensor, json, llm, vectorstore, http_server, gpu_runtime
       src/lsp/          completion + servidor LSP              (tilt lsp)
 ```

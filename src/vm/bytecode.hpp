@@ -24,6 +24,8 @@ enum class Op : std::uint8_t {
   CallFunc,    // a: names index, b: argc
   Print,       // b: argc
   Len,         // 1 arg -> inteiro
+  MakeList,    // b: argc (pops argc values -> lista)
+  Index,       // pop idx, pop lista -> elemento
   Return,      // pop -> function result
   ReturnNil,
 };

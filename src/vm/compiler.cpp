@@ -23,15 +23,22 @@ struct Builder {
   const std::unordered_set<std::string>& known;
   Chunk chunk;
   std::unordered_map<std::string, int> slots;
+  int extra_slots = 0;  // slots anonimos do dessugar (ex.: 'para cada')
 
   int slot_of(const std::string& name, bool create) {
     auto it = slots.find(name);
     if (it != slots.end()) return it->second;
     if (!create) return -1;
-    int s = static_cast<int>(slots.size());
+    int s = static_cast<int>(slots.size()) + extra_slots;
     slots.emplace(name, s);
     return s;
   }
+
+  // Slot sem nome, para temporarios de dessugar. Nao desloca os slots
+  // nomeados; chunk.num_locals soma os dois contadores no final.
+  int fresh_slot() { return static_cast<int>(slots.size()) + extra_slots++; }
+
+  int total_locals() const { return static_cast<int>(slots.size()) + extra_slots; }
 
   int emit(Op op, std::int32_t a = 0, std::int32_t b = 0) {
     chunk.code.push_back({op, a, b});
@@ -87,6 +94,22 @@ struct Builder {
         expr(*e.rhs);
         emit(e.text == "-" ? Op::Neg : Op::Not);
         return;
+      case ExprKind::ListLit:
+        for (const auto& el : e.elems) expr(*el);
+        emit(Op::MakeList, 0, static_cast<std::int32_t>(e.elems.size()));
+        return;
+      case ExprKind::Index: {
+        if (e.lhs && e.lhs->kind == ExprKind::Name &&
+            (e.lhs->text == "tensor" || e.lhs->text == "zeros" || e.lhs->text == "uns" ||
+             e.lhs->text == "aleatorio")) {
+          bail("construtor de tensor");
+        }
+        if (e.elems.size() != 1) bail("indice multidimensional");
+        expr(*e.lhs);
+        expr(*e.elems[0]);
+        emit(Op::Index);
+        return;
+      }
       case ExprKind::Binary: {
         if (e.text == "|") bail("operador '|'");
         if (e.text == "e" || e.text == "ou") {
@@ -130,11 +153,63 @@ struct Builder {
     }
   }
 
+  // Compila `se ...:` seguido de `- senao:` solto (item de campo em
+  // 'passos:'), com a mesma semantica do interpretador: o senao so roda se
+  // nenhum ramo do 'se' pegou.
+  void if_with_stray_senao(const Stmt& s, const ast::Block& senao) {
+    expr(*s.a);
+    int j_else = emit(Op::JumpIfFalse);
+    block(s.body);
+    int j_end = emit(Op::Jump);
+    chunk.code[static_cast<std::size_t>(j_else)].a = static_cast<std::int32_t>(chunk.code.size());
+    block(senao);
+    chunk.code[static_cast<std::size_t>(j_end)].a = static_cast<std::int32_t>(chunk.code.size());
+  }
+
   void block(const ast::Block& b) {
-    for (const auto& raw : b.items) {
-      if (!raw) continue;
-      const Item* it = raw.get();
-      if (it->kind == ItemKind::ListEntry && it->child) it = it->child.get();
+    const auto& items = b.items;
+    for (std::size_t k = 0; k < items.size(); ++k) {
+      const Item* it = items[k].get();
+      if (!it) continue;
+      // `- senao:` solto: pareia com um 'se' sem else imediatamente anterior;
+      // fora desse par, executa incondicionalmente (legado do interpretador).
+      const Item* bare = it;
+      if (bare->kind == ItemKind::ListEntry) {
+        bare = bare->child ? bare->child.get()
+                           : (bare->block && !bare->block->items.empty()
+                                  ? bare->block->items[0].get()
+                                  : nullptr);
+      }
+      const Item* next = k + 1 < items.size() ? items[k + 1].get() : nullptr;
+      const Item* nbare = next;
+      if (nbare && nbare->kind == ItemKind::ListEntry) {
+        nbare = nbare->child ? nbare->child.get()
+                             : (nbare->block && !nbare->block->items.empty()
+                                    ? nbare->block->items[0].get()
+                                    : nullptr);
+      }
+      if (bare && bare->kind == ItemKind::Stmt && bare->stmt &&
+          bare->stmt->kind == StmtKind::If && !bare->stmt->else_body && nbare &&
+          nbare->kind == ItemKind::Field && nbare->key == "senao" && nbare->header.empty() &&
+          nbare->block) {
+        if_with_stray_senao(*bare->stmt, *nbare->block);
+        ++k;
+        continue;
+      }
+      if (bare && bare->kind == ItemKind::Field && bare->key == "senao" &&
+          bare->header.empty() && bare->block) {
+        block(*bare->block);  // legado: incondicional
+        continue;
+      }
+      if (it->kind == ItemKind::ListEntry) {
+        // `- passo` de linha unica tem 'child'; `- para cada ...:' com corpo
+        // indentado traz o stmt dentro de 'block'.
+        if (it->block) {
+          block(*it->block);
+          continue;
+        }
+        if (it->child) it = it->child.get();
+      }
       if (it->kind != ItemKind::Stmt || !it->stmt) bail("item fora do subconjunto do VM");
       stmt(*it->stmt);
     }
@@ -189,10 +264,41 @@ struct Builder {
         chunk.code[static_cast<std::size_t>(j_end)].a = static_cast<std::int32_t>(chunk.code.size());
         return;
       }
+      case StmtKind::ForEach: {
+        // Dessugar: it = <iteravel>; i = 0; enquanto i < tamanho(it): var =
+        // it[i]; <corpo>; i = i + 1
+        const int it_slot = b_slot();
+        const int i_slot = b_slot();
+        const int var_slot = slot_of(s.name, true);
+        expr(*s.a);
+        emit(Op::StoreLocal, it_slot);
+        emit(Op::Const, const_idx(rt::Value::inteiro(0)));
+        emit(Op::StoreLocal, i_slot);
+        const int start = static_cast<int>(chunk.code.size());
+        emit(Op::LoadLocal, i_slot);
+        emit(Op::LoadLocal, it_slot);
+        emit(Op::Len);
+        emit(Op::Binop, op_idx("<"));
+        const int j_end = emit(Op::JumpIfFalse);
+        emit(Op::LoadLocal, it_slot);
+        emit(Op::LoadLocal, i_slot);
+        emit(Op::Index);
+        emit(Op::StoreLocal, var_slot);
+        block(s.body);
+        emit(Op::LoadLocal, i_slot);
+        emit(Op::Const, const_idx(rt::Value::inteiro(1)));
+        emit(Op::Binop, op_idx("+"));
+        emit(Op::StoreLocal, i_slot);
+        emit(Op::Jump, start);
+        chunk.code[static_cast<std::size_t>(j_end)].a = static_cast<std::int32_t>(chunk.code.size());
+        return;
+      }
       default:
         bail("instrucao fora do subconjunto do VM");
     }
   }
+
+  int b_slot() { return fresh_slot(); }
 };
 
 }  // namespace
@@ -203,7 +309,32 @@ Chunk compile_function(const Item& fn, const std::unordered_set<std::string>& kn
   if (!fn.block) bail("funcao sem corpo");
   b.block(*fn.block);
   b.emit(Op::ReturnNil);
-  b.chunk.num_locals = static_cast<int>(b.slots.size());
+  b.chunk.num_locals = b.total_locals();
+  return std::move(b.chunk);
+}
+
+Chunk compile_pipeline(const Item& pipeline, const std::unordered_set<std::string>& known_funcs) {
+  if (!pipeline.block) bail("pipeline sem bloco");
+  // agenda/ao_falhar/verificar mudam a semantica de execucao; deixa para o
+  // interpretador de arvore.
+  for (const char* kw : {"agenda", "ao_falhar"}) {
+    for (const auto& it : pipeline.block->items) {
+      if (it && it->kind == ItemKind::Field && it->key == kw) {
+        bail(std::string("campo '") + kw + "' do pipeline");
+      }
+    }
+  }
+  const Item* passos = nullptr;
+  for (const auto& it : pipeline.block->items) {
+    if (it && it->kind == ItemKind::Field && it->key == "passos") {
+      passos = it.get();
+      break;
+    }
+  }
+  Builder b{known_funcs, {}, {}};
+  if (passos && passos->block) b.block(*passos->block);
+  b.emit(Op::ReturnNil);
+  b.chunk.num_locals = b.total_locals();
   return std::move(b.chunk);
 }
 

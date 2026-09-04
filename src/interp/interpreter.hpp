@@ -36,6 +36,11 @@ class Interpreter {
   // TILT_AGORA fake clock) firing each pipeline at its `agenda:` cron.
   int run_scheduled();
 
+  // `tilt executar --vm`: roda cada pipeline pelo bytecode VM quando o corpo
+  // esta no subconjunto compilavel; cai de volta para o interpretador de
+  // arvore por pipeline quando nao esta. Saida identica a run().
+  int run_vm();
+
   // Serves the first `servico` declaration. `max_requests <= 0` runs forever.
   int serve(int port_override, int max_requests);
 
@@ -136,6 +141,11 @@ class Interpreter {
     bool set = false;
   };
   RouteResponse* route_resp_ = nullptr;  // non-null only while handling a request
+
+  // Execucao de 'se': informa ao 'exec_block' se algum ramo foi tomado, para
+  // ele parear um 'senao:' solto (item de campo em 'passos:') com o 'se'
+  // anterior. Fora desse par, 'senao' executa incondicionalmente (legado).
+  bool last_if_taken_ = false;
 
   bool schedule_mode_ = false;
 };

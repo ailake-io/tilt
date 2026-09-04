@@ -114,6 +114,25 @@ rt::Value Vm::run(const Chunk& chunk, std::vector<rt::Value> args) {
         stack.push_back(Value::inteiro(n));
         break;
       }
+      case Op::MakeList: {
+        rt::ValueList items(static_cast<std::size_t>(in.b));
+        for (std::size_t k = items.size(); k-- > 0;) items[k] = pop();
+        stack.push_back(Value::lista(std::move(items)));
+        break;
+      }
+      case Op::Index: {
+        Value idx = pop();
+        Value base = pop();
+        if ((base.kind != ValueKind::Lista && base.kind != ValueKind::Tabela) || !base.list) {
+          throw std::runtime_error("VM: indice espera uma lista");
+        }
+        const auto i = static_cast<long long>(idx.as_number());
+        if (i < 0 || static_cast<std::size_t>(i) >= base.list->size()) {
+          throw std::runtime_error("VM: indice fora da faixa");
+        }
+        stack.push_back((*base.list)[static_cast<std::size_t>(i)]);
+        break;
+      }
       case Op::Return:
         return pop();
       case Op::ReturnNil:

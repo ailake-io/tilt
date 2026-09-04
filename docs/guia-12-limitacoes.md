@@ -96,10 +96,15 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## VM / nativo
 
-- A VM cobre só `funcao` pura; o resto roda no interpretador de árvore.
+- A VM cobre `funcao` pura e `pipeline`s no subconjunto (literais incl.
+  listas, `para cada`, índice, `contem`); o resto roda no interpretador de
+  árvore (`tilt executar --vm` cai por pipeline, transparente).
 - `e` / `ou` na VM não fazem curto-circuito.
-- `tilt compilar` cobre só o subconjunto **inteiro**; `/` é divisão inteira.
-  Sem `funcao principal` não compila.
+- `tilt compilar` cobre o **programa inteiro** dentro do subconjunto da VM:
+  `funcao principal` ou pipelines, com texto/decimal/lista e saída idêntica
+  ao interpretador (runtime C espelhando `value.cpp`; teste `native`
+  diferencial). Fora do subconjunto (builtins como `ler_csv`, interpolação,
+  membros, `agenda:`/`ao_falhar:`) rejeita com mensagem clara.
 
 ## Plataforma
 
