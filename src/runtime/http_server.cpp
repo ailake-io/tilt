@@ -11,13 +11,20 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
+#include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
 #if defined(__linux__)
+#include <condition_variable>
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <thread>
 #endif
 
 #include "runtime/arena.hpp"
@@ -154,6 +161,13 @@ struct Conn {
   bool writing = false;       // EPOLLOUT registrado
   std::uint64_t last_active;  // epoch seconds
   TiltArena arena;
+  // Paralelo: numeracao de sequencia preserva a ordem das respostas
+  // (HTTP pipelining) quando os handlers rodam em workers distintos.
+  std::uint64_t next_dispatch_seq = 0;  // proximo numero a despachar
+  std::uint64_t next_queue_seq = 0;     // proximo numero a anexar em `out`
+  std::uint64_t final_seq = std::numeric_limits<std::uint64_t>::max();  // seq da decisao de fechar
+  int inflight = 0;                     // requests despachados sem resposta
+  std::map<std::uint64_t, HttpResponse> pending;  // respostas prontas fora de ordem
 };
 
 std::uint64_t now_sec() {
@@ -165,6 +179,18 @@ int set_nonblocking(int fd) {
   if (flags < 0) return -1;
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
+
+struct Task {
+  int fd;
+  std::uint64_t seq;
+  HttpRequest req;
+};
+
+struct Completion {
+  int fd;
+  std::uint64_t seq;
+  HttpResponse resp;
+};
 
 int run_epoll(int listen_fd, const std::function<HttpResponse(const HttpRequest&)>& handler,
               int max_requests, std::string& fatal) {
@@ -369,6 +395,316 @@ int run_epoll(int listen_fd, const std::function<HttpResponse(const HttpRequest&
   return served;
 }
 
+// Caminho paralelo: o event loop so parseia e despacha; os handlers rodam
+// num pool de `threads` workers e as respostas voltam via eventfd. Cada
+// conexao numeros de sequencia garantem que respostas pipelined saem na
+// ordem dos requests, mesmo completando em ordem diferente.
+int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const HttpRequest&)>& handler,
+                       int max_requests, int threads, std::string& fatal) {
+  const int ep = epoll_create1(0);
+  if (ep < 0) {
+    fatal = "epoll_create1() falhou";
+    return -1;
+  }
+  const int efd = eventfd(0, EFD_NONBLOCK);
+  if (efd < 0) {
+    fatal = "eventfd() falhou";
+    ::close(ep);
+    return -1;
+  }
+
+  set_nonblocking(listen_fd);
+  epoll_event ev{};
+  ev.events = EPOLLIN;
+  ev.data.fd = listen_fd;
+  if (epoll_ctl(ep, EPOLL_CTL_ADD, listen_fd, &ev) != 0) {
+    fatal = "epoll_ctl(listen) falhou";
+    ::close(efd);
+    ::close(ep);
+    return -1;
+  }
+  epoll_event eev{};
+  eev.events = EPOLLIN;
+  eev.data.fd = efd;
+  if (epoll_ctl(ep, EPOLL_CTL_ADD, efd, &eev) != 0) {
+    fatal = "epoll_ctl(eventfd) falhou";
+    ::close(efd);
+    ::close(ep);
+    return -1;
+  }
+
+  std::mutex task_m;
+  std::condition_variable task_cv;
+  std::deque<Task> tasks;
+  bool pool_stop = false;
+  std::mutex comp_m;
+  std::deque<Completion> completions;
+
+  auto worker = [&]() {
+    while (true) {
+      Task t;
+      {
+        std::unique_lock<std::mutex> lk(task_m);
+        task_cv.wait(lk, [&] { return pool_stop || !tasks.empty(); });
+        if (pool_stop) return;
+        t = std::move(tasks.front());
+        tasks.pop_front();
+      }
+      Completion c;
+      c.fd = t.fd;
+      c.seq = t.seq;
+      try {
+        c.resp = handler(t.req);
+      } catch (...) {
+        c.resp.status = 500;
+        c.resp.body = R"({"erro":"falha interna"})";
+      }
+      {
+        std::lock_guard<std::mutex> lk(comp_m);
+        completions.push_back(std::move(c));
+      }
+      const std::uint64_t one = 1;
+      // Acorda o event loop; EAGAIN so significa que ja ha bytes pendentes.
+      if (::write(efd, &one, sizeof(one)) < 0 && errno != EAGAIN) return;
+    }
+  };
+
+  std::vector<std::thread> pool;
+  pool.reserve(static_cast<std::size_t>(threads));
+  for (int i = 0; i < threads; ++i) pool.emplace_back(worker);
+
+  std::unordered_map<int, std::unique_ptr<Conn>> conns;
+  int served = 0;
+  bool stopping = false;
+
+  auto close_conn = [&](int fd) {
+    epoll_ctl(ep, EPOLL_CTL_DEL, fd, nullptr);
+    ::close(fd);
+    conns.erase(fd);
+  };
+
+  // Nada mais sera lido/escrito nesta conexao: so falta entregar o que ja
+  // foi despachado (e, com peer_eof, nenhum request novo vira).
+  auto conn_drained = [](const Conn& c) { return c.inflight == 0 && c.pending.empty(); };
+
+  auto begin_shutdown = [&]() {
+    if (stopping) return;
+    stopping = true;
+    std::vector<int> droppable;
+    for (const auto& [fd, c] : conns) {
+      c->close_after = true;
+      if (c->out.empty() && conn_drained(*c)) droppable.push_back(fd);
+    }
+    for (int fd : droppable) close_conn(fd);
+  };
+
+  // Enfileira a resposta; registra EPOLLOUT se a escrita nao completou.
+  auto queue_out = [&](Conn& c) {
+    if (c.out.empty()) {
+      if ((c.close_after || c.peer_eof) && conn_drained(c)) close_conn(c.fd);
+      return;
+    }
+    if (!c.writing) {
+      epoll_event wev{};
+      wev.events = EPOLLIN | EPOLLOUT;
+      wev.data.fd = c.fd;
+      if (epoll_ctl(ep, EPOLL_CTL_MOD, c.fd, &wev) == 0) c.writing = true;
+    }
+  };
+
+  auto drain_out = [&](Conn& c) {
+    while (!c.out.empty()) {
+      const ssize_t n = ::send(c.fd, c.out.data(), c.out.size(), MSG_NOSIGNAL);
+      if (n > 0) {
+        c.out.erase(0, static_cast<std::size_t>(n));
+        continue;
+      }
+      if (n < 0 && errno == EAGAIN) return;  // EPOLLOUT avisa quando der
+      close_conn(c.fd);                      // erro: desiste da conexao
+      return;
+    }
+    c.writing = false;
+    if ((c.close_after || c.peer_eof) && conn_drained(c)) {
+      close_conn(c.fd);
+    } else {
+      epoll_event wev{};
+      wev.events = EPOLLIN;
+      wev.data.fd = c.fd;
+      epoll_ctl(ep, EPOLL_CTL_MOD, c.fd, &wev);
+    }
+  };
+
+  // Anexa em `out` as respostas prontas que chegaram em ordem de sequencia.
+  auto drain_pending = [&](Conn& c) {
+    while (!c.pending.empty()) {
+      auto it = c.pending.begin();
+      if (it->first != c.next_queue_seq) break;
+      const bool keep = !(c.close_after && it->first == c.final_seq);
+      c.out += build_response(it->second, keep);
+      c.pending.erase(it);
+      ++c.next_queue_seq;
+    }
+  };
+
+  // Le tudo que esta pronto e despacha requests completos para o pool.
+  auto service_conn = [&](Conn& c) {
+    char chunk[8192];
+    while (true) {
+      const ssize_t n = ::recv(c.fd, chunk, sizeof(chunk), 0);
+      if (n > 0) {
+        c.in.append(chunk, static_cast<std::size_t>(n));
+        continue;
+      }
+      if (n == 0) c.peer_eof = true;
+      else if (errno != EAGAIN) {
+        close_conn(c.fd);
+        return;
+      }
+      break;
+    }
+
+    while (true) {
+      HttpRequest req;
+      c.arena.resetar();
+      const ParseResult r = parse_request(c.in, c.arena, req);
+      if (r == ParseResult::NeedMore) break;
+      if (r == ParseResult::Bad) {
+        HttpResponse bad;
+        bad.status = 400;
+        bad.body = R"({"erro":"requisicao malformada"})";
+        c.out += build_response(bad, false);
+        c.close_after = true;
+        c.arena.resetar();
+        break;
+      }
+
+      const std::uint64_t seq = c.next_dispatch_seq++;
+      const bool keep = req.keep_alive && (max_requests <= 0 || served + 1 < max_requests);
+      if (!keep) {
+        c.close_after = true;
+        c.final_seq = seq;
+      }
+      {
+        std::lock_guard<std::mutex> lk(task_m);
+        tasks.push_back(Task{c.fd, seq, std::move(req)});
+      }
+      task_cv.notify_one();
+      ++c.inflight;
+      ++served;  // contado no despacho: a cota limita o que entra, nao o que sai
+      c.arena.resetar();  // liberacao instantanea do scratch da requisicao
+      if (!keep) break;
+    }
+    drain_pending(c);
+    queue_out(c);
+  };
+
+  epoll_event events[kMaxEvents];
+  while (true) {
+    if (stopping && conns.empty()) break;
+    const int n = epoll_wait(ep, events, kMaxEvents, 1000);
+    if (n < 0) {
+      if (errno == EINTR) continue;
+      fatal = "epoll_wait() falhou";
+      break;
+    }
+    if (n == 0) {  // timeout: varre conexoes ociosas
+      const std::uint64_t now = now_sec();
+      std::vector<int> stale;
+      for (const auto& [fd, c] : conns) {
+        if (c->out.empty() && conn_drained(*c) &&
+            now - c->last_active > static_cast<std::uint64_t>(kIdleTimeoutSec)) {
+          stale.push_back(fd);
+        }
+      }
+      for (int fd : stale) close_conn(fd);
+      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      continue;
+    }
+
+    for (int i = 0; i < n; ++i) {
+      const int fd = events[i].data.fd;
+
+      if (fd == efd) {  // respostas prontas dos workers
+        std::uint64_t buf[16];
+        while (::read(efd, buf, sizeof(buf)) == static_cast<ssize_t>(sizeof(buf))) {
+        }
+        std::deque<Completion> done;
+        {
+          std::lock_guard<std::mutex> lk(comp_m);
+          done.swap(completions);
+        }
+        for (const Completion& comp : done) {
+          auto it = conns.find(comp.fd);
+          if (it == conns.end()) continue;  // conexao fechada no meio do caminho: descarta
+          Conn& c = *it->second;
+          --c.inflight;
+          c.pending.emplace(comp.seq, std::move(comp.resp));
+          drain_pending(c);
+          queue_out(c);
+        }
+        if (max_requests > 0 && served >= max_requests) begin_shutdown();
+        continue;
+      }
+
+      if (fd == listen_fd) {
+        if (stopping) continue;
+        while (true) {
+          const int client = ::accept(listen_fd, nullptr, nullptr);
+          if (client < 0) break;  // EAGAIN: nada mais pronto
+          if (conns.size() >= static_cast<std::size_t>(kMaxConns) || set_nonblocking(client) != 0) {
+            const char* busy = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            ::send(client, busy, std::strlen(busy), MSG_NOSIGNAL);
+            ::close(client);
+            continue;
+          }
+          epoll_event cev{};
+          cev.events = EPOLLIN;
+          cev.data.fd = client;
+          if (epoll_ctl(ep, EPOLL_CTL_ADD, client, &cev) != 0) {
+            ::close(client);
+            continue;
+          }
+          auto c = std::make_unique<Conn>(client);
+          c->last_active = now_sec();
+          conns.emplace(client, std::move(c));
+        }
+        if (max_requests > 0 && served >= max_requests) begin_shutdown();
+        continue;
+      }
+
+      auto it = conns.find(fd);
+      if (it == conns.end()) continue;
+      Conn& c = *it->second;
+      c.last_active = now_sec();
+
+      if (events[i].events & (EPOLLERR | EPOLLHUP)) {
+        close_conn(fd);
+        continue;
+      }
+      if (events[i].events & EPOLLOUT) drain_out(c);
+      it = conns.find(fd);
+      if (it == conns.end()) continue;
+      if (events[i].events & EPOLLIN && !it->second->peer_eof) service_conn(*it->second);
+      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(task_m);
+    pool_stop = true;
+  }
+  task_cv.notify_all();
+  for (auto& t : pool) t.join();
+  for (const auto& [fd, c] : conns) {
+    epoll_ctl(ep, EPOLL_CTL_DEL, fd, nullptr);
+    ::close(fd);
+  }
+  ::close(efd);
+  ::close(ep);
+  if (!fatal.empty()) return -1;
+  return served;
+}
+
 #else  // !__linux__ : fallback bloqueante, uma conexao por vez
 
 int run_blocking(int listen_fd, const std::function<HttpResponse(const HttpRequest&)>& handler,
@@ -462,10 +798,13 @@ std::string HttpServer::listen_on(const std::string& host, int port) {
   return "";
 }
 
-int HttpServer::run(const std::function<HttpResponse(const HttpRequest&)>& handler, int max_requests) {
+int HttpServer::run(const std::function<HttpResponse(const HttpRequest&)>& handler, int max_requests,
+                    int threads) {
 #if defined(__linux__)
+  if (threads > 1) return run_epoll_parallel(fd_, handler, max_requests, threads, last_error_);
   return run_epoll(fd_, handler, max_requests, last_error_);
 #else
+  (void)threads;
   return run_blocking(fd_, handler, max_requests, last_error_);
 #endif
 }

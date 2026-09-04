@@ -39,6 +39,13 @@
 
 namespace tilt {
 
+// Estado por thread do pool de rotas (serve()): cada worker executa uma
+// rota de ponta a ponta na sua thread, entao a resposta corrente, o flag de
+// 'se' e o dispositivo ativo nunca sao compartilhados entre requisicoes.
+thread_local RouteResponse* route_resp_ = nullptr;  // non-null only while handling a request
+thread_local bool last_if_taken_ = false;
+thread_local bool use_gpu_ = false;  // active for the current model/treino call
+
 using ast::Expr;
 using ast::ExprKind;
 using ast::Item;
@@ -865,6 +872,7 @@ void Interpreter::set_device(const Item& decl) {
   }
   if (rt::GpuRuntime::instance().ensure(dev)) {
     use_gpu_ = true;
+    std::lock_guard<std::mutex> lk(log_mutex_);
     if (!gpu_announced_) {
       out_ << "[gpu] " << rt::GpuRuntime::instance().info() << "\n";
       gpu_announced_ = true;
@@ -897,7 +905,10 @@ rt::Tensor Interpreter::act_relu(const rt::Tensor& x) {
 const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl,
                                                                std::int64_t in_dim, Span span) {
   const std::string name = decl_name(decl);
-  if (auto it = model_cache_.find(name); it != model_cache_.end()) return it->second;
+  {
+    std::lock_guard<std::mutex> lk(model_cache_mutex_);
+    if (auto it = model_cache_.find(name); it != model_cache_.end()) return it->second;
+  }
   std::vector<Layer> layers = build_layers(decl, in_dim);
 
   // Carga de 'pesos: "arquivo"' (formato tilt-pesos, gerado por
@@ -952,6 +963,7 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
       }
     }
   }
+  std::lock_guard<std::mutex> lk(model_cache_mutex_);
   return model_cache_.emplace(name, std::move(layers)).first->second;
 }
 
@@ -1308,7 +1320,10 @@ void Interpreter::run_treino(const Item& decl) {
     fail(decl.span, std::string("treino ") + name + ": " + e.what());
   }
 
-  model_cache_[name] = std::move(layers);
+  {
+    std::lock_guard<std::mutex> lk(model_cache_mutex_);
+    model_cache_[name] = std::move(layers);
+  }
 }
 
 // ------------------------------------------------------------------ LLM + RAG
@@ -1492,6 +1507,9 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     }
   }
   const std::string emb_model = field_str(b, "embeddings");
+  // Serializa o indice em memoria entre as rotas paralelas. Vive ate o fim
+  // da funcao: cobre inserir/buscar e as chamadas de embedding no meio.
+  std::unique_lock<std::mutex> index_lk(index_stores_mutex_);
   rt::MemoryIndex& store = index_stores_[indice_name];
 
   if (method == "inserir") {
@@ -1742,8 +1760,13 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   }
 
   std::string prompt = message;
-  if (memoria == "conversa" && !agent_memory_[agent_name].empty()) {
-    prompt = agent_memory_[agent_name] + "\n" + message;
+  if (memoria == "conversa") {
+    std::string mem;
+    {
+      std::lock_guard<std::mutex> lk(agent_memory_mutex_);
+      mem = agent_memory_[agent_name];
+    }
+    if (!mem.empty()) prompt = mem + "\n" + message;
   }
 
   Value rastro = Value::lista();
@@ -1846,8 +1869,9 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   }
 
   if (memoria == "conversa") {
-    agent_memory_[agent_name] += (agent_memory_[agent_name].empty() ? "" : "\n") + ("usuario: " + message) +
-                                 "\nagente: " + answer;
+    std::lock_guard<std::mutex> lk(agent_memory_mutex_);
+    std::string& mem = agent_memory_[agent_name];
+    mem += (mem.empty() ? "" : "\n") + ("usuario: " + message) + "\nagente: " + answer;
   }
 
   Value out = Value::mapa();
@@ -2034,7 +2058,7 @@ std::vector<Route> collect_routes(const ast::Block& block) {
 
 }  // namespace
 
-int Interpreter::serve(int port_override, int max_requests) {
+int Interpreter::serve(int port_override, int max_requests, int threads) {
   register_decls();
 
   const Item* svc = nullptr;
@@ -2068,8 +2092,13 @@ int Interpreter::serve(int port_override, int max_requests) {
   }
   out_ << "servico " << decl_name(*svc) << ": escutando 127.0.0.1:" << port << "\n" << std::flush;
 
-  // As rotas executam em serie (o interpretador nao e reentrante); a camada
-  // de rede (epoll/keep-alive) ja atende varias conexoes concorrentes.
+  // O tratamento das rotas roda num pool de workers (padrao: ate 4); os
+  // estados mutaveis compartilhados do interpretador foram tornados
+  // reentrantes (thread_locals + mutexes nos caches).
+  if (threads <= 0) {
+    const unsigned hc = std::thread::hardware_concurrency();
+    threads = hc > 0 ? static_cast<int>(std::min(4u, hc)) : 1;
+  }
   const int served = server.run(
       [&](const rt::HttpRequest& req) -> rt::HttpResponse {
         rt::HttpResponse resp;
@@ -2133,10 +2162,13 @@ int Interpreter::serve(int port_override, int max_requests) {
           }
         }
 
-        out_ << req.method << " " << req.path << " -> " << resp.status << "\n" << std::flush;
+        {
+          std::lock_guard<std::mutex> lk(log_mutex_);
+          out_ << req.method << " " << req.path << " -> " << resp.status << "\n" << std::flush;
+        }
         return resp;
       },
-      max_requests);
+      max_requests, threads);
   return served < 0 ? 1 : 0;
 }
 
@@ -2573,27 +2605,34 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
 
 Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span) {
   // Try the bytecode VM for functions in its pure subset; fall back otherwise.
-  auto cit = vm_chunks_.find(&fn);
-  if (cit == vm_chunks_.end()) {
-    std::shared_ptr<vm::Chunk> chunk;
-    try {
-      std::unordered_set<std::string> names;
-      for (const auto& kv : functions_) names.insert(kv.first);
-      chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
-    } catch (const vm::NotCompilable&) {
-      chunk = nullptr;
-    }
-    cit = vm_chunks_.emplace(&fn, std::move(chunk)).first;
-    if (std::getenv("TILT_VM_DEBUG") && cit->second) {
-      const vm::Chunk& c = *cit->second;
-      out_ << "; chunk " << decl_name(fn) << " locals=" << c.num_locals << "\n";
-      for (std::size_t i = 0; i < c.code.size(); ++i) {
-        out_ << ";  " << i << ": op=" << static_cast<int>(c.code[i].op) << " a=" << c.code[i].a
-             << " b=" << c.code[i].b << "\n";
+  // A compilacao e lazy e cacheada: o mutex so cobre o mapa; o Chunk em si
+  // e imutavel durante a execucao e pode ser rodado por varias threads.
+  std::shared_ptr<vm::Chunk> chunk;
+  {
+    std::lock_guard<std::mutex> lk(vm_chunks_mutex_);
+    auto cit = vm_chunks_.find(&fn);
+    if (cit == vm_chunks_.end()) {
+      try {
+        std::unordered_set<std::string> names;
+        for (const auto& kv : functions_) names.insert(kv.first);
+        chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
+      } catch (const vm::NotCompilable&) {
+        chunk = nullptr;
+      }
+      cit = vm_chunks_.emplace(&fn, chunk).first;
+      if (std::getenv("TILT_VM_DEBUG") && chunk) {
+        const vm::Chunk& c = *chunk;
+        std::lock_guard<std::mutex> log_lk(log_mutex_);
+        out_ << "; chunk " << decl_name(fn) << " locals=" << c.num_locals << "\n";
+        for (std::size_t i = 0; i < c.code.size(); ++i) {
+          out_ << ";  " << i << ": op=" << static_cast<int>(c.code[i].op) << " a=" << c.code[i].a
+               << " b=" << c.code[i].b << "\n";
+        }
       }
     }
+    chunk = cit->second;
   }
-  if (cit->second) {
+  if (chunk) {
     vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
       auto f = functions_.find(name);
       if (f == functions_.end()) {
@@ -2604,7 +2643,7 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
       return call_function(*f->second, std::move(a), Span{});
     });
     try {
-      return machine.run(*cit->second, std::move(args));
+      return machine.run(*chunk, std::move(args));
     } catch (const std::exception& e) {
       fail(fn.span, std::string("VM: ") + e.what());
     }

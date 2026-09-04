@@ -9,6 +9,7 @@ comandos:
   executar <arquivo> [--agendar]     roda o programa no interpretador
   executar --vm <arquivo>            roda pipelines pelo bytecode VM
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
+                                     [--requisicoes N] [--threads N]
   compilar <arquivo> --saida <bin>   gera binario nativo
   referencia                         referencia compacta da linguagem
   completar <arq> --linha L --coluna C   candidatos de autocomplete

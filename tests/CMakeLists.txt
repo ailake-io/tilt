@@ -11,6 +11,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico.tilt)
 
 add_test(
+  NAME par
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/par_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico_lento.tilt)
+
+add_test(
   NAME native
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/native_test.sh
           $<TARGET_FILE:tilt>

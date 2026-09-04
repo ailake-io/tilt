@@ -1,0 +1,18 @@
+# Servico com rota de burn de CPU (loop interpretado) para o teste de
+# paralelismo real: o teste compara o wall time de 1 request contra
+# 4 requests concorrentes e so passa se houver speedup.
+servico Lento:
+  rota get "/lento":
+    passos:
+      - n = 0
+      - enquanto n < 50000:
+          n = n + 1
+      - responder:
+          dados:
+            ok: verdadeiro
+            n: n
+  rota get "/saude":
+    passos:
+      - responder:
+          dados:
+            ok: verdadeiro

@@ -24,8 +24,11 @@ struct HttpResponse {
 // connections (a slow client cannot stall the others), keep-alive with
 // per-connection loops, non-blocking writes, idle timeout, and a TiltArena
 // of scratch per request (reset right after the response is queued).
-// Route handling itself runs serially in the event-loop thread; the
-// interpreter is not reentrant.
+// With `threads` > 1 route handling runs on a worker pool: the event loop
+// parses and dispatches complete requests, workers invoke `handler`
+// concurrently, and completions return via an eventfd; per-connection
+// sequence numbers keep pipelined responses in order. The handler must be
+// thread-safe when `threads` > 1.
 //
 // Other platforms: blocking fallback, one connection at a time,
 // Connection: close.
@@ -38,9 +41,12 @@ class HttpServer {
 
   // Runs the accept/serve loop; `handler` is invoked once per complete
   // request and must not throw. Stops once `max_requests` (> 0) requests
-  // have been served. Returns the number of requests served, or -1 on a
-  // fatal error (see last_error()).
-  int run(const std::function<HttpResponse(const HttpRequest&)>& handler, int max_requests);
+  // have been served. `threads` <= 1 runs route handling serially in the
+  // event-loop thread; `threads` > 1 runs it on a pool of that many
+  // workers. Returns the number of requests served, or -1 on a fatal
+  // error (see last_error()).
+  int run(const std::function<HttpResponse(const HttpRequest&)>& handler, int max_requests,
+          int threads = 1);
 
   const std::string& last_error() const { return last_error_; }
 

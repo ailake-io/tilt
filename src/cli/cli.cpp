@@ -46,6 +46,7 @@ void print_usage(std::ostream& os) {
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
      << "  executar --vm <arquivo>            roda pipelines pelo bytecode VM\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
+     << "                                     [--requisicoes N] [--threads N]\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "  referencia                         referencia compacta da linguagem\n"
      << "  completar <arq> --linha L --coluna C   candidatos de autocomplete\n"
@@ -379,7 +380,8 @@ BUILTINS
 
 CLI
   tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
-  tilt servir <a> [--porta N]   compilar <a> --saida <bin> [--asm]
+  tilt servir <a> [--porta N] [--requisicoes N] [--threads N]
+  tilt compilar <a> --saida <bin> [--asm]
   tilt tokens <a>   referencia   versao
 
 DIAGNOSTICOS (codigo estavel Tnnn)
@@ -471,11 +473,14 @@ int cmd_servir(const std::vector<std::string_view>& args) {
   std::string_view path;
   int port = 0;
   int max_requests = 0;
+  int threads = 0;  // 0 = padrao (min(4, cores)); 1 = serial
   for (std::size_t k = 1; k < args.size(); ++k) {
     if (args[k] == "--porta" && k + 1 < args.size()) {
       port = std::atoi(std::string(args[++k]).c_str());
     } else if (args[k] == "--requisicoes" && k + 1 < args.size()) {
       max_requests = std::atoi(std::string(args[++k]).c_str());
+    } else if (args[k] == "--threads" && k + 1 < args.size()) {
+      threads = std::atoi(std::string(args[++k]).c_str());
     } else if (args[k].rfind("--", 0) == 0) {
       std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
       return kUsage;
@@ -484,7 +489,7 @@ int cmd_servir(const std::vector<std::string_view>& args) {
     }
   }
   if (path.empty()) {
-    std::cerr << "tilt: uso: tilt servir <arquivo> [--porta N] [--requisicoes N]\n";
+    std::cerr << "tilt: uso: tilt servir <arquivo> [--porta N] [--requisicoes N] [--threads N]\n";
     return kUsage;
   }
 
@@ -508,7 +513,7 @@ int cmd_servir(const std::vector<std::string_view>& args) {
   }
 
   Interpreter interp(program, diag, std::cout);
-  const int rc = interp.serve(port, max_requests);
+  const int rc = interp.serve(port, max_requests, threads);
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());
     return kDiagnostics;

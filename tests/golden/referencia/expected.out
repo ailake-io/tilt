@@ -40,7 +40,8 @@ BUILTINS
 
 CLI
   tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
-  tilt servir <a> [--porta N]   compilar <a> --saida <bin> [--asm]
+  tilt servir <a> [--porta N] [--requisicoes N] [--threads N]
+  tilt compilar <a> --saida <bin> [--asm]
   tilt tokens <a>   referencia   versao
 
 DIAGNOSTICOS (codigo estavel Tnnn)

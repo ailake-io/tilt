@@ -37,7 +37,7 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 | ML/DL | tensores f32 CPU (matmul multithread), `modelo` (inferência, `pesos:` de arquivo, `norma_camada`), `treino` (CE + quadrática, SGD/Adam), `carregador` | GPU só validado em `fake`; `conv2d`/`norma_lote`, backward de `norma_camada` |
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno), no **Qdrant** (REST via `curl`) e no **pgvector** (SQL sobre libpq, cosseno `<=>`) | rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder` (planner iterativo), `equipe` (sequencial/paralelo/supervisor) | planner tolerante a protocolo (1 linha/turno) |
-| HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` (epoll + keep-alive + arena por requisição, Linux) | execução paralela de rotas, `meio:` (middleware) |
+| HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` (epoll + keep-alive + arena por requisição + **pool de rotas paralelo** `--threads N`, Linux; respostas pipelined em ordem por conexão) | `meio:` (middleware) |
 | Execução | VM de bytecode p/ `funcao` pura **e pipelines** (`tilt executar --vm`), codegen nativo x86-64 p/ **programa inteiro** (texto, decimal, listas, `para cada`, pipelines; saída idêntica ao interpretador) | curto-circuito de `e`/`ou` na VM, builtins fora do subconjunto nativo |
 | Tooling | `checar --json`, `referencia`, `tilt lsp` + `completar`, `checar_tilt`, extensão VS Code (realce + LSP, vsix empacotável com `npm run package`) | publicação no Marketplace |
 
@@ -115,7 +115,7 @@ total: 102 -> grande
 | `tilt checar <a> [--json]` | valida sintaxe, indentação, tipos, segredos, dispositivos, referências |
 | `tilt executar <a> [--agendar]` | roda no interpretador (VM para `funcao` pura) |
 | `tilt executar --vm <a>` | roda pipelines pelo bytecode VM (fall-back por pipeline) |
-| `tilt servir <a> [--porta N] [--requisicoes N]` | sobe o `servico` HTTP declarado |
+| `tilt servir <a> [--porta N] [--requisicoes N] [--threads N]` | sobe o `servico` HTTP declarado |
 | `tilt compilar <a> --saida <bin> [--asm]` | binário nativo x86-64 (programa inteiro no subconjunto da VM) |
 | `tilt completar <a> --linha L --coluna C [--json]` | candidatos de autocomplete |
 | `tilt lsp` | servidor Language Server (stdio) |
@@ -200,7 +200,7 @@ Layout do repositório em [`CLAUDE.md` §4](CLAUDE.md).
 ```bash
 cmake --preset debug     # AddressSanitizer + UBSan + -Werror
 cmake --build --preset debug
-ctest --preset debug --output-on-failure     # golden + http + native + lsp
+ctest --preset debug --output-on-failure     # golden + http + par + native + lsp
 ```
 
 Testes de ouro em `tests/golden/` (`entrada.tilt` → `esperado.*`); regenerar:
@@ -213,8 +213,9 @@ CI: `.github/workflows/ci.yml` (Linux gcc + macOS + sanitizers) e
 ## Roadmap
 
 `M0`–`M12` + instalador + GPU + tooling de IA concluídos (1ª passada). A seguir:
-conectores de rede reais, VM/codegen para o programa inteiro (texto, decimal,
-tabelas), execução paralela de rotas no `servico`, extensão de editor.
+conectores de rede reais (Kafka/S3), streaming com `janela:`, append
+transacional no Delta, `meio:` (middleware) e publicação da extensão no
+Marketplace.
 
 ## Licença
 

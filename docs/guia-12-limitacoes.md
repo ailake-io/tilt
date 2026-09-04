@@ -87,10 +87,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## HTTP
 
-- As rotas executam em série (na thread do event loop) — o interpretador não
-  é reentrante; execução paralela de rotas fica para uma próxima passada.
+- As rotas executam em paralelo por padrão (pool de `min(4, núcleos)`
+  workers; `--threads N` ajusta, `--threads 1` volta ao serial). Rotas que
+  tocam o **mesmo** `indice` em memória se serializam por um mutex global do
+  índice — para alta concorrência, use Qdrant/pgvector como armazenamento.
 - `meio:` (middleware) só é reconhecido.
-- No Linux: epoll + keep-alive + arena por requisição (M10.2 entregue).
+- No Linux: epoll + keep-alive + arena por requisição + pool de rotas com
+  ordenação por sequência por conexão (M10.2 + paralelismo entregues).
   Em outros sistemas, o servidor é bloqueante, uma conexão por vez,
   `Connection: close`.
 

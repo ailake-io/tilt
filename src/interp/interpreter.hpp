@@ -2,6 +2,7 @@
 
 #include <iosfwd>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -17,6 +18,15 @@
 #include "vm/bytecode.hpp"
 
 namespace tilt {
+
+// Estado da resposta sendo montada por `responder:`/`responder_em_fluxo:`
+// dentro de uma rota de `servico`. Apontado por um thread_local no
+// interpretador (uma rota por thread do pool), nunca compartilhado.
+struct RouteResponse {
+  int status = 200;
+  rt::Value dados;
+  bool set = false;
+};
 
 // Tree-walking interpreter. Executes every top-level `pipeline` in order (and a
 // `funcao principal` if no pipeline is present). Real compute + a small set of
@@ -42,7 +52,9 @@ class Interpreter {
   int run_vm();
 
   // Serves the first `servico` declaration. `max_requests <= 0` runs forever.
-  int serve(int port_override, int max_requests);
+  // `threads` <= 0 picks a default (min(4, cores)); 1 runs route handling
+  // serially; > 1 runs it on a worker pool (handler must be reentrant).
+  int serve(int port_override, int max_requests, int threads);
 
  private:
   struct Env {
@@ -132,20 +144,21 @@ class Interpreter {
   std::unordered_map<const ast::Item*, std::shared_ptr<vm::Chunk>> vm_chunks_;  // null = not compilable
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
-  bool use_gpu_ = false;        // active for the current model/treino call
   bool gpu_announced_ = false;  // printed the backend banner once
 
-  struct RouteResponse {
-    int status = 200;
-    rt::Value dados;
-    bool set = false;
-  };
-  RouteResponse* route_resp_ = nullptr;  // non-null only while handling a request
+  // Serializam caches/armazenamento mutavel compartilhado entre as threads
+  // do pool de rotas (ver serve()): compilacao lazy de chunks/modelos,
+  // indice em memoria e memoria de conversa dos agentes.
+  std::mutex vm_chunks_mutex_;
+  std::mutex model_cache_mutex_;
+  std::mutex index_stores_mutex_;
+  std::mutex agent_memory_mutex_;
+  std::mutex log_mutex_;  // linhas de log do handler de requisicoes
 
   // Execucao de 'se': informa ao 'exec_block' se algum ramo foi tomado, para
   // ele parear um 'senao:' solto (item de campo em 'passos:') com o 'se'
   // anterior. Fora desse par, 'senao' executa incondicionalmente (legado).
-  bool last_if_taken_ = false;
+  // Estado por thread: rotas paralelas nao podem interferir uma na outra.
 
   bool schedule_mode_ = false;
 };

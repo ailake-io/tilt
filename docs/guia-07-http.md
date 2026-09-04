@@ -38,6 +38,8 @@ servico Loja:
 ```bash
 tilt servir servico.tilt --porta 8080
 tilt servir servico.tilt --porta 8080 --requisicoes 3   # atende 3 e sai (testes)
+tilt servir servico.tilt --threads 8                    # pool com 8 workers
+tilt servir servico.tilt --threads 1                    # rotas em série
 ```
 
 No Linux, o servidor usa epoll com sockets não-bloqueantes: várias conexões
@@ -47,8 +49,23 @@ de 30 s e uma `TiltArena` de scratch por requisição — resetada assim que a
 resposta é despachada. O parsing de headers aloca nessa arena. Em outros
 sistemas, um fallback bloqueante atende uma conexão por vez.
 
-As rotas ainda executam em série, na thread do event loop (o interpretador
-não é reentrante). Log determinístico:
+### Execução paralela de rotas
+
+Por padrão (`--threads` omitido) o tratamento das rotas roda num pool de
+`min(4, núcleos)` workers — rotas de CPU-bound (inferência, ETL, loops)
+atendem em paralelo, uma requisição lenta não bloqueia as outras. O event
+loop só faz rede: parseia o request, o despacha numerado para a fila do pool
+e recebe as respostas de volta via `eventfd`. Cada conexão numera seus
+requests por sequência, então respostas de requests pipelined na **mesma**
+conexão saem sempre na ordem enviada, mesmo completando fora de ordem.
+
+O interpretador é reentrante nesse modo: a resposta corrente (`responder:`),
+o estado de `se`/`senao:` e o dispositivo ativo (`cpu`/`cuda`) são
+`thread_local`, e os caches compartilhados (chunks da VM, modelos, índice em
+memória, memória de conversa dos agentes) são protegidos por mutex.
+`--threads 1` volta ao modo serial (mesmo comportamento de antes).
+
+Log por requisição (uma linha por resposta, ordem de conclusão):
 
 ```
 servico Loja: escutando 127.0.0.1:8080
