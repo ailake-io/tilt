@@ -1,0 +1,12 @@
+funcao marca x -> logico:
+  imprimir "avaliado:", x
+  retornar x
+
+pipeline p:
+  passos:
+    - imprimir "A:", falso e marca(verdadeiro)
+    - imprimir "B:", verdadeiro ou marca(falso)
+    - imprimir "C:", verdadeiro e marca(verdadeiro)
+    - imprimir "D:", falso ou marca(falso)
+    - imprimir "E:", falso e marca(verdadeiro) e marca(falso)
+    - imprimir "F:", verdadeiro ou marca(verdadeiro) ou marca(falso)

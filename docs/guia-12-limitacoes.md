@@ -102,7 +102,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - A VM cobre `funcao` pura e `pipeline`s no subconjunto (literais incl.
   listas, `para cada`, índice, `contem`); o resto roda no interpretador de
   árvore (`tilt executar --vm` cai por pipeline, transparente).
-- `e` / `ou` na VM não fazem curto-circuito.
+- `e` / `ou` na VM fazem curto-circuito (desde a Fase 8), com resultado
+  sempre `logico`.
 - `tilt compilar` cobre o **programa inteiro** dentro do subconjunto da VM:
   `funcao principal` ou pipelines, com texto/decimal/lista e saída idêntica
   ao interpretador (runtime C espelhando `value.cpp`; teste `native`

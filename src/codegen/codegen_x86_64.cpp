@@ -179,16 +179,6 @@ struct Emitter {
           os << "  mov %rsp, %rdi\n  call tv_truthy\n  mov %rax, %rsi\n  mov %rsp, %rdi\n"
                 "  call tv_logico\n";
           break;
-        case Op::And:
-        case Op::Or:
-          os << "  mov %rsp, %rdi\n  call tv_truthy\n  mov %rax, %r12\n  add $" << kSlot
-             << ", %rsp\n";
-          os << "  mov %rsp, %rdi\n  call tv_truthy\n";
-          os << "  test %rax, %rax\n  setne %al\n  movzbq %al, %rax\n";
-          os << "  test %r12, %r12\n  setne %r12b\n  movzbq %r12b, %r12\n";
-          os << (in.op == Op::And ? "  and %r12, %rax\n" : "  or %r12, %rax\n");
-          os << "  mov %rax, %rsi\n  mov %rsp, %rdi\n  call tv_logico\n";
-          break;
         case Op::Binop: {
           os << "  lea " << kSlot << "(%rsp), %rdi\n  lea " << kSlot << "(%rsp), %rsi\n  mov $"
              << binop_id(c.op_names[static_cast<std::size_t>(in.a)]) << ", %edx\n"

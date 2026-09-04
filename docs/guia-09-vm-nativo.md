@@ -19,9 +19,9 @@ Subconjunto suportado:
 Fora disso (`tentar`, membros, tensores, LLM, agente, tabelas, interpolação,
 …) a função cai no interpretador de árvore.
 
-Diferença observável: **`e` / `ou` na VM não fazem curto-circuito** nesta
-passada (avaliam os dois lados). Como o subconjunto não tem efeitos colaterais
-em expressão além de `imprimir`, o *valor* é o mesmo.
+`e` / `ou` compilam com curto-circuito (Fase 8): o lado direito só é
+avaliado quando o esquerdo não decide, e o resultado é sempre `logico` —
+mesma semântica do interpretador de árvore.
 
 `TILT_VM_DEBUG=1 tilt executar prog.tilt` despeja o bytecode gerado.
 

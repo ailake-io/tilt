@@ -16,8 +16,6 @@ enum class Op : std::uint8_t {
   Neg,
   Not,
   Truthy,      // replace top with logico(truthy)
-  And,         // pop 2 -> logico
-  Or,
   Binop,       // a: op_names index
   Jump,        // a: target ip
   JumpIfFalse, // a: target ip (consumes stack top)

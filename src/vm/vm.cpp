@@ -54,18 +54,6 @@ rt::Value Vm::run(const Chunk& chunk, std::vector<rt::Value> args) {
       case Op::Truthy:
         stack.push_back(Value::logico(pop().truthy()));
         break;
-      case Op::And: {
-        bool b = pop().truthy();
-        bool a = pop().truthy();
-        stack.push_back(Value::logico(a && b));
-        break;
-      }
-      case Op::Or: {
-        bool b = pop().truthy();
-        bool a = pop().truthy();
-        stack.push_back(Value::logico(a || b));
-        break;
-      }
       case Op::Binop: {
         Value b = pop();
         Value a = pop();

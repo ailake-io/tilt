@@ -38,7 +38,7 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno), no **Qdrant** (REST via `curl`) e no **pgvector** (SQL sobre libpq, cosseno `<=>`) | rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder` (planner iterativo), `equipe` (sequencial/paralelo/supervisor) | planner tolerante a protocolo (1 linha/turno) |
 | HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` (epoll + keep-alive + arena por requisição + **pool de rotas paralelo** `--threads N`, Linux; respostas pipelined em ordem por conexão) | `meio:` (middleware) |
-| Execução | VM de bytecode p/ `funcao` pura **e pipelines** (`tilt executar --vm`), codegen nativo x86-64 p/ **programa inteiro** (texto, decimal, listas, `para cada`, pipelines; saída idêntica ao interpretador) | curto-circuito de `e`/`ou` na VM, builtins fora do subconjunto nativo |
+| Execução | VM de bytecode p/ `funcao` pura **e pipelines** (`tilt executar --vm`), codegen nativo x86-64 p/ **programa inteiro** (texto, decimal, listas, `para cada`, pipelines; saída idêntica ao interpretador) | builtins fora do subconjunto nativo |
 | Tooling | `checar --json`, `referencia`, `tilt lsp` + `completar`, `checar_tilt`, extensão VS Code (realce + LSP, vsix empacotável com `npm run package`) | publicação no Marketplace |
 
 Detalhes em [`docs/guia-12-limitacoes.md`](docs/guia-12-limitacoes.md).

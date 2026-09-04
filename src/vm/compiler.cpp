@@ -112,12 +112,28 @@ struct Builder {
       }
       case ExprKind::Binary: {
         if (e.text == "|") bail("operador '|'");
-        if (e.text == "e" || e.text == "ou") {
+        if (e.text == "e") {
           expr(*e.lhs);
           emit(Op::Truthy);
+          int j_false = emit(Op::JumpIfFalse);
           expr(*e.rhs);
           emit(Op::Truthy);
-          emit(e.text == "e" ? Op::And : Op::Or);
+          int j_end = emit(Op::Jump);
+          chunk.code[static_cast<std::size_t>(j_false)].a = static_cast<std::int32_t>(chunk.code.size());
+          emit(Op::Const, const_idx(rt::Value::logico(false)));
+          chunk.code[static_cast<std::size_t>(j_end)].a = static_cast<std::int32_t>(chunk.code.size());
+          return;
+        }
+        if (e.text == "ou") {
+          expr(*e.lhs);
+          emit(Op::Truthy);
+          int j_rhs = emit(Op::JumpIfFalse);
+          emit(Op::Const, const_idx(rt::Value::logico(true)));
+          int j_end = emit(Op::Jump);
+          chunk.code[static_cast<std::size_t>(j_rhs)].a = static_cast<std::int32_t>(chunk.code.size());
+          expr(*e.rhs);
+          emit(Op::Truthy);
+          chunk.code[static_cast<std::size_t>(j_end)].a = static_cast<std::int32_t>(chunk.code.size());
           return;
         }
         expr(*e.lhs);

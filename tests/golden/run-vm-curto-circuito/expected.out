@@ -1,0 +1,9 @@
+== pipeline p ==
+A: falso
+B: verdadeiro
+avaliado: verdadeiro
+C: verdadeiro
+avaliado: falso
+D: falso
+E: falso
+F: verdadeiro
