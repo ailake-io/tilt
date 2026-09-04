@@ -1,4 +1,4 @@
 pipeline noturno:
-  agenda: "0 3 * * *"
+  agenda: "*/15 * * * *"
   passos:
     - imprimir "executado"

@@ -44,6 +44,7 @@ add_library(tilt_core STATIC
   src/runtime/vectorstore.cpp
   src/runtime/http_server.cpp
   src/runtime/gpu_runtime.cpp
+  src/runtime/parquet.cpp
   src/vm/compiler.cpp
   src/vm/vm.cpp
   src/codegen/codegen_x86_64.cpp

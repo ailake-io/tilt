@@ -4,6 +4,9 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <chrono>
+#include <cstdio>
+#include <ctime>
 #include <exception>
 #include <fstream>
 #include <functional>
@@ -12,6 +15,7 @@
 #include <ostream>
 #include <sstream>
 #include <string_view>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 
@@ -21,6 +25,7 @@
 #include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
+#include "runtime/parquet.hpp"
 #include "runtime/vectorstore.hpp"
 #include "semantic/checker.hpp"
 #include "vm/compiler.hpp"
@@ -152,6 +157,161 @@ void Interpreter::register_decls() {
   }
 }
 
+namespace {
+
+// Extracts N from `ao_falhar: repetir N[, espera: "..."]`. Returns 0 if absent.
+int retry_count(const Item& pipeline) {
+  const Item* f = find_field(*pipeline.block, "ao_falhar");
+  if (!f || !f->value) return 0;
+  const Expr* v = f->value.get();
+  if (v->kind == ExprKind::Call && v->lhs && v->lhs->kind == ExprKind::Name &&
+      v->lhs->text == "repetir" && !v->args.empty() &&
+      v->args[0].value->kind == ExprKind::IntLit) {
+    return static_cast<int>(std::strtol(v->args[0].value->text.c_str(), nullptr, 10));
+  }
+  return 0;
+}
+
+// ------------------------------------------------------------------ cron
+// Subconjunto de cron de 5 campos: minuto hora dia-do-mes mes dia-da-semana.
+// Cada campo aceita: * | n | a-b | a-b/n | */n | listas com virgula.
+struct CronRange {
+  int a, b, step;
+  bool matches(int v) const { return v >= a && v <= b && (v - a) % step == 0; }
+};
+
+struct CronField {
+  bool any = false;
+  bool is_dow = false;
+  std::vector<CronRange> ranges;
+
+  bool matches(int v) const {
+    if (any) return true;
+    for (const CronRange& r : ranges) {
+      if (r.matches(v)) return true;
+    }
+    // domingo: 0 e 7 sao equivalentes
+    if (is_dow && v == 0) {
+      for (const CronRange& r : ranges) {
+        if (r.matches(7)) return true;
+      }
+    }
+    return false;
+  }
+};
+
+bool parse_cron_field(const std::string& s, int lo, int hi, bool is_dow, CronField& out) {
+  out = CronField{};
+  out.is_dow = is_dow;
+  if (s == "*") {
+    out.any = true;
+    return true;
+  }
+  std::size_t pos = 0;
+  while (pos <= s.size()) {
+    const std::size_t comma = s.find(',', pos);
+    const std::string part =
+        s.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    if (part.empty()) return false;
+    int step = 1;
+    std::string range = part;
+    if (const std::size_t slash = part.find('/'); slash != std::string::npos) {
+      step = std::atoi(part.substr(slash + 1).c_str());
+      range = part.substr(0, slash);
+    }
+    int a, b;
+    if (range == "*") {
+      a = lo;
+      b = hi;
+    } else if (const std::size_t dash = range.find('-'); dash != std::string::npos) {
+      a = std::atoi(range.substr(0, dash).c_str());
+      b = std::atoi(range.substr(dash + 1).c_str());
+    } else {
+      a = b = std::atoi(range.c_str());
+    }
+    if (step < 1 || a < lo || a > b || b > hi) return false;
+    out.ranges.push_back({a, b, step});
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+  return !out.ranges.empty();
+}
+
+struct CronSpec {
+  CronField min, hour, dom, mon, dow;
+  bool valid = false;
+};
+
+CronSpec parse_cron(const std::string& expr) {
+  CronSpec c;
+  std::vector<std::string> parts;
+  std::size_t pos = 0;
+  while (pos <= expr.size()) {
+    const std::size_t sp = expr.find_first_of(" \t", pos);
+    parts.push_back(expr.substr(pos, sp == std::string::npos ? std::string::npos : sp - pos));
+    if (sp == std::string::npos) break;
+    pos = expr.find_first_not_of(" \t", sp);
+    if (pos == std::string::npos) break;
+  }
+  c.valid = parts.size() == 5 && parse_cron_field(parts[0], 0, 59, false, c.min) &&
+            parse_cron_field(parts[1], 0, 23, false, c.hour) &&
+            parse_cron_field(parts[2], 1, 31, false, c.dom) &&
+            parse_cron_field(parts[3], 1, 12, false, c.mon) &&
+            parse_cron_field(parts[4], 0, 7, true, c.dow);
+  return c;
+}
+
+std::time_t next_cron_fire(const CronSpec& c, std::time_t after) {
+  // arredonda para o inicio do proximo minuto
+  std::time_t t = after + 60;
+  std::tm local{};
+  localtime_r(&t, &local);
+  local.tm_sec = 0;
+  t = std::mktime(&local);
+  for (int i = 0; i < 366 * 24 * 60; ++i, t += 60) {
+    std::tm cur{};
+    localtime_r(&t, &cur);
+    const int dow = cur.tm_wday;
+    if (c.min.matches(cur.tm_min) && c.hour.matches(cur.tm_hour) &&
+        c.dom.matches(cur.tm_mday) && c.mon.matches(cur.tm_mon + 1) && c.dow.matches(dow)) {
+      return t;
+    }
+  }
+  return -1;
+}
+
+std::string format_local(std::time_t t) {
+  std::tm local{};
+  char buf[64];
+  localtime_r(&t, &local);
+  std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d", local.tm_year + 1900,
+                local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min);
+  return buf;
+}
+
+// Relogio fake para testes: TILT_AGORA="YYYY-MM-DDTHH:MM[:SS]" (hora local;
+// tambem aceita espaco no lugar de 'T'). Com relogio fake, o loop nao dorme
+// e avanca o tempo sozinho; TILT_AGENDAR_MAX limita o numero de execucoes
+// (padrao 1 no modo fake).
+bool fake_now(std::time_t& out) {
+  const char* env = std::getenv("TILT_AGORA");
+  if (!env || !*env) return false;
+  std::tm local{};
+  int sec = 0;
+  if (std::sscanf(env, "%d-%d-%dT%d:%d:%d", &local.tm_year, &local.tm_mon, &local.tm_mday,
+                  &local.tm_hour, &local.tm_min, &sec) < 5 &&
+      std::sscanf(env, "%d-%d-%d %d:%d:%d", &local.tm_year, &local.tm_mon, &local.tm_mday,
+                  &local.tm_hour, &local.tm_min, &sec) < 5) {
+    return false;
+  }
+  local.tm_year -= 1900;
+  local.tm_mon -= 1;
+  local.tm_sec = sec;
+  out = std::mktime(&local);
+  return true;
+}
+
+}  // namespace
 int Interpreter::run() {
   try {
     register_decls();
@@ -184,37 +344,90 @@ int Interpreter::run() {
   }
 }
 
-namespace {
+int Interpreter::run_scheduled() {
+  try {
+    register_decls();
 
-// Extracts N from `ao_falhar: repetir N[, espera: "..."]`. Returns 0 if absent.
-int retry_count(const Item& pipeline) {
-  const Item* f = find_field(*pipeline.block, "ao_falhar");
-  if (!f || !f->value) return 0;
-  const Expr* v = f->value.get();
-  if (v->kind == ExprKind::Call && v->lhs && v->lhs->kind == ExprKind::Name &&
-      v->lhs->text == "repetir" && !v->args.empty() &&
-      v->args[0].value->kind == ExprKind::IntLit) {
-    return static_cast<int>(std::strtol(v->args[0].value->text.c_str(), nullptr, 10));
-  }
-  return 0;
-}
-
-// A cron expression is valid here if it has exactly five whitespace fields.
-bool valid_cron(const std::string& expr) {
-  int fields = 0;
-  bool in_field = false;
-  for (char c : expr) {
-    if (c == ' ' || c == '\t') {
-      in_field = false;
-    } else if (!in_field) {
-      in_field = true;
-      ++fields;
+    struct Scheduled {
+      const Item* pipeline;
+      CronSpec cron;
+    };
+    std::vector<Scheduled> scheduled;
+    std::vector<const Item*> immediate;
+    for (const Item* p : pipelines_) {
+      const Item* ag = p->block ? find_field(*p->block, "agenda") : nullptr;
+      if (ag && ag->value && ag->value->kind == ExprKind::TextLit) {
+        CronSpec c = parse_cron(ag->value->text);
+        if (!c.valid) {
+          fail(ag->value->span, "agenda '" + ag->value->text + "' nao e um cron valido de 5 campos");
+        }
+        scheduled.push_back({p, c});
+      } else {
+        immediate.push_back(p);
+      }
     }
+
+    for (const Item* p : immediate) run_pipeline(*p);
+    if (scheduled.empty()) {
+      out_ << "nenhuma agenda definida; nada a agendar\n";
+      return 0;
+    }
+
+    // treinos e funcao principal nao entram no loop; rodam uma vez antes
+    for (const auto& item : program_.items) {
+      if (item && item->kind == ItemKind::Decl && item->key == "treino") run_treino(*item);
+    }
+
+    std::time_t now = std::time(nullptr);
+    const bool fake = fake_now(now);
+    long max_runs = 0;
+    if (const char* m = std::getenv("TILT_AGENDAR_MAX")) {
+      max_runs = std::atol(m);
+    } else if (fake) {
+      max_runs = 1;
+    }
+    if (fake && max_runs <= 0) {
+      fail({}, "TILT_AGORA definido sem TILT_AGENDAR_MAX; o relogio fake precisa de limite");
+    }
+
+    long fired_total = 0;
+    while (true) {
+      // proximo disparo entre todos os pipelines agendados
+      std::time_t next = -1;
+      for (const Scheduled& s : scheduled) {
+        const std::time_t t = next_cron_fire(s.cron, now);
+        if (t < 0) {
+          fail({}, "agenda sem proxima ocorrencia nos proximos 366 dias");
+        }
+        if (next < 0 || t < next) next = t;
+      }
+      out_ << "proxima execucao: " << format_local(next) << "\n";
+      if (!fake) {
+        const std::time_t cur = std::time(nullptr);
+        if (next > cur) {
+          std::this_thread::sleep_for(std::chrono::seconds(next - cur));
+        }
+      }
+      now = next;
+      for (const Scheduled& s : scheduled) {
+        if (next_cron_fire(s.cron, now - 60) == now) run_pipeline(*s.pipeline);
+      }
+      ++fired_total;
+      if (max_runs > 0 && fired_total >= max_runs) break;
+    }
+    return 0;
+  } catch (const RuntimeAbort& a) {
+    Diagnostic d;
+    d.severity = Severity::Error;
+    d.code = a.code;
+    d.span = a.span;
+    d.message = a.message;
+    d.notes = a.notes;
+    diag_.report(std::move(d));
+    return 1;
   }
-  return fields == 5;
 }
 
-}  // namespace
 
 void Interpreter::run_pipeline(const Item& pipeline) {
   out_ << "== pipeline " << decl_name(pipeline) << " ==\n";
@@ -223,12 +436,8 @@ void Interpreter::run_pipeline(const Item& pipeline) {
   if (const Item* ag = find_field(*pipeline.block, "agenda");
       ag && ag->value && ag->value->kind == ExprKind::TextLit) {
     const std::string& cron = ag->value->text;
-    if (!valid_cron(cron)) {
-      fail(ag->value->span, "agenda '" + cron + "' nao e um cron de 5 campos");
-    }
-    if (schedule_mode_) {
-      out_ << "agenda: '" << cron << "' registrada (execucao unica neste modo; "
-           << "o loop real chega no M5.2)\n";
+    if (!parse_cron(cron).valid) {
+      fail(ag->value->span, "agenda '" + cron + "' nao e um cron valido de 5 campos");
     }
   }
 
@@ -405,6 +614,16 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
     }
     if (parsed.kind == ValueKind::Lista) parsed.kind = ValueKind::Tabela;
     return parsed;
+  }
+  if (tipo == "parquet") {
+    if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
+    try {
+      Value t = rt::parquet_read(path);
+      t.kind = ValueKind::Tabela;
+      return t;
+    } catch (const std::exception& e) {
+      fail(span, std::string(e.what()));
+    }
   }
   fail(span, "fonte '" + name + "': conector '" + (tipo.empty() ? "?" : tipo) +
                  "' nao implementado (M5.2)",
@@ -2338,6 +2557,17 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_csv espera um caminho");
     return read_csv_file(a[0].s, call.span);
   }
+  if (name == "ler_parquet") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_parquet espera um caminho");
+    try {
+      Value t = rt::parquet_read(a[0].s);
+      t.kind = ValueKind::Tabela;
+      return t;
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "carregador") {
     auto a = args();
     rt::ValueMap kw = eval_kwargs(call, env);
@@ -2398,7 +2628,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     out << rt::json_dump(a[0]);
     return Value::nulo();
   }
-  if (name == "escrever_csv" || name == "escrever_parquet") {
+  if (name == "escrever_csv") {
     auto a = args();
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "escrever espera (tabela, caminho)");
@@ -2418,8 +2648,17 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         outf << '\n';
       }
     }
-    if (name == "escrever_parquet") {
-      out_ << "[nota] parquet ainda nao implementado (M5); gravado como CSV em " << a[1].s << '\n';
+    return Value::nulo();
+  }
+  if (name == "escrever_parquet") {
+    auto a = args();
+    if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
+      fail(call.span, "escrever_parquet espera (tabela, caminho)");
+    }
+    try {
+      rt::parquet_write(a[1].s, a[0]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
     }
     return Value::nulo();
   }

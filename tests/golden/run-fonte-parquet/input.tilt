@@ -1,0 +1,18 @@
+fonte vendas:
+  tipo: parquet
+  caminho: "entrada.parquet"
+
+pipeline preparar:
+  passos:
+    - dados = [
+        { regiao: "sul", valor: 100 },
+        { regiao: "norte", valor: 200 },
+        { regiao: "sul", valor: 50 }
+      ]
+    - escrever_parquet dados, "entrada.parquet"
+
+pipeline analisar:
+  passos:
+    - tabela = ler vendas
+    - para cada linha em tabela:
+        - imprimir linha.regiao, linha.valor

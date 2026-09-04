@@ -25,10 +25,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## Dados
 
-- Conectores de rede (`postgres`, `kafka`, `s3`, `delta`) e Parquet → `T900`.
-  Só CSV e JSON de arquivo local.
+- Parquet é nativo (reader/writer próprio, zero dependências) mas de 1ª
+  passada: colunas obrigatórias (sem nulls), encoding PLAIN, sem compressão,
+  um row group por arquivo. Arquivos fora desse perfil (compressão, OPTIONAL,
+  dictionary) levantam erro claro na leitura.
+- Conectores de rede (`postgres`, `kafka`, `s3`, `delta`) → `T900`. Só CSV,
+  JSON e Parquet de arquivo local.
 - Streaming com `janela:` não roda.
-- `agenda:` é validada mas `--agendar` não entra em loop (roda uma vez).
+- `--agendar` entra em loop real de agenda, mas o parser cron é numérico
+  (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
+  E (não pelo OU do cron clássico) e não há persistência de estado entre
+  disparos.
 
 ## ML / DL
 

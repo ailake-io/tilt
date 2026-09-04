@@ -1,0 +1,4 @@
+== pipeline roundtrip ==
+ana 30 3500.75 verdadeiro
+bruno 41 5100.5 falso
+carla 25 2890 verdadeiro

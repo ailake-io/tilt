@@ -1,0 +1,11 @@
+pipeline roundtrip:
+  passos:
+    - dados = [
+        { nome: "ana", idade: 30, salario: 3500.75, ativo: verdadeiro },
+        { nome: "bruno", idade: 41, salario: 5100.50, ativo: falso },
+        { nome: "carla", idade: 25, salario: 2890.00, ativo: verdadeiro }
+      ]
+    - escrever_parquet dados, "saida.parquet"
+    - volta = ler_parquet "saida.parquet"
+    - para cada linha em volta:
+        - imprimir linha.nome, linha.idade, linha.salario, linha.ativo

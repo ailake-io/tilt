@@ -1,3 +1,6 @@
+proxima execucao: 2026-01-05 03:00
 == pipeline noturno ==
-agenda: '0 3 * * *' registrada (execucao unica neste modo; o loop real chega no M5.2)
+executado
+proxima execucao: 2026-01-05 03:15
+== pipeline noturno ==
 executado

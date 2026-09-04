@@ -32,6 +32,10 @@ class Interpreter {
   // Returns 0 on success, 1 if a runtime error was reported.
   int run();
 
+  // `tilt executar --agendar`: loop forever (or TILT_AGENDAR_MAX runs with the
+  // TILT_AGORA fake clock) firing each pipeline at its `agenda:` cron.
+  int run_scheduled();
+
   // Serves the first `servico` declaration. `max_requests <= 0` runs forever.
   int serve(int port_override, int max_requests);
 

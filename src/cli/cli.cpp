@@ -273,7 +273,7 @@ int cmd_executar(const std::vector<std::string_view>& args) {
 
   Interpreter interp(program, diag, std::cout);
   interp.set_schedule_mode(schedule);
-  int rc = interp.run();
+  int rc = schedule ? interp.run_scheduled() : interp.run();
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());
     return kDiagnostics;
@@ -366,7 +366,8 @@ INSTRUCOES (passos:/executar:/funcao)
 
 BUILTINS
   imprimir registrar env tamanho contar somar media min max intervalo dividir
-  ler_csv escrever_csv ler_json escrever_json ler <fonte> carregador
+  ler_csv escrever_csv ler_json escrever_json ler_parquet escrever_parquet
+  ler <fonte> carregador
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)
   modelo X.executar <tensor>   |   <indice>.inserir / .buscar
   checar_tilt "<arquivo>"  -> { ok, erros: [{codigo,linha,coluna,mensagem,notas}] }
