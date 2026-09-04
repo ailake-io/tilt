@@ -26,6 +26,7 @@
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
 #include "runtime/parquet.hpp"
+#include "runtime/delta.hpp"
 #include "runtime/vectorstore.hpp"
 #include "semantic/checker.hpp"
 #include "vm/compiler.hpp"
@@ -619,6 +620,16 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
     if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
     try {
       Value t = rt::parquet_read(path);
+      t.kind = ValueKind::Tabela;
+      return t;
+    } catch (const std::exception& e) {
+      fail(span, std::string(e.what()));
+    }
+  }
+  if (tipo == "delta") {
+    if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
+    try {
+      Value t = rt::delta_read(path);
       t.kind = ValueKind::Tabela;
       return t;
     } catch (const std::exception& e) {
@@ -2568,6 +2579,17 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
   }
+  if (name == "ler_delta") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_delta espera um diretorio");
+    try {
+      Value t = rt::delta_read(a[0].s);
+      t.kind = ValueKind::Tabela;
+      return t;
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "carregador") {
     auto a = args();
     rt::ValueMap kw = eval_kwargs(call, env);
@@ -2657,6 +2679,18 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       rt::parquet_write(a[1].s, a[0]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "escrever_delta") {
+    auto a = args();
+    if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
+      fail(call.span, "escrever_delta espera (tabela, diretorio)");
+    }
+    try {
+      rt::delta_write(a[1].s, a[0]);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

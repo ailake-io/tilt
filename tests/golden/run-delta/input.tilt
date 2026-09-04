@@ -1,0 +1,17 @@
+fonte metricas:
+  tipo: delta
+  caminho: "tabela_delta"
+
+pipeline preparar:
+  passos:
+    - dados = [
+        { dia: "2026-01-01", valor: 10.5, ok: verdadeiro },
+        { dia: "2026-01-02", valor: 20.0, ok: falso }
+      ]
+    - escrever_delta dados, "tabela_delta"
+
+pipeline analisar:
+  passos:
+    - tabela = ler metricas
+    - para cada linha em tabela:
+        - imprimir linha.dia, linha.valor, linha.ok

@@ -367,6 +367,7 @@ INSTRUCOES (passos:/executar:/funcao)
 BUILTINS
   imprimir registrar env tamanho contar somar media min max intervalo dividir
   ler_csv escrever_csv ler_json escrever_json ler_parquet escrever_parquet
+  ler_delta escrever_delta
   ler <fonte> carregador
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)
   modelo X.executar <tensor>   |   <indice>.inserir / .buscar

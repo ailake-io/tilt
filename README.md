@@ -33,7 +33,7 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 |---|---|---|
 | Sintaxe | lexer, parser, semântica (`checar`), interpretador de árvore, literais `[...]`/`{...}` multilinha | assinaturas exóticas de `funcao` |
 | Semântica | tipos, segredos, dispositivos, referências de ferramenta, resolução de nomes em `passos:`/`executar:` (`T030`), shape solver de `densa`/`linear` (`T012`) | shape solver fora de `densa`/`linear`, inferência completa de tipos |
-| Dados | CSV, JSON e **Parquet nativo** (leitura/escrita, validado com pyarrow), `fonte` de arquivo local, `pipeline`, `verificar`, `ao_falhar`, `agenda` com **loop real** (`tilt executar --agendar`, cron 5 campos) | Delta Lake (JSON log), Kafka/S3, streaming `janela`, bancos (Postgres/Redis/Qdrant em andamento) |
+| Dados | CSV, JSON, **Parquet nativo** e **Delta Lake mínimo** (leitura/escrita, validados com pyarrow/delta-rs), `fonte` de arquivo local, `pipeline`, `verificar`, `ao_falhar`, `agenda` com **loop real** (`tilt executar --agendar`, cron 5 campos) | Kafka/S3, streaming `janela`, bancos SQL/NoSQL/vetoriais (em andamento) |
 | ML/DL | tensores f32 CPU (matmul multithread), `modelo` (inferência, `pesos:` de arquivo, `norma_camada`), `treino` (CE + quadrática, SGD/Adam), `carregador` | GPU só validado em `fake`; `conv2d`/`norma_lote`, backward de `norma_camada` |
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno) | `qdrant`/`pgvector`; rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder` (planner iterativo), `equipe` (sequencial/paralelo/supervisor) | planner tolerante a protocolo (1 linha/turno) |

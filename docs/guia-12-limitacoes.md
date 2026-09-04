@@ -29,8 +29,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   passada: colunas obrigatórias (sem nulls), encoding PLAIN, sem compressão,
   um row group por arquivo. Arquivos fora desse perfil (compressão, OPTIONAL,
   dictionary) levantam erro claro na leitura.
-- Conectores de rede (`postgres`, `kafka`, `s3`, `delta`) → `T900`. Só CSV,
-  JSON e Parquet de arquivo local.
+- Delta Lake é mínimo: escrita sobrescreve a tabela (sem append/ACID), sem
+  partições nem checkpoints; a leitura herda as limitações do Parquet acima,
+  então tabelas de outros escritores só leem sem compressão/dictionary e com
+  colunas obrigatórias.
+- Conectores de rede (`postgres`, `kafka`, `s3`) → `T900`. Só CSV, JSON,
+  Parquet e Delta de arquivo local.
 - Streaming com `janela:` não roda.
 - `--agendar` entra em loop real de agenda, mas o parser cron é numérico
   (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por

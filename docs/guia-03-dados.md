@@ -70,6 +70,22 @@ schema = pa.schema([("nome", pa.string(), False), ("idade", pa.int64(), False)])
 pq.write_table(tabela, "saida.parquet", compression="NONE", use_dictionary=False)
 ```
 
+## Delta Lake mínimo
+
+`escrever_delta`/`ler_delta` e `fonte tipo: delta` implementam o subconjunto de
+1ª passada do protocolo Delta sobre diretório local:
+
+- a escrita grava `<dir>/part-*.parquet` (mesmo perfil do Parquet acima) e o
+  log `<dir>/_delta_log/00000000000000000000.json` com `protocol`, `metaData`
+  (schemaString no formato JSON do Delta) e `add`;
+- a leitura aplica o log em ordem de versão (`add`/`remove`) e concatena os
+  arquivos ativos, validando que o schema não diverge entre versões;
+- interoperável com delta-rs: `DeltaTable(dir).to_pyarrow_table()` lê tabelas
+  escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
+  sem dictionary e com colunas obrigatórias;
+- limitações: escrita sobrescreve a tabela (sem append transacional), sem
+  partições, sem checkpoints, sem transações concorrentes.
+
 ## Métodos de tabela
 
 Operam sobre `tabela` e `lista` de mapas. `linha` é a variável implícita da linha atual.
