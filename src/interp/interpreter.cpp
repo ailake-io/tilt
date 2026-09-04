@@ -31,6 +31,7 @@
 #include "runtime/redis.hpp"
 #include "runtime/sqlite.hpp"
 #include "runtime/postgres.hpp"
+#include "runtime/pgvector.hpp"
 #include "runtime/vectorstore.hpp"
 #include "semantic/checker.hpp"
 #include "vm/compiler.hpp"
@@ -1397,12 +1398,17 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
   auto it = entities_.find(indice_name);
   const ast::Block& b = *it->second->block;
   const std::string armazenamento = field_str(b, "armazenamento");
-  // Formato: "qdrant://host:porta/colecao" (ver run-indice-armazenamento).
+  // Formatos: "qdrant://host:porta/colecao" (ver run-indice-armazenamento) e
+  // "pgvector://colecao" (Postgres + extensao pgvector; connection string no
+  // campo "url", como em fonte postgres).
   std::string qdrant_base, qdrant_col;
+  std::string pgv_table, pgv_url;
   const bool qdrant = armazenamento.rfind("qdrant://", 0) == 0;
-  if (!armazenamento.empty() && armazenamento != "memoria" && !qdrant) {
+  const bool pgvector = armazenamento.rfind("pgvector://", 0) == 0;
+  if (!armazenamento.empty() && armazenamento != "memoria" && !qdrant && !pgvector) {
     fail(call.span, "indice '" + indice_name + "': armazenamento '" + armazenamento +
-                        "' nao implementado; use \"memoria\" ou \"qdrant://host:porta/colecao\"",
+                        "' nao implementado; use \"memoria\", \"qdrant://host:porta/colecao\" "
+                        "ou \"pgvector://colecao\" (com campo \"url\")",
          DiagCode::ConnectorNotImplemented);
   }
   if (qdrant) {
@@ -1414,6 +1420,15 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     }
     qdrant_base = "http://" + rest.substr(0, slash);
     qdrant_col = rest.substr(slash + 1);
+  }
+  if (pgvector) {
+    pgv_table = armazenamento.substr(11);  // depois de pgvector://
+    pgv_url = field_str(b, "url");
+    if (pgv_url.empty()) {
+      fail(call.span, "indice '" + indice_name +
+                          "': armazenamento pgvector precisa do campo \"url\" "
+                          "(connection string libpq, ex.: \"host=... port=... dbname=... user=...\")");
+    }
   }
   const std::string emb_model = field_str(b, "embeddings");
   rt::MemoryIndex& store = index_stores_[indice_name];
@@ -1432,6 +1447,12 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
       if (qdrant) {
         try {
           rt::qdrant_upsert(qdrant_base, qdrant_col, id, text, vec);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      } else if (pgvector) {
+        try {
+          rt::pgvector_upsert(pgv_url, pgv_table, id, text, vec);
         } catch (const std::exception& e) {
           fail(call.span, std::string(e.what()));
         }
@@ -1459,10 +1480,14 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     if (const Value* tk = kw.find("top_k")) k = static_cast<std::size_t>(tk->as_number());
     const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
     Value out = Value::lista();
-    if (qdrant) {
+    if (qdrant || pgvector) {
       std::vector<std::pair<std::string, double>> hits;
       try {
-        hits = rt::qdrant_search(qdrant_base, qdrant_col, rt::llm_embed(emb_model, qt), k);
+        if (qdrant) {
+          hits = rt::qdrant_search(qdrant_base, qdrant_col, rt::llm_embed(emb_model, qt), k);
+        } else {
+          hits = rt::pgvector_search(pgv_url, pgv_table, rt::llm_embed(emb_model, qt), k);
+        }
       } catch (const std::exception& e) {
         fail(call.span, std::string(e.what()));
       }

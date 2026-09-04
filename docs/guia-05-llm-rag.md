@@ -79,6 +79,7 @@ padrão.
 indice base:
   embeddings: "text-embedding-3-small"
   armazenamento: "memoria"          # ou qdrant://host:porta/colecao (REST via curl)
+                                     # ou pgvector://colecao (Postgres + extensão pgvector)
 
 pipeline indexar:
   passos:
@@ -98,5 +99,14 @@ pipeline indexar:
   tilt vira UUID determinístico). Nesse modo `buscar` devolve `{ id, score }`
   — o texto fica no payload do ponto no Qdrant. Use parênteses para argumento
   lista: `base.inserir([...])`.
+- Com `armazenamento: "pgvector://colecao"` + campo `url:` (connection string
+  libpq, como em `fonte` postgres), delegam ao Postgres com a extensão
+  pgvector: a tabela `<colecao>` é criada automaticamente na primeira escrita
+  (`id TEXT PRIMARY KEY, texto TEXT, embedding vector(N)`), o upsert usa
+  `ON CONFLICT` e a busca ordena por cosseno (`<=>`). `buscar` devolve
+  `{ id, score }` (o texto fica na coluna `texto` da tabela). Exige a
+  extensão `vector` instalada no banco (o Tilt tenta
+  `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
+  primeira vez).
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).

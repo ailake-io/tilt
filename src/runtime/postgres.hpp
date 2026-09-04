@@ -18,4 +18,9 @@ namespace tilt::rt {
 // Lanca std::runtime_error com mensagem acionavel em qualquer falha.
 Value postgres_query(const std::string& url, const std::string& sql);
 
+// Executa SQL que nao retorna linhas (DDL/DML: CREATE/INSERT/UPDATE...).
+// Nao verifica o tipo de comando; erro do servidor vira excecao com a
+// mensagem do Postgres. Para SELECT use postgres_query().
+void postgres_exec(const std::string& url, const std::string& sql);
+
 }  // namespace tilt::rt

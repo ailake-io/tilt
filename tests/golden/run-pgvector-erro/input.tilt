@@ -1,0 +1,8 @@
+indice docs:
+  embeddings: "m"
+  armazenamento: "pgvector://docs"
+  url: "host=127.0.0.1 port=59996 dbname=vdb user=postgres password=tilt"
+
+pipeline usar:
+  passos:
+    - docs.inserir("x")

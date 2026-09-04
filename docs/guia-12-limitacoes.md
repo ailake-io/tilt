@@ -34,7 +34,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   então tabelas de outros escritores só leem sem compressão/dictionary e com
   colunas obrigatórias.
 - Conectores ainda não cobertos (`kafka`, `s3`, `mongodb`, `iceberg`) →
-  `T900`. CSV, JSON, Parquet, Delta, SQLite, Postgres, Redis e Qdrant rodam.
+  `T900`. CSV, JSON, Parquet, Delta, SQLite, Postgres, Redis, Qdrant e
+  pgvector rodam.
 - Bancos relacionais: somente consultas SELECT (sem INSERT/UPDATE via SQL,
   sem prepared statements); Postgres carrega `libpq.so.5` e SQLite
   `libsqlite3.so.0` via `dlopen` — precisam estar instalados no sistema.
@@ -42,6 +43,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
   id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
   `texto`, que fica no payload do ponto).
+- pgvector: exige a extensão `vector` instalada no banco (o Tilt tenta
+  `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
+  primeira vez); upsert sem prepared statements (escaping manual de
+  strings); nome de coleção restrito a `[a-z0-9_]`.
 - Streaming com `janela:` não roda.
 - `--agendar` entra em loop real de agenda, mas o parser cron é numérico
   (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
@@ -63,8 +68,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## LLM / RAG
 
 - Sem `TILT_LLM`, a chamada real depende do `curl` no `PATH`.
-- `indice` roda com `armazenamento: "memoria"` (cosseno local) e
-  `"qdrant://host:porta/colecao"` (REST via curl); `pgvector` → `T900`.
+- `indice` roda com `armazenamento: "memoria"` (cosseno local),
+  `"qdrant://host:porta/colecao"` (REST via curl) e `"pgvector://colecao"`
+  (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
+  `buscar` devolve `{ id, score }`, sem o texto).
 - Os embeddings do modo `mock` são um bag-of-tokens hasheado (16 dimensões) —
   bons para testes determinísticos, não para relevância real.
 

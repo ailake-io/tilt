@@ -14,6 +14,7 @@ namespace {
 // Constantes do libpq-fe.h / catalog OIDs (não incluímos os headers).
 constexpr int kConnectionOk = 0;
 constexpr int kPgTuplesOk = 2;
+constexpr int kPgCommandOk = 1;
 // OIDs de tipos escalares do catálogo pg_type.
 constexpr unsigned kOidBool = 16;
 constexpr unsigned kOidInt8 = 20;
@@ -38,6 +39,7 @@ struct PqApi {
   void (*clear)(void*) = nullptr;
   void (*finish)(void*) = nullptr;
   char* (*error_message)(const void*) = nullptr;
+  void (*set_notice_processor)(void*, void (*)(void*, const char*), void*) = nullptr;
 };
 
 template <typename F>
@@ -65,7 +67,8 @@ const PqApi& api() {
                     bind_sym(a.lib, a.getisnull, "PQgetisnull") &&
                     bind_sym(a.lib, a.clear, "PQclear") &&
                     bind_sym(a.lib, a.finish, "PQfinish") &&
-                    bind_sym(a.lib, a.error_message, "PQerrorMessage");
+                    bind_sym(a.lib, a.error_message, "PQerrorMessage") &&
+                    bind_sym(a.lib, a.set_notice_processor, "PQsetNoticeProcessor");
     if (!ok) {
       ::dlclose(a.lib);
       a = PqApi{};
@@ -75,19 +78,29 @@ const PqApi& api() {
   return instance;
 }
 
+// Silencia NOTICE/aviso do servidor (ex.: "extension already exists") para
+// nao poluir o stderr do programa tilt.
+void swallow_notice(void*, const char*) {}
+
+void* connect_or_die(const PqApi& pq, const std::string& url) {
+  void* conn = pq.connectdb(url.c_str());
+  if (!conn) die("falha de memoria ao conectar");
+  if (pq.set_notice_processor) pq.set_notice_processor(conn, swallow_notice, nullptr);
+  if (pq.status(conn) != kConnectionOk) {
+    const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
+    pq.finish(conn);
+    die("falha na conexao: " + msg);
+  }
+  return conn;
+}
+
 }  // namespace
 
 Value postgres_query(const std::string& url, const std::string& sql) {
   const PqApi& pq = api();
   if (!pq.lib) die("libpq.so.5 nao encontrada; instale o pacote libpq5");
 
-  void* conn = pq.connectdb(url.c_str());
-  if (!conn) die("falha de memoria ao conectar");
-  if (pq.status(conn) != kConnectionOk) {
-    const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
-    pq.finish(conn);
-    die("falha na conexao: " + msg);
-  }
+  void* conn = connect_or_die(pq, url);
 
   void* res = pq.exec(conn, sql.c_str());
   if (!res) {
@@ -143,6 +156,26 @@ Value postgres_query(const std::string& url, const std::string& sql) {
   pq.clear(res);
   pq.finish(conn);
   return Value::tabela(std::move(rows));
+}
+
+void postgres_exec(const std::string& url, const std::string& sql) {
+  const PqApi& pq = api();
+  if (!pq.lib) die("libpq.so.5 nao encontrada; instale o pacote libpq5");
+
+  void* conn = connect_or_die(pq, url);
+  void* res = pq.exec(conn, sql.c_str());
+  if (!res) {
+    const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
+    pq.finish(conn);
+    die("falha ao executar comando: " + msg);
+  }
+  const int status = pq.result_status(res);
+  const char* err = pq.error_message(conn);
+  pq.clear(res);
+  pq.finish(conn);
+  if (status != kPgCommandOk && status != kPgTuplesOk) {
+    die(std::string("comando rejeitado pelo servidor: ") + (err && *err ? err : "erro desconhecido"));
+  }
 }
 
 }  // namespace tilt::rt

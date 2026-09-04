@@ -33,13 +33,13 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 |---|---|---|
 | Sintaxe | lexer, parser, semântica (`checar`), interpretador de árvore, literais `[...]`/`{...}` multilinha | assinaturas exóticas de `funcao` |
 | Semântica | tipos, segredos, dispositivos, referências de ferramenta, resolução de nomes em `passos:`/`executar:` (`T030`), shape solver de `densa`/`linear` (`T012`) | shape solver fora de `densa`/`linear`, inferência completa de tipos |
-| Dados | CSV, JSON, **Parquet nativo** e **Delta Lake mínimo** (leitura/escrita, validados com pyarrow/delta-rs), `fonte` **sqlite**/**postgres** (SELECT via `dlopen`), Redis via **RESP nativo** (`ler_redis`/`escrever_redis`), índice **Qdrant** (`armazenamento: "qdrant://..."`), `pipeline`, `verificar`, `ao_falhar`, `agenda` com **loop real** | Kafka/S3, streaming `janela`, append transacional no Delta, MongoDB/Iceberg (wire protocol/Avro) |
+| Dados | CSV, JSON, **Parquet nativo** e **Delta Lake mínimo** (leitura/escrita, validados com pyarrow/delta-rs), `fonte` **sqlite**/**postgres** (SELECT via `dlopen`), Redis via **RESP nativo** (`ler_redis`/`escrever_redis`), índice **Qdrant** (`armazenamento: "qdrant://..."`) e **pgvector** (`armazenamento: "pgvector://colecao"` + `url:`), `pipeline`, `verificar`, `ao_falhar`, `agenda` com **loop real** | Kafka/S3, streaming `janela`, append transacional no Delta, MongoDB/Iceberg (wire protocol/Avro) |
 | ML/DL | tensores f32 CPU (matmul multithread), `modelo` (inferência, `pesos:` de arquivo, `norma_camada`), `treino` (CE + quadrática, SGD/Adam), `carregador` | GPU só validado em `fake`; `conv2d`/`norma_lote`, backward de `norma_camada` |
-| LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno) e no **Qdrant** (REST via `curl`) | `pgvector`; rede real precisa de `curl` |
+| LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno), no **Qdrant** (REST via `curl`) e no **pgvector** (SQL sobre libpq, cosseno `<=>`) | rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder` (planner iterativo), `equipe` (sequencial/paralelo/supervisor) | planner tolerante a protocolo (1 linha/turno) |
 | HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` (epoll + keep-alive + arena por requisição, Linux) | execução paralela de rotas, `meio:` (middleware) |
 | Execução | VM de bytecode p/ `funcao` pura, codegen nativo x86-64 (subconjunto inteiro) | VM/codegen para o programa inteiro |
-| Tooling | `checar --json`, `referencia`, `tilt lsp` + `completar`, `checar_tilt` | extensão de editor publicada |
+| Tooling | `checar --json`, `referencia`, `tilt lsp` + `completar`, `checar_tilt`, extensão VS Code (realce + LSP, vsix empacotável com `npm run package`) | publicação no Marketplace |
 
 Detalhes em [`docs/guia-12-limitacoes.md`](docs/guia-12-limitacoes.md).
 
