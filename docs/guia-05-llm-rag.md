@@ -78,7 +78,7 @@ padrão.
 ```tilt
 indice base:
   embeddings: "text-embedding-3-small"
-  armazenamento: "memoria"          # qdrant:// / pgvector -> T900
+  armazenamento: "memoria"          # ou qdrant://host:porta/colecao (REST via curl)
 
 pipeline indexar:
   passos:
@@ -93,5 +93,10 @@ pipeline indexar:
   da chave `id` da linha, se houver, senão é sequencial.
 - `.buscar "consulta", top_k: N` → lista de `{ id, texto, score }` ordenada por
   similaridade de cosseno (embeddings determinísticos no modo `mock`).
+- Com `armazenamento: "qdrant://host:porta/colecao"`, `.inserir`/`.buscar`
+  delegam ao Qdrant (coleção criada automaticamente, distância Cosine; o id
+  tilt vira UUID determinístico). Nesse modo `buscar` devolve `{ id, score }`
+  — o texto fica no payload do ponto no Qdrant. Use parênteses para argumento
+  lista: `base.inserir([...])`.
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).

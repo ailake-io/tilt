@@ -8,9 +8,9 @@ fonte produtos:
   caminho: "dados/produtos.json"   # ou arquivo: / url:  ; aceita  env "VAR"
 ```
 
-Num pipeline, `ler produtos` lê o arquivo conforme `tipo:` e devolve uma
-`tabela`. `file://` é removido do caminho. Conectores de rede (`postgres`,
-`kafka`, `s3`, `delta`) levantam `T900` apontando o marco.
+Num pipeline, `ler produtos` lê a fonte conforme `tipo:` e devolve uma
+`tabela`. `file://` é removido do caminho. Conectores ainda não cobertos
+(`kafka`, `s3`, `mongodb`, `iceberg`) levantam `T900` apontando o marco.
 
 ## `pipeline`
 
@@ -83,8 +83,82 @@ pq.write_table(tabela, "saida.parquet", compression="NONE", use_dictionary=False
 - interoperável com delta-rs: `DeltaTable(dir).to_pyarrow_table()` lê tabelas
   escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
   sem dictionary e com colunas obrigatórias;
-- limitações: escrita sobrescreve a tabela (sem append transacional), sem
+- limitações: escrita sobrescreve a tabela (sem append/ACID concorrente), sem
   partições, sem checkpoints, sem transações concorrentes.
+
+## Bancos relacionais (SQLite e Postgres)
+
+`fonte tipo: sqlite` e `fonte tipo: postgres` executam **consultas SELECT**
+e devolvem `tabela`. Zero dependências de link: as bibliotecas são carregadas
+em tempo de execução com `dlopen` (erro claro se ausentes).
+
+```tilt
+fonte clientes:
+  tipo: postgres
+  url: "host=localhost port=5432 dbname=app user=app"
+  consulta: "select nome, idade from clientes where ativo"
+
+fonte metricas:
+  tipo: sqlite
+  caminho: "metricas.db"
+  consulta: "select dia, valor from vendas order by dia"
+
+pipeline etl:
+  passos:
+    - novos = ler clientes
+    - local = ler metricas
+```
+
+| Campo | Efeito |
+|---|---|
+| `caminho:` | SQLite: arquivo `.db` (deve existir) |
+| `url:` | Postgres: connection string libpq |
+| `consulta:` | SQL `SELECT` (INSERT/UPDATE/DDL → erro claro) |
+
+Tipos: inteiro→`inteiro`, real/numeric→`decimal`, bool→`logico`,
+texto→`texto`, NULL→`nulo`, BLOB SQLite→texto hex `0x...`.
+
+## Redis (RESP nativo)
+
+Sem dependências: cliente RESP próprio sobre socket TCP (sem hiredis).
+
+```tilt
+pipeline cache:
+  passos:
+    - escrever_redis "redis://localhost:6379", "perfil:1", { nome: "ana", idade: 30 }
+    - perfil = ler_redis "redis://localhost:6379", "perfil:1"
+    - imprimir perfil.nome
+```
+
+- `ler_redis url, chave`: GET; texto cru devolve `texto`, conteúdo que
+  começa com `{`/`[` é parseado como JSON → `mapa`/`lista`; chave ausente →
+  erro claro.
+- `escrever_redis url, chave, valor`: SET; texto/numérico gravado como
+  string, `mapa`/`lista` serializados como JSON compacto.
+- limitações: sem TLS, sem AUTH, sem db index, um comando por conexão.
+
+## Índice vetorial no Qdrant
+
+`indice` com `armazenamento: "qdrant://host:porta/colecao"` delega
+`inserir`/`buscar` ao Qdrant via REST (curl, mesmo padrão do LLM). Os
+embeddings continuam vindo de `embeddings:` (`TILT_LLM=mock` offline nos
+testes). O id tilt (texto) é mapeado para UUID determinístico, pois o Qdrant
+só aceita inteiro ou UUID. `inserir` cria a coleção automaticamente na
+primeira chamada (distância Cosine).
+
+```tilt
+indice docs:
+  embeddings: "meu-modelo"
+  armazenamento: "qdrant://localhost:6333/docs"
+
+pipeline rag:
+  passos:
+    - docs.inserir([{ id: "a1", texto: "gato doméstico" }])
+    - achados = docs.buscar("gato", top_k: 3)
+```
+
+Nota: chame os métodos com parênteses quando o argumento é uma lista —
+`docs.inserir([...])` — para não confundir o parser.
 
 ## Métodos de tabela
 

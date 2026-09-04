@@ -27,6 +27,10 @@
 #include "runtime/llm.hpp"
 #include "runtime/parquet.hpp"
 #include "runtime/delta.hpp"
+#include "runtime/qdrant.hpp"
+#include "runtime/redis.hpp"
+#include "runtime/sqlite.hpp"
+#include "runtime/postgres.hpp"
 #include "runtime/vectorstore.hpp"
 #include "semantic/checker.hpp"
 #include "vm/compiler.hpp"
@@ -630,6 +634,20 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
     if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
     try {
       Value t = rt::delta_read(path);
+      t.kind = ValueKind::Tabela;
+      return t;
+    } catch (const std::exception& e) {
+      fail(span, std::string(e.what()));
+    }
+  }
+  if (tipo == "sqlite" || tipo == "postgres") {
+    const Item* c = find_field(*decl->block, "consulta");
+    if (!c || !c->value || c->value->kind != ExprKind::TextLit) {
+      fail(span, "fonte '" + name + "': falta 'consulta: \"select ...\"'");
+    }
+    const std::string& sql = c->value->text;
+    try {
+      Value t = tipo == "sqlite" ? rt::sqlite_query(path, sql) : rt::postgres_query(path, sql);
       t.kind = ValueKind::Tabela;
       return t;
     } catch (const std::exception& e) {
@@ -1379,10 +1397,23 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
   auto it = entities_.find(indice_name);
   const ast::Block& b = *it->second->block;
   const std::string armazenamento = field_str(b, "armazenamento");
-  if (!armazenamento.empty() && armazenamento != "memoria") {
+  // Formato: "qdrant://host:porta/colecao" (ver run-indice-armazenamento).
+  std::string qdrant_base, qdrant_col;
+  const bool qdrant = armazenamento.rfind("qdrant://", 0) == 0;
+  if (!armazenamento.empty() && armazenamento != "memoria" && !qdrant) {
     fail(call.span, "indice '" + indice_name + "': armazenamento '" + armazenamento +
-                        "' nao implementado (M8.2); use \"memoria\"",
+                        "' nao implementado; use \"memoria\" ou \"qdrant://host:porta/colecao\"",
          DiagCode::ConnectorNotImplemented);
+  }
+  if (qdrant) {
+    const std::string rest = armazenamento.substr(9);  // depois de qdrant://
+    const std::size_t slash = rest.find('/');
+    if (slash == std::string::npos || slash == 0 || slash == rest.size() - 1) {
+      fail(call.span, "indice '" + indice_name +
+                          "': armazenamento qdrant deve ser 'qdrant://host:porta/colecao'");
+    }
+    qdrant_base = "http://" + rest.substr(0, slash);
+    qdrant_col = rest.substr(slash + 1);
   }
   const std::string emb_model = field_str(b, "embeddings");
   rt::MemoryIndex& store = index_stores_[indice_name];
@@ -1397,7 +1428,16 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
       if (item.kind == ValueKind::Mapa && item.map) {
         if (const Value* i = item.map->find("id")) id = to_display(*i);
       }
-      store.insert(id, text, rt::llm_embed(emb_model, text));
+      const std::vector<float> vec = rt::llm_embed(emb_model, text);
+      if (qdrant) {
+        try {
+          rt::qdrant_upsert(qdrant_base, qdrant_col, id, text, vec);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      } else {
+        store.insert(id, text, vec);
+      }
       ++added;
     };
     if ((v.kind == ValueKind::Lista || v.kind == ValueKind::Tabela) && v.list) {
@@ -1418,8 +1458,23 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     std::size_t k = 5;
     if (const Value* tk = kw.find("top_k")) k = static_cast<std::size_t>(tk->as_number());
     const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
-    auto hits = store.search(rt::llm_embed(emb_model, qt), k);
     Value out = Value::lista();
+    if (qdrant) {
+      std::vector<std::pair<std::string, double>> hits;
+      try {
+        hits = rt::qdrant_search(qdrant_base, qdrant_col, rt::llm_embed(emb_model, qt), k);
+      } catch (const std::exception& e) {
+        fail(call.span, std::string(e.what()));
+      }
+      for (const auto& h : hits) {
+        Value row = Value::mapa();
+        row.map->set("id", Value::texto(h.first));
+        row.map->set("score", Value::decimal(h.second));
+        out.list->push_back(std::move(row));
+      }
+      return out;
+    }
+    auto hits = store.search(rt::llm_embed(emb_model, qt), k);
     for (const auto& h : hits) {
       Value row = Value::mapa();
       row.map->set("id", Value::texto(h.id));
@@ -2783,6 +2838,30 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       return read_fonte(a[0].s, call.span);
     }
     fail(call.span, "ler: esperava uma 'fonte' declarada", DiagCode::ConnectorNotImplemented);
+  }
+  if (name == "ler_redis") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span, "ler_redis espera (url, chave), ex.: ler_redis \"redis://localhost:6379\", \"chave\"");
+    }
+    try {
+      return rt::redis_get(a[0].s, a[1].s);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "escrever_redis") {
+    auto a = args();
+    if (a.size() < 3 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "escrever_redis espera (url, chave, valor), ex.: escrever_redis url, \"chave\", valor");
+    }
+    try {
+      rt::redis_set(a[0].s, a[1].s, a[2]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
   }
   if (word_in(name, {"escrever"}) || (name.rfind("ler_", 0) == 0) ||
       (name.rfind("escrever_", 0) == 0)) {

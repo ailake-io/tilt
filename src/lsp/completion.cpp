@@ -38,12 +38,13 @@ const std::array<std::string_view, 20> kDeclKeywords = {
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 28> kBuiltins = {
+const std::array<std::string_view, 30> kBuiltins = {
     "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
     "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
     "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
     "incorporar", "dividir_texto", "responder", "tensor",   "zeros",   "checar_tilt",
-    "ler_parquet", "escrever_parquet", "ler_delta", "escrever_delta"};
+    "ler_parquet", "escrever_parquet", "ler_delta", "escrever_delta",
+    "ler_redis", "escrever_redis"};
 
 const std::array<std::string_view, 11> kTableMethods = {
     "filtrar",  "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",

@@ -1,0 +1,7 @@
+erro[T901]: redis: nao foi possivel conectar em '127.0.0.1:59998'
+  --> input.tilt:3:11
+   |
+ 3 |     - v = ler_redis "redis://127.0.0.1:59998", "chave"
+   |           ^^^^^^^^^
+   |
+

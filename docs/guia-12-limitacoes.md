@@ -33,8 +33,15 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   partições nem checkpoints; a leitura herda as limitações do Parquet acima,
   então tabelas de outros escritores só leem sem compressão/dictionary e com
   colunas obrigatórias.
-- Conectores de rede (`postgres`, `kafka`, `s3`) → `T900`. Só CSV, JSON,
-  Parquet e Delta de arquivo local.
+- Conectores ainda não cobertos (`kafka`, `s3`, `mongodb`, `iceberg`) →
+  `T900`. CSV, JSON, Parquet, Delta, SQLite, Postgres, Redis e Qdrant rodam.
+- Bancos relacionais: somente consultas SELECT (sem INSERT/UPDATE via SQL,
+  sem prepared statements); Postgres carrega `libpq.so.5` e SQLite
+  `libsqlite3.so.0` via `dlopen` — precisam estar instalados no sistema.
+- Redis: sem TLS/AUTH/db index, um comando por conexão, timeout fixo de 5s.
+- Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
+  id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
+  `texto`, que fica no payload do ponto).
 - Streaming com `janela:` não roda.
 - `--agendar` entra em loop real de agenda, mas o parser cron é numérico
   (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por

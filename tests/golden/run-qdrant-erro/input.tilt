@@ -1,0 +1,7 @@
+indice docs:
+  embeddings: "m"
+  armazenamento: "qdrant://127.0.0.1:59997/docs"
+
+pipeline usar:
+  passos:
+    - docs.inserir("x")

@@ -1,0 +1,11 @@
+fonte clientes:
+  tipo: sqlite
+  caminho: "clientes.db"
+  consulta: "select nome, idade, salario from clientes order by idade"
+
+pipeline etl:
+  passos:
+    - tabela = ler clientes
+    - maiores = tabela.filtrar linha.idade >= 30
+    - para cada linha em maiores:
+        - imprimir linha.nome, linha.idade, linha.salario

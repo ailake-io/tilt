@@ -46,6 +46,10 @@ add_library(tilt_core STATIC
   src/runtime/gpu_runtime.cpp
   src/runtime/parquet.cpp
   src/runtime/delta.cpp
+  src/runtime/qdrant.cpp
+  src/runtime/redis.cpp
+  src/runtime/sqlite.cpp
+  src/runtime/postgres.cpp
   src/vm/compiler.cpp
   src/vm/vm.cpp
   src/codegen/codegen_x86_64.cpp

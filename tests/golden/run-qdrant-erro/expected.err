@@ -1,7 +1,7 @@
 erro[T901]: qdrant: requisicao falhou (curl codigo 1792): verifique URL/colecao/servidor. Resposta: 
   --> input.tilt:7:7
    |
- 7 |     - kb.inserir "x"
-   |       ^^
+ 7 |     - docs.inserir("x")
+   |       ^^^^
    |
 

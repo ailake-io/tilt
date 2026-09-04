@@ -1,4 +1,4 @@
-erro[T900]: fonte 'db': conector 'postgres' nao implementado (M5.2)
+erro[T901]: fonte 'db': falta 'consulta: "select ..."'
   --> input.tilt:7:11
    |
  7 |     - t = ler db
