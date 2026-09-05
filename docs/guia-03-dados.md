@@ -78,13 +78,21 @@ pq.write_table(tabela, "saida.parquet", compression="NONE", use_dictionary=False
 - a escrita grava `<dir>/part-*.parquet` (mesmo perfil do Parquet acima) e o
   log `<dir>/_delta_log/00000000000000000000.json` com `protocol`, `metaData`
   (schemaString no formato JSON do Delta) e `add`;
+- `anexar_delta tabela, "dir"` acrescenta linhas sem apagar o que já existe:
+  valida que o schema (colunas em nome e ordem) é idêntico ao `metaData` da
+  versão atual, grava um novo `part-*.parquet` e commita a próxima versão
+  (`00000000000000000001.json`, ...) com `commitInfo` + `add`. O commit é
+  atômico: o JSONL é gravado num temporário do mesmo diretório e publicado
+  com `rename()` — crash antes do rename só deixa um parquet órfão, ignorado
+  pela leitura. Diretório inexistente ou schema divergente → erro claro;
 - a leitura aplica o log em ordem de versão (`add`/`remove`) e concatena os
   arquivos ativos, validando que o schema não diverge entre versões;
 - interoperável com delta-rs: `DeltaTable(dir).to_pyarrow_table()` lê tabelas
   escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
   sem dictionary e com colunas obrigatórias;
-- limitações: escrita sobrescreve a tabela (sem append/ACID concorrente), sem
-  partições, sem checkpoints, sem transações concorrentes.
+- limitações: `escrever_delta` sobrescreve a tabela (recria a versão 0);
+  `anexar_delta` pressupõe um único escritor (sem locks nem optimistic
+  concurrency), sem partições, sem checkpoints, sem transações concorrentes.
 
 ## Bancos relacionais (SQLite e Postgres)
 

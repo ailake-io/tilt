@@ -128,11 +128,25 @@ std::string delta_type_name(const Value& v) {
   }
 }
 
-std::string delta_schema_string(const Value& tabela) {
+// Colunas (nome + ordem) da 1a linha da tabela — criterio de schema usado
+// tambem pela leitura ao concatenar os parquet das versoes.
+std::vector<std::string> table_columns(const Value& tabela, const char* ctx) {
   if (tabela.kind != ValueKind::Lista && tabela.kind != ValueKind::Tabela) {
-    die("escrever_delta espera uma tabela (lista de mapas)");
+    die(std::string(ctx) + " espera uma tabela (lista de mapas)");
   }
-  if (tabela.list->empty()) die("escrever_delta: tabela vazia (sem schema deduzivel)");
+  if (tabela.list->empty()) die(std::string(ctx) + ": tabela vazia (sem schema deduzivel)");
+  const Value& first = tabela.list->front();
+  if (first.kind != ValueKind::Mapa || !first.map) die("linhas devem ser mapas { campo: valor }");
+  std::vector<std::string> cols;
+  for (const auto& kv : first.map->items) cols.push_back(kv.first);
+  return cols;
+}
+
+std::string delta_schema_string(const Value& tabela, const char* ctx) {
+  if (tabela.kind != ValueKind::Lista && tabela.kind != ValueKind::Tabela) {
+    die(std::string(ctx) + " espera uma tabela (lista de mapas)");
+  }
+  if (tabela.list->empty()) die(std::string(ctx) + ": tabela vazia (sem schema deduzivel)");
   const Value& first = tabela.list->front();
   if (first.kind != ValueKind::Mapa || !first.map) die("linhas devem ser mapas { campo: valor }");
   Value fields = Value::lista();
@@ -148,6 +162,65 @@ std::string delta_schema_string(const Value& tabela) {
   schema.map->set("type", Value::texto("struct"));
   schema.map->set("fields", std::move(fields));
   return json_compact(schema);
+}
+
+std::string join_cols(const std::vector<std::string>& cols) {
+  std::string out = "[";
+  for (std::size_t i = 0; i < cols.size(); ++i) {
+    if (i) out += ", ";
+    out += cols[i];
+  }
+  out += ']';
+  return out;
+}
+
+// schemaString do metaData mais recente do log (acoes em ordem de versao).
+std::string current_schema_string(const std::vector<std::string>& versions) {
+  std::string schema;
+  for (const std::string& path : versions) {
+    std::ifstream in(path);
+    if (!in) die("nao foi possivel abrir '" + path + "'");
+    std::string line_text;
+    while (std::getline(in, line_text)) {
+      if (line_text.empty()) continue;
+      Value row;
+      try {
+        row = json_parse(line_text);
+      } catch (const std::exception& e) {
+        die("linha invalida no log '" + path + "': " + e.what());
+      }
+      if (row.kind != ValueKind::Mapa || !row.map) continue;
+      if (const Value* md = row.map->find("metaData");
+          md && md->kind == ValueKind::Mapa && md->map) {
+        if (const Value* s = md->map->find("schemaString");
+            s && s->kind == ValueKind::Texto) {
+          schema = s->s;
+        }
+      }
+    }
+  }
+  return schema;
+}
+
+// Nomes das colunas de uma schemaString no formato do Delta.
+std::vector<std::string> schema_string_columns(const std::string& schema_json) {
+  Value v;
+  try {
+    v = json_parse(schema_json);
+  } catch (const std::exception& e) {
+    die("schemaString invalido no log: " + std::string(e.what()));
+  }
+  std::vector<std::string> cols;
+  if (v.kind != ValueKind::Mapa || !v.map) return cols;
+  const Value* fields = v.map->find("fields");
+  if (!fields || fields->kind != ValueKind::Lista || !fields->list) return cols;
+  for (const Value& f : *fields->list) {
+    if (f.kind == ValueKind::Mapa && f.map) {
+      const Value* n = f.map->find("name");
+      cols.push_back(n && n->kind == ValueKind::Texto ? n->s : "");
+    }
+  }
+  return cols;
 }
 
 // Lista os arquivos de <dir>/_delta_log/NNN.json em ordem crescente de versao.
@@ -172,7 +245,7 @@ std::vector<std::string> list_delta_versions(const std::string& log_dir) {
 }  // namespace
 
 void delta_write(const std::string& dir, const Value& tabela) {
-  const std::string schema = delta_schema_string(tabela);
+  const std::string schema = delta_schema_string(tabela, "escrever_delta");
   mkdir_if_missing(dir);
   const std::string log_dir = dir + "/_delta_log";
   mkdir_if_missing(log_dir);
@@ -226,6 +299,89 @@ void delta_write(const std::string& dir, const Value& tabela) {
   log << line("metaData", meta) << '\n';
   log << line("add", add) << '\n';
   if (!log) die("falha ao gravar '" + log_path + "'");
+}
+
+void delta_append(const std::string& dir, const Value& tabela) {
+  const std::string log_dir = dir + "/_delta_log";
+  struct stat st {};
+  if (::stat(log_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
+  }
+  const std::vector<std::string> versions = list_delta_versions(log_dir);
+  if (versions.empty()) {
+    die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
+  }
+
+  // Validacao de schema: as colunas (nome + ordem) da tabela anexada devem
+  // ser identicas as do metaData da versao atual — mesmo criterio da leitura.
+  const std::vector<std::string> cur_cols = schema_string_columns(current_schema_string(versions));
+  const std::vector<std::string> new_cols = table_columns(tabela, "anexar_delta");
+  if (cur_cols.empty()) {
+    die("tabela em '" + dir + "' nao tem schema no log (metaData ausente)");
+  }
+  if (cur_cols != new_cols) {
+    die("anexar_delta: schema divergente em '" + dir + "' (esperado " +
+        join_cols(cur_cols) + "; recebido " + join_cols(new_cols) + ")");
+  }
+
+  // Grava o parquet ANTES de commitar; se der crash antes do rename, sobra
+  // um parquet orfao que a leitura ignora (nao esta no log).
+  const std::string part = "part-00000000-0000-4000-8000-" + new_table_id().substr(0, 12) + ".parquet";
+  const std::string part_path = dir + "/" + part;
+  parquet_write(part_path, tabela);
+  const std::int64_t part_size = file_size(part_path);
+  if (part_size <= 0) die("falha ao gravar '" + part_path + "'");
+
+  // Proxima versao = maior numero de <log_dir>/*.json + 1. Os nomes sao
+  // zero-padded de 20 digitos, entao a ordem lexicografica == numerica.
+  long long next = -1;
+  for (const std::string& p : versions) {
+    std::string base = p.substr(p.find_last_of('/') + 1);
+    base = base.substr(0, base.size() - 5);
+    try {
+      next = std::max(next, std::stoll(base));
+    } catch (const std::exception&) {
+      // nome nao numerico no log: ignora no calculo da versao
+    }
+  }
+  next += 1;
+  char num[32];
+  std::snprintf(num, sizeof num, "%020lld", next);
+  const std::string final_path = log_dir + "/" + num + ".json";
+
+  const std::int64_t ts = now_ms();
+  Value commit = Value::mapa();
+  commit.map->set("timestamp", Value::inteiro(ts));
+  commit.map->set("operation", Value::texto("APPEND"));
+
+  Value add = Value::mapa();
+  add.map->set("path", Value::texto(part));
+  add.map->set("partitionValues", Value::mapa());
+  add.map->set("size", Value::inteiro(part_size));
+  add.map->set("modificationTime", Value::inteiro(ts));
+  add.map->set("dataChange", Value::logico(true));
+
+  auto line = [](const char* key, Value& payload) {
+    Value row = Value::mapa();
+    row.map->set(key, std::move(payload));
+    return json_compact(row);
+  };
+
+  // Commit atomico: JSONL num temporario do mesmo diretorio, fecha e rename()
+  // para o nome final (rename atomico no mesmo filesystem).
+  const std::string tmp_path = log_dir + "/.commit-" + std::to_string(::getpid()) + ".tmp";
+  {
+    std::ofstream log(tmp_path, std::ios::trunc);
+    if (!log) die("nao foi possivel gravar '" + tmp_path + "'");
+    log << line("commitInfo", commit) << '\n';
+    log << line("add", add) << '\n';
+    log.flush();
+    if (!log) die("falha ao gravar '" + tmp_path + "'");
+  }
+  if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+    ::unlink(tmp_path.c_str());
+    die("falha ao commitar a versao em '" + final_path + "'");
+  }
 }
 
 Value delta_read(const std::string& dir) {

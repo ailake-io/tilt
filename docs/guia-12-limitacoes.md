@@ -29,10 +29,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   passada: colunas obrigatórias (sem nulls), encoding PLAIN, sem compressão,
   um row group por arquivo. Arquivos fora desse perfil (compressão, OPTIONAL,
   dictionary) levantam erro claro na leitura.
-- Delta Lake é mínimo: escrita sobrescreve a tabela (sem append/ACID), sem
-  partições nem checkpoints; a leitura herda as limitações do Parquet acima,
-  então tabelas de outros escritores só leem sem compressão/dictionary e com
-  colunas obrigatórias.
+- Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
+  0); o append existe via `anexar_delta` (nova versão por commit atômico de
+  `rename`, validação de schema, single-writer — sem locks/optimistic
+  concurrency), sem partições nem checkpoints; a leitura herda as limitações
+  do Parquet acima, então tabelas de outros escritores só leem sem
+  compressão/dictionary e com colunas obrigatórias.
 - Conectores ainda não cobertos (`kafka`, `s3`, `mongodb`, `iceberg`) →
   `T900`. CSV, JSON, Parquet, Delta, SQLite, Postgres, Redis, Qdrant e
   pgvector rodam.

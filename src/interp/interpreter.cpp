@@ -2928,6 +2928,18 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "anexar_delta") {
+    auto a = args();
+    if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
+      fail(call.span, "anexar_delta espera (tabela, diretorio)");
+    }
+    try {
+      rt::delta_append(a[1].s, a[0]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
   if (name == "responder") {
     rt::ValueMap kw = eval_kwargs(call, env);
     out_ << "resposta:";

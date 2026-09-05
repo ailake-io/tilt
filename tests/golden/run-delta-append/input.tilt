@@ -1,0 +1,29 @@
+funcao tentar_anexar t -> texto:
+  tentar:
+    anexar_delta t, "saida_delta"
+    retornar "sem erro"
+  capturar erro:
+    retornar erro
+
+pipeline principal:
+  passos:
+    - t1 = [
+        { nome: "ana", idade: 30 },
+        { nome: "bruno", idade: 40 }
+      ]
+    - t2 = [
+        { nome: "carla", idade: 50 }
+      ]
+    - escrever_delta t1, "saida_delta"
+    - anexar_delta t2, "saida_delta"
+    - tabela = ler_delta "saida_delta"
+    - imprimir tamanho tabela
+    - imprimir tabela[0].nome, tabela[1].idade, tabela[2].nome
+    - t3 = [
+        { nome: "duda", cidade: "sp" }
+      ]
+    - imprimir tentar_anexar t3
+    - t4 = [
+        { cidade: "rj", nome: "edu" }
+      ]
+    - imprimir tentar_anexar t4
