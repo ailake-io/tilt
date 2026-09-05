@@ -1,0 +1,16 @@
+fonte eventos:
+  tipo: csv
+  caminho: "dados.csv"
+
+pipeline contagens:
+  agenda: "*/1 * * * *"
+  entrada: eventos
+  janela: 2
+  passos:
+    - imprimir "janela:", tamanho(linhas), linhas[0].id, linhas[-1].id
+
+pipeline limitado:
+  agenda: "*/1 * * * *"
+  janela: "2min"
+  passos:
+    - imprimir "tick"

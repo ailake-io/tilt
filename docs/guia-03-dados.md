@@ -36,6 +36,57 @@ Para testar sem esperar, use o relógio fake `TILT_AGORA=2026-01-05T02:50`
 (hora local) com limite `TILT_AGENDAR_MAX=3` — o loop não dorme e avança o
 tempo sozinho.
 
+## Streaming com `janela:`
+
+`janela:` é um campo de `pipeline` (ao lado de `agenda:`/`passos:`) que
+controla **quando** os passos rodam dentro do loop de `--agendar`. Há três
+formas:
+
+```tilt
+fonte eventos:
+  tipo: csv
+  caminho: "eventos.csv"
+
+pipeline lotes:
+  agenda: "*/1 * * * *"
+  entrada: eventos        # fonte declarada com `fonte`
+  janela: 100             # 1) contagem: passos rodam a cada 100 elementos novos
+  passos:
+    - imprimir tamanho(linhas), linhas[0].id
+
+pipeline a_cada_5min:
+  agenda: "*/1 * * * *"
+  entrada: eventos
+  janela: "5min"          # 2) tempo: passos rodam quando a janela decorre e há dados
+  passos:
+    - imprimir tamanho(linhas)
+
+pipeline limitado:
+  agenda: "*/1 * * * *"
+  janela: "30s"           # 3) throttle: no máximo 1 execução por 30s
+  passos:
+    - imprimir "tick"
+```
+
+1. **Contagem** (`janela: N` inteiro, exige `entrada:`): a cada tick a fonte é
+   relida por inteiro; os elementos além do último offset consumido entram num
+   buffer. Quando o buffer acumula `N` elementos, os passos rodam **uma vez**
+   com `linhas` = esses `N` elementos (na ordem da fonte), que saem do buffer.
+   Sem elementos novos, os passos não rodam — contagem não depende do relógio.
+2. **Tempo com entrada** (`janela: "30s"`, `"5min"`, `"1h"` + `entrada:`):
+   novos elementos acumulam no buffer a cada tick; quando o relógio avançou a
+   duração desde a última execução dos passos **e** há elementos pendentes,
+   os passos rodam com `linhas` = tudo que acumulou, e o buffer zera.
+3. **Throttle** (`janela: "<duracao>"` sem `entrada:`): limita a taxa do
+   pipeline agendado — o primeiro tick executa e os seguintes só rodam quando
+   a duração decorreu.
+
+Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
+(a janela "fecha" na primeira execução). O estado (offset, buffer e relógio da
+última execução) fica **em memória** e reinicia a cada processo — não há
+persistência entre execuções de `tilt`. Durações aceitas: `"Ns"`, `"Nmin"`,
+`"Nh"` com `N` inteiro positivo.
+
 ## Leitura e escrita
 
 | Builtin | Efeito |

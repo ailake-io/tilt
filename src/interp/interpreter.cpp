@@ -185,6 +185,58 @@ int retry_count(const Item& pipeline) {
   return 0;
 }
 
+// ------------------------------------------------------------------ janela
+// `janela: N` (IntLit) e janela de contagem; `janela: "30s"` / `"5min"` /
+// `"1h"` e janela de tempo (throttle quando sem `entrada:`).
+struct JanelaSpec {
+  enum Kind { Contagem, Tempo } kind = Contagem;
+  long count = 0;         // Contagem: elementos por execucao
+  std::time_t dur = 0;    // Tempo: duracao em segundos
+  bool valid = false;
+  std::string erro;       // motivo da invalidade (mensagem para fail())
+};
+
+// "30s" | "5min" | "1h" -> segundos. Falso para qualquer outro formato.
+bool parse_duracao(const std::string& s, std::time_t& out) {
+  std::size_t i = 0;
+  while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) ++i;
+  if (i == 0 || i == s.size()) return false;
+  const long n = std::strtol(s.substr(0, i).c_str(), nullptr, 10);
+  if (n <= 0) return false;
+  const std::string suf = s.substr(i);
+  long mult;
+  if (suf == "s") mult = 1;
+  else if (suf == "min") mult = 60;
+  else if (suf == "h") mult = 3600;
+  else return false;
+  out = static_cast<std::time_t>(n * mult);
+  return true;
+}
+
+JanelaSpec parse_janela(const Item& field) {
+  JanelaSpec spec;
+  const Expr* v = field.value.get();
+  auto rejeita = [&](std::string msg) {
+    spec.valid = false;
+    spec.erro = std::move(msg);
+    return spec;
+  };
+  if (!v) return rejeita("espera um inteiro (contagem) ou uma duracao (\"30s\", \"5min\", \"1h\")");
+  if (v->kind == ExprKind::IntLit) {
+    spec.kind = JanelaSpec::Contagem;
+    spec.count = std::strtol(v->text.c_str(), nullptr, 10);
+    if (spec.count <= 0) return rejeita("contagem precisa ser um inteiro positivo");
+    spec.valid = true;
+    return spec;
+  }
+  if (v->kind == ExprKind::TextLit && parse_duracao(v->text, spec.dur)) {
+    spec.kind = JanelaSpec::Tempo;
+    spec.valid = true;
+    return spec;
+  }
+  return rejeita("valor invalido; use um inteiro (contagem) ou duracao \"30s\", \"5min\", \"1h\"");
+}
+
 // ------------------------------------------------------------------ cron
 // Subconjunto de cron de 5 campos: minuto hora dia-do-mes mes dia-da-semana.
 // Cada campo aceita: * | n | a-b | a-b/n | */n | listas com virgula.
@@ -484,7 +536,7 @@ int Interpreter::run_scheduled() {
       }
       now = next;
       for (const Scheduled& s : scheduled) {
-        if (next_cron_fire(s.cron, now - 60) == now) run_pipeline(*s.pipeline);
+        if (next_cron_fire(s.cron, now - 60) == now) run_pipeline(*s.pipeline, now);
       }
       ++fired_total;
       if (max_runs > 0 && fired_total >= max_runs) break;
@@ -503,7 +555,7 @@ int Interpreter::run_scheduled() {
 }
 
 
-void Interpreter::run_pipeline(const Item& pipeline) {
+void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
   out_ << "== pipeline " << decl_name(pipeline) << " ==\n";
   if (!pipeline.block) return;
 
@@ -521,11 +573,27 @@ void Interpreter::run_pipeline(const Item& pipeline) {
     return;
   }
 
+  // Streaming com `janela:`: acumula elementos da `entrada:` e so executa os
+  // passos quando a janela fecha, com `linhas` = lote consumido.
+  std::vector<Value> janela_lotes;
+  const Item* janela = find_field(*pipeline.block, "janela");
+  if (janela) {
+    if (now < 0) {
+      std::time_t t;
+      now = fake_now(t) ? t : std::time(nullptr);
+    }
+    if (!run_janela(*janela, pipeline, now, janela_lotes)) {
+      out_ << "  (janela nao fechou; passos nao executados)\n";
+      return;
+    }
+  }
+
   const int retries = retry_count(pipeline);
   for (int attempt = 0; attempt <= retries; ++attempt) {
     try {
       Env env;
       env.parent = &root_;
+      if (janela) env.vars["linhas"] = Value::lista(janela_lotes);
       exec_block(*passos->block, env);
       return;
     } catch (const RuntimeAbort& a) {
@@ -534,6 +602,64 @@ void Interpreter::run_pipeline(const Item& pipeline) {
            << (retries + 1) << "\n";
     }
   }
+}
+
+bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time_t now,
+                             std::vector<Value>& batch) {
+  const JanelaSpec spec = parse_janela(janela);
+  if (!spec.valid) fail(janela.span, "janela: " + spec.erro);
+
+  const Item* entrada = find_field(*pipeline.block, "entrada");
+  std::string fonte;
+  if (entrada) {
+    if (!entrada->value || entrada->value->kind != ExprKind::Name) {
+      fail(entrada->span, "entrada: espera o nome de uma 'fonte' declarada");
+    }
+    fonte = entrada->value->text;
+    if (!entities_.count(fonte)) {
+      fail(entrada->span, "entrada: fonte '" + fonte + "' nao declarada");
+    }
+  }
+  if (spec.kind == JanelaSpec::Contagem && fonte.empty()) {
+    fail(janela.span, "janela: contagem exige 'entrada:' (fonte)");
+  }
+
+  WindowState& st = window_states_[decl_name(pipeline)];
+  if (!fonte.empty()) {
+    // Le a fonte inteira a cada tick; so os elementos alem do offset acumulam.
+    Value data = read_fonte(fonte, entrada->span);
+    if (data.list) {
+      if (st.offset > data.list->size()) st.offset = data.list->size();  // fonte encolheu
+      for (std::size_t i = st.offset; i < data.list->size(); ++i) {
+        st.buffer.push_back((*data.list)[i]);
+      }
+      st.offset = data.list->size();
+    }
+  }
+
+  bool roda = false;
+  if (spec.kind == JanelaSpec::Contagem) {
+    // Contagem nao depende do relogio: fecha com novos elementos suficientes.
+    if (st.buffer.size() >= static_cast<std::size_t>(spec.count)) {
+      batch.assign(st.buffer.begin(), st.buffer.begin() + spec.count);
+      st.buffer.erase(st.buffer.begin(), st.buffer.begin() + spec.count);
+      roda = true;
+    }
+  } else {
+    const bool decorreu = !st.ran_once || (now - st.last_run) >= spec.dur;
+    if (fonte.empty()) {
+      roda = decorreu;  // throttle: no maximo 1 execucao por duracao
+    } else if (decorreu && !st.buffer.empty()) {
+      batch = st.buffer;  // janela de tempo: entrega tudo que acumulou e zera
+      st.buffer.clear();
+      roda = true;
+    }
+  }
+  if (roda) {
+    st.ran_once = true;
+    st.last_run = now;
+  }
+  return roda;
 }
 
 void Interpreter::run_verificar(const Item& field, Env& env) {

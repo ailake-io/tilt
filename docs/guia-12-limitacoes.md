@@ -49,7 +49,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
   strings); nome de coleção restrito a `[a-z0-9_]`.
-- Streaming com `janela:` não roda.
+- Streaming com `janela:`: offset e buffer ficam só em memória (reiniciam a
+  cada processo, sem persistência nem repartição de estado entre réplicas);
+  sem conector Kafka — a fonte é relida por inteiro a cada tick, o que não
+  escala para fontes grandes; sem janela deslizante/overlap entre lotes.
 - `--agendar` entra em loop real de agenda, mas o parser cron é numérico
   (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
   E (não pelo OU do cron clássico) e não há persistência de estado entre

@@ -1,0 +1,25 @@
+proxima execucao: 2026-01-05 02:51
+== pipeline contagens ==
+janela: 2 1 2
+== pipeline limitado ==
+tick
+proxima execucao: 2026-01-05 02:52
+== pipeline contagens ==
+janela: 2 3 4
+== pipeline limitado ==
+  (janela nao fechou; passos nao executados)
+proxima execucao: 2026-01-05 02:53
+== pipeline contagens ==
+  (janela nao fechou; passos nao executados)
+== pipeline limitado ==
+tick
+proxima execucao: 2026-01-05 02:54
+== pipeline contagens ==
+  (janela nao fechou; passos nao executados)
+== pipeline limitado ==
+  (janela nao fechou; passos nao executados)
+proxima execucao: 2026-01-05 02:55
+== pipeline contagens ==
+  (janela nao fechou; passos nao executados)
+== pipeline limitado ==
+tick

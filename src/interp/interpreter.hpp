@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ctime>
 #include <iosfwd>
 #include <memory>
 #include <mutex>
@@ -79,7 +80,14 @@ class Interpreter {
                          DiagCode code = DiagCode::RuntimeError);
 
   void register_decls();
-  void run_pipeline(const ast::Item& pipeline);
+  // `now < 0` le o relogio atual (fake via TILT_AGORA ou real); o loop de
+  // agenda passa o tempo fake avancado explicitamente.
+  void run_pipeline(const ast::Item& pipeline, std::time_t now = -1);
+  // Campo `janela:`: le novos elementos da `entrada:` (fonte), aplica a
+  // semantica de janela e, se ela fechar, preenche `batch` (vai para a
+  // variavel `linhas`). Retorna false quando os passos nao devem rodar.
+  bool run_janela(const ast::Item& janela, const ast::Item& pipeline, std::time_t now,
+                  std::vector<rt::Value>& batch);
   void run_verificar(const ast::Item& field, Env& env);
   void exec_block(const ast::Block& block, Env& env);
   void exec_item(const ast::Item& item, Env& env);
@@ -144,6 +152,16 @@ class Interpreter {
   std::unordered_map<const ast::Item*, std::shared_ptr<vm::Chunk>> vm_chunks_;  // null = not compilable
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
+  // Streaming (`janela:`) por pipeline: offset de elementos ja consumidos da
+  // fonte, buffer de pendentes e relogio da ultima execucao dos passos. Vive
+  // em memoria e reinicia a cada processo (offset nao e persistente).
+  struct WindowState {
+    std::size_t offset = 0;
+    std::vector<rt::Value> buffer;
+    bool ran_once = false;
+    std::time_t last_run = 0;
+  };
+  std::unordered_map<std::string, WindowState> window_states_;
   bool gpu_announced_ = false;  // printed the backend banner once
 
   // Serializam caches/armazenamento mutavel compartilhado entre as threads

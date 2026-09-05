@@ -394,7 +394,8 @@ bool is_builtin_name(std::string_view w) {
 
 // Implicit bindings introduced by the runtime (row predicates, callbacks, ...).
 bool is_magic_name(std::string_view w) {
-  return word_in(w, {"linha", "entrada", "epoca", "epocas", "metricas", "passo", "resultado"});
+  return word_in(w, {"linha", "linhas", "entrada", "epoca", "epocas", "metricas", "passo",
+                     "resultado"});
 }
 
 bool is_lazy_row_method(std::string_view m) {
