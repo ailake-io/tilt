@@ -25,20 +25,23 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## Dados
 
-- Parquet é nativo (reader/writer próprio, zero dependências) mas de 1ª
-  passada: colunas obrigatórias (sem nulls), encoding PLAIN, sem compressão,
-  um row group por arquivo. Arquivos fora desse perfil (compressão, OPTIONAL,
-  dictionary) levantam erro claro na leitura.
+- Parquet é nativo (reader/writer próprio, zero dependências de link): a
+  escrita é PLAIN, sem compressão, um row group por arquivo, com colunas
+  REQUIRED ou OPTIONAL (nulos via definition levels RLE). A leitura cobre
+  múltiplos row groups, campos REQUIRED/OPTIONAL, páginas PLAIN e DICTIONARY
+  (PLAIN_DICTIONARY/RLE_DICTIONARY) e gzip/deflate (zlib via `dlopen`;
+  snappy e demais codecs levantam erro claro). DATA_PAGE_V2, campos REPEATED
+  e tipos físicos fora de BOOLEAN/INT64/DOUBLE/BYTE_ARRAY ainda não são lidos.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema, single-writer — sem locks/optimistic
-  concurrency), sem partições nem checkpoints; a leitura herda as limitações
-  do Parquet acima, então tabelas de outros escritores só leem sem
-  compressão/dictionary e com colunas obrigatórias.
+  concurrency), sem partições nem checkpoints; a leitura herda o subconjunto
+  do Parquet acima.
 - Iceberg é de 1ª passada: catálogo só **Hadoop** (diretório local — sem
   REST/JDBC), sem partições nem schema evolution, codec Avro "null" apenas, a
-  leitura garante apenas o que o tilt escreve (tabelas de outros escritores
-  sem garantia) e single-writer (sem locks nem optimistic concurrency);
+  leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
+  escritores sem garantia além dele) e single-writer (sem locks nem
+  optimistic concurrency);
   `escrever_iceberg` sobrescreve a tabela (recria a versão 0) e o append é via
   `anexar_iceberg` (novo snapshot por commit atômico de `rename`, cadeia de
   pais com adds menos removes).

@@ -8,6 +8,7 @@ tests/golden/*/.actual.*
 CPack*.cmake
 tests/golden/run-pesos-salva/saida.json
 tests/golden/run-parquet/saida.parquet
+tests/golden/run-parquet-nulos/saida_nulos.parquet
 tests/golden/run-fonte-parquet/entrada.parquet
 tests/golden/run-delta/tabela_delta/
 tests/golden/run-delta-append/saida_delta/

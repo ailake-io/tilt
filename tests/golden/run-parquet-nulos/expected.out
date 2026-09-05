@@ -1,0 +1,6 @@
+== pipeline nulos ==
+ana 30 3500.75 verdadeiro
+nulo nulo 5100.5 falso
+carla 25 nulo verdadeiro
+nulo 41 2890 nulo
+linhas: 4

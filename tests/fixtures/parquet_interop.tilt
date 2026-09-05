@@ -1,0 +1,15 @@
+pipeline interop:
+  passos:
+    - dados = ler_parquet "interop.parquet"
+    - imprimir "linhas:", tamanho dados
+    - para cada linha em dados:
+        - imprimir linha.id, linha.nome, linha.score, linha.ativo
+    - saida = [
+        { rotulo: "aa", qtd: 1, preco: 9.90 },
+        { rotulo: nulo, qtd: nulo, preco: 4.50 },
+        { rotulo: "cc", qtd: 7, preco: nulo }
+      ]
+    - escrever_parquet saida, "saida_nulos.parquet"
+    - volta = ler_parquet "saida_nulos.parquet"
+    - para cada linha em volta:
+        - imprimir linha.rotulo, linha.qtd, linha.preco

@@ -130,19 +130,26 @@ Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
 próprio do tilt (zero dependências), interoperável com pyarrow/parquet-cpp:
 
 - tipos: `logico`→BOOLEAN, `inteiro`→INT64, `decimal`→DOUBLE, `texto`→BYTE_ARRAY;
-- colunas **obrigatórias** (sem nulls), encoding **PLAIN**, **sem compressão**,
-  um row group por arquivo;
-- na escrita, a 1ª linha da tabela define o schema e todas as linhas precisam
-  ter as mesmas colunas e tipos;
-- na leitura, arquivos com compressão, campos opcionais (nulls) ou encoding
-  diferente de PLAIN levantam erro claro (diz o que falta suportar).
+- **nulos**: coluna com `nulo` vira **OPTIONAL** (definition levels RLE,
+  valores nulos omitidos das páginas); coluna sem nulos segue REQUIRED.
+  Uma coluna só de nulos gera erro — o tipo não pode ser inferido;
+- escrita: encoding **PLAIN**, **sem compressão**, um row group por arquivo;
+  a 1ª linha da tabela define o schema e todas as linhas precisam ter as
+  mesmas colunas e tipos;
+- leitura: **todos os row groups** (concatenados), campos REQUIRED e
+  OPTIONAL, páginas **PLAIN** e **DICTIONARY** (`PLAIN_DICTIONARY`/
+  `RLE_DICTIONARY`) e compressão **gzip/deflate** (zlib carregada em
+  `dlopen("libz.so.1")`, zero dependência de link). Snappy e demais codecs,
+  DATA_PAGE_V2 e campos REPEATED levantam erro claro.
 
-Exemplo de interoperabilidade com Python:
+Exemplo de interoperabilidade com Python (arquivos de outras ferramentas —
+dictionary, gzip e vários row groups — são lidos diretamente):
 
 ```python
 import pyarrow as pa, pyarrow.parquet as pq
-schema = pa.schema([("nome", pa.string(), False), ("idade", pa.int64(), False)])
-pq.write_table(tabela, "saida.parquet", compression="NONE", use_dictionary=False)
+schema = pa.schema([("nome", pa.string()), ("idade", pa.int64())])
+pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
+               use_dictionary=True, compression="gzip")
 ```
 
 ## Delta Lake mínimo
