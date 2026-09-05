@@ -30,6 +30,7 @@
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
 #include "runtime/kafka.hpp"
+#include "runtime/mongo.hpp"
 #include "runtime/s3.hpp"
 #include "runtime/sqlite.hpp"
 #include "runtime/postgres.hpp"
@@ -3238,6 +3239,71 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
     return Value::nulo();
+  }
+  if (name == "mongo_inserir") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "mongo_inserir espera (colecao, documento, {banco:}), ex.: mongo_inserir \"pedidos\", "
+           "{ cliente: \"ana\" }");
+    }
+    std::string banco;
+    if (a.size() >= 3) {
+      if (a[2].kind != ValueKind::Mapa || !a[2].map) {
+        fail(call.span, "mongo_inserir: opcoes devem ser um mapa {banco: \"x\"}");
+      }
+      if (const Value* bv = a[2].map->find("banco")) {
+        if (bv->kind != ValueKind::Texto) {
+          fail(call.span, "mongo_inserir: 'banco' deve ser texto");
+        }
+        banco = bv->s;
+      }
+    }
+    try {
+      rt::mongo_inserir(a[0].s, a[1], banco);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "mongo_buscar") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "mongo_buscar espera (colecao, {filtro:, max:, banco:}), ex.: mongo_buscar \"pedidos\", "
+           "{ filtro: { cliente: \"ana\" } }");
+    }
+    Value filtro = Value::mapa();
+    std::int64_t max = 100;
+    std::string banco;
+    if (a.size() >= 2) {
+      if (a[1].kind != ValueKind::Mapa || !a[1].map) {
+        fail(call.span, "mongo_buscar: opcoes devem ser um mapa {filtro:, max:, banco:}");
+      }
+      if (const Value* fv = a[1].map->find("filtro")) {
+        if (fv->kind != ValueKind::Mapa || !fv->map) {
+          fail(call.span, "mongo_buscar: 'filtro' deve ser um mapa de igualdade");
+        }
+        filtro = *fv;
+      }
+      if (const Value* mv = a[1].map->find("max")) {
+        if (mv->kind != ValueKind::Inteiro) {
+          fail(call.span, "mongo_buscar: 'max' deve ser inteiro");
+        }
+        max = mv->i;
+      }
+      if (const Value* bv = a[1].map->find("banco")) {
+        if (bv->kind != ValueKind::Texto) {
+          fail(call.span, "mongo_buscar: 'banco' deve ser texto");
+        }
+        banco = bv->s;
+      }
+    }
+    try {
+      return rt::mongo_buscar(a[0].s, filtro, max, banco);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
   }
   if (name == "ler_s3") {
     auto a = args();

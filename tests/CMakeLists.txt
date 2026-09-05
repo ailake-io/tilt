@@ -30,6 +30,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/kafka_roundtrip.tilt)
 
 add_test(
+  NAME mongo
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mongo_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/mongo_roundtrip.tilt)
+
+add_test(
   NAME native
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/native_test.sh
           $<TARGET_FILE:tilt>

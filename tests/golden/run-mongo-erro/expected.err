@@ -1,0 +1,7 @@
+erro[T901]: mongo: defina o banco no MONGO_URL (mongodb://host:porta/banco) ou em {banco: ...}
+  --> input.tilt:5:17
+   |
+ 5 |     - achados = mongo_buscar "x"
+   |                 ^^^^^^^^^^^^
+   |
+

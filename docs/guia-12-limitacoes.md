@@ -35,8 +35,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   concurrency), sem partições nem checkpoints; a leitura herda as limitações
   do Parquet acima, então tabelas de outros escritores só leem sem
   compressão/dictionary e com colunas obrigatórias.
-- Conectores ainda não cobertos (`mongodb`, `iceberg`) → `T900`. CSV, JSON,
-  Parquet, Delta, SQLite, Postgres, Redis, Kafka, Qdrant, pgvector e S3 rodam.
+- Conectores ainda não cobertos (`iceberg`) → `T900`. CSV, JSON,
+  Parquet, Delta, SQLite, Postgres, Redis, Kafka, MongoDB, Qdrant, pgvector e
+  S3 rodam.
+- MongoDB (`mongo_inserir`/`mongo_buscar`): BSON + OP_MSG próprios de 1ª
+  passada — insert e find apenas (sem update/delete/indexes/aggregate),
+  filtro só por igualdade exata top-level (combinado por E), sem auth/TLS
+  (plain), sem `OP_COMPRESSED`; document sequences (section kind 1) são
+  puladas na leitura; uma conexão (com handshake `isMaster`) por chamada e
+  payload inteiro em memória; banco por `MONGO_URL` (path) ou opção
+  `banco:`.
 - Kafka (`ler_kafka`/`escrever_kafka`): wire protocol 0.9-era — sem consumer
   groups/offset commit (stateless, `desde: "inicio"` relê do earliest toda
   vez), sem SASL/TLS (plain), produce v1/fetch v1 apenas, um broker líder por

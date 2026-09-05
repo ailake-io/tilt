@@ -49,6 +49,7 @@ add_library(tilt_core STATIC
   src/runtime/qdrant.cpp
   src/runtime/redis.cpp
   src/runtime/kafka.cpp
+  src/runtime/mongo.cpp
   src/runtime/s3.cpp
   src/runtime/sha256.cpp
   src/runtime/sqlite.cpp

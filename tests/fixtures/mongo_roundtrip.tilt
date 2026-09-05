@@ -1,0 +1,12 @@
+# Roundtrip MongoDB contra o mock mongod do mongo_test.sh (MONGO_URL aponta p/ ele).
+# Dois inserts na MESMA colecao (banco "loja" vem do path da MONGO_URL), uma
+# busca filtrada por igualdade (cliente "ana") e uma sem filtro.
+pipeline mongo:
+  passos:
+    - mongo_inserir "pedidos", {cliente: "ana", valor: 200}
+    - mongo_inserir "pedidos", {cliente: "bob", valor: 150}
+    - achados = mongo_buscar "pedidos", {filtro: {cliente: "ana"}}
+    - imprimir tamanho achados
+    - imprimir achados[0].valor
+    - todos = mongo_buscar "pedidos", {}
+    - imprimir tamanho todos

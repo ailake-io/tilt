@@ -10,7 +10,7 @@ fonte produtos:
 
 Num pipeline, `ler produtos` lê a fonte conforme `tipo:` e devolve uma
 `tabela`. `file://` é removido do caminho. Conectores ainda não cobertos
-(`kafka`, `s3`, `mongodb`, `iceberg`) levantam `T900` apontando o marco.
+(`kafka`, `s3`, `iceberg`) levantam `T900` apontando o marco.
 
 ## `pipeline`
 
@@ -248,6 +248,40 @@ pipeline eventos:
 - limitações da 1ª passada: sem consumer groups / offset commit (stateless —
   `desde: "inicio"` relê do earliest toda vez), sem SASL/TLS (plain), um
   broker líder por chamada.
+
+## MongoDB (BSON + OP_MSG nativos)
+
+Sem dependências: BSON próprio (serializer + parser, tipos: double, string,
+document, array, ObjectId, bool, datetime, null, int32, int64) e wire
+protocol **OP_MSG** (opcode 2013) sobre socket TCP, com handshake
+`{isMaster: 1}` no connect. O servidor vem da variável de ambiente
+`MONGO_URL` (default `mongodb://127.0.0.1:27017`); o path opcional da URL é
+o banco default (`mongodb://host:porta/banco`).
+
+```tilt
+pipeline pedidos:
+  passos:
+    - mongo_inserir "pedidos", {cliente: "ana", valor: 200}
+    - achados = mongo_buscar "pedidos", {filtro: {cliente: "ana"}}
+    - imprimir tamanho achados, achados[0].valor
+```
+
+- `mongo_inserir colecao, documento, {banco: "x"}`: o documento deve ser
+  `mapa` (senão erro claro); gera `_id` ObjectId quando ausente. Mapeamento:
+  `decimal`→double, `inteiro`→int64, `texto`→string, `logico`→bool,
+  `nulo`→null, `mapa`→document, `lista`→array; `tensor`/`tabela` → erro
+  claro. ObjectId vindo do servidor vira `texto` hex de 24 chars.
+- `mongo_buscar colecao, {filtro:, max:, banco:}`: devolve `lista` de
+  `mapas` (ordem do servidor). `filtro` é um `mapa` de **igualdade exata
+  campo a campo** (top-level, combinado por E); omitido, retorna tudo.
+  `max` limita a quantidade (default 100).
+- banco efetivo: opção `banco:` > path do `MONGO_URL`; sem nenhum dos dois,
+  `mongo_inserir`/`mongo_buscar` falham com erro acionável **antes** de
+  tocar a rede.
+- limitações da 1ª passada: sem update/delete/indexes/aggregate, filtro só
+  por igualdade top-level, sem auth/TLS, sem `OP_COMPRESSED`; respostas com
+  document sequences (section kind 1) são aceitas, mas `batchSize`/`max` de
+  100 cabem na section kind 0 de qualquer forma.
 
 ## Índice vetorial no Qdrant
 

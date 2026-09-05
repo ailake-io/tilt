@@ -1,0 +1,6 @@
+# Sem banco no path da MONGO_URL e sem opcao {banco: ...}: o erro de "defina
+# o banco" e deterministico e nao toca a rede (melhor que conexao recusada).
+pipeline mongo:
+  passos:
+    - achados = mongo_buscar "x"
+    - imprimir achados
