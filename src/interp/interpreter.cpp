@@ -2075,8 +2075,12 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
 
   int port = port_override > 0 ? port_override : field_int(*svc->block, "porta", 8080);
   const std::vector<Route> routes = collect_routes(*svc->block);
-  if (find_field(*svc->block, "meio")) {
-    out_ << "[nota] 'meio:' (middleware) chega no M10.2\n";
+  // Middleware: todos os blocos `meio:` do servico, em ordem de declaracao.
+  // Cada um roda (no Env da rota casada) antes dos `passos:`; se algum
+  // executar `responder:`, a resposta dele vale e a rota nao executa.
+  std::vector<const Item*> meios;
+  for (const auto& it : svc->block->items) {
+    if (it && it->kind == ItemKind::Field && it->key == "meio") meios.push_back(it.get());
   }
 
   rt::HttpServer server;
@@ -2151,7 +2155,16 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
             env.vars["entrada"] = parsed;
             const Item* passos = match->field->block ? find_field(*match->field->block, "passos") : nullptr;
             try {
-              if (passos && passos->block) exec_block(*passos->block, env);
+              bool abortado = false;
+              for (const Item* meio : meios) {
+                if (!meio->block) continue;
+                exec_block(*meio->block, env);
+                if (rr.set) {  // meio respondeu (ex.: recusa de autenticacao)
+                  abortado = true;
+                  break;
+                }
+              }
+              if (!abortado && passos && passos->block) exec_block(*passos->block, env);
               resp.status = rr.set ? rr.status : 200;
               resp.body = json_dump(rr.dados.kind == ValueKind::Nulo ? Value::mapa() : rr.dados);
             } catch (const RuntimeAbort& a) {

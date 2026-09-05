@@ -31,7 +31,27 @@ servico Loja:
 - `- responder: status:, dados:` monta a resposta. `dados:` pode ser um bloco
   (vira mapa) ou um valor. Sem `status:`, é `200`.
 - Rota não encontrada → `404`. Exceção no handler → `500 { "erro": "..." }`.
-- `meio:` (middleware) é reconhecido com nota; a implementação chega adiante.
+- `meio:` (middleware): blocos de passos que rodam antes de cada rota
+  casada, no mesmo escopo dela — variáveis atribuídas no `meio:` são
+  visíveis nos `passos:` da rota, e um `responder:` no `meio:` aborta a
+  rota (a resposta do middleware vence; caso de uso: autenticação):
+
+```tilt
+servico Api:
+  meio:
+    - prefixo = "v1"
+    - se entrada?.chave != "segredo":
+        responder:
+          status: 401
+          dados:
+            erro: "nao autorizado"
+  rota get "/saude":
+    passos:
+      - responder:
+          dados:
+            ok: verdadeiro
+            versao: prefixo
+```
 
 ## Subir o serviço
 

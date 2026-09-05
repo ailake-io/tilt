@@ -37,7 +37,7 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 | ML/DL | tensores f32 CPU (matmul multithread), `modelo` (inferência, `pesos:` de arquivo, `norma_camada`), `treino` (CE + quadrática, SGD/Adam), `carregador` | GPU só validado em `fake`; `conv2d`/`norma_lote`, backward de `norma_camada` |
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno), no **Qdrant** (REST via `curl`) e no **pgvector** (SQL sobre libpq, cosseno `<=>`) | rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder` (planner iterativo), `equipe` (sequencial/paralelo/supervisor) | planner tolerante a protocolo (1 linha/turno) |
-| HTTP | `servico`/`rota`, validação de `entrada:`, `tilt servir` (epoll + keep-alive + arena por requisição + **pool de rotas paralelo** `--threads N`, Linux; respostas pipelined em ordem por conexão) | `meio:` (middleware) |
+| HTTP | `servico`/`rota`, validação de `entrada:`, middleware **`meio:`** (aborta via `responder:`, escopo compartilhado com a rota), `tilt servir` (epoll + keep-alive + arena por requisição + **pool de rotas paralelo** `--threads N`, Linux; respostas pipelined em ordem por conexão) | — |
 | Execução | VM de bytecode p/ `funcao` pura **e pipelines** (`tilt executar --vm`), codegen nativo x86-64 p/ **programa inteiro** (texto, decimal, listas, `para cada`, pipelines; saída idêntica ao interpretador) | builtins fora do subconjunto nativo |
 | Tooling | `checar --json`, `referencia`, `tilt lsp` + `completar`, `checar_tilt`, extensão VS Code (realce + LSP, vsix empacotável com `npm run package`) | publicação no Marketplace |
 
@@ -214,8 +214,7 @@ CI: `.github/workflows/ci.yml` (Linux gcc + macOS + sanitizers) e
 
 `M0`–`M12` + instalador + GPU + tooling de IA concluídos (1ª passada). A seguir:
 conectores de rede reais (Kafka/S3), streaming com `janela:`, append
-transacional no Delta, `meio:` (middleware) e publicação da extensão no
-Marketplace.
+transacional no Delta e publicação da extensão no Marketplace.
 
 ## Licença
 

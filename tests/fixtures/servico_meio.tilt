@@ -1,0 +1,26 @@
+# Servico com middleware `meio:`: os blocos `meio:` rodam (no mesmo Env da
+# rota casada) antes dos `passos:`; variaveis atribuidas ali saem visiveis na
+# rota, e um `responder:` no meio aborta a rota (ex.: autenticacao).
+tipo Abertura:
+  chave: texto
+
+servico ComMiddleware:
+  meio:
+    - prefixo = "v1"
+    - se entrada?.chave e entrada.chave != "segredo":
+        responder:
+          status: 401
+          dados:
+            erro: "nao autorizado"
+  rota post "/abre":
+    entrada: Abertura
+    passos:
+      - responder:
+          dados:
+            ok: verdadeiro
+            prefixo: prefixo
+  rota get "/saude":
+    passos:
+      - responder:
+          dados:
+            ok: verdadeiro

@@ -11,6 +11,7 @@ using ast::ExprKind;
 using ast::Item;
 using ast::ItemKind;
 using ast::Stmt;
+using ast::StmtKind;
 using sema::Type;
 using sema::TypeKind;
 
@@ -444,6 +445,35 @@ void collect_entrada_names(const ast::Block& block, std::unordered_set<std::stri
   }
 }
 
+// Atribuicoes feitas em blocos `meio:` do `servico` sao visiveis nos
+// `passos:` das rotas (o meio roda no mesmo Env da rota); coleta os nomes
+// para o escopo do checker nao apontar nomes definidos no meio.
+void collect_assigned_names(const ast::Block& block, std::unordered_set<std::string>& scope) {
+  for (const auto& raw : block.items) {
+    const Item* it = raw.get();
+    if (!it) continue;
+    if (it->kind == ItemKind::ListEntry) {
+      if (it->block) collect_assigned_names(*it->block, scope);
+      it = it->child.get();
+      if (!it) continue;
+    }
+    if (it->kind == ItemKind::Stmt && it->stmt) {
+      const Stmt& s = *it->stmt;
+      if (s.kind == StmtKind::Assign && s.a && s.a->kind == ExprKind::Name) {
+        scope.insert(s.a->text);
+      } else if (s.kind == StmtKind::If) {
+        collect_assigned_names(s.body, scope);
+        for (const auto& ei : s.elifs) collect_assigned_names(ei.body, scope);
+        if (s.else_body) collect_assigned_names(*s.else_body, scope);
+      } else if (s.kind == StmtKind::While || s.kind == StmtKind::ForEach) {
+        collect_assigned_names(s.body, scope);
+      }
+    } else if (it->kind == ItemKind::Field && it->block) {
+      collect_assigned_names(*it->block, scope);
+    }
+  }
+}
+
 }  // namespace
 
 void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
@@ -593,6 +623,15 @@ void SemanticChecker::walk_stmt_block(const ast::Block& block, Scope scope) {
 
 void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope) {
   collect_entrada_names(block, scope);
+  // Atribuicoes feitas em blocos `meio:` do `servico` valem para todas as
+  // rotas (o meio executa no mesmo Env da rota antes dos `passos:`).
+  for (const auto& raw : block.items) {
+    const Item* it = raw.get();
+    if (it && it->kind == ItemKind::ListEntry && it->child) it = it->child.get();
+    if (it && it->kind == ItemKind::Field && it->key == "meio" && it->block) {
+      collect_assigned_names(*it->block, scope);
+    }
+  }
   for (const auto& raw : block.items) {
     if (!raw) continue;
     const Item* it = raw.get();

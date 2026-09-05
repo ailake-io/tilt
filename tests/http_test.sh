@@ -95,5 +95,30 @@ while [ "$i" -le 8 ]; do
   i=$((i + 1))
 done
 
+# --- 4) middleware `meio:`: variavel compartilhada + aborta via responder: --
+MWFIXTURE="${3:-${FIXTURE%/*}/servico_meio.tilt}"
+mw_port=$((PORT + 3))
+"$BIN" servir "$MWFIXTURE" --porta "$mw_port" --requisicoes 3 >"$tmp/log_mw" 2>&1 &
+srv_pid=$!
+wait_listen "$tmp/log_mw"
+
+mw_ok=$(curl -s -o "$tmp/mw_ok" -w '%{http_code}' -X POST "localhost:$mw_port/abre" -d '{"chave":"segredo"}')
+mw_negado=$(curl -s -o "$tmp/mw_negado" -w '%{http_code}' -X POST "localhost:$mw_port/abre" -d '{"chave":"errada"}')
+mw_saude=$(curl -s -o "$tmp/mw_saude" -w '%{http_code}' "localhost:$mw_port/saude")
+
+wait "$srv_pid"
+srv_pid=""
+
+[ "$mw_ok" = "200" ] || { echo "meio: autorizado esperava 200, obtido $mw_ok"; fail=1; }
+grep -q '"prefixo": "v1"' "$tmp/mw_ok" || {
+  echo "meio: resposta autorizada sem 'prefixo: v1': $(cat "$tmp/mw_ok")"; fail=1;
+}
+[ "$mw_negado" = "401" ] || { echo "meio: chave errada esperava 401, obtido $mw_negado"; fail=1; }
+grep -q '"erro": "nao autorizado"' "$tmp/mw_negado" || {
+  echo "meio: 401 sem corpo esperado: $(cat "$tmp/mw_negado")"; fail=1;
+}
+[ "$mw_saude" = "200" ] || { echo "meio: /saude esperava 200, obtido $mw_saude"; fail=1; }
+grep -q '"ok": true' "$tmp/mw_saude" || { echo "meio: /saude sem resposta ok"; fail=1; }
+
 [ "$fail" = 0 ] && echo "http_test ok"
 exit "$fail"

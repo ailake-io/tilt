@@ -8,7 +8,8 @@ add_test(
   NAME http
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/http_test.sh
           $<TARGET_FILE:tilt>
-          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico.tilt)
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico.tilt
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico_meio.tilt)
 
 add_test(
   NAME par
