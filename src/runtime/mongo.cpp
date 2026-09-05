@@ -406,6 +406,15 @@ std::string errmsg_de(const Value& resp) {
   return "comando falhou (ok: 0)";
 }
 
+// Campo inteiro da resposta do servidor (n / nModified). Servidores reais
+// mandam double; o mock manda int32 — aceitamos os dois.
+std::int64_t inteiro_de(const Value& resp, const std::string& campo, const std::string& ctx) {
+  if (!resp.map) die(ctx + ": resposta sem documento");
+  const Value* v = resp.map->find(campo);
+  if (!v || !v->is_number()) die(ctx + ": resposta sem '" + campo + "'");
+  return static_cast<std::int64_t>(v->as_number());
+}
+
 // Sessao OP_MSG: connecta, faz o handshake isMaster e executa comandos.
 class Sessao {
  public:
@@ -574,6 +583,99 @@ Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t
     die("resposta de find sem 'cursor.firstBatch'");
   }
   return *batch;
+}
+
+std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
+                             const Value& mudancas, bool multi, const std::string& banco) {
+  if (filtro.kind != ValueKind::Mapa || !filtro.map) die("atualizar espera um mapa como filtro");
+  if (mudancas.kind != ValueKind::Mapa || !mudancas.map) {
+    die("atualizar espera um mapa de mudancas, ex.: {$set: {valor: 999}}");
+  }
+  for (const auto& [op, _v] : mudancas.map->items) {
+    if (op != "$set") die("atualizar: operador '" + op + "' nao suportado (fase atual: so $set)");
+  }
+  const Value* set = mudancas.map->find("$set");
+  if (!set || set->kind != ValueKind::Mapa || !set->map) {
+    die("atualizar: '$set' deve ser um mapa {campo: valor}");
+  }
+
+  const MongoUrl url = parse_url();
+  const std::string db = banco_efetivo(url, banco);
+  Sessao sessao(url);
+
+  Value cmd = Value::mapa();
+  cmd.map->set("update", Value::texto(colecao));
+  cmd.map->set("$db", Value::texto(db));
+  Value upd = Value::mapa();
+  upd.map->set("q", filtro);
+  upd.map->set("u", mudancas);
+  upd.map->set("multi", Value::logico(multi));
+  Value updates = Value::lista();
+  updates.list->push_back(upd);
+  cmd.map->set("updates", updates);
+
+  const Value resp = sessao.comando(cmd);
+  if (!ok_de(resp)) die("update em '" + colecao + "': " + errmsg_de(resp));
+  return inteiro_de(resp, "nModified", "update");
+}
+
+std::int64_t mongo_deletar(const std::string& colecao, const Value& filtro,
+                           const std::string& banco) {
+  if (filtro.kind != ValueKind::Mapa || !filtro.map) die("deletar espera um mapa como filtro");
+
+  const MongoUrl url = parse_url();
+  const std::string db = banco_efetivo(url, banco);
+  Sessao sessao(url);
+
+  Value cmd = Value::mapa();
+  cmd.map->set("delete", Value::texto(colecao));
+  cmd.map->set("$db", Value::texto(db));
+  Value dl = Value::mapa();
+  dl.map->set("q", filtro);
+  dl.map->set("limit", Value::inteiro(0));
+  Value deletes = Value::lista();
+  deletes.list->push_back(dl);
+  cmd.map->set("deletes", deletes);
+
+  const Value resp = sessao.comando(cmd);
+  if (!ok_de(resp)) die("delete em '" + colecao + "': " + errmsg_de(resp));
+  return inteiro_de(resp, "n", "delete");
+}
+
+std::string mongo_criar_indice(const std::string& colecao, const Value& campos,
+                               const std::string& banco) {
+  if (campos.kind != ValueKind::Lista || !campos.list || campos.list->empty()) {
+    die("criar_indice espera uma lista de campos nao vazia");
+  }
+  Value key = Value::mapa();
+  std::string name;
+  for (std::size_t i = 0; i < campos.list->size(); ++i) {
+    const Value& c = (*campos.list)[i];
+    if (c.kind != ValueKind::Texto || c.s.empty()) {
+      die("criar_indice: campos devem ser textos nao vazios");
+    }
+    key.map->set(c.s, Value::inteiro(1));
+    if (i > 0) name += "_";
+    name += c.s + "_1";
+  }
+
+  const MongoUrl url = parse_url();
+  const std::string db = banco_efetivo(url, banco);
+  Sessao sessao(url);
+
+  Value cmd = Value::mapa();
+  cmd.map->set("createIndexes", Value::texto(colecao));
+  cmd.map->set("$db", Value::texto(db));
+  Value idx = Value::mapa();
+  idx.map->set("key", key);
+  idx.map->set("name", Value::texto(name));
+  Value indexes = Value::lista();
+  indexes.list->push_back(idx);
+  cmd.map->set("indexes", indexes);
+
+  const Value resp = sessao.comando(cmd);
+  if (!ok_de(resp)) die("createIndexes em '" + colecao + "': " + errmsg_de(resp));
+  return name;
 }
 
 }  // namespace tilt::rt

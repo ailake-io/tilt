@@ -45,13 +45,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, Redis, Kafka,
   MongoDB, Qdrant, pgvector e S3 rodam.
-- MongoDB (`mongo_inserir`/`mongo_buscar`): BSON + OP_MSG próprios de 1ª
-  passada — insert e find apenas (sem update/delete/indexes/aggregate),
-  filtro só por igualdade exata top-level (combinado por E), sem auth/TLS
-  (plain), sem `OP_COMPRESSED`; document sequences (section kind 1) são
-  puladas na leitura; uma conexão (com handshake `isMaster`) por chamada e
-  payload inteiro em memória; banco por `MONGO_URL` (path) ou opção
-  `banco:`.
+- MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
+  `mongo_criar_indice`): BSON + OP_MSG próprios com CRUD básico completo —
+  restam: sem `aggregate`, sem `$unset`/`$inc`/demais operadores de update
+  (só `$set`), sem índices de texto/TTL, filtro só por igualdade exata
+  top-level (combinado por E), `mongo_deletar` remove sempre todos que casam
+  (sem `limit 1`), find sem projeção (retorna o documento inteiro), sem
+  auth/TLS (plain; TLS é fase futura), sem `OP_COMPRESSED`; document
+  sequences (section kind 1) são puladas na leitura; uma conexão (com
+  handshake `isMaster`) por chamada e payload inteiro em memória; banco por
+  `MONGO_URL` (path) ou opção `banco:`.
 - Kafka (`ler_kafka`/`escrever_kafka`/`fonte tipo: kafka`): wire protocol
   0.9-era — consumer groups com 1 membro por grupo por vez (o assignment
   "range" pega todas as partições, mas sem rebalanceamento real: dois

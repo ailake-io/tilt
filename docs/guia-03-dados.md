@@ -354,6 +354,12 @@ pipeline pedidos:
     - mongo_inserir "pedidos", {cliente: "ana", valor: 200}
     - achados = mongo_buscar "pedidos", {filtro: {cliente: "ana"}}
     - imprimir tamanho achados, achados[0].valor
+    - mods = mongo_atualizar "pedidos", {cliente: "ana"}, {$set: {valor: 999}}
+    - imprimir mods                              # nModified (inteiro)
+    - deletados = mongo_deletar "pedidos", {cliente: "bob"}
+    - imprimir deletados                         # n deletados (inteiro)
+    - nome = mongo_criar_indice "pedidos", {campos: ["cliente"]}
+    - imprimir nome                              # "cliente_1"
 ```
 
 - `mongo_inserir colecao, documento, {banco: "x"}`: o documento deve ser
@@ -365,13 +371,25 @@ pipeline pedidos:
   `mapas` (ordem do servidor). `filtro` é um `mapa` de **igualdade exata
   campo a campo** (top-level, combinado por E); omitido, retorna tudo.
   `max` limita a quantidade (default 100).
+- `mongo_atualizar colecao, filtro, mudancas, {banco:, multi:}`: devolve
+  `nModified` (inteiro). `mudancas` é um mapa de operadores — 1ª passada só
+  `$set: {campo: valor, ...}` (outro operador → erro claro). `filtro` é o
+  mesmo de `mongo_buscar`. `multi` (lógico, default `falso`): `falso`
+  atualiza só o primeiro documento que casa; `verdadeiro`, todos.
+- `mongo_deletar colecao, filtro, {banco:}`: remove **todos** os documentos
+  que casam com `filtro` (igualdade top-level; 1ª passada sem "só o
+  primeiro") e devolve `n` deletados (inteiro).
+- `mongo_criar_indice colecao, {campos: ["a", "b"], banco:}`: cria índice
+  ascendente (`{a: 1, b: 1}`) e devolve o `name` gerado dos campos
+  (texto, ex.: `"a_1_b_1"`).
 - banco efetivo: opção `banco:` > path do `MONGO_URL`; sem nenhum dos dois,
-  `mongo_inserir`/`mongo_buscar` falham com erro acionável **antes** de
-  tocar a rede.
-- limitações da 1ª passada: sem update/delete/indexes/aggregate, filtro só
-  por igualdade top-level, sem auth/TLS, sem `OP_COMPRESSED`; respostas com
-  document sequences (section kind 1) são aceitas, mas `batchSize`/`max` de
-  100 cabem na section kind 0 de qualquer forma.
+  os builtins falham com erro acionável **antes** de tocar a rede.
+- limitações da 1ª passada: sem `aggregate`, sem `$unset`/`$inc`/demais
+  operadores de update (só `$set`), sem índices de texto/TTL, filtro só por
+  igualdade top-level, `mongo_deletar` sempre remove todos que casam (sem
+  `limit 1`), sem auth/TLS, sem `OP_COMPRESSED`; respostas com document
+  sequences (section kind 1) são aceitas, mas `batchSize`/`max` de 100 cabem
+  na section kind 0 de qualquer forma.
 
 ## Índice vetorial no Qdrant
 

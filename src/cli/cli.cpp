@@ -376,7 +376,7 @@ BUILTINS
   ler_iceberg escrever_iceberg anexar_iceberg
   ler_redis escrever_redis
   ler_kafka escrever_kafka
-  mongo_inserir mongo_buscar
+  mongo_inserir mongo_buscar mongo_atualizar mongo_deletar mongo_criar_indice
   ler_s3 escrever_s3
   ler <fonte> carregador
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)

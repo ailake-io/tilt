@@ -3506,6 +3506,104 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
   }
+  if (name == "mongo_atualizar") {
+    auto a = args();
+    if (a.size() < 3 || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "mongo_atualizar espera (colecao, filtro, mudancas, {banco:, multi:}), ex.: "
+           "mongo_atualizar \"pedidos\", {cliente: \"ana\"}, {$set: {valor: 999}}");
+    }
+    if (a[1].kind != ValueKind::Mapa || !a[1].map) {
+      fail(call.span, "mongo_atualizar: 'filtro' deve ser um mapa de igualdade");
+    }
+    if (a[2].kind != ValueKind::Mapa || !a[2].map) {
+      fail(call.span, "mongo_atualizar: 'mudancas' deve ser um mapa {$set: {...}}");
+    }
+    std::string banco;
+    bool multi = false;
+    if (a.size() >= 4) {
+      if (a[3].kind != ValueKind::Mapa || !a[3].map) {
+        fail(call.span, "mongo_atualizar: opcoes devem ser um mapa {banco:, multi:}");
+      }
+      if (const Value* bv = a[3].map->find("banco")) {
+        if (bv->kind != ValueKind::Texto) {
+          fail(call.span, "mongo_atualizar: 'banco' deve ser texto");
+        }
+        banco = bv->s;
+      }
+      if (const Value* mv = a[3].map->find("multi")) {
+        if (mv->kind != ValueKind::Logico) {
+          fail(call.span, "mongo_atualizar: 'multi' deve ser logico");
+        }
+        multi = mv->b;
+      }
+    }
+    try {
+      return Value::inteiro(rt::mongo_atualizar(a[0].s, a[1], a[2], multi, banco));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "mongo_deletar") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "mongo_deletar espera (colecao, filtro, {banco:}), ex.: mongo_deletar \"pedidos\", "
+           "{cliente: \"bob\"}");
+    }
+    if (a[1].kind != ValueKind::Mapa || !a[1].map) {
+      fail(call.span, "mongo_deletar: 'filtro' deve ser um mapa de igualdade");
+    }
+    std::string banco;
+    if (a.size() >= 3) {
+      if (a[2].kind != ValueKind::Mapa || !a[2].map) {
+        fail(call.span, "mongo_deletar: opcoes devem ser um mapa {banco: \"x\"}");
+      }
+      if (const Value* bv = a[2].map->find("banco")) {
+        if (bv->kind != ValueKind::Texto) {
+          fail(call.span, "mongo_deletar: 'banco' deve ser texto");
+        }
+        banco = bv->s;
+      }
+    }
+    try {
+      return Value::inteiro(rt::mongo_deletar(a[0].s, a[1], banco));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "mongo_criar_indice") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "mongo_criar_indice espera (colecao, {campos:, banco:}), ex.: mongo_criar_indice "
+           "\"pedidos\", {campos: [\"cliente\"]}");
+    }
+    if (a[1].kind != ValueKind::Mapa || !a[1].map) {
+      fail(call.span, "mongo_criar_indice: opcoes devem ser um mapa {campos:, banco:}");
+    }
+    Value campos;
+    if (const Value* cv = a[1].map->find("campos")) {
+      if (cv->kind != ValueKind::Lista || !cv->list) {
+        fail(call.span, "mongo_criar_indice: 'campos' deve ser uma lista de textos");
+      }
+      campos = *cv;
+    } else {
+      fail(call.span, "mongo_criar_indice: falta 'campos: [\"a\", ...]'");
+    }
+    std::string banco;
+    if (const Value* bv = a[1].map->find("banco")) {
+      if (bv->kind != ValueKind::Texto) {
+        fail(call.span, "mongo_criar_indice: 'banco' deve ser texto");
+      }
+      banco = bv->s;
+    }
+    try {
+      return Value::texto(rt::mongo_criar_indice(a[0].s, campos, banco));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "ler_s3") {
     auto a = args();
     if (a.size() < 1 || a[0].kind != ValueKind::Texto) {

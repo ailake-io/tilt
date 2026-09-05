@@ -31,4 +31,25 @@ void mongo_inserir(const std::string& colecao, const Value& doc, const std::stri
 Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t max,
                    const std::string& banco);
 
+// Atualiza documentos que casam com `filtro` (mesma igualdade top-level de
+// buscar) aplicando `mudancas`. 1a passada: so o operador `$set` (mapa
+// {$set: {campo: valor, ...}}); outro operador -> erro claro. `multi` falso
+// (default) atualiza so o primeiro que casa; verdadeiro atualiza todos.
+// Comando {update, $db, updates: [{q, u, multi}]}; ok:0 vira excecao com o
+// errmsg. Devolve nModified como inteiro.
+std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
+                             const Value& mudancas, bool multi, const std::string& banco);
+
+// Remove os documentos que casam com `filtro` (igualdade top-level).
+// Comando {delete, $db, deletes: [{q, limit: 0}]} (limit 0 = todos que
+// casam; 1a passada sem limit 1). Devolve n (deletados) como inteiro.
+std::int64_t mongo_deletar(const std::string& colecao, const Value& filtro,
+                           const std::string& banco);
+
+// Cria indice ascendente (1) nos `campos` (lista de textos nao vazia) da
+// colecao. Comando {createIndexes, $db, indexes: [{key: {a: 1, ...},
+// name: "a_1_..."}]}; o name e gerado dos campos. Devolve o name (texto).
+std::string mongo_criar_indice(const std::string& colecao, const Value& campos,
+                               const std::string& banco);
+
 }  // namespace tilt::rt

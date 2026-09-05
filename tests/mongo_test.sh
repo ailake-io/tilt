@@ -1,11 +1,12 @@
 #!/usr/bin/env sh
-# Integration test for the MongoDB connector (`mongo_inserir`/`mongo_buscar`):
-# spins up a mock mongod in python3 (pure socketserver, implementing the same
-# subset of the wire protocol: OP_MSG opcode 2013 with section kind 0, BSON
-# com os mesmos tipos do cliente) and runs `tilt executar` on a roundtrip
-# fixture (2 inserts on the same collection + 1 filtered find + 1 unfiltered
-# find), checking the printed results plus the mock's request log (2 INSERT +
-# 2 FIND).
+# Integration test for the MongoDB connector (`mongo_inserir`/`mongo_buscar`/
+# `mongo_atualizar`/`mongo_deletar`/`mongo_criar_indice`): spins up a mock
+# mongod in python3 (pure socketserver, implementing the same subset of the
+# wire protocol: OP_MSG opcode 2013 with section kind 0, BSON com os mesmos
+# tipos do cliente) and runs `tilt executar` em dois fixtures: o roundtrip
+# (2 inserts na mesma colecao + 2 finds) e o CRUD (3 inserts, update $set,
+# delete, createIndexes), checando as saidas impressas mais o log de
+# requisicoes do mock (INSERT/FIND/UPDATE/DELETE/CREATEINDEXES).
 set -eu
 
 BIN="$1"
@@ -35,6 +36,8 @@ log = open(log_path, "a", encoding="utf-8")
 
 # store[(db, colecao)] = [doc, ...]; doc = {campo: valor tagged}
 store = {}
+# indexes[(db, colecao, name)] = indice tagged (createIndexes e so registrado)
+indexes = {}
 req_id = 0
 
 
@@ -237,6 +240,59 @@ class Mongod(socketserver.BaseRequestHandler):
                 "ok": ("double", 1.0),
                 "cursor": ("doc", {"firstBatch": ("arr", achados), "id": ("i64", 0)}),
             })
+        if "update" in cmd:
+            _tag, colecao = cmd["update"]
+            _tag, db = cmd["$db"]
+            fila = store.setdefault((db, colecao), [])
+            n = 0
+            n_modified = 0
+            for _tag, upd in cmd["updates"][1].values():
+                filtro = upd.get("q", ("doc", {}))[1]
+                _tag, u = upd["u"]
+                multi = upd.get("multi", ("bool", False))[1]
+                set_ops = u.get("$set", ("doc", {}))[1]
+                for doc in fila:
+                    if all(doc.get(k) == v for k, v in filtro.items()):
+                        n += 1
+                        for k, v in set_ops.items():
+                            doc[k] = v
+                        n_modified += 1
+                        if not multi:
+                            break
+            log.write("UPDATE %s.%s n=%d nModified=%d\n" % (db, colecao, n, n_modified))
+            log.flush()
+            return op_msg_response(req_id, {"ok": ("double", 1.0),
+                                            "n": ("i32", n),
+                                            "nModified": ("i32", n_modified)})
+        if "delete" in cmd:
+            _tag, colecao = cmd["delete"]
+            _tag, db = cmd["$db"]
+            fila = store.setdefault((db, colecao), [])
+            n = 0
+            for _tag, dl in cmd["deletes"][1].values():
+                filtro = dl.get("q", ("doc", {}))[1]
+                restantes = []
+                for doc in fila:
+                    if all(doc.get(k) == v for k, v in filtro.items()):
+                        n += 1
+                    else:
+                        restantes.append(doc)
+                fila[:] = restantes
+            log.write("DELETE %s.%s n=%d\n" % (db, colecao, n))
+            log.flush()
+            return op_msg_response(req_id, {"ok": ("double", 1.0), "n": ("i32", n)})
+        if "createIndexes" in cmd:
+            _tag, colecao = cmd["createIndexes"]
+            _tag, db = cmd["$db"]
+            for _tag, idx in cmd["indexes"][1].values():
+                indexes[(db, colecao, idx["name"][1])] = idx
+            nomes = ",".join(idx["name"][1] for _tag, idx in cmd["indexes"][1].values())
+            log.write("CREATEINDEXES %s.%s %s\n" % (db, colecao, nomes))
+            log.flush()
+            return op_msg_response(req_id, {"ok": ("double", 1.0),
+                                            "createdCollectionAutomatically": ("bool", False),
+                                            "numIndexesBefore": ("i32", 1),
+                                            "numIndexesAfter": ("i32", 2)})
         return op_msg_response(req_id, {"ok": ("double", 0.0),
                                         "errmsg": ("str", "comando desconhecido")})
 
@@ -275,6 +331,14 @@ out=$(
     "$BIN" executar "${2:-${0%/*}/fixtures/mongo_roundtrip.tilt}"
 )
 
+cp "$tmp/log" "$tmp/log_roundtrip"
+
+# --- CRUD (update/delete/createIndexes) em banco separado ---------------------
+out2=$(
+  env MONGO_URL="mongodb://127.0.0.1:$PORTA/lojadb" \
+    "$BIN" executar "${0%/*}/fixtures/mongo_crud.tilt"
+)
+
 kill "$mock_pid" 2>/dev/null || true
 mock_pid=""
 
@@ -283,13 +347,33 @@ echo "$out" | grep -q "^1$" || { echo "saida sem tamanho 1 (filtro ana): $out"; 
 echo "$out" | grep -q "^200$" || { echo "saida sem valor 200: $out"; fail=1; }
 echo "$out" | grep -q "^2$" || { echo "saida sem tamanho 2 (sem filtro): $out"; fail=1; }
 
-inserts=$(grep -c "^INSERT " "$tmp/log" || true)
-finds=$(grep -c "^FIND " "$tmp/log" || true)
-[ "$inserts" = "2" ] || { echo "esperado 2 INSERT, obtido $inserts"; cat "$tmp/log"; fail=1; }
-[ "$finds" = "2" ] || { echo "esperado 2 FIND, obtido $finds"; cat "$tmp/log"; fail=1; }
-grep -q "^INSERT loja.pedidos" "$tmp/log" || { echo "log sem INSERT loja.pedidos"; cat "$tmp/log"; fail=1; }
-grep -q "^FIND loja.pedidos n=1" "$tmp/log" || { echo "log sem FIND loja.pedidos n=1"; cat "$tmp/log"; fail=1; }
-grep -q "^FIND loja.pedidos n=2" "$tmp/log" || { echo "log sem FIND loja.pedidos n=2"; cat "$tmp/log"; fail=1; }
+inserts=$(grep -c "^INSERT " "$tmp/log_roundtrip" || true)
+finds=$(grep -c "^FIND " "$tmp/log_roundtrip" || true)
+[ "$inserts" = "2" ] || { echo "esperado 2 INSERT, obtido $inserts"; cat "$tmp/log_roundtrip"; fail=1; }
+[ "$finds" = "2" ] || { echo "esperado 2 FIND, obtido $finds"; cat "$tmp/log_roundtrip"; fail=1; }
+grep -q "^INSERT loja.pedidos" "$tmp/log_roundtrip" || { echo "log sem INSERT loja.pedidos"; cat "$tmp/log_roundtrip"; fail=1; }
+grep -q "^FIND loja.pedidos n=1" "$tmp/log_roundtrip" || { echo "log sem FIND loja.pedidos n=1"; cat "$tmp/log_roundtrip"; fail=1; }
+grep -q "^FIND loja.pedidos n=2" "$tmp/log_roundtrip" || { echo "log sem FIND loja.pedidos n=2"; cat "$tmp/log_roundtrip"; fail=1; }
+
+# --- CRUD: saida (nModified=1, valor 999, n=1, total 2, name cliente_1) -------
+echo "$out2" | grep -q "^1$" || { echo "saida crud sem nModified 1: $out2"; fail=1; }
+echo "$out2" | grep -q "^999$" || { echo "saida crud sem valor 999: $out2"; fail=1; }
+echo "$out2" | grep -q "^cliente_1$" || { echo "saida crud sem name cliente_1: $out2"; fail=1; }
+
+inserts2=$(grep -c "^INSERT " "$tmp/log" || true)
+finds2=$(grep -c "^FIND " "$tmp/log" || true)
+updates=$(grep -c "^UPDATE " "$tmp/log" || true)
+deletes=$(grep -c "^DELETE " "$tmp/log" || true)
+idxs=$(grep -c "^CREATEINDEXES " "$tmp/log" || true)
+[ "$inserts2" = "5" ] || { echo "esperado 5 INSERT no total, obtido $inserts2"; cat "$tmp/log"; fail=1; }
+[ "$finds2" = "4" ] || { echo "esperado 4 FIND no total, obtido $finds2"; cat "$tmp/log"; fail=1; }
+[ "$updates" = "1" ] || { echo "esperado 1 UPDATE, obtido $updates"; cat "$tmp/log"; fail=1; }
+[ "$deletes" = "1" ] || { echo "esperado 1 DELETE, obtido $deletes"; cat "$tmp/log"; fail=1; }
+[ "$idxs" = "1" ] || { echo "esperado 1 CREATEINDEXES, obtido $idxs"; cat "$tmp/log"; fail=1; }
+grep -q "^UPDATE lojadb.pedidos n=1 nModified=1" "$tmp/log" || { echo "log sem UPDATE lojadb.pedidos n=1 nModified=1"; cat "$tmp/log"; fail=1; }
+grep -q "^DELETE lojadb.pedidos n=1" "$tmp/log" || { echo "log sem DELETE lojadb.pedidos n=1"; cat "$tmp/log"; fail=1; }
+grep -q "^CREATEINDEXES lojadb.pedidos cliente_1" "$tmp/log" || { echo "log sem CREATEINDEXES lojadb.pedidos cliente_1"; cat "$tmp/log"; fail=1; }
+grep -q "^FIND lojadb.pedidos n=2" "$tmp/log" || { echo "log sem FIND lojadb.pedidos n=2"; cat "$tmp/log"; fail=1; }
 
 [ "$fail" = 0 ] && echo "mongo_test ok"
 exit "$fail"

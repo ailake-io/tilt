@@ -1,0 +1,20 @@
+# CRUD MongoDB contra o mock mongod do mongo_test.sh (segunda rodada, banco
+# "lojadb" via path da MONGO_URL para nao misturar com o roundtrip): 3 inserts
+# {cliente, valor}, update com $set filtrando cliente "ana", delete de "bob" e
+# createIndexes em ["cliente"]. Confere nModified, n deletados, total restante
+# e o name do indice.
+pipeline mongo_crud:
+  passos:
+    - mongo_inserir "pedidos", {cliente: "ana", valor: 200}
+    - mongo_inserir "pedidos", {cliente: "bob", valor: 150}
+    - mongo_inserir "pedidos", {cliente: "ana", valor: 300}
+    - mods = mongo_atualizar "pedidos", {cliente: "ana"}, {"$set": {valor: 999}}
+    - imprimir mods
+    - ana = mongo_buscar "pedidos", {filtro: {cliente: "ana"}}
+    - imprimir ana[0].valor
+    - deletados = mongo_deletar "pedidos", {cliente: "bob"}
+    - imprimir deletados
+    - todos = mongo_buscar "pedidos", {}
+    - imprimir tamanho todos
+    - nome = mongo_criar_indice "pedidos", {campos: ["cliente"]}
+    - imprimir nome
