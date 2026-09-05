@@ -202,25 +202,132 @@ std::string current_schema_string(const std::vector<std::string>& versions) {
   return schema;
 }
 
-// Nomes das colunas de uma schemaString no formato do Delta.
-std::vector<std::string> schema_string_columns(const std::string& schema_json) {
+// Pares (nome, tipo delta) das colunas de uma schemaString no formato do
+// Delta — usados na leitura para converter partitionValues (sempre texto no
+// log) de volta ao tipo declarado.
+std::vector<std::pair<std::string, std::string>> schema_string_fields(const std::string& schema_json) {
   Value v;
   try {
     v = json_parse(schema_json);
   } catch (const std::exception& e) {
     die("schemaString invalido no log: " + std::string(e.what()));
   }
-  std::vector<std::string> cols;
-  if (v.kind != ValueKind::Mapa || !v.map) return cols;
-  const Value* fields = v.map->find("fields");
-  if (!fields || fields->kind != ValueKind::Lista || !fields->list) return cols;
-  for (const Value& f : *fields->list) {
+  std::vector<std::pair<std::string, std::string>> fields;
+  if (v.kind != ValueKind::Mapa || !v.map) return fields;
+  const Value* fl = v.map->find("fields");
+  if (!fl || fl->kind != ValueKind::Lista || !fl->list) return fields;
+  for (const Value& f : *fl->list) {
     if (f.kind == ValueKind::Mapa && f.map) {
       const Value* n = f.map->find("name");
-      cols.push_back(n && n->kind == ValueKind::Texto ? n->s : "");
+      const Value* t = f.map->find("type");
+      fields.emplace_back(n && n->kind == ValueKind::Texto ? n->s : "",
+                          t && t->kind == ValueKind::Texto ? t->s : "string");
+    }
+  }
+  return fields;
+}
+
+// Nomes das colunas de uma schemaString no formato do Delta.
+std::vector<std::string> schema_string_columns(const std::string& schema_json) {
+  std::vector<std::string> cols;
+  for (const auto& f : schema_string_fields(schema_json)) cols.push_back(f.first);
+  return cols;
+}
+
+bool fields_contains(const std::vector<std::pair<std::string, std::string>>& fields,
+                     const std::string& col) {
+  for (const auto& f : fields) {
+    if (f.first == col) return true;
+  }
+  return false;
+}
+
+// partitionColumns do metaData mais recente do log (ordem de versao).
+std::vector<std::string> current_partition_columns(const std::vector<std::string>& versions) {
+  std::vector<std::string> cols;
+  for (const std::string& path : versions) {
+    std::ifstream in(path);
+    if (!in) die("nao foi possivel abrir '" + path + "'");
+    std::string line_text;
+    while (std::getline(in, line_text)) {
+      if (line_text.empty()) continue;
+      Value row;
+      try {
+        row = json_parse(line_text);
+      } catch (const std::exception& e) {
+        die("linha invalida no log '" + path + "': " + e.what());
+      }
+      if (row.kind != ValueKind::Mapa || !row.map) continue;
+      if (const Value* md = row.map->find("metaData");
+          md && md->kind == ValueKind::Mapa && md->map) {
+        if (const Value* pc = md->map->find("partitionColumns");
+            pc && pc->kind == ValueKind::Lista && pc->list) {
+          cols.clear();
+          for (const Value& c : *pc->list) {
+            if (c.kind == ValueKind::Texto) cols.push_back(c.s);
+          }
+        }
+      }
     }
   }
   return cols;
+}
+
+// Valor de particao como string (nome do diretorio hive-style). Erro claro
+// em nulo e em texto com '/' (fase 25: sem __HIVE_DEFAULT_PARTITION__ nem
+// escaping de caracteres especiais).
+std::string partition_value_string(const Value& v, const std::string& col) {
+  switch (v.kind) {
+    case ValueKind::Nulo:
+      die("valor nulo em coluna de particao '" + col +
+          "' (fase 25: particao com nulo nao e suportada)");
+    case ValueKind::Logico: return v.b ? "true" : "false";
+    case ValueKind::Inteiro: return std::to_string(v.i);
+    case ValueKind::Decimal: {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "%g", v.d);
+      return buf;
+    }
+    case ValueKind::Texto:
+      if (v.s.find('/') != std::string::npos) {
+        die("valor da coluna de particao '" + col +
+            "' contem '/' (fase 25: caracteres especiais nao suportados)");
+      }
+      return v.s;
+    default:
+      die("coluna de particao '" + col + "' deve ser texto, inteiro, decimal ou logico");
+  }
+}
+
+// partitionValues do log sao strings; converte para o tipo declarado no
+// schema (inteiro/decimal/logico). Conversao impossivel mantem texto.
+Value partition_rehydrate(const std::string& s, const std::string& delta_type) {
+  try {
+    if (delta_type == "long" || delta_type == "integer" || delta_type == "short" ||
+        delta_type == "byte") {
+      return Value::inteiro(std::stoll(s));
+    }
+    if (delta_type == "double" || delta_type == "float") {
+      return Value::decimal(std::stod(s));
+    }
+    if (delta_type == "boolean") {
+      if (s == "true") return Value::logico(true);
+      if (s == "false") return Value::logico(false);
+      return Value::texto(s);
+    }
+  } catch (const std::exception&) {
+    // fora de formato/alcance: mantem texto (decisao da fase 25)
+  }
+  return Value::texto(s);
+}
+
+// Garante que a coluna de particao existe no schema da tabela (1a linha).
+void ensure_partition_column(const Value& tabela, const std::string& col, const char* ctx) {
+  const std::vector<std::string> cols = table_columns(tabela, ctx);
+  if (std::find(cols.begin(), cols.end(), col) == cols.end()) {
+    die(std::string(ctx) + ": coluna de particao '" + col + "' nao existe na tabela (colunas: " +
+        join_cols(cols) + ")");
+  }
 }
 
 // Lista os arquivos de <dir>/_delta_log/NNN.json em ordem crescente de versao.
@@ -242,10 +349,117 @@ std::vector<std::string> list_delta_versions(const std::string& log_dir) {
   return out;
 }
 
+// Proximo indice livre part-NNNNN.parquet dentro de um diretorio de
+// particao: conta os part-*.parquet ja presentes (reescrita e append nao
+// colidem com arquivos de versoes anteriores, que permanecem no disco).
+int next_part_index(const std::string& dir) {
+  DIR* d = ::opendir(dir.c_str());
+  if (!d) return 0;
+  int n = 0;
+  while (dirent* e = ::readdir(d)) {
+    const std::string name = e->d_name;
+    if (name.rfind("part-", 0) == 0 && name.size() > 8 &&
+        name.compare(name.size() - 8, 8, ".parquet") == 0) {
+      ++n;
+    }
+  }
+  ::closedir(d);
+  return n;
+}
+
+// Linha sem a coluna de particao: o parquet do Delta nao armazena as colunas
+// de particao (o valor vive no diretorio/partitionValues).
+Value strip_partition_column(const Value& row, const std::string& col) {
+  Value m = Value::mapa();
+  for (const auto& kv : row.map->items) {
+    if (kv.first != col) m.map->set(kv.first, kv.second);
+  }
+  return m;
+}
+
+struct PartitionGroup {
+  std::string valor;  // valor da coluna de particao como string
+  Value rows;         // tabela sem a coluna de particao
+};
+
+// Agrupa as linhas pelo valor da coluna de particao, na ordem de 1a
+// aparicao dos valores (define a ordem dos adds no log).
+std::vector<PartitionGroup> partition_rows(const Value& tabela, const std::string& col) {
+  std::vector<PartitionGroup> grupos;
+  for (const Value& row : *tabela.list) {
+    if (row.kind != ValueKind::Mapa || !row.map) die("linhas devem ser mapas { campo: valor }");
+    const Value* cell = row.map->find(col);
+    const std::string valor = partition_value_string(cell ? *cell : Value::nulo(), col);
+    auto it = std::find_if(grupos.begin(), grupos.end(),
+                           [&](const PartitionGroup& g) { return g.valor == valor; });
+    if (it == grupos.end()) {
+      PartitionGroup g;
+      g.valor = valor;
+      g.rows = Value::tabela();
+      it = grupos.insert(grupos.end(), std::move(g));
+    }
+    it->rows.list->push_back(strip_partition_column(row, col));
+  }
+  return grupos;
+}
+
+Value make_add(const std::string& rel_path,
+               const std::vector<std::pair<std::string, std::string>>& partvals,
+               std::int64_t size, std::int64_t ts) {
+  Value add = Value::mapa();
+  add.map->set("path", Value::texto(rel_path));
+  Value pv = Value::mapa();
+  for (const auto& kv : partvals) pv.map->set(kv.first, Value::texto(kv.second));
+  add.map->set("partitionValues", std::move(pv));
+  add.map->set("size", Value::inteiro(size));
+  add.map->set("modificationTime", Value::inteiro(ts));
+  add.map->set("dataChange", Value::logico(true));
+  return add;
+}
+
+// Grava os parquet de uma escrita/anexo. Com col vazio, um unico arquivo na
+// raiz (comportamento original); com col, um arquivo por valor de particao
+// em <dir>/<col>=<valor>/part-NNNNN.parquet. Devolve os adds para o log.
+std::vector<Value> write_partitions(const std::string& dir, const Value& tabela,
+                                    const std::string& col) {
+  std::vector<Value> adds;
+  std::vector<PartitionGroup> grupos;
+  if (col.empty()) {
+    PartitionGroup g;
+    g.rows = tabela;
+    grupos.push_back(std::move(g));
+  } else {
+    grupos = partition_rows(tabela, col);
+  }
+  for (const PartitionGroup& g : grupos) {
+    const std::string subdir = col.empty() ? dir : dir + "/" + col + "=" + g.valor;
+    mkdir_if_missing(subdir);
+    std::string nome;
+    if (col.empty()) {
+      // nomenclatura historica (uuid) preservada para tabelas sem particao
+      nome = "part-00000000-0000-4000-8000-" + new_table_id().substr(0, 12) + ".parquet";
+    } else {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "part-%05d.parquet", next_part_index(subdir));
+      nome = buf;
+    }
+    const std::string fpath = subdir + "/" + nome;
+    parquet_write(fpath, g.rows);
+    const std::int64_t size = file_size(fpath);
+    if (size <= 0) die("falha ao gravar '" + fpath + "'");
+    const std::string rel = col.empty() ? nome : col + "=" + g.valor + "/" + nome;
+    std::vector<std::pair<std::string, std::string>> pv;
+    if (!col.empty()) pv.emplace_back(col, g.valor);
+    adds.push_back(make_add(rel, pv, size, now_ms()));
+  }
+  return adds;
+}
+
 }  // namespace
 
-void delta_write(const std::string& dir, const Value& tabela) {
+void delta_write(const std::string& dir, const Value& tabela, const std::string& part_col) {
   const std::string schema = delta_schema_string(tabela, "escrever_delta");
+  if (!part_col.empty()) ensure_partition_column(tabela, part_col, "escrever_delta");
   mkdir_if_missing(dir);
   const std::string log_dir = dir + "/_delta_log";
   mkdir_if_missing(log_dir);
@@ -256,13 +470,9 @@ void delta_write(const std::string& dir, const Value& tabela) {
     if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
   }
 
-  const std::string part = "part-00000000-0000-4000-8000-" + new_table_id().substr(0, 12) + ".parquet";
-  const std::string part_path = dir + "/" + part;
-  parquet_write(part_path, tabela);
-  const std::int64_t part_size = file_size(part_path);
-  if (part_size <= 0) die("falha ao gravar '" + part_path + "'");
-
   const std::int64_t ts = now_ms();
+  std::vector<Value> adds = write_partitions(dir, tabela, part_col);
+
   Value protocol = Value::mapa();
   protocol.map->set("minReaderVersion", Value::inteiro(1));
   protocol.map->set("minWriterVersion", Value::inteiro(2));
@@ -275,16 +485,11 @@ void delta_write(const std::string& dir, const Value& tabela) {
   meta.map->set("id", Value::texto(new_table_id()));
   meta.map->set("format", std::move(format));
   meta.map->set("schemaString", Value::texto(schema));
-  meta.map->set("partitionColumns", Value::lista());
+  Value part_cols = Value::lista();
+  if (!part_col.empty()) part_cols.list->push_back(Value::texto(part_col));
+  meta.map->set("partitionColumns", std::move(part_cols));
   meta.map->set("configuration", Value::mapa());
   meta.map->set("createdTime", Value::inteiro(ts));
-
-  Value add = Value::mapa();
-  add.map->set("path", Value::texto(part));
-  add.map->set("partitionValues", Value::mapa());
-  add.map->set("size", Value::inteiro(part_size));
-  add.map->set("modificationTime", Value::inteiro(ts));
-  add.map->set("dataChange", Value::logico(true));
 
   auto line = [&](const char* key, Value& payload) {
     Value row = Value::mapa();
@@ -297,11 +502,13 @@ void delta_write(const std::string& dir, const Value& tabela) {
   if (!log) die("nao foi possivel gravar '" + log_path + "'");
   log << line("protocol", protocol) << '\n';
   log << line("metaData", meta) << '\n';
-  log << line("add", add) << '\n';
+  for (Value& add : adds) {
+    log << line("add", add) << '\n';
+  }
   if (!log) die("falha ao gravar '" + log_path + "'");
 }
 
-void delta_append(const std::string& dir, const Value& tabela) {
+void delta_append(const std::string& dir, const Value& tabela, const std::string& part_col_req) {
   const std::string log_dir = dir + "/_delta_log";
   struct stat st {};
   if (::stat(log_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
@@ -324,13 +531,25 @@ void delta_append(const std::string& dir, const Value& tabela) {
         join_cols(cur_cols) + "; recebido " + join_cols(new_cols) + ")");
   }
 
-  // Grava o parquet ANTES de commitar; se der crash antes do rename, sobra
+  // Particao: herda a da tabela existente; erro se explicita e divergente.
+  const std::vector<std::string> existing = current_partition_columns(versions);
+  std::string part_col;
+  if (!existing.empty()) {
+    part_col = existing.front();
+    if (!part_col_req.empty() && part_col_req != part_col) {
+      die("anexar_delta: tabela em '" + dir + "' ja e particionada por '" + part_col +
+          "' (recebido particionar_por: '" + part_col_req + "')");
+    }
+    ensure_partition_column(tabela, part_col, "anexar_delta");
+  } else if (!part_col_req.empty()) {
+    die("anexar_delta: tabela em '" + dir + "' nao e particionada — recrie-a com escrever_delta " +
+        "tabela, \"" + dir + "\", particionar_por: \"" + part_col_req + "\"");
+  }
+
+  // Grava os parquet ANTES de commitar; se der crash antes do rename, sobra
   // um parquet orfao que a leitura ignora (nao esta no log).
-  const std::string part = "part-00000000-0000-4000-8000-" + new_table_id().substr(0, 12) + ".parquet";
-  const std::string part_path = dir + "/" + part;
-  parquet_write(part_path, tabela);
-  const std::int64_t part_size = file_size(part_path);
-  if (part_size <= 0) die("falha ao gravar '" + part_path + "'");
+  const std::int64_t ts = now_ms();
+  std::vector<Value> adds = write_partitions(dir, tabela, part_col);
 
   // Proxima versao = maior numero de <log_dir>/*.json + 1. Os nomes sao
   // zero-padded de 20 digitos, entao a ordem lexicografica == numerica.
@@ -349,17 +568,9 @@ void delta_append(const std::string& dir, const Value& tabela) {
   std::snprintf(num, sizeof num, "%020lld", next);
   const std::string final_path = log_dir + "/" + num + ".json";
 
-  const std::int64_t ts = now_ms();
   Value commit = Value::mapa();
   commit.map->set("timestamp", Value::inteiro(ts));
   commit.map->set("operation", Value::texto("APPEND"));
-
-  Value add = Value::mapa();
-  add.map->set("path", Value::texto(part));
-  add.map->set("partitionValues", Value::mapa());
-  add.map->set("size", Value::inteiro(part_size));
-  add.map->set("modificationTime", Value::inteiro(ts));
-  add.map->set("dataChange", Value::logico(true));
 
   auto line = [](const char* key, Value& payload) {
     Value row = Value::mapa();
@@ -374,7 +585,9 @@ void delta_append(const std::string& dir, const Value& tabela) {
     std::ofstream log(tmp_path, std::ios::trunc);
     if (!log) die("nao foi possivel gravar '" + tmp_path + "'");
     log << line("commitInfo", commit) << '\n';
-    log << line("add", add) << '\n';
+    for (Value& add : adds) {
+      log << line("add", add) << '\n';
+    }
     log.flush();
     if (!log) die("falha ao gravar '" + tmp_path + "'");
   }
@@ -388,7 +601,13 @@ Value delta_read(const std::string& dir) {
   const std::string log_dir = dir + "/_delta_log";
   const std::vector<std::string> versions = list_delta_versions(log_dir);
 
-  std::vector<std::string> active;  // arquivos ativos, em ordem de add
+  // Arquivos ativos + seus partitionValues (Texto; Nulo = particao default
+  // de tabelas externas, reidratada como nulo).
+  struct ActiveFile {
+    std::string path;
+    std::vector<std::pair<std::string, Value>> partvals;
+  };
+  std::vector<ActiveFile> active;  // em ordem de add
   for (const std::string& path : versions) {
     std::ifstream in(path);
     if (!in) die("nao foi possivel abrir '" + path + "'");
@@ -404,41 +623,88 @@ Value delta_read(const std::string& dir) {
       if (row.kind != ValueKind::Mapa || !row.map) continue;
       if (const Value* add = row.map->find("add"); add && add->kind == ValueKind::Mapa && add->map) {
         const Value* p = add->map->find("path");
-        if (p && p->kind == ValueKind::Texto) active.push_back(p->s);
+        if (p && p->kind == ValueKind::Texto) {
+          ActiveFile f;
+          f.path = p->s;
+          if (const Value* pv = add->map->find("partitionValues");
+              pv && pv->kind == ValueKind::Mapa && pv->map) {
+            for (const auto& kv : pv->map->items) {
+              if (kv.second.kind == ValueKind::Texto || kv.second.kind == ValueKind::Nulo) {
+                f.partvals.emplace_back(kv.first, kv.second);
+              }
+            }
+          }
+          active.push_back(std::move(f));
+        }
       }
       if (const Value* rem = row.map->find("remove");
           rem && rem->kind == ValueKind::Mapa && rem->map) {
         const Value* p = rem->map->find("path");
         if (p && p->kind == ValueKind::Texto) {
-          active.erase(std::remove(active.begin(), active.end(), p->s), active.end());
+          active.erase(std::remove_if(active.begin(), active.end(),
+                                      [&](const ActiveFile& f) { return f.path == p->s; }),
+                       active.end());
         }
       }
     }
   }
   if (active.empty()) die("tabela em '" + dir + "' esta vazia (nenhum arquivo ativo no log)");
 
+  // Schema declarado no metaData (com as colunas de particao); sem metaData,
+  // cai no legado de deduzir as colunas do 1o arquivo parquet.
+  const std::vector<std::pair<std::string, std::string>> fields =
+      schema_string_fields(current_schema_string(versions));
+
   Value out = Value::tabela();
   std::vector<std::string> schema_cols;
-  for (const std::string& part : active) {
-    Value chunk = parquet_read(dir + "/" + part);
+  for (const ActiveFile& f : active) {
+    Value chunk = parquet_read(dir + "/" + f.path);
     if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
-      die("arquivo '" + part + "' nao e uma tabela parquet");
+      die("arquivo '" + f.path + "' nao e uma tabela parquet");
     }
     for (Value& row : *chunk.list) {
-      if (row.kind != ValueKind::Mapa || !row.map) die("linha de '" + part + "' nao e um mapa");
-      if (schema_cols.empty()) {
-        for (const auto& kv : row.map->items) schema_cols.push_back(kv.first);
-      } else {
-        if (row.map->items.size() != schema_cols.size()) {
-          die("schema divergente em '" + part + "' (colunas diferentes da 1a versao)");
-        }
-        for (std::size_t k = 0; k < schema_cols.size(); ++k) {
-          if (row.map->items[k].first != schema_cols[k]) {
-            die("schema divergente em '" + part + "' (ordem/nome de colunas difere)");
+      if (row.kind != ValueKind::Mapa || !row.map) die("linha de '" + f.path + "' nao e um mapa");
+      if (!fields.empty()) {
+        // Reidrata na ordem declarada: valor do parquet, senao partitionValues
+        // convertido para o tipo do schema, senao nulo.
+        Value m = Value::mapa();
+        for (const auto& fld : fields) {
+          if (const Value* cell = row.map->find(fld.first)) {
+            m.map->set(fld.first, *cell);
+            continue;
+          }
+          auto pv = std::find_if(f.partvals.begin(), f.partvals.end(),
+                                 [&](const auto& kv) { return kv.first == fld.first; });
+          if (pv == f.partvals.end()) {
+            m.map->set(fld.first, Value::nulo());
+          } else if (pv->second.kind == ValueKind::Nulo) {
+            m.map->set(fld.first, Value::nulo());
+          } else {
+            m.map->set(fld.first, partition_rehydrate(pv->second.s, fld.second));
           }
         }
+        for (const auto& kv : row.map->items) {
+          if (!fields_contains(fields, kv.first)) {
+            die("schema divergente em '" + f.path + "' (coluna '" + kv.first +
+                "' fora do metaData)");
+          }
+        }
+        out.list->push_back(std::move(m));
+      } else {
+        if (schema_cols.empty()) {
+          for (const auto& kv : row.map->items) schema_cols.push_back(kv.first);
+        } else {
+          if (row.map->items.size() != schema_cols.size()) {
+            die("schema divergente em '" + f.path + "' (colunas diferentes da 1a versao)");
+          }
+          for (std::size_t k = 0; k < schema_cols.size(); ++k) {
+            if (row.map->items[k].first != schema_cols[k]) {
+              die("schema divergente em '" + f.path + "' (ordem/nome de colunas difere)");
+            }
+          }
+        }
+        out.list->push_back(std::move(row));
       }
-      out.list->push_back(std::move(row));
     }
   }
   return out;

@@ -12,5 +12,10 @@ tests/golden/run-parquet-nulos/saida_nulos.parquet
 tests/golden/run-fonte-parquet/entrada.parquet
 tests/golden/run-delta/tabela_delta/
 tests/golden/run-delta-append/saida_delta/
+tests/golden/run-delta-particionado/vendas/
+tests/golden/run-delta-particionado/por_ano/
+tests/golden/run-delta-particionado/avulsos/
+tests/golden/run-delta-particionado/erro_barra/
+tests/golden/run-delta-particionado/erro_nulo/
 tests/golden/run-iceberg/saida_iceberg/
 tests/golden/*/*.tilt-offset

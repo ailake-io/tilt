@@ -169,12 +169,27 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   pela leitura. Diretório inexistente ou schema divergente → erro claro;
 - a leitura aplica o log em ordem de versão (`add`/`remove`) e concatena os
   arquivos ativos, validando que o schema não diverge entre versões;
+- **partições hive-style**: `escrever_delta tabela, "dir", particionar_por: "col"`
+  grava os parquet em `<dir>/<col>=<valor>/part-NNNNN.parquet`, **sem** a coluna
+  de partição nos dados (padrão Delta — o valor vive no diretório e no
+  `partitionValues` de cada `add`; o `metaData` registra `partitionColumns` e o
+  `schemaString` continua listando a coluna). Valor nulo na coluna de partição
+  ou texto com `/` → erro claro (fase 25: sem `__HIVE_DEFAULT_PARTITION__` nem
+  escaping). `anexar_delta` herda a partição da tabela existente (chamar sem a
+  opção ou com o mesmo valor); `particionar_por` explícito e divergente, ou
+  opção em tabela não particionada → erro claro. Na leitura a coluna é
+  reidratada a partir de `partitionValues`, convertida para o tipo declarado no
+  schema (falha de conversão mantém texto). Tabelas particionadas por
+  ferramentas externas (ex.: pyarrow/delta-rs) também são lidas. Não há filtro
+  por diretório de partição — a leitura lê todos os arquivos ativos e reidrata
+  (predicados de igualdade em `onde` ficam para fase futura);
 - interoperável com delta-rs: `DeltaTable(dir).to_pyarrow_table()` lê tabelas
   escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
   sem dictionary e com colunas obrigatórias;
 - limitações: `escrever_delta` sobrescreve a tabela (recria a versão 0);
   `anexar_delta` pressupõe um único escritor (sem locks nem optimistic
-  concurrency), sem partições, sem checkpoints, sem transações concorrentes.
+  concurrency), uma única coluna de partição, sem checkpoints, sem transações
+  concorrentes.
 
 ## Iceberg (catálogo Hadoop)
 

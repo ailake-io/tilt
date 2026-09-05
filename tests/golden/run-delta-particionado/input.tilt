@@ -1,0 +1,62 @@
+funcao tentar_escrever t, dir, col -> texto:
+  tentar:
+    escrever_delta t, dir, particionar_por: col
+    retornar "sem erro"
+  capturar erro:
+    retornar erro
+
+funcao tentar_anexar_part t, dir, col -> texto:
+  tentar:
+    anexar_delta t, dir, particionar_por: col
+    retornar "sem erro"
+  capturar erro:
+    retornar erro
+
+pipeline principal:
+  passos:
+    - t1 = [
+        { estado: "sp", cidade: "santos", valor: 10 },
+        { estado: "rj", cidade: "niteroi", valor: 20 },
+        { estado: "sp", cidade: "campinas", valor: 30 },
+        { estado: "mg", cidade: "bh", valor: 40 }
+      ]
+    - escrever_delta t1, "vendas", particionar_por: "estado"
+    - t2 = [
+        { estado: "sp", cidade: "sorocaba", valor: 50 },
+        { estado: "ba", cidade: "salvador", valor: 60 }
+      ]
+    - anexar_delta t2, "vendas"
+    - t3 = [
+        { estado: "rj", cidade: "rio", valor: 70 }
+      ]
+    - anexar_delta t3, "vendas", particionar_por: "estado"
+    - tabela = ler_delta "vendas"
+    - imprimir tamanho tabela
+    - para cada linha em tabela:
+        - imprimir linha.estado, linha.cidade, linha.valor
+    - particionada_por_inteiro = [
+        { ano: 2024, nome: "a" },
+        { ano: 2025, nome: "b" },
+        { ano: 2024, nome: "c" }
+      ]
+    - escrever_delta particionada_por_inteiro, "por_ano", particionar_por: "ano"
+    - por_ano = ler_delta "por_ano"
+    - soma = 0
+    - para cada linha em por_ano:
+        - soma = soma + linha.ano
+    - imprimir soma
+    - com_barra = [
+        { estado: "sp/centro", cidade: "x", valor: 1 }
+      ]
+    - imprimir tentar_escrever com_barra, "erro_barra", "estado"
+    - com_nulo = [
+        { estado: nulo, cidade: "x", valor: 1 }
+      ]
+    - imprimir tentar_escrever com_nulo, "erro_nulo", "estado"
+    - col_inexistente = [
+        { estado: "sp", cidade: "x", valor: 1 }
+      ]
+    - imprimir tentar_escrever col_inexistente, "erro_col", "regiao"
+    - escrever_delta col_inexistente, "avulsos"
+    - imprimir tentar_anexar_part col_inexistente, "avulsos", "estado"
+    - imprimir tentar_anexar_part col_inexistente, "vendas", "cidade"

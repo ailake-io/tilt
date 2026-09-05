@@ -35,8 +35,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema, single-writer — sem locks/optimistic
-  concurrency), sem partições nem checkpoints; a leitura herda o subconjunto
-  do Parquet acima.
+  concurrency). Partições hive-style existem para **uma coluna**
+  (`particionar_por:`, layout `<col>=<valor>/part-NNNNN.parquet`, coluna
+  reidratada na leitura), mas: valor nulo em coluna de partição e valores com
+  `/` não são suportados (erro claro, sem `__HIVE_DEFAULT_PARTITION__` nem
+  escaping), a leitura não filtra por diretório de partição (lê tudo e
+  reidrata) e não há checkpoints; a leitura herda o subconjunto do Parquet
+  acima.
 - Iceberg é de 1ª passada: catálogo só **Hadoop** (diretório local — sem
   REST/JDBC), sem partições nem schema evolution, codec Avro "null" apenas, a
   leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
