@@ -39,7 +39,7 @@ entrega tudo em JSON.
 
 | Código | Significado |
 |---|---|
-| `T900` | conector não implementado (`postgres`, `kafka`, `s3`, `parquet`, `qdrant`, ...) |
+| `T900` | conector não implementado (`s3`, `qdrant`, ...) |
 | `T901` | erro de execução (arquivo ausente, índice fora dos limites, laço estourou, LLM falhou, ...) |
 | `T902` | recurso não implementado (LLM sem `TILT_LLM=mock` e sem `curl`, método de modelo futuro, ...) |
 | `T910` | violação de qualidade de dados (`verificar` com `ao_violar: abortar`) |

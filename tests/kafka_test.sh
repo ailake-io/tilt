@@ -1,10 +1,15 @@
 #!/usr/bin/env sh
-# Integration test for the Kafka connector (`ler_kafka`/`escrever_kafka`):
-# spins up a mock Kafka 0.9-era broker in python3 (pure socketserver,
-# implementing the same subset of the wire protocol: metadata v0, produce v1,
-# fetch v1) and runs `tilt executar` on a roundtrip fixture (2 produces on
-# the same partition + 1 fetch from the beginning), checking the printed
-# messages (order and count) plus the mock's request log (2 PRODUCE + 1 FETCH).
+# Integration test for the Kafka connector (`ler_kafka`/`escrever_kafka` and
+# `fonte tipo: kafka`): spins up a mock Kafka 0.9-era broker in python3 (pure
+# socketserver, implementing the wire protocol: metadata v0, produce v1,
+# fetch v1, plus group coordination — find_coordinator v0, join_group v0,
+# heartbeat v0, leave_group v0, sync_group v0, offset_fetch v0, offset_commit
+# v1) and runs `tilt executar` on two fixtures: kafka_roundtrip.tilt (2
+# produces + 1 fetch from the beginning) and kafka_grupo.tilt (consumer group
+# with offset commit checkpoint + stateless `fonte tipo:` kafka), checking the
+# printed messages (order and count), the empty second read of the group and
+# the mock's request log (PRODUCE/FETCH counts, JOINGROUP/SYNCGROUP/
+# OFFSETFETCH/OFFSETCOMMIT/HEARTBEAT/LEAVEGROUP).
 set -eu
 
 BIN="$1"
@@ -34,6 +39,25 @@ log = open(log_path, "a", encoding="utf-8")
 
 # store[(topico, particao)] = [valor_bytes, ...]  (offset = indice)
 store = {}
+# grupo_topicos[gid] = [topicos do join] ; offsets[(gid, topico, part)] = commitado
+grupo_topicos = {}
+offsets = {}
+
+
+def rd_str(body, pos):
+    n = struct.unpack_from(">h", body, pos)[0]
+    pos += 2
+    if n < 0:
+        return "", pos
+    return body[pos:pos + n].decode(), pos + n
+
+
+def rd_bytes(body, pos):
+    n = struct.unpack_from(">i", body, pos)[0]
+    pos += 4
+    if n < 0:
+        return b"", pos
+    return body[pos:pos + n], pos + n
 
 
 def p8(v):
@@ -124,7 +148,134 @@ class Broker(socketserver.BaseRequestHandler):
             return p32(corr) + self.produce(payload[pos:])
         if api == 1:
             return p32(corr) + self.fetch(payload[pos:])
+        if api == 10:
+            return p32(corr) + self.find_coordinator(payload[pos:])
+        if api == 11:
+            return p32(corr) + self.join_group(payload[pos:])
+        if api == 12:
+            return p32(corr) + self.heartbeat(payload[pos:])
+        if api == 13:
+            return p32(corr) + self.leave_group(payload[pos:])
+        if api == 14:
+            return p32(corr) + self.sync_group(payload[pos:])
+        if api == 9:
+            return p32(corr) + self.offset_fetch(payload[pos:])
+        if api == 8:
+            return p32(corr) + self.offset_commit(payload[pos:])
         return p32(corr)  # api desconhecida: so o correlation_id
+
+    # --- coordenacao de consumer groups (0.9-era) -------------------------
+    def find_coordinator(self, body):
+        gid, _pos = rd_str(body, 0)
+        porta = self.server.server_address[1]
+        log.write("FINDCOORDINATOR %s\n" % gid)
+        log.flush()
+        return p16(0) + p32(0) + pstr("127.0.0.1") + p32(porta)  # si mesmo
+
+    def join_group(self, body):
+        gid, pos = rd_str(body, 0)
+        pos += 4  # session_timeout
+        _member, pos = rd_str(body, pos)
+        _ptype, pos = rd_str(body, pos)
+        nproto = struct.unpack_from(">i", body, pos)[0]
+        pos += 4
+        topicos = []
+        for _ in range(nproto):
+            _nome, pos = rd_str(body, pos)
+            meta, pos = rd_bytes(body, pos)
+            mpos = 2  # pula version int16
+            nt = struct.unpack_from(">i", meta, mpos)[0]
+            mpos += 4
+            for _ in range(nt):
+                t, mpos = rd_str(meta, mpos)
+                topicos.append(t)
+        grupo_topicos[gid] = topicos
+        log.write("JOINGROUP %s\n" % gid)
+        log.flush()
+        # error 0, generation 1, protocol "range", leader "m-1", member "m-1"
+        return p16(0) + p32(1) + pstr("range") + pstr("m-1") + pstr("m-1") + p32(0)
+
+    def heartbeat(self, body):
+        gid, _pos = rd_str(body, 0)
+        log.write("HEARTBEAT %s\n" % gid)
+        log.flush()
+        return p16(0)
+
+    def leave_group(self, body):
+        gid, _pos = rd_str(body, 0)
+        log.write("LEAVEGROUP %s\n" % gid)
+        log.flush()
+        return p16(0)
+
+    def sync_group(self, body):
+        gid, pos = rd_str(body, 0)
+        pos += 4  # generation
+        _member, pos = rd_str(body, pos)
+        na = struct.unpack_from(">i", body, pos)[0]
+        pos += 4
+        for _ in range(na):
+            _m, pos = rd_str(body, pos)
+            _a, pos = rd_bytes(body, pos)
+        log.write("SYNCGROUP %s\n" % gid)
+        log.flush()
+        assignment = p16(0) + p32(len(grupo_topicos.get(gid, [])))
+        for t in grupo_topicos.get(gid, []):
+            assignment += pstr(t) + p32(1) + p32(0)  # 1 particao (id 0)
+        assignment += p32(-1)  # user_data NULL
+        return p16(0) + pbytes(assignment)
+
+    def offset_fetch(self, body):
+        gid, pos = rd_str(body, 0)
+        nt = struct.unpack_from(">i", body, pos)[0]
+        pos += 4
+        topicos = []
+        for _ in range(nt):
+            t, pos = rd_str(body, pos)
+            np_ = struct.unpack_from(">i", body, pos)[0]
+            pos += 4
+            partes = []
+            for _ in range(np_):
+                (part,) = struct.unpack_from(">i", body, pos)
+                pos += 4
+                partes.append(part)
+            topicos.append((t, partes))
+        log.write("OFFSETFETCH %s\n" % gid)
+        log.flush()
+        out = p32(len(topicos))
+        for t, partes in topicos:
+            out += pstr(t) + p32(len(partes))
+            for part in partes:
+                off = offsets.get((gid, t, part), -1)
+                out += p32(part) + p64(off) + pstr("") + p16(0)
+        return out
+
+    def offset_commit(self, body):
+        gid, pos = rd_str(body, 0)
+        pos += 4  # generation
+        _member, pos = rd_str(body, pos)
+        nt = struct.unpack_from(">i", body, pos)[0]
+        pos += 4
+        topicos = []
+        for _ in range(nt):
+            t, pos = rd_str(body, pos)
+            np_ = struct.unpack_from(">i", body, pos)[0]
+            pos += 4
+            partes = []
+            for _ in range(np_):
+                (part, off, _ts) = struct.unpack_from(">iqi", body, pos)
+                pos += 20
+                _meta, pos = rd_str(body, pos)
+                offsets[(gid, t, part)] = off
+                partes.append(part)
+                log.write("OFFSETCOMMIT %s %s %d %d\n" % (gid, t, part, off))
+                log.flush()
+            topicos.append((t, partes))
+        out = p32(len(topicos))
+        for t, partes in topicos:
+            out += pstr(t) + p32(len(partes))
+            for part in partes:
+                out += p32(part) + p16(0)
+        return out
 
     def metadata(self, body):
         porta = self.server.server_address[1]
@@ -252,6 +403,12 @@ out=$(
     "$BIN" executar "${2:-${0%/*}/fixtures/kafka_roundtrip.tilt}"
 )
 
+# --- consumer group + fonte kafka (fixture kafka_grupo.tilt) ---------------------
+out2=$(
+  env KAFKA_BOOTSTRAP="127.0.0.1:$PORTA" \
+    "$BIN" executar "${0%/*}/fixtures/kafka_grupo.tilt"
+)
+
 kill "$mock_pid" 2>/dev/null || true
 mock_pid=""
 
@@ -266,10 +423,30 @@ depois=$(echo "$out" | grep -n "msg-2" | head -1 | cut -d: -f1)
 }
 echo "$out" | grep -q "^2$" || { echo "saida sem tamanho 2: $out"; fail=1; }
 
+# (b) 1a leitura do grupo devolve as 3 mensagens, em ordem (1 linha: lista)
+echo "$out2" | grep -q "^\[c-1, c-2, c-3\]$" || {
+  echo "grupo: esperado '[c-1, c-2, c-3]': $out2"; fail=1;
+}
+# (c) 2a leitura vem vazia (offsets commitados): tamanho 0 impresso
+echo "$out2" | grep -q "^0$" || { echo "grupo: 2a leitura deveria vir vazia (sem '0'): $out2"; fail=1; }
+# (d) fonte kafka sem grupo le as 2 mensagens do outro topico
+echo "$out2" | grep -q "k-1" || { echo "fonte kafka: saida sem 'k-1': $out2"; fail=1; }
+echo "$out2" | grep -q "k-2" || { echo "fonte kafka: saida sem 'k-2': $out2"; fail=1; }
+
 produces=$(grep -c "^PRODUCE " "$tmp/log" || true)
 fetches=$(grep -c "^FETCH " "$tmp/log" || true)
-[ "$produces" = "2" ] || { echo "esperado 2 PRODUCE, obtido $produces"; cat "$tmp/log"; fail=1; }
-[ "$fetches" = "1" ] || { echo "esperado 1 FETCH, obtido $fetches"; cat "$tmp/log"; fail=1; }
+[ "$produces" = "7" ] || { echo "esperado 7 PRODUCE, obtido $produces"; cat "$tmp/log"; fail=1; }
+[ "$fetches" = "4" ] || { echo "esperado 4 FETCH, obtido $fetches"; cat "$tmp/log"; fail=1; }
+
+# coordenacao do consumer group: 2 chamadas com grupo no fixture kafka_grupo
+for ev in JOINGROUP SYNCGROUP OFFSETFETCH OFFSETCOMMIT HEARTBEAT LEAVEGROUP; do
+  n=$(grep -c "^$ev " "$tmp/log" || true)
+  [ "$n" = "2" ] || { echo "esperado 2 $ev, obtido $n"; cat "$tmp/log"; fail=1; }
+done
+# o offset commitado na 1a chamada deve ser 3 (proximo apos as 3 mensagens)
+grep -q "^OFFSETCOMMIT g1 compras 0 3$" "$tmp/log" || {
+  echo "OFFSETCOMMIT esperado 'g1 compras 0 3' ausente"; cat "$tmp/log"; fail=1;
+}
 
 [ "$fail" = 0 ] && echo "kafka_test ok"
 exit "$fail"

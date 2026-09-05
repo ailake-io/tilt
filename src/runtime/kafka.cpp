@@ -127,12 +127,15 @@ struct BrokerAddr {
   std::string port;
 };
 
-BrokerAddr bootstrap_addr() {
-  const char* env = std::getenv("KAFKA_BOOTSTRAP");
-  std::string addr = env && *env ? env : "127.0.0.1:9092";
+BrokerAddr parse_addr(const std::string& addr) {
   const std::size_t colon = addr.rfind(':');
   if (colon == std::string::npos) return {addr, "9092"};
   return {addr.substr(0, colon), addr.substr(colon + 1)};
+}
+
+BrokerAddr bootstrap_addr() {
+  const char* env = std::getenv("KAFKA_BOOTSTRAP");
+  return parse_addr(env && *env ? env : "127.0.0.1:9092");
 }
 
 // Conexao simples: abre, usa, fecha. Bloqueante com timeout de recv/send.
@@ -239,6 +242,18 @@ std::string roundtrip(Conn& conn, std::int16_t api_key, std::int16_t api_version
       die(contexto + " falhou: NotLeaderForPartition (kafka codigo 6)");
     case 7:
       die(contexto + " falhou: RequestTimedOut (kafka codigo 7)");
+    case 15:
+      die(contexto + " falhou: CoordinatorNotAvailable (kafka codigo 15)");
+    case 16:
+      die(contexto + " falhou: NotCoordinatorForGroup (kafka codigo 16)");
+    case 21:
+      die(contexto + " falhou: IllegalGeneration (kafka codigo 21)");
+    case 22:
+      die(contexto + " falhou: InconsistentGroupProtocol (kafka codigo 22)");
+    case 25:
+      die(contexto + " falhou: UnknownMemberId (kafka codigo 25)");
+    case 27:
+      die(contexto + " falhou: RebalanceInProgress (kafka codigo 27)");
     default:
       die(contexto + " falhou (kafka codigo " + std::to_string(code) + ")");
   }
@@ -308,12 +323,9 @@ Metadata metadata(const std::string& topico, const BrokerAddr& addr) {
   return md;
 }
 
-// Acha o lider da particao e devolve seu endereco; conecta no bootstrap e,
-// se o lider for outro broker, devolve o endereco dele.
-BrokerAddr lider_addr(const std::string& topico, std::int32_t particao, Metadata& md) {
-  const BrokerAddr bootstrap = bootstrap_addr();
-  md = metadata(topico, bootstrap);
-  if (static_cast<std::size_t>(particao) >= md.partitions.size()) {
+// Acha o endereco do lider de uma particao num metadata ja carregado.
+BrokerAddr lider_addr_md(const std::string& topico, std::int32_t particao, const Metadata& md) {
+  if (particao < 0 || static_cast<std::size_t>(particao) >= md.partitions.size()) {
     die("topico '" + topico + "' nao tem a particao " + std::to_string(particao));
   }
   const PartitionInfo& pi = md.partitions[static_cast<std::size_t>(particao)];
@@ -323,6 +335,14 @@ BrokerAddr lider_addr(const std::string& topico, std::int32_t particao, Metadata
   }
   die("lider da particao " + std::to_string(particao) + " do topico '" + topico +
       "' nao encontrado no metadata");
+}
+
+// Acha o lider da particao e devolve seu endereco; conecta no bootstrap e,
+// se o lider for outro broker, devolve o endereco dele.
+BrokerAddr lider_addr(const std::string& topico, std::int32_t particao, Metadata& md) {
+  const BrokerAddr bootstrap = bootstrap_addr();
+  md = metadata(topico, bootstrap);
+  return lider_addr_md(topico, particao, md);
 }
 
 // ------------------------------------------------------------------ message
@@ -346,6 +366,68 @@ std::string encode_message(const std::string& valor) {
 }
 
 // ------------------------------------------------------------------ produce
+
+// -------------------------------------------------------------- fetch interno
+
+// Executa FetchRequest v1 para uma particao numa conexao ja aberta e devolve
+// os pares (offset, valor) na ordem do log. `offset` < 0 = "latest".
+std::vector<std::pair<std::int64_t, std::string>> fetch_msgs(Conn& conn, const std::string& topico,
+                                                             std::int32_t particao,
+                                                             std::int64_t offset,
+                                                             std::int64_t max) {
+  std::string payload;
+  put_i32(payload, -1);   // replica_id: cliente normal
+  put_i32(payload, 100);  // max_wait ms
+  put_i32(payload, 1);    // min_bytes
+  put_i32(payload, 1);    // [topics]
+  put_str(payload, topico);
+  put_i32(payload, 1);  // [partitions]
+  put_i32(payload, particao);
+  put_i64(payload, offset);
+  put_i32(payload, 16 * 1024 * 1024);  // max_bytes
+
+  const std::string resp = roundtrip(conn, 1, 1, kClientIdCorrBase + 3, payload);
+  Reader r{resp};
+  const std::int32_t nresp = r.i32();
+  for (std::int32_t i = 0; i < nresp; ++i) {
+    const std::string nome = r.str();
+    const std::int32_t np = r.i32();
+    for (std::int32_t p = 0; p < np; ++p) {
+      const std::int32_t part = r.i32();
+      const std::int16_t erro = r.i16();
+      r.i64();  // high_watermark
+      std::string message_set = r.bytes();
+      if (nome == topico && part == particao) {
+        if (erro != 0) die_code("fetch no topico '" + topico + "'", erro);
+        std::vector<std::pair<std::int64_t, std::string>> out;
+        Reader ms{message_set};
+        while (max > 0 && static_cast<std::int64_t>(out.size()) < max &&
+               ms.pos + 12 <= ms.d.size()) {
+          const std::int64_t msg_offset = ms.i64();
+          const std::int32_t size = ms.i32();
+          if (size < 14 || ms.pos + static_cast<std::size_t>(size) > ms.d.size()) {
+            die("message set malformado na resposta de fetch");
+          }
+          Reader msg{ms.d};
+          msg.pos = ms.pos;
+          msg.i32();  // crc (ignorado na leitura)
+          const std::int8_t magic = msg.i8();
+          if (magic != 0 && magic != 1) {
+            die("magic byte inesperado no message set: " + std::to_string(magic));
+          }
+          msg.i8();                   // attributes
+          if (magic == 1) msg.i64();  // timestamp (message v1)
+          msg.bytes();                // key
+          out.emplace_back(msg_offset, msg.bytes());
+          ms.pos += static_cast<std::size_t>(size);
+        }
+        return out;
+      }
+    }
+  }
+  die("resposta de fetch sem a particao " + std::to_string(particao) + " do topico '" + topico +
+      "'");
+}
 
 }  // namespace
 
@@ -388,67 +470,303 @@ std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
   die("resposta de produce sem a particao " + std::to_string(particao));
 }
 
-Value kafka_ler(const std::string& topico, bool do_fim, std::int64_t max) {
+Value kafka_ler(const std::string& topico, bool do_fim, std::int64_t max,
+                const std::string& broker) {
   if (max < 0) die("max deve ser >= 0");
 
   Metadata md;
-  const BrokerAddr addr = lider_addr(topico, 0, md);
+  BrokerAddr addr;
+  if (broker.empty()) {
+    addr = lider_addr(topico, 0, md);
+  } else {
+    md = metadata(topico, parse_addr(broker));
+    addr = lider_addr_md(topico, 0, md);
+  }
   Conn conn(addr.host, addr.port);
 
-  std::string payload;
-  put_i32(payload, -1);   // replica_id: cliente normal
-  put_i32(payload, 100);  // max_wait ms
-  put_i32(payload, 1);    // min_bytes
-  put_i32(payload, 1);    // [topics]
-  put_str(payload, topico);
-  put_i32(payload, 1);  // [partitions]
-  put_i32(payload, 0);  // particao 0
   // 0.9-era: offset -1 = "latest" (high watermark), 0 = earliest.
-  put_i64(payload, do_fim ? -1 : 0);
-  put_i32(payload, 16 * 1024 * 1024);  // max_bytes
+  Value out = Value::lista();
+  for (const auto& [off, valor] :
+       fetch_msgs(conn, topico, 0, do_fim ? -1 : 0, max)) {
+    (void)off;
+    out.list->push_back(Value::texto(valor));
+  }
+  return out;
+}
 
-  const std::string resp = roundtrip(conn, 1, 1, kClientIdCorrBase + 3, payload);
+// ------------------------------------------------------- consumer group 0.9
+
+namespace {
+
+// MemberMetadata v0: version int16=0, [topics], user_data BYTES.
+std::string member_metadata(const std::string& topico) {
+  std::string m;
+  put_i16(m, 0);
+  put_i32(m, 1);
+  put_str(m, topico);
+  put_i32(m, -1);  // user_data NULL
+  return m;
+}
+
+// MemberAssignment v0 -> lista de (topico, [particoes]).
+std::vector<std::pair<std::string, std::vector<std::int32_t>>> parse_assignment(
+    const std::string& bytes) {
+  Reader a{bytes};
+  a.i16();  // version
+  const std::int32_t nt = a.i32();
+  if (nt < 0) die("assignment do sync group malformado");
+  std::vector<std::pair<std::string, std::vector<std::int32_t>>> out;
+  for (std::int32_t t = 0; t < nt; ++t) {
+    const std::string topico = a.str();
+    const std::int32_t np = a.i32();
+    if (np < 0) die("assignment do sync group malformado");
+    std::vector<std::int32_t> parts;
+    for (std::int32_t p = 0; p < np; ++p) parts.push_back(a.i32());
+    out.emplace_back(topico, std::move(parts));
+  }
+  a.bytes();  // user_data
+  return out;
+}
+
+// FindCoordinator (api 10, v0): group_id -> host:port do coordenador.
+BrokerAddr find_coordinator(Conn& conn, const std::string& grupo) {
+  std::string payload;
+  put_str(payload, grupo);
+  const std::string resp = roundtrip(conn, 10, 0, 10, payload);
   Reader r{resp};
-  const std::int32_t nresp = r.i32();
-  for (std::int32_t i = 0; i < nresp; ++i) {
-    const std::string nome = r.str();
-    const std::int32_t np = r.i32();
-    for (std::int32_t p = 0; p < np; ++p) {
-      const std::int32_t part = r.i32();
-      const std::int16_t erro = r.i16();
-      r.i64();  // high_watermark
-      std::string message_set = r.bytes();
-      if (nome == topico && part == 0) {
-        if (erro != 0) die_code("fetch no topico '" + topico + "'", erro);
+  const std::int16_t erro = r.i16();
+  if (erro != 0) die_code("find_coordinator do grupo '" + grupo + "'", erro);
+  r.i32();  // coordinator id
+  const std::string host = r.str();
+  const std::int32_t port = r.i32();
+  return {host, std::to_string(port)};
+}
 
-        Value out = Value::lista();
-        Reader ms{message_set};
-        while (max > 0 && static_cast<std::int64_t>(out.list->size()) < max &&
-               ms.pos + 12 <= ms.d.size()) {
-          ms.i64();  // offset
-          const std::int32_t size = ms.i32();
-          if (size < 14 || ms.pos + static_cast<std::size_t>(size) > ms.d.size()) {
-            die("message set malformado na resposta de fetch");
-          }
-          Reader msg{ms.d};
-          msg.pos = ms.pos;
-          msg.i32();  // crc (ignorado na leitura)
-          const std::int8_t magic = msg.i8();
-          if (magic != 0 && magic != 1) {
-            die("magic byte inesperado no message set: " + std::to_string(magic));
-          }
-          msg.i8();                   // attributes
-          if (magic == 1) msg.i64();  // timestamp (message v1)
-          msg.bytes();                // key
-          const std::string valor = msg.bytes();
-          out.list->push_back(Value::texto(valor));
-          ms.pos += static_cast<std::size_t>(size);
-        }
-        return out;
-      }
+struct JoinInfo {
+  std::int32_t generation = 0;
+  std::string member_id;
+};
+
+// JoinGroup (api 11, v0): entra no grupo com member_id vazio e o protocolo
+// "range"; devolve a geracao e o member_id atribuidos pelo coordenador.
+JoinInfo join_group(Conn& conn, const std::string& grupo, const std::string& topico) {
+  std::string payload;
+  put_str(payload, grupo);
+  put_i32(payload, 30000);  // session_timeout ms
+  put_str(payload, "");     // member_id vazio: primeiro join
+  put_str(payload, "consumer");
+  put_i32(payload, 1);  // [protocols]
+  put_str(payload, "range");
+  put_bytes(payload, member_metadata(topico));
+
+  const std::string resp = roundtrip(conn, 11, 0, 11, payload);
+  Reader r{resp};
+  const std::int16_t erro = r.i16();
+  if (erro != 0) die_code("join_group do grupo '" + grupo + "'", erro);
+  JoinInfo j;
+  j.generation = r.i32();
+  r.str();  // group_protocol escolhido
+  r.str();  // leader_id
+  j.member_id = r.str();
+  const std::int32_t nm = r.i32();  // [members]
+  if (nm < 0) die("resposta de join group malformada");
+  for (std::int32_t i = 0; i < nm; ++i) {
+    r.str();    // member_id
+    r.bytes();  // metadata
+  }
+  if (j.member_id.empty()) die("coordenador nao atribuiu member_id no join");
+  return j;
+}
+
+// Heartbeat (api 12, v0): 1 batida apos o join (sessao nao expira na janela
+// de um fetch curto).
+void heartbeat(Conn& conn, const std::string& grupo, std::int32_t generation,
+               const std::string& member_id) {
+  std::string payload;
+  put_str(payload, grupo);
+  put_i32(payload, generation);
+  put_str(payload, member_id);
+  const std::string resp = roundtrip(conn, 12, 0, 12, payload);
+  Reader r{resp};
+  const std::int16_t erro = r.i16();
+  if (erro != 0) die_code("heartbeat do grupo '" + grupo + "'", erro);
+}
+
+// LeaveGroup (api 13, v0): melhor esforco no fim da sessao.
+void leave_group(Conn& conn, const std::string& grupo, const std::string& member_id) {
+  std::string payload;
+  put_str(payload, grupo);
+  put_str(payload, member_id);
+  const std::string resp = roundtrip(conn, 13, 0, 13, payload);
+  Reader r{resp};
+  const std::int16_t erro = r.i16();
+  if (erro != 0) die_code("leave_group do grupo '" + grupo + "'", erro);
+}
+
+// Garante LeaveGroup mesmo quando fetch/commit lanca excecao.
+struct GroupSession {
+  Conn& conn;
+  std::string grupo;
+  std::string member_id;
+  ~GroupSession() {
+    try {
+      leave_group(conn, grupo, member_id);
+    } catch (...) {
+      // sessao expira sozinha pelo session_timeout
     }
   }
-  die("resposta de fetch sem a particao 0 do topico '" + topico + "'");
+};
+
+// SyncGroup (api 14, v0) com group_assignment vazio: a resposta traz o
+// MemberAssignment deste membro.
+std::vector<std::pair<std::string, std::vector<std::int32_t>>> sync_group(
+    Conn& conn, const std::string& grupo, std::int32_t generation, const std::string& member_id) {
+  std::string payload;
+  put_str(payload, grupo);
+  put_i32(payload, generation);
+  put_str(payload, member_id);
+  put_i32(payload, 0);  // group_assignment vazio
+  const std::string resp = roundtrip(conn, 14, 0, 14, payload);
+  Reader r{resp};
+  const std::int16_t erro = r.i16();
+  if (erro != 0) die_code("sync_group do grupo '" + grupo + "'", erro);
+  return parse_assignment(r.bytes());
+}
+
+// OffsetFetch (api 9, v0): offsets commitados por particao (-1 se nenhum).
+std::vector<std::pair<std::int32_t, std::int64_t>> offset_fetch(
+    Conn& conn, const std::string& grupo,
+    const std::vector<std::pair<std::string, std::vector<std::int32_t>>>& assignment) {
+  std::string payload;
+  put_str(payload, grupo);
+  put_i32(payload, static_cast<std::int32_t>(assignment.size()));
+  for (const auto& [topico, parts] : assignment) {
+    put_str(payload, topico);
+    put_i32(payload, static_cast<std::int32_t>(parts.size()));
+    for (const std::int32_t p : parts) put_i32(payload, p);
+  }
+  const std::string resp = roundtrip(conn, 9, 0, 9, payload);
+  Reader r{resp};
+  const std::int32_t nt = r.i32();
+  if (nt < 0) die("resposta de offset fetch malformada");
+  std::vector<std::pair<std::int32_t, std::int64_t>> out;
+  for (std::int32_t t = 0; t < nt; ++t) {
+    const std::string topico = r.str();
+    const std::int32_t np = r.i32();
+    if (np < 0) die("resposta de offset fetch malformada");
+    for (std::int32_t p = 0; p < np; ++p) {
+      const std::int32_t part = r.i32();
+      const std::int64_t offset = r.i64();
+      r.str();                       // metadata
+      const std::int16_t erro = r.i16();
+      if (erro != 0) die_code("offset_fetch do grupo '" + grupo + "'", erro);
+      out.emplace_back(part, offset);
+    }
+    (void)topico;
+  }
+  return out;
+}
+
+// OffsetCommit (api 8, v1): commita o offset seguinte ao ultimo lido,
+// metadata "tilt".
+void offset_commit(Conn& conn, const std::string& grupo, std::int32_t generation,
+                   const std::string& member_id, const std::string& topico,
+                   const std::vector<std::pair<std::int32_t, std::int64_t>>& commits) {
+  std::string payload;
+  put_str(payload, grupo);
+  put_i32(payload, generation);
+  put_str(payload, member_id);
+  put_i32(payload, 1);  // [topics]
+  put_str(payload, topico);
+  put_i32(payload, static_cast<std::int32_t>(commits.size()));
+  for (const auto& [part, offset] : commits) {
+    put_i32(payload, part);
+    put_i64(payload, offset);
+    put_i64(payload, -1);  // timestamp: server time
+    put_str(payload, "tilt");
+  }
+  const std::string resp = roundtrip(conn, 8, 1, 8, payload);
+  Reader r{resp};
+  const std::int32_t nt = r.i32();
+  if (nt < 0) die("resposta de offset commit malformada");
+  for (std::int32_t t = 0; t < nt; ++t) {
+    r.str();
+    const std::int32_t np = r.i32();
+    if (np < 0) die("resposta de offset commit malformada");
+    for (std::int32_t p = 0; p < np; ++p) {
+      r.i32();
+      const std::int16_t erro = r.i16();
+      if (erro != 0) die_code("offset_commit do grupo '" + grupo + "'", erro);
+    }
+  }
+}
+
+}  // namespace
+
+std::vector<std::pair<int, std::string>> kafka_consume_group(const std::string& broker,
+                                                             const std::string& grupo,
+                                                             const std::string& topico,
+                                                             int max_msgs) {
+  if (max_msgs < 0) die("max deve ser >= 0");
+  if (grupo.empty()) die("grupo nao pode ser vazio");
+
+  const BrokerAddr bootstrap = broker.empty() ? bootstrap_addr() : parse_addr(broker);
+
+  // 1. FindCoordinator no bootstrap.
+  BrokerAddr coord;
+  {
+    Conn conn(bootstrap.host, bootstrap.port);
+    coord = find_coordinator(conn, grupo);
+  }
+
+  // Coordenador: join -> heartbeat -> sync -> offsets -> (fetch/commit) ->
+  // leave ao sair do escopo.
+  Conn conn(coord.host, coord.port);
+  const JoinInfo join = join_group(conn, grupo, topico);
+  GroupSession sess{conn, grupo, join.member_id};
+  heartbeat(conn, grupo, join.generation, join.member_id);
+
+  const auto assignment = sync_group(conn, grupo, join.generation, join.member_id);
+  if (assignment.empty()) {
+    die("grupo '" + grupo + "' nao atribuiu particoes deste membro no sync");
+  }
+
+  // 4. Offsets commitados por particao.
+  const auto offsets = offset_fetch(conn, grupo, assignment);
+
+  // 5. Fetch: cada particao atribuida a partir do offset commitado (ou do
+  // earliest, quando -1), sequencialmente, ate `max_msgs`.
+  const Metadata md = metadata(topico, bootstrap);
+  std::vector<std::pair<int, std::string>> out;
+  std::vector<std::pair<std::int32_t, std::int64_t>> commits;
+  for (const auto& [t, parts] : assignment) {
+    if (t != topico) continue;  // assignment de outro topico: ignora
+    for (const std::int32_t part : parts) {
+      std::int64_t inicio = 0;
+      for (const auto& [p, off] : offsets) {
+        if (p == part && off >= 0) inicio = off;
+      }
+      const std::int64_t restante = static_cast<std::int64_t>(max_msgs) -
+                                    static_cast<std::int64_t>(out.size());
+      if (restante <= 0) {
+        commits.emplace_back(part, inicio);
+        continue;
+      }
+      const BrokerAddr lider = lider_addr_md(topico, part, md);
+      Conn fc(lider.host, lider.port);
+      const auto msgs = fetch_msgs(fc, topico, part, inicio, restante);
+      std::int64_t proximo = inicio;
+      for (const auto& [off, valor] : msgs) {
+        out.emplace_back(static_cast<int>(part), valor);
+        proximo = off + 1;
+      }
+      commits.emplace_back(part, proximo);
+    }
+  }
+
+  // 6. Commit do offset seguinte ao ultimo lido em todas as particoes.
+  offset_commit(conn, grupo, join.generation, join.member_id, topico, commits);
+  return out;
 }
 
 }  // namespace tilt::rt

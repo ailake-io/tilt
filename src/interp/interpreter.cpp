@@ -853,6 +853,39 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
       fail(span, std::string(e.what()));
     }
   }
+  if (tipo == "kafka") {
+    const std::string topico = field_text("topico");
+    if (topico.empty()) {
+      fail(span, "fonte '" + name + "': falta 'topico: \"...\"'");
+    }
+    const std::string broker = field_text("broker");
+    const std::string grupo = field_text("grupo");
+    std::int64_t max = 100;
+    if (const Item* m = find_field(*decl->block, "max");
+        m && m->value && m->value->kind == ExprKind::IntLit) {
+      try {
+        max = std::stoll(m->value->text);
+      } catch (...) {
+        fail(span, "fonte '" + name + "': 'max' deve ser inteiro");
+      }
+    }
+    try {
+      if (!grupo.empty()) {
+        // Com grupo: o commit de offsets vira o checkpoint natural da fonte
+        // (cada `ler` consome so o que ainda nao foi commitado).
+        Value out = Value::lista();
+        for (const auto& [part, valor] :
+             rt::kafka_consume_group(broker, grupo, topico, static_cast<int>(max))) {
+          (void)part;
+          out.list->push_back(Value::texto(valor));
+        }
+        return out;
+      }
+      return rt::kafka_ler(topico, field_text("desde") == "fim", max, broker);
+    } catch (const std::exception& e) {
+      fail(span, std::string(e.what()));
+    }
+  }
   fail(span, "fonte '" + name + "': conector '" + (tipo.empty() ? "?" : tipo) +
                  "' nao implementado (M5.2)",
        DiagCode::ConnectorNotImplemented);
@@ -3221,14 +3254,15 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) {
       fail(call.span,
-           "ler_kafka espera (topico, {desde:, max:}), ex.: ler_kafka \"pedidos\", "
-           "{desde: \"inicio\", max: 100}");
+           "ler_kafka espera (topico, {desde:, max:, grupo:, broker:}), ex.: ler_kafka "
+           "\"pedidos\", {desde: \"inicio\", max: 100}");
     }
     bool do_fim = false;
     std::int64_t max = 100;
+    std::string grupo, broker;
     if (a.size() >= 2) {
       if (a[1].kind != ValueKind::Mapa || !a[1].map) {
-        fail(call.span, "ler_kafka: opcoes devem ser um mapa {desde:, max:}");
+        fail(call.span, "ler_kafka: opcoes devem ser um mapa {desde:, max:, grupo:, broker:}");
       }
       if (const Value* dv = a[1].map->find("desde")) {
         if (dv->kind != ValueKind::Texto || (dv->s != "inicio" && dv->s != "fim")) {
@@ -3242,9 +3276,31 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         }
         max = mv->i;
       }
+      if (const Value* gv = a[1].map->find("grupo")) {
+        if (gv->kind != ValueKind::Texto || gv->s.empty()) {
+          fail(call.span, "ler_kafka: 'grupo' deve ser texto nao vazio");
+        }
+        grupo = gv->s;
+      }
+      if (const Value* bv = a[1].map->find("broker")) {
+        if (bv->kind != ValueKind::Texto) {
+          fail(call.span, "ler_kafka: 'broker' deve ser texto (ex.: \"host:9092\")");
+        }
+        broker = bv->s;
+      }
     }
     try {
-      return rt::kafka_ler(a[0].s, do_fim, max);
+      if (!grupo.empty()) {
+        // Consumer group: coordenacao + checkpoint por commit de offset.
+        Value out = Value::lista();
+        for (const auto& [part, valor] : rt::kafka_consume_group(broker, grupo, a[0].s,
+                                                                 static_cast<int>(max))) {
+          (void)part;
+          out.list->push_back(Value::texto(valor));
+        }
+        return out;
+      }
+      return rt::kafka_ler(a[0].s, do_fim, max, broker);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

@@ -52,10 +52,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   puladas na leitura; uma conexão (com handshake `isMaster`) por chamada e
   payload inteiro em memória; banco por `MONGO_URL` (path) ou opção
   `banco:`.
-- Kafka (`ler_kafka`/`escrever_kafka`): wire protocol 0.9-era — sem consumer
-  groups/offset commit (stateless, `desde: "inicio"` relê do earliest toda
-  vez), sem SASL/TLS (plain), produce v1/fetch v1 apenas, um broker líder por
-  chamada e payload inteiro em memória; o `janela:` ainda não consome Kafka.
+- Kafka (`ler_kafka`/`escrever_kafka`/`fonte tipo: kafka`): wire protocol
+  0.9-era — consumer groups com 1 membro por grupo por vez (o assignment
+  "range" pega todas as partições, mas sem rebalanceamento real: dois
+  consumidores no mesmo grupo não dividem as partições de forma coordenada),
+  sem SASL/TLS (plain), produce v1/fetch v1 apenas, um broker líder por
+  chamada e payload inteiro em memória.
 - S3 (`ler_s3`/`escrever_s3`): 1ª passada com GET/PUT só — sem
   list/delete/multipart, sem query string (versão/versionamento, ACL etc.) e
   payload inteiro em memória; HTTP depende do binário `curl` e das
@@ -74,8 +76,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   strings); nome de coleção restrito a `[a-z0-9_]`.
 - Streaming com `janela:`: offset e buffer ficam só em memória (reiniciam a
   cada processo, sem persistência nem repartição de estado entre réplicas);
-  sem conector Kafka — a fonte é relida por inteiro a cada tick, o que não
-  escala para fontes grandes; sem janela deslizante/overlap entre lotes.
+  sem `grupo:` na fonte Kafka ela é relida do início por inteiro a cada
+  tick, o que não escala para tópicos grandes (com `grupo:` o checkpoint é o
+  offset commitado no broker); sem janela deslizante/overlap entre lotes.
 - `--agendar` entra em loop real de agenda, mas o parser cron é numérico
   (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
   E (não pelo OU do cron clássico) e não há persistência de estado entre

@@ -4,13 +4,14 @@
 
 ```tilt
 fonte produtos:
-  tipo: json                       # csv | json  (postgres/kafka/s3 -> T900)
+  tipo: json          # csv | json | parquet | delta | sqlite | postgres | kafka
   caminho: "dados/produtos.json"   # ou arquivo: / url:  ; aceita  env "VAR"
 ```
 
 Num pipeline, `ler produtos` lê a fonte conforme `tipo:` e devolve uma
-`tabela`. `file://` é removido do caminho. Conectores ainda não cobertos
-(`kafka`, `s3`) levantam `T900` apontando o marco.
+`tabela` (arquivos/SQL) ou `lista` de `texto` (kafka). `file://` é removido
+do caminho. Conectores ainda não cobertos (`s3`, `qdrant`) levantam `T900`
+apontando o marco. `fonte tipo: kafka` exige `topico:` (ver seção Kafka).
 
 ## `pipeline`
 
@@ -256,10 +257,13 @@ pipeline arquivos:
 
 ## Kafka (wire protocol nativo)
 
-Sem dependências: cliente do protocolo 0.9-era (MetadataRequest, ProduceRequest
-v1, FetchRequest v1) sobre socket TCP, com CRC32-IEEE próprio para o message
-set. O broker vem da variável de ambiente `KAFKA_BOOTSTRAP` (default
-`127.0.0.1:9092`).
+Sem dependências: cliente do protocolo 0.9-era sobre socket TCP, com
+CRC32-IEEE próprio para o message set — produce (api 0, v1), fetch (api 1,
+v1), metadata (api 3, v0) e coordenação de consumer groups 0.9-era
+(find_coordinator api 10, join_group api 11, heartbeat api 12,
+leave_group api 13, sync_group api 14, offset_fetch api 9, offset_commit
+api 8, v1). O broker vem da variável de ambiente `KAFKA_BOOTSTRAP`
+(default `127.0.0.1:9092`) ou da opção `broker:`/`campo broker:`.
 
 ```tilt
 pipeline eventos:
@@ -268,18 +272,49 @@ pipeline eventos:
     - escrever_kafka "pedidos", { id: 1, total: 99.9 }
     - msgs = ler_kafka "pedidos", { desde: "inicio", max: 10 }
     - imprimir tamanho msgs
+    - novas = ler_kafka "pedidos", { grupo: "etl", max: 100 }
 ```
 
 - `escrever_kafka topico, valor, {particao: N}`: produce com
   `required_acks=1`; `texto` vai bruto, demais valores são serializados com
   `json_dump`. `particao` é opcional (default 0). O cliente resolve o líder
   da partição via metadata e conecta nele.
-- `ler_kafka topico, {desde:, max:}`: devolve `lista` de `texto` na ordem do
-  log. `desde: "inicio"` (default) lê do earliest; `"fim"` lê do high
-  watermark (só mensagens novas). `max` limita a quantidade (default 100).
-- limitações da 1ª passada: sem consumer groups / offset commit (stateless —
-  `desde: "inicio"` relê do earliest toda vez), sem SASL/TLS (plain), um
-  broker líder por chamada.
+- `ler_kafka topico, {desde:, max:, broker:}`: stateless — devolve `lista`
+  de `texto` na ordem do log. `desde: "inicio"` (default) lê do earliest;
+  `"fim"` lê do high watermark (só mensagens novas). `max` limita a
+  quantidade (default 100).
+- `ler_kafka topico, {grupo:, max:}`: consumer group com coordenação
+  completa — o cliente resolve o coordenador (find_coordinator), entra no
+  grupo (join_group com member_id vazio + sync_group com o assignor
+  `"range"`), lê o offset commitado (offset_fetch), consome a partir dele
+  (earliest se nunca commitado) e commita o offset seguinte ao último lido
+  (offset_commit, metadata `"tilt"`) antes do leave_group. Com 1 membro no
+  grupo, o assignment pega **todas** as partições do tópico, consumidas
+  sequencialmente. Uma segunda chamada com o mesmo grupo só vê o que ainda
+  não foi commitado — checkpoint natural entre execuções.
+- `fonte tipo: kafka`: `topico:` é obrigatório; `grupo:` (checkpoint por
+  commit de offset), `desde: "inicio"|"fim"`, `broker:` e `max:` são
+  opcionais. `ler minha_fonte` devolve `lista` de `texto`. Em um `pipeline`
+  com `janela:` e `agenda:`, a fonte **com** `grupo:` faz a janela acumular
+  só mensagens novas a cada tick, porque o offset fica commitado no broker:
+
+```tilt
+fonte pedidos_kafka:
+  tipo: kafka
+  topico: "pedidos"
+  grupo: "etl"          # offset commitado no broker = checkpoint da janela
+
+pipeline agregacao:
+  agenda: "* * * * *"
+  entrada: pedidos_kafka
+  janela: "1min"
+  passos:
+    - imprimir tamanho linhas, "pedidos no minuto"
+```
+
+- limitações: 1 membro por grupo por vez (sem rebalanceamento real entre
+  consumidores), protocolo 0.9-era apenas, sem SASL/TLS (plain), um broker
+  líder por chamada.
 
 ## MongoDB (BSON + OP_MSG nativos)
 

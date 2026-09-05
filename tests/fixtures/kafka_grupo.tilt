@@ -1,0 +1,23 @@
+# Consumer groups no Kafka contra o mock broker do kafka_test.sh
+# (KAFKA_BOOTSTRAP aponta para ele).
+# (a) 3 produces; (b) ler com {grupo:} le as 3 e commita os offsets;
+# (c) segunda leitura com o mesmo grupo vem VAZIA (checkpoint pelo commit);
+# (d) fonte tipo: kafka sem grupo le stateless do inicio.
+fonte cliques_kafka:
+  tipo: kafka
+  topico: "cliques"
+  desde: "inicio"
+
+pipeline kafka_grupo:
+  passos:
+    - escrever_kafka "compras", "c-1"
+    - escrever_kafka "compras", "c-2"
+    - escrever_kafka "compras", "c-3"
+    - lote1 = ler_kafka "compras", {grupo: "g1", max: 3}
+    - imprimir lote1
+    - lote2 = ler_kafka "compras", {grupo: "g1", max: 10}
+    - imprimir tamanho lote2
+    - escrever_kafka "cliques", "k-1"
+    - escrever_kafka "cliques", "k-2"
+    - eventos = ler cliques_kafka
+    - imprimir eventos
