@@ -1,0 +1,7 @@
+erro[T901]: kafka: nao foi possivel conectar em '127.0.0.1:59995'
+  --> input.tilt:3:14
+   |
+ 3 |     - msgs = ler_kafka "x", {max: 1}
+   |              ^^^^^^^^^
+   |
+

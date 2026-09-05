@@ -1,0 +1,4 @@
+pipeline kafka:
+  passos:
+    - msgs = ler_kafka "x", {max: 1}
+    - imprimir msgs

@@ -35,9 +35,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   concurrency), sem partições nem checkpoints; a leitura herda as limitações
   do Parquet acima, então tabelas de outros escritores só leem sem
   compressão/dictionary e com colunas obrigatórias.
-- Conectores ainda não cobertos (`kafka`, `mongodb`, `iceberg`) →
-  `T900`. CSV, JSON, Parquet, Delta, SQLite, Postgres, Redis, Qdrant,
-  pgvector e S3 rodam.
+- Conectores ainda não cobertos (`mongodb`, `iceberg`) → `T900`. CSV, JSON,
+  Parquet, Delta, SQLite, Postgres, Redis, Kafka, Qdrant, pgvector e S3 rodam.
+- Kafka (`ler_kafka`/`escrever_kafka`): wire protocol 0.9-era — sem consumer
+  groups/offset commit (stateless, `desde: "inicio"` relê do earliest toda
+  vez), sem SASL/TLS (plain), produce v1/fetch v1 apenas, um broker líder por
+  chamada e payload inteiro em memória; o `janela:` ainda não consome Kafka.
 - S3 (`ler_s3`/`escrever_s3`): 1ª passada com GET/PUT só — sem
   list/delete/multipart, sem query string (versão/versionamento, ACL etc.) e
   payload inteiro em memória; HTTP depende do binário `curl` e das

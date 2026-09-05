@@ -1,0 +1,10 @@
+# Roundtrip Kafka contra o mock broker do kafka_test.sh (KAFKA_BOOTSTRAP aponta p/ ele).
+# Duas producoes na MESMA particao (default 0) e leitura do inicio do log.
+pipeline kafka:
+  passos:
+    - escrever_kafka "pedidos", "msg-1"
+    - escrever_kafka "pedidos", "msg-2"
+    - msgs = ler_kafka "pedidos", {desde: "inicio", max: 10}
+    - imprimir tamanho msgs
+    - imprimir msgs[0]
+    - imprimir msgs[1]

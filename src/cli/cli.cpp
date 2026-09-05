@@ -373,6 +373,7 @@ BUILTINS
   imprimir registrar env tamanho contar somar media min max intervalo dividir
   ler_csv escrever_csv ler_json escrever_json ler_parquet escrever_parquet
   ler_delta escrever_delta anexar_delta ler_redis escrever_redis
+  ler_kafka escrever_kafka
   ler_s3 escrever_s3
   ler <fonte> carregador
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)

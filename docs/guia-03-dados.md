@@ -222,6 +222,33 @@ pipeline arquivos:
   `http://host:porta` para S3-compatível (ex.: MinIO). O path do objeto é
   codificado por segmento e a query string fica vazia nesta 1ª passada.
 
+## Kafka (wire protocol nativo)
+
+Sem dependências: cliente do protocolo 0.9-era (MetadataRequest, ProduceRequest
+v1, FetchRequest v1) sobre socket TCP, com CRC32-IEEE próprio para o message
+set. O broker vem da variável de ambiente `KAFKA_BOOTSTRAP` (default
+`127.0.0.1:9092`).
+
+```tilt
+pipeline eventos:
+  passos:
+    - escrever_kafka "pedidos", "msg-1"
+    - escrever_kafka "pedidos", { id: 1, total: 99.9 }
+    - msgs = ler_kafka "pedidos", { desde: "inicio", max: 10 }
+    - imprimir tamanho msgs
+```
+
+- `escrever_kafka topico, valor, {particao: N}`: produce com
+  `required_acks=1`; `texto` vai bruto, demais valores são serializados com
+  `json_dump`. `particao` é opcional (default 0). O cliente resolve o líder
+  da partição via metadata e conecta nele.
+- `ler_kafka topico, {desde:, max:}`: devolve `lista` de `texto` na ordem do
+  log. `desde: "inicio"` (default) lê do earliest; `"fim"` lê do high
+  watermark (só mensagens novas). `max` limita a quantidade (default 100).
+- limitações da 1ª passada: sem consumer groups / offset commit (stateless —
+  `desde: "inicio"` relê do earliest toda vez), sem SASL/TLS (plain), um
+  broker líder por chamada.
+
 ## Índice vetorial no Qdrant
 
 `indice` com `armazenamento: "qdrant://host:porta/colecao"` delega

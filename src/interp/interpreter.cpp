@@ -29,6 +29,7 @@
 #include "runtime/delta.hpp"
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
+#include "runtime/kafka.hpp"
 #include "runtime/s3.hpp"
 #include "runtime/sqlite.hpp"
 #include "runtime/postgres.hpp"
@@ -3174,6 +3175,65 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       rt::redis_set(a[0].s, a[1].s, a[2]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "ler_kafka") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "ler_kafka espera (topico, {desde:, max:}), ex.: ler_kafka \"pedidos\", "
+           "{desde: \"inicio\", max: 100}");
+    }
+    bool do_fim = false;
+    std::int64_t max = 100;
+    if (a.size() >= 2) {
+      if (a[1].kind != ValueKind::Mapa || !a[1].map) {
+        fail(call.span, "ler_kafka: opcoes devem ser um mapa {desde:, max:}");
+      }
+      if (const Value* dv = a[1].map->find("desde")) {
+        if (dv->kind != ValueKind::Texto || (dv->s != "inicio" && dv->s != "fim")) {
+          fail(call.span, "ler_kafka: 'desde' deve ser \"inicio\" ou \"fim\"");
+        }
+        do_fim = dv->s == "fim";
+      }
+      if (const Value* mv = a[1].map->find("max")) {
+        if (mv->kind != ValueKind::Inteiro) {
+          fail(call.span, "ler_kafka: 'max' deve ser inteiro");
+        }
+        max = mv->i;
+      }
+    }
+    try {
+      return rt::kafka_ler(a[0].s, do_fim, max);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "escrever_kafka") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "escrever_kafka espera (topico, valor, {particao:}), ex.: escrever_kafka "
+           "\"pedidos\", valor");
+    }
+    std::int64_t particao = 0;
+    if (a.size() >= 3) {
+      if (a[2].kind != ValueKind::Mapa || !a[2].map) {
+        fail(call.span, "escrever_kafka: opcoes devem ser um mapa {particao: N}");
+      }
+      if (const Value* pv = a[2].map->find("particao")) {
+        if (pv->kind != ValueKind::Inteiro) {
+          fail(call.span, "escrever_kafka: 'particao' deve ser inteiro");
+        }
+        particao = pv->i;
+      }
+    }
+    try {
+      const std::string body = a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
+      rt::kafka_produzir(a[0].s, body, static_cast<std::int32_t>(particao));
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
