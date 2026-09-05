@@ -263,7 +263,15 @@ pipeline cache:
   `ler_redis url, "chave", {senha: "segredo", banco: 2}` /
   `escrever_redis url, "chave", valor, {banco: 2}`. Sem senha/banco, o
   comportamento é o de sempre (sem AUTH, db 0).
-- limitações: sem TLS, um comando por conexão.
+- **TLS**: use o esquema `rediss://` (`rediss://host:6379`) ou a opção
+  `{tls: verdadeiro}` com URL comum. O OpenSSL é carregado em runtime via
+  `dlopen` (`libssl.so.3`, fallback `libssl.so`) — zero dependência de link;
+  o certificado do servidor é verificado contra o trust store do sistema e
+  o hostname é conferido. Para certificado auto-assinado (ex.: em testes),
+  defina `TILT_TLS_SKIP_VERIFY=1` para desligar a verificação. Sem
+  client-cert/SASL nesta fase. O mesmo mecanismo cobre MongoDB e Kafka
+  (ver abaixo).
+- limitações: um comando por conexão.
 
 ## S3 (AWS SigV4 próprio)
 
@@ -322,8 +330,10 @@ pipeline eventos:
 - `escrever_kafka topico, valor, {particao: N}`: produce com
   `required_acks=1`; `texto` vai bruto, demais valores são serializados com
   `json_dump`. `particao` é opcional (default 0). O cliente resolve o líder
-  da partição via metadata e conecta nele.
-- `ler_kafka topico, {desde:, max:, broker:}`: stateless — devolve `lista`
+  da partição via metadata e conecta nele. `{tls: verdadeiro}` liga TLS
+  (todas as conexões da chamada: metadata, produce/fetch e coordenação de
+  grupo; ver nota de TLS na seção Redis).
+- `ler_kafka topico, {desde:, max:, broker:, tls:}`: stateless — devolve `lista`
   de `texto` na ordem do log. `desde: "inicio"` (default) lê do earliest;
   `"fim"` lê do high watermark (só mensagens novas). `max` limita a
   quantidade (default 100).
@@ -357,8 +367,8 @@ pipeline agregacao:
 ```
 
 - limitações: 1 membro por grupo por vez (sem rebalanceamento real entre
-  consumidores), protocolo 0.9-era apenas, sem SASL/TLS (plain), um broker
-  líder por chamada.
+  consumidores), protocolo 0.9-era apenas, sem SASL, um broker líder por
+  chamada.
 
 ## MongoDB (BSON + OP_MSG nativos)
 
@@ -367,7 +377,9 @@ document, array, ObjectId, bool, datetime, null, int32, int64) e wire
 protocol **OP_MSG** (opcode 2013) sobre socket TCP, com handshake
 `{isMaster: 1}` no connect. O servidor vem da variável de ambiente
 `MONGO_URL` (default `mongodb://127.0.0.1:27017`); o path opcional da URL é
-o banco default (`mongodb://host:porta/banco`).
+o banco default (`mongodb://host:porta/banco`). O esquema
+`mongodb+srv://host:porta/banco` liga **TLS** (mesma camada do Redis; sem
+lookup DNS SRV nesta fase — o host é usado como em `mongodb://`).
 
 ```tilt
 pipeline pedidos:

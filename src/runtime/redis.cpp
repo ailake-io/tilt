@@ -10,11 +10,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "runtime/json.hpp"
+#include "runtime/tls.hpp"
 
 namespace tilt::rt {
 
@@ -29,15 +31,23 @@ struct UrlParts {
   std::string port = "6379";
   std::string auth;  // userinfo ":senha@" -> senha (vazio = sem AUTH)
   int db = -1;       // path "/N" (negativo = sem SELECT)
+  bool tls = false;  // esquema "rediss://" (ou {tls: verdadeiro} nas opcoes)
 };
 
 // "redis://[:senha@]host[:porta][/N]" -> host/porta/auth/db; ausente ->
 // localhost:6379, sem AUTH, sem SELECT. Query string nao e suportada.
+// "rediss://" ativa TLS (OpenSSL via dlopen; ver runtime/tls.hpp).
 UrlParts parse_url(const std::string& url) {
   std::string rest = url;
+  const std::string prefix_tls = "rediss://";
   const std::string prefix = "redis://";
-  if (rest.rfind(prefix, 0) == 0) rest = rest.substr(prefix.size());
   UrlParts parts;
+  if (rest.rfind(prefix_tls, 0) == 0) {
+    parts.tls = true;
+    rest = rest.substr(prefix_tls.size());
+  } else if (rest.rfind(prefix, 0) == 0) {
+    rest = rest.substr(prefix.size());
+  }
   // userinfo: tudo antes do '@' ("usuario:senha" ou ":senha"; o usuario,
   // se houver, e ignorado — o Redis classic AUTH so usa a senha).
   const std::size_t at = rest.rfind('@');
@@ -70,15 +80,19 @@ UrlParts parse_url(const std::string& url) {
 }
 
 // Aplica as opcoes do builtin por cima do que a URL trouxe: opcao informada
-// (senha nao vazia / banco >= 0) vence a URL; ausente herda a URL.
+// (senha nao vazia / banco >= 0) vence a URL; ausente herda a URL. TLS liga
+// se a URL for rediss:// ou se {tls: verdadeiro} for informado.
 RedisOpts merge_opts(const UrlParts& parts, const RedisOpts& opts) {
   RedisOpts eff;
   eff.auth = opts.auth.empty() ? parts.auth : opts.auth;
   eff.db = opts.db < 0 ? parts.db : opts.db;
+  eff.tls = opts.tls || parts.tls;
   return eff;
 }
 
 // Conexao simples: abre, usa, fecha. Bloqueante com timeout de recv/send.
+// Com `parts.tls`, o trafego passa por TlsStream (handshake cliente logo
+// apos o connect).
 class Conn {
  public:
   explicit Conn(const UrlParts& parts) {
@@ -104,6 +118,8 @@ class Conn {
     tv.tv_sec = kTimeoutSec;
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (parts.tls) tls_.emplace(fd_, parts.host);
   }
 
   ~Conn() {
@@ -116,7 +132,7 @@ class Conn {
   void send_all(const std::string& data) {
     std::size_t off = 0;
     while (off < data.size()) {
-      const ssize_t n = ::send(fd_, data.data() + off, data.size() - off, MSG_NOSIGNAL);
+      const ssize_t n = send_raw(data.data() + off, data.size() - off);
       if (n <= 0) die("falha ao enviar comando");
       off += static_cast<std::size_t>(n);
     }
@@ -127,7 +143,7 @@ class Conn {
     out.resize(n);
     std::size_t off = 0;
     while (off < n) {
-      const ssize_t r = ::recv(fd_, out.data() + off, n - off, 0);
+      const ssize_t r = recv_raw(out.data() + off, n - off);
       if (r <= 0) return false;
       off += static_cast<std::size_t>(r);
     }
@@ -139,11 +155,11 @@ class Conn {
     out.clear();
     char c = 0;
     while (true) {
-      const ssize_t r = ::recv(fd_, &c, 1, 0);
+      const ssize_t r = recv_raw(&c, 1);
       if (r <= 0) return false;
       if (c == '\r') {
         char lf = 0;
-        if (::recv(fd_, &lf, 1, 0) != 1 || lf != '\n') return false;
+        if (recv_raw(&lf, 1) != 1 || lf != '\n') return false;
         return true;
       }
       out += c;
@@ -151,7 +167,21 @@ class Conn {
   }
 
  private:
+  // Primitivas de transporte: TLS quando ativo, socket cru caso contrario.
+  ssize_t send_raw(const char* p, std::size_t n) {
+    if (tls_) {
+      tls_->write_all(p, n);
+      return static_cast<ssize_t>(n);
+    }
+    return ::send(fd_, p, n, MSG_NOSIGNAL);
+  }
+  ssize_t recv_raw(char* p, std::size_t n) {
+    if (tls_) return static_cast<ssize_t>(tls_->read_some(p, n));
+    return ::recv(fd_, p, n, 0);
+  }
+
   int fd_ = -1;
+  std::optional<TlsStream> tls_;
 };
 
 // Valor RESP generico: simple string, error, integer, bulk, array, nil.
@@ -232,10 +262,12 @@ void handshake(Conn& conn, const RedisOpts& opts) {
 }
 
 // Abre a conexao, faz o handshake opcional, envia o comando e devolve a
-// resposta; '-ERR...' vira excecao.
+// resposta; '-ERR...' vira excecao. `opts` ja e o resultado de merge_opts.
 Resp command(const UrlParts& parts, const RedisOpts& opts,
              const std::vector<std::string>& args) {
-  Conn conn(parts);
+  UrlParts eff = parts;
+  eff.tls = opts.tls;
+  Conn conn(eff);
   handshake(conn, opts);
   conn.send_all(encode_cmd(args));
   Resp r = read_resp(conn);

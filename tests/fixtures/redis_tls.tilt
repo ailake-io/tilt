@@ -1,0 +1,14 @@
+# Roundtrip Redis sobre TLS contra o mock RESP-TLS do tls_test.sh.
+# REDIS_URL aponta com esquema rediss:// (TLS ativo pela URL) e REDIS_URL2
+# com redis:// simples + {tls: verdadeiro} (TLS ativo pela opcao). O script
+# roda com TILT_TLS_SKIP_VERIFY=1 (cert auto-assinado do mock).
+pipeline redis_tls:
+  passos:
+    - url = env "REDIS_URL"
+    - escrever_redis url, "chave-tls", "valor-tls"
+    - de_volta = ler_redis url, "chave-tls"
+    - imprimir de_volta
+    - url2 = env "REDIS_URL2"
+    - escrever_redis url2, "chave-op", "valor-op", {tls: verdadeiro}
+    - de_volta2 = ler_redis url2, "chave-op", {tls: verdadeiro}
+    - imprimir de_volta2

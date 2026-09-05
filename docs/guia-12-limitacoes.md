@@ -53,8 +53,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   restam: sem `aggregate`, sem `$unset`/`$inc`/demais operadores de update
   (só `$set`), sem índices de texto/TTL, filtro só por igualdade exata
   top-level (combinado por E), `mongo_deletar` remove sempre todos que casam
-  (sem `limit 1`), find sem projeção (retorna o documento inteiro), sem
-  auth/TLS (plain; TLS é fase futura), sem `OP_COMPRESSED`; document
+  (sem `limit 1`), find sem projeção (retorna o documento inteiro), TLS via
+  esquema `mongodb+srv://` (sem lookup DNS SRV), sem `OP_COMPRESSED`; document
   sequences (section kind 1) são puladas na leitura; uma conexão (com
   handshake `isMaster`) por chamada e payload inteiro em memória; banco por
   `MONGO_URL` (path) ou opção `banco:`.
@@ -62,7 +62,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   0.9-era — consumer groups com 1 membro por grupo por vez (o assignment
   "range" pega todas as partições, mas sem rebalanceamento real: dois
   consumidores no mesmo grupo não dividem as partições de forma coordenada),
-  sem SASL/TLS (plain), produce v1/fetch v1 apenas, um broker líder por
+  sem SASL (TLS via `{tls: verdadeiro}` nas opções), produce v1/fetch v1
+  apenas, um broker líder por
   chamada e payload inteiro em memória.
 - S3 (`ler_s3`/`escrever_s3`/`listar_s3`/`apagar_s3`): GET/PUT/LIST/DELETE
   com query string assinada (ListObjectsV2) — sem multipart/copy/presigned
@@ -73,9 +74,20 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Bancos relacionais: somente consultas SELECT (sem INSERT/UPDATE via SQL,
   sem prepared statements); Postgres carrega `libpq.so.5` e SQLite
   `libsqlite3.so.0` via `dlopen` — precisam estar instalados no sistema.
-- Redis: sem TLS (fase próxima), um comando por conexão, timeout fixo de 5s.
+- Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, um comando por conexão,
+  timeout fixo de 5s.
   AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT
   via path numérico (`redis://host:6379/2`) ou opção `banco:`.
+- TLS (redis/mongo/kafka): camada mínima em `src/runtime/tls.*` — OpenSSL
+  carregado em runtime via `dlopen` (`libssl.so.3`, fallback `libssl.so`, e
+  libcrypto correspondente), zero dependência de link. Verificação de
+  certificado contra o trust store do sistema + hostname; `TILT_TLS_SKIP_VERIFY=1`
+  desliga a verificação (cert auto-assinado em testes — o próprio erro de
+  handshake sugere o env). Sem SASL nem client-cert: se o servidor exigir
+  autenticação mútua, o handshake falha com erro do OpenSSL. `mongodb+srv://`
+  não faz lookup DNS SRV (usa o host como `mongodb://`). Coberto por
+  `tests/tls_test.sh` (mock RESP sobre TLS com cert auto-assinado gerado na
+  hora com a CLI `openssl`).
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
   id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
   `texto`, que fica no payload do ponto).

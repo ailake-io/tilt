@@ -3378,12 +3378,13 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     fail(call.span, "ler: esperava uma 'fonte' declarada", DiagCode::ConnectorNotImplemented);
   }
-  // Opcoes {senha:, banco:} comuns a ler_redis/escrever_redis; vencem a URL.
+  // Opcoes {senha:, banco:, tls:} comuns a ler_redis/escrever_redis; senha e
+  // banco vencem a URL, tls liga TLS (rediss:// tambem liga).
   auto redis_opts = [&](const std::vector<Value>& a, std::size_t idx) -> rt::RedisOpts {
     rt::RedisOpts opts;
     if (a.size() <= idx) return opts;
     if (a[idx].kind != ValueKind::Mapa || !a[idx].map) {
-      fail(call.span, "redis: opcoes devem ser um mapa {senha:, banco:}");
+      fail(call.span, "redis: opcoes devem ser um mapa {senha:, banco:, tls:}");
     }
     if (const Value* sv = a[idx].map->find("senha")) {
       if (sv->kind != ValueKind::Texto) fail(call.span, "redis: 'senha' deve ser texto");
@@ -3392,6 +3393,10 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     if (const Value* bv = a[idx].map->find("banco")) {
       if (bv->kind != ValueKind::Inteiro) fail(call.span, "redis: 'banco' deve ser inteiro");
       opts.db = static_cast<int>(bv->i);
+    }
+    if (const Value* tv = a[idx].map->find("tls")) {
+      if (tv->kind != ValueKind::Logico) fail(call.span, "redis: 'tls' deve ser logico");
+      opts.tls = tv->b;
     }
     return opts;
   };
@@ -3432,9 +3437,10 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     bool do_fim = false;
     std::int64_t max = 100;
     std::string grupo, broker;
+    bool tls = false;
     if (a.size() >= 2) {
       if (a[1].kind != ValueKind::Mapa || !a[1].map) {
-        fail(call.span, "ler_kafka: opcoes devem ser um mapa {desde:, max:, grupo:, broker:}");
+        fail(call.span, "ler_kafka: opcoes devem ser um mapa {desde:, max:, grupo:, broker:, tls:}");
       }
       if (const Value* dv = a[1].map->find("desde")) {
         if (dv->kind != ValueKind::Texto || (dv->s != "inicio" && dv->s != "fim")) {
@@ -3460,19 +3466,23 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         }
         broker = bv->s;
       }
+      if (const Value* tv = a[1].map->find("tls")) {
+        if (tv->kind != ValueKind::Logico) fail(call.span, "ler_kafka: 'tls' deve ser logico");
+        tls = tv->b;
+      }
     }
     try {
       if (!grupo.empty()) {
         // Consumer group: coordenacao + checkpoint por commit de offset.
         Value out = Value::lista();
         for (const auto& [part, valor] : rt::kafka_consume_group(broker, grupo, a[0].s,
-                                                                 static_cast<int>(max))) {
+                                                                 static_cast<int>(max), tls)) {
           (void)part;
           out.list->push_back(Value::texto(valor));
         }
         return out;
       }
-      return rt::kafka_ler(a[0].s, do_fim, max, broker);
+      return rt::kafka_ler(a[0].s, do_fim, max, broker, tls);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -3485,9 +3495,10 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
            "\"pedidos\", valor");
     }
     std::int64_t particao = 0;
+    bool tls = false;
     if (a.size() >= 3) {
       if (a[2].kind != ValueKind::Mapa || !a[2].map) {
-        fail(call.span, "escrever_kafka: opcoes devem ser um mapa {particao: N}");
+        fail(call.span, "escrever_kafka: opcoes devem ser um mapa {particao:, tls:}");
       }
       if (const Value* pv = a[2].map->find("particao")) {
         if (pv->kind != ValueKind::Inteiro) {
@@ -3495,10 +3506,14 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         }
         particao = pv->i;
       }
+      if (const Value* tv = a[2].map->find("tls")) {
+        if (tv->kind != ValueKind::Logico) fail(call.span, "escrever_kafka: 'tls' deve ser logico");
+        tls = tv->b;
+      }
     }
     try {
       const std::string body = a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
-      rt::kafka_produzir(a[0].s, body, static_cast<std::int32_t>(particao));
+      rt::kafka_produzir(a[0].s, body, static_cast<std::int32_t>(particao), tls);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

@@ -11,11 +11,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "runtime/tls.hpp"
 
 namespace tilt::rt {
 
@@ -304,15 +307,23 @@ struct MongoUrl {
   std::string host;
   std::string port;
   std::string banco;
+  bool tls = false;  // esquema "mongodb+srv://" (tratado como TLS puro;
+                     // sem lookup DNS SRV nesta fase)
 };
 
 MongoUrl parse_url() {
   const char* env = std::getenv("MONGO_URL");
   std::string url = env && *env ? env : "mongodb://127.0.0.1:27017";
-  const std::string prefixo = "mongodb://";
-  if (url.rfind(prefixo, 0) == 0) url = url.substr(prefixo.size());
-
   MongoUrl u;
+  const std::string prefixo_tls = "mongodb+srv://";
+  const std::string prefixo = "mongodb://";
+  if (url.rfind(prefixo_tls, 0) == 0) {
+    u.tls = true;
+    url = url.substr(prefixo_tls.size());
+  } else if (url.rfind(prefixo, 0) == 0) {
+    url = url.substr(prefixo.size());
+  }
+
   const std::size_t barra = url.find('/');
   const std::string hostport = url.substr(0, barra);
   if (barra != std::string::npos) {
@@ -329,14 +340,18 @@ MongoUrl parse_url() {
     u.host = hostport.substr(0, dois_pontos);
     u.port = hostport.substr(dois_pontos + 1);
   }
-  if (u.host.empty()) die("MONGO_URL sem host (esperado mongodb://host:porta/banco)");
+  if (u.host.empty()) {
+    die("MONGO_URL sem host (esperado mongodb://host:porta/banco; use mongodb+srv:// para TLS)");
+  }
   return u;
 }
 
 // Conexao simples: abre, usa, fecha. Bloqueante com timeout de recv/send.
+// Com `tls`, o trafego passa por TlsStream (handshake cliente logo apos o
+// connect).
 class Conn {
  public:
-  Conn(const std::string& host, const std::string& port) {
+  Conn(const std::string& host, const std::string& port, bool tls = false) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -357,6 +372,8 @@ class Conn {
     tv.tv_sec = kTimeoutSec;
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (tls) tls_.emplace(fd_, host);
   }
 
   ~Conn() {
@@ -369,7 +386,7 @@ class Conn {
   void write_full(const std::string& data) {
     std::size_t off = 0;
     while (off < data.size()) {
-      const ssize_t n = ::send(fd_, data.data() + off, data.size() - off, MSG_NOSIGNAL);
+      const ssize_t n = send_raw(data.data() + off, data.size() - off);
       if (n <= 0) die("falha ao enviar requisicao");
       off += static_cast<std::size_t>(n);
     }
@@ -379,14 +396,28 @@ class Conn {
     out.resize(n);
     std::size_t off = 0;
     while (off < n) {
-      const ssize_t r = ::recv(fd_, out.data() + off, n - off, 0);
+      const ssize_t r = recv_raw(out.data() + off, n - off);
       if (r <= 0) die("resposta incompleta do servidor");
       off += static_cast<std::size_t>(r);
     }
   }
 
  private:
+  // Primitivas de transporte: TLS quando ativo, socket cru caso contrario.
+  ssize_t send_raw(const char* p, std::size_t n) {
+    if (tls_) {
+      tls_->write_all(p, n);
+      return static_cast<ssize_t>(n);
+    }
+    return ::send(fd_, p, n, MSG_NOSIGNAL);
+  }
+  ssize_t recv_raw(char* p, std::size_t n) {
+    if (tls_) return static_cast<ssize_t>(tls_->read_some(p, n));
+    return ::recv(fd_, p, n, 0);
+  }
+
   int fd_ = -1;
+  std::optional<TlsStream> tls_;
 };
 
 // --------------------------------------------------------------- OP_MSG
@@ -420,7 +451,7 @@ class Sessao {
  public:
   explicit Sessao(const MongoUrl& url) {
     url_ = url;
-    conn_ = std::make_unique<Conn>(url_.host, url_.port);
+    conn_ = std::make_unique<Conn>(url_.host, url_.port, url_.tls);
 
     Value handshake = Value::mapa();
     handshake.map->set("isMaster", Value::inteiro(1));

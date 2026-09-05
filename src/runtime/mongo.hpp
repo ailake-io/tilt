@@ -15,8 +15,12 @@ namespace tilt::rt {
 //
 // O servidor vem da env `MONGO_URL`
 // (default "mongodb://127.0.0.1:27017"); o path opcional da URL e o banco
-// default (mongodb://host:porta/banco). Sem path e sem opcao `banco:`,
-// inserir/buscar falham com erro acionavel antes de tocar a rede.
+// default (mongodb://host:porta/banco). O esquema "mongodb+srv://" liga TLS
+// (OpenSSL via dlopen; ver runtime/tls.hpp, incluindo a env
+// TILT_TLS_SKIP_VERIFY para certificados auto-assinados em testes) — sem
+// lookup DNS SRV nesta fase, o host e usado como em mongodb://. Sem path e
+// sem opcao `banco:`, inserir/buscar falham com erro acionavel antes de
+// tocar a rede.
 
 // Insere `doc` (deve ser mapa; senao "mongo: inserir espera um mapa") na
 // colecao. Gera `_id` ObjectId quando ausente. Comando {insert, $db,

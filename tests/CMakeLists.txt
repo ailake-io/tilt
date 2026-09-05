@@ -66,6 +66,12 @@ add_test(
           $<TARGET_FILE:tilt>
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/janela_offset)
 
+add_test(
+  NAME tls
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tls_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/redis_tls.tilt)
+
 find_program(PYTHON3 python3)
 if(PYTHON3)
   add_test(NAME lsp COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/lsp_test.py $<TARGET_FILE:tilt>)

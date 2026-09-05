@@ -9,10 +9,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "runtime/tls.hpp"
 
 namespace tilt::rt {
 
@@ -141,7 +144,7 @@ BrokerAddr bootstrap_addr() {
 // Conexao simples: abre, usa, fecha. Bloqueante com timeout de recv/send.
 class Conn {
  public:
-  Conn(const std::string& host, const std::string& port) {
+  Conn(const std::string& host, const std::string& port, bool tls = false) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -162,6 +165,8 @@ class Conn {
     tv.tv_sec = kTimeoutSec;
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (tls) tls_.emplace(fd_, host);
   }
 
   ~Conn() {
@@ -174,7 +179,7 @@ class Conn {
   void write_full(const std::string& data) {
     std::size_t off = 0;
     while (off < data.size()) {
-      const ssize_t n = ::send(fd_, data.data() + off, data.size() - off, MSG_NOSIGNAL);
+      const ssize_t n = send_raw(data.data() + off, data.size() - off);
       if (n <= 0) die("falha ao enviar requisicao");
       off += static_cast<std::size_t>(n);
     }
@@ -184,14 +189,28 @@ class Conn {
     out.resize(n);
     std::size_t off = 0;
     while (off < n) {
-      const ssize_t r = ::recv(fd_, out.data() + off, n - off, 0);
+      const ssize_t r = recv_raw(out.data() + off, n - off);
       if (r <= 0) die("resposta incompleta do broker");
       off += static_cast<std::size_t>(r);
     }
   }
 
  private:
+  // Primitivas de transporte: TLS quando ativo, socket cru caso contrario.
+  ssize_t send_raw(const char* p, std::size_t n) {
+    if (tls_) {
+      tls_->write_all(p, n);
+      return static_cast<ssize_t>(n);
+    }
+    return ::send(fd_, p, n, MSG_NOSIGNAL);
+  }
+  ssize_t recv_raw(char* p, std::size_t n) {
+    if (tls_) return static_cast<ssize_t>(tls_->read_some(p, n));
+    return ::recv(fd_, p, n, 0);
+  }
+
   int fd_ = -1;
+  std::optional<TlsStream> tls_;
 };
 
 // ------------------------------------------------------- framing da requisicao
@@ -277,8 +296,8 @@ struct Metadata {
   std::vector<PartitionInfo> partitions;  // indexado pelo id da particao
 };
 
-Metadata metadata(const std::string& topico, const BrokerAddr& addr) {
-  Conn conn(addr.host, addr.port);
+Metadata metadata(const std::string& topico, const BrokerAddr& addr, bool tls) {
+  Conn conn(addr.host, addr.port, tls);
   std::string payload;
   put_i32(payload, 1);
   put_str(payload, topico);
@@ -339,9 +358,9 @@ BrokerAddr lider_addr_md(const std::string& topico, std::int32_t particao, const
 
 // Acha o lider da particao e devolve seu endereco; conecta no bootstrap e,
 // se o lider for outro broker, devolve o endereco dele.
-BrokerAddr lider_addr(const std::string& topico, std::int32_t particao, Metadata& md) {
+BrokerAddr lider_addr(const std::string& topico, std::int32_t particao, Metadata& md, bool tls) {
   const BrokerAddr bootstrap = bootstrap_addr();
-  md = metadata(topico, bootstrap);
+  md = metadata(topico, bootstrap, tls);
   return lider_addr_md(topico, particao, md);
 }
 
@@ -432,12 +451,12 @@ std::vector<std::pair<std::int64_t, std::string>> fetch_msgs(Conn& conn, const s
 }  // namespace
 
 std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
-                            std::int32_t particao) {
+                            std::int32_t particao, bool tls) {
   if (particao < 0) die("particao deve ser >= 0");
 
   Metadata md;
-  const BrokerAddr addr = lider_addr(topico, particao, md);
-  Conn conn(addr.host, addr.port);
+  const BrokerAddr addr = lider_addr(topico, particao, md, tls);
+  Conn conn(addr.host, addr.port, tls);
 
   const std::string message_set = encode_message(valor);
 
@@ -471,18 +490,18 @@ std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
 }
 
 Value kafka_ler(const std::string& topico, bool do_fim, std::int64_t max,
-                const std::string& broker) {
+                const std::string& broker, bool tls) {
   if (max < 0) die("max deve ser >= 0");
 
   Metadata md;
   BrokerAddr addr;
   if (broker.empty()) {
-    addr = lider_addr(topico, 0, md);
+    addr = lider_addr(topico, 0, md, tls);
   } else {
-    md = metadata(topico, parse_addr(broker));
+    md = metadata(topico, parse_addr(broker), tls);
     addr = lider_addr_md(topico, 0, md);
   }
-  Conn conn(addr.host, addr.port);
+  Conn conn(addr.host, addr.port, tls);
 
   // 0.9-era: offset -1 = "latest" (high watermark), 0 = earliest.
   Value out = Value::lista();
@@ -706,7 +725,7 @@ void offset_commit(Conn& conn, const std::string& grupo, std::int32_t generation
 std::vector<std::pair<int, std::string>> kafka_consume_group(const std::string& broker,
                                                              const std::string& grupo,
                                                              const std::string& topico,
-                                                             int max_msgs) {
+                                                             int max_msgs, bool tls) {
   if (max_msgs < 0) die("max deve ser >= 0");
   if (grupo.empty()) die("grupo nao pode ser vazio");
 
@@ -715,13 +734,13 @@ std::vector<std::pair<int, std::string>> kafka_consume_group(const std::string& 
   // 1. FindCoordinator no bootstrap.
   BrokerAddr coord;
   {
-    Conn conn(bootstrap.host, bootstrap.port);
+    Conn conn(bootstrap.host, bootstrap.port, tls);
     coord = find_coordinator(conn, grupo);
   }
 
   // Coordenador: join -> heartbeat -> sync -> offsets -> (fetch/commit) ->
   // leave ao sair do escopo.
-  Conn conn(coord.host, coord.port);
+  Conn conn(coord.host, coord.port, tls);
   const JoinInfo join = join_group(conn, grupo, topico);
   GroupSession sess{conn, grupo, join.member_id};
   heartbeat(conn, grupo, join.generation, join.member_id);
@@ -736,7 +755,7 @@ std::vector<std::pair<int, std::string>> kafka_consume_group(const std::string& 
 
   // 5. Fetch: cada particao atribuida a partir do offset commitado (ou do
   // earliest, quando -1), sequencialmente, ate `max_msgs`.
-  const Metadata md = metadata(topico, bootstrap);
+  const Metadata md = metadata(topico, bootstrap, tls);
   std::vector<std::pair<int, std::string>> out;
   std::vector<std::pair<std::int32_t, std::int64_t>> commits;
   for (const auto& [t, parts] : assignment) {
@@ -753,7 +772,7 @@ std::vector<std::pair<int, std::string>> kafka_consume_group(const std::string& 
         continue;
       }
       const BrokerAddr lider = lider_addr_md(topico, part, md);
-      Conn fc(lider.host, lider.port);
+      Conn fc(lider.host, lider.port, tls);
       const auto msgs = fetch_msgs(fc, topico, part, inicio, restante);
       std::int64_t proximo = inicio;
       for (const auto& [off, valor] : msgs) {
