@@ -1,0 +1,13 @@
+funcao tentar_anexar t -> texto:
+  tentar:
+    anexar_iceberg t, "nao_existe_ainda"
+    retornar "sem erro"
+  capturar erro:
+    retornar erro
+
+pipeline principal:
+  passos:
+    - t1 = [
+        { nome: "ana", idade: 30 }
+      ]
+    - imprimir tentar_anexar t1

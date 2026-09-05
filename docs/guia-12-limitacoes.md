@@ -35,9 +35,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   concurrency), sem partições nem checkpoints; a leitura herda as limitações
   do Parquet acima, então tabelas de outros escritores só leem sem
   compressão/dictionary e com colunas obrigatórias.
-- Conectores ainda não cobertos (`iceberg`) → `T900`. CSV, JSON,
-  Parquet, Delta, SQLite, Postgres, Redis, Kafka, MongoDB, Qdrant, pgvector e
-  S3 rodam.
+- Iceberg é de 1ª passada: catálogo só **Hadoop** (diretório local — sem
+  REST/JDBC), sem partições nem schema evolution, codec Avro "null" apenas, a
+  leitura garante apenas o que o tilt escreve (tabelas de outros escritores
+  sem garantia) e single-writer (sem locks nem optimistic concurrency);
+  `escrever_iceberg` sobrescreve a tabela (recria a versão 0) e o append é via
+  `anexar_iceberg` (novo snapshot por commit atômico de `rename`, cadeia de
+  pais com adds menos removes).
+- Todos os conectores planejados rodam — a lista de stubs de conectores está
+  vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, Redis, Kafka,
+  MongoDB, Qdrant, pgvector e S3 rodam.
 - MongoDB (`mongo_inserir`/`mongo_buscar`): BSON + OP_MSG próprios de 1ª
   passada — insert e find apenas (sem update/delete/indexes/aggregate),
   filtro só por igualdade exata top-level (combinado por E), sem auth/TLS

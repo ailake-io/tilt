@@ -46,6 +46,7 @@ add_library(tilt_core STATIC
   src/runtime/gpu_runtime.cpp
   src/runtime/parquet.cpp
   src/runtime/delta.cpp
+  src/runtime/iceberg.cpp
   src/runtime/qdrant.cpp
   src/runtime/redis.cpp
   src/runtime/kafka.cpp

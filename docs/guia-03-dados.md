@@ -10,7 +10,7 @@ fonte produtos:
 
 Num pipeline, `ler produtos` lê a fonte conforme `tipo:` e devolve uma
 `tabela`. `file://` é removido do caminho. Conectores ainda não cobertos
-(`kafka`, `s3`, `iceberg`) levantam `T900` apontando o marco.
+(`kafka`, `s3`) levantam `T900` apontando o marco.
 
 ## `pipeline`
 
@@ -144,6 +144,38 @@ pq.write_table(tabela, "saida.parquet", compression="NONE", use_dictionary=False
 - limitações: `escrever_delta` sobrescreve a tabela (recria a versão 0);
   `anexar_delta` pressupõe um único escritor (sem locks nem optimistic
   concurrency), sem partições, sem checkpoints, sem transações concorrentes.
+
+## Iceberg (catálogo Hadoop)
+
+`escrever_iceberg`/`anexar_iceberg`/`ler_iceberg` implementam o subconjunto de
+1ª passada do Iceberg com catálogo tipo Hadoop (diretório local), Avro OCF
+próprio (writer e reader, zero dependências) para manifest list + manifest e
+Parquet nativo para os data files:
+
+```tilt
+- escrever_iceberg vendas, "tabela_iceberg"   # cria/sobrescreve (metadata v0)
+- anexar_iceberg novas, "tabela_iceberg"      # append transacional (metadata v1, ...)
+- tabela = ler_iceberg "tabela_iceberg"       # concatena os data files ativos
+```
+
+- layout: `<dir>/data/<uuid>.parquet`, `<dir>/metadata/<uuid>-m0.avro`
+  (manifest), `<dir>/metadata/snap-<id>-0-<uuid>.avro` (manifest list) e
+  `<dir>/metadata/v<N>-<uuid>.metadata.json` com `format-version: 2`, schema
+  (tipos `texto`→string, `inteiro`→long, `decimal`→double, `logico`→boolean),
+  `partition-specs` vazio e a lista de snapshots com `parent-snapshot-id`;
+- `anexar_iceberg` valida que o schema é idêntico ao do metadata corrente,
+  grava um novo data file e commita a próxima versão com um novo snapshot cujo
+  manifest lista só o ADD do novo arquivo — os arquivos antigos permanecem
+  visíveis pela cadeia de pais. O commit grava o metadata num temporário do
+  mesmo diretório e publica com `rename()` (atômico no mesmo filesystem);
+  diretório inexistente ou schema divergente → erro claro;
+- a leitura resolve o snapshot atual percorrendo a cadeia de pais e coletando
+  adds menos removes dos manifests (status 2 = DELETED), concatenando os data
+  files com validação de schema entre arquivos;
+- limitações: catálogo só Hadoop (diretório local, sem REST/JDBC), sem
+  partições nem schema evolution, codec Avro "null" apenas, lê o que o tilt
+  escreve (sem garantia de tabelas de outros escritores) e single-writer (sem
+  locks nem optimistic concurrency).
 
 ## Bancos relacionais (SQLite e Postgres)
 

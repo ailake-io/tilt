@@ -27,6 +27,7 @@
 #include "runtime/llm.hpp"
 #include "runtime/parquet.hpp"
 #include "runtime/delta.hpp"
+#include "runtime/iceberg.hpp"
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
 #include "runtime/kafka.hpp"
@@ -3064,6 +3065,41 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       rt::delta_append(a[1].s, a[0]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "ler_iceberg") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_iceberg espera um diretorio");
+    try {
+      Value t = rt::iceberg_read(a[0].s);
+      t.kind = ValueKind::Tabela;
+      return t;
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "escrever_iceberg") {
+    auto a = args();
+    if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
+      fail(call.span, "escrever_iceberg espera (tabela, diretorio)");
+    }
+    try {
+      rt::iceberg_write(a[1].s, a[0]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "anexar_iceberg") {
+    auto a = args();
+    if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
+      fail(call.span, "anexar_iceberg espera (tabela, diretorio)");
+    }
+    try {
+      rt::iceberg_append(a[1].s, a[0]);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

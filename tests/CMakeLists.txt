@@ -42,6 +42,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo.tilt
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo2.tilt)
 
+add_test(
+  NAME iceberg
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/iceberg_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_roundtrip.tilt)
+
 find_program(PYTHON3 python3)
 if(PYTHON3)
   add_test(NAME lsp COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/lsp_test.py $<TARGET_FILE:tilt>)

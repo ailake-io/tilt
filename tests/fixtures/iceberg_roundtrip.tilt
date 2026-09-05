@@ -1,0 +1,14 @@
+pipeline principal:
+  passos:
+    - t1 = [
+        { nome: "ana", idade: 30, nota: 9.5 },
+        { nome: "bruno", idade: 40, nota: 7.0 }
+      ]
+    - t2 = [
+        { nome: "carla", idade: 50, nota: 8.0 }
+      ]
+    - escrever_iceberg t1, "tabela_iceberg"
+    - anexar_iceberg t2, "tabela_iceberg"
+    - tabela = ler_iceberg "tabela_iceberg"
+    - imprimir tamanho tabela
+    - imprimir tabela[0].nome, tabela[1].idade, tabela[2].nome
