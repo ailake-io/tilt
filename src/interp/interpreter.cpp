@@ -29,6 +29,7 @@
 #include "runtime/delta.hpp"
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
+#include "runtime/s3.hpp"
 #include "runtime/sqlite.hpp"
 #include "runtime/postgres.hpp"
 #include "runtime/pgvector.hpp"
@@ -3173,6 +3174,31 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       rt::redis_set(a[0].s, a[1].s, a[2]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "ler_s3") {
+    auto a = args();
+    if (a.size() < 1 || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "ler_s3 espera (url), ex.: ler_s3 \"s3://bucket/chave\"");
+    }
+    try {
+      return Value::texto(rt::s3_get(a[0].s));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "escrever_s3") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "escrever_s3 espera (url, valor), ex.: escrever_s3 \"s3://bucket/chave\", valor");
+    }
+    try {
+      const std::string body =
+          a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
+      rt::s3_put(a[0].s, body);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

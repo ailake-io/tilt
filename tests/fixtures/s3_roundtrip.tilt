@@ -1,0 +1,6 @@
+# Roundtrip S3 contra o mock SigV4 do s3_test.sh (S3_ENDPOINT aponta p/ ele).
+pipeline roundtrip:
+  passos:
+    - escrever_s3 "s3://bucket/teste.txt", "ola s3"
+    - conteudo = ler_s3 "s3://bucket/teste.txt"
+    - imprimir conteudo

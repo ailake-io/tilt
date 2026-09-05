@@ -196,6 +196,32 @@ pipeline cache:
   string, `mapa`/`lista` serializados como JSON compacto.
 - limitações: sem TLS, sem AUTH, sem db index, um comando por conexão.
 
+## S3 (AWS SigV4 próprio)
+
+Sem dependências: SHA-256/HMAC implementados em C++ (FIPS 180-4 / RFC 2104)
+e a assinatura AWS SigV4 calculada no próprio runtime; o HTTP sai pelo binário
+`curl`, mesmo padrão do Qdrant/LLM.
+
+```tilt
+pipeline arquivos:
+  passos:
+    - escrever_s3 "s3://meu-bucket/relatorios/vendas.txt", "ola s3"
+    - conteudo = ler_s3 "s3://meu-bucket/relatorios/vendas.txt"
+    - imprimir conteudo
+```
+
+- `ler_s3 "s3://bucket/chave"`: GET do objeto, conteúdo devolvido como
+  `texto` (a chave pode conter `/`).
+- `escrever_s3 "s3://bucket/chave", valor`: PUT; `texto` vai bruto, demais
+  valores são serializados com `json_dump`. Content-Type
+  `application/octet-stream`.
+- credenciais por variáveis de ambiente: `AWS_ACCESS_KEY_ID` e
+  `AWS_SECRET_ACCESS_KEY` (obrigatórias, string vazia conta como ausente),
+  `AWS_SESSION_TOKEN` (opcional), `AWS_REGION` (default `us-east-1`).
+- `S3_ENDPOINT` (default `https://s3.<region>.amazonaws.com`): aponte para
+  `http://host:porta` para S3-compatível (ex.: MinIO). O path do objeto é
+  codificado por segmento e a query string fica vazia nesta 1ª passada.
+
 ## Índice vetorial no Qdrant
 
 `indice` com `armazenamento: "qdrant://host:porta/colecao"` delega

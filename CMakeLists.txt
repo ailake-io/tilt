@@ -48,6 +48,8 @@ add_library(tilt_core STATIC
   src/runtime/delta.cpp
   src/runtime/qdrant.cpp
   src/runtime/redis.cpp
+  src/runtime/s3.cpp
+  src/runtime/sha256.cpp
   src/runtime/sqlite.cpp
   src/runtime/postgres.cpp
   src/runtime/pgvector.cpp

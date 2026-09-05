@@ -35,9 +35,14 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   concurrency), sem partições nem checkpoints; a leitura herda as limitações
   do Parquet acima, então tabelas de outros escritores só leem sem
   compressão/dictionary e com colunas obrigatórias.
-- Conectores ainda não cobertos (`kafka`, `s3`, `mongodb`, `iceberg`) →
-  `T900`. CSV, JSON, Parquet, Delta, SQLite, Postgres, Redis, Qdrant e
-  pgvector rodam.
+- Conectores ainda não cobertos (`kafka`, `mongodb`, `iceberg`) →
+  `T900`. CSV, JSON, Parquet, Delta, SQLite, Postgres, Redis, Qdrant,
+  pgvector e S3 rodam.
+- S3 (`ler_s3`/`escrever_s3`): 1ª passada com GET/PUT só — sem
+  list/delete/multipart, sem query string (versão/versionamento, ACL etc.) e
+  payload inteiro em memória; HTTP depende do binário `curl` e das
+  credenciais via env (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`).
+  Funciona com S3-compatível (MinIO etc.) via `S3_ENDPOINT`.
 - Bancos relacionais: somente consultas SELECT (sem INSERT/UPDATE via SQL,
   sem prepared statements); Postgres carrega `libpq.so.5` e SQLite
   `libsqlite3.so.0` via `dlopen` — precisam estar instalados no sistema.

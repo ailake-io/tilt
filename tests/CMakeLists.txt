@@ -18,6 +18,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico_lento.tilt)
 
 add_test(
+  NAME s3
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/s3_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/s3_roundtrip.tilt)
+
+add_test(
   NAME native
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/native_test.sh
           $<TARGET_FILE:tilt>

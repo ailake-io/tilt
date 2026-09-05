@@ -1,0 +1,7 @@
+erro[T901]: s3: defina AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY
+  --> input.tilt:3:11
+   |
+ 3 |     - v = ler_s3 "s3://127.0.0.1:59999/x"
+   |           ^^^^^^
+   |
+

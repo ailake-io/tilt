@@ -33,7 +33,7 @@ Toolchain interpretada **completa** (1ª passada de cada marco). O que roda hoje
 |---|---|---|
 | Sintaxe | lexer, parser, semântica (`checar`), interpretador de árvore, literais `[...]`/`{...}` multilinha | assinaturas exóticas de `funcao` |
 | Semântica | tipos, segredos, dispositivos, referências de ferramenta, resolução de nomes em `passos:`/`executar:` (`T030`), shape solver de `densa`/`linear` (`T012`) | shape solver fora de `densa`/`linear`, inferência completa de tipos |
-| Dados | CSV, JSON, **Parquet nativo** e **Delta Lake mínimo** (leitura/escrita, **append transacional** via `anexar_delta` — commit atômico por `rename`, single-writer — validados com pyarrow/delta-rs), `fonte` **sqlite**/**postgres** (SELECT via `dlopen`), Redis via **RESP nativo** (`ler_redis`/`escrever_redis`), índice **Qdrant** (`armazenamento: "qdrant://..."`) e **pgvector** (`armazenamento: "pgvector://colecao"` + `url:`), `pipeline`, `verificar`, `ao_falhar`, `agenda` com **loop real**, streaming `janela:` (contagem, tempo e throttle) | Kafka/S3, MongoDB/Iceberg (wire protocol/Avro) |
+| Dados | CSV, JSON, **Parquet nativo** e **Delta Lake mínimo** (leitura/escrita, **append transacional** via `anexar_delta` — commit atômico por `rename`, single-writer — validados com pyarrow/delta-rs), `fonte` **sqlite**/**postgres** (SELECT via `dlopen`), Redis via **RESP nativo** (`ler_redis`/`escrever_redis`), índice **Qdrant** (`armazenamento: "qdrant://..."`) e **pgvector** (`armazenamento: "pgvector://colecao"` + `url:`), **S3** (`ler_s3`/`escrever_s3` — SigV4 próprio, GET/PUT, via env + `curl`), `pipeline`, `verificar`, `ao_falhar`, `agenda` com **loop real**, streaming `janela:` (contagem, tempo e throttle) | Kafka, MongoDB/Iceberg (wire protocol/Avro) |
 | ML/DL | tensores f32 CPU (matmul multithread), `modelo` (inferência, `pesos:` de arquivo, `norma_camada`), `treino` (CE + quadrática, SGD/Adam), `carregador` | GPU só validado em `fake`; `conv2d`/`norma_lote`, backward de `norma_camada` |
 | LLM/RAG | `perguntar`, saída estruturada por `tipo`, `incorporar`, `indice` em memória (cosseno), no **Qdrant** (REST via `curl`) e no **pgvector** (SQL sobre libpq, cosseno `<=>`) | rede real precisa de `curl` |
 | Agentes | `ferramenta`, `agente.responder` (planner iterativo), `equipe` (sequencial/paralelo/supervisor) | planner tolerante a protocolo (1 linha/turno) |
@@ -213,7 +213,7 @@ CI: `.github/workflows/ci.yml` (Linux gcc + macOS + sanitizers) e
 ## Roadmap
 
 `M0`–`M12` + instalador + GPU + tooling de IA concluídos (1ª passada). A seguir:
-conectores de rede reais (Kafka/S3), append
+conectores de rede reais (Kafka), append
 transacional no Delta e publicação da extensão no Marketplace.
 
 ## Licença

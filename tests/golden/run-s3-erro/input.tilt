@@ -1,0 +1,4 @@
+pipeline s3:
+  passos:
+    - v = ler_s3 "s3://127.0.0.1:59999/x"
+    - imprimir v
