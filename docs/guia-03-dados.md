@@ -250,7 +250,13 @@ pipeline cache:
   erro claro.
 - `escrever_redis url, chave, valor`: SET; texto/numérico gravado como
   string, `mapa`/`lista` serializados como JSON compacto.
-- limitações: sem TLS, sem AUTH, sem db index, um comando por conexão.
+- AUTH e seleção de banco: a URL aceita userinfo para a senha e path
+  numérico para o db — `redis://:senha@host:6379/2` (AUTH `senha` + SELECT
+  2). Também dá para passar como opções, que **vencem** a URL:
+  `ler_redis url, "chave", {senha: "segredo", banco: 2}` /
+  `escrever_redis url, "chave", valor, {banco: 2}`. Sem senha/banco, o
+  comportamento é o de sempre (sem AUTH, db 0).
+- limitações: sem TLS, um comando por conexão.
 
 ## S3 (AWS SigV4 próprio)
 

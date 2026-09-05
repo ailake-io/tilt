@@ -1,0 +1,17 @@
+# Roundtrip Redis contra o mock RESP do redis_test.sh (REDIS_URL aponta p/ ele,
+# no formato "redis://:segredo@host:porta/0" — userinfo = senha, path = db).
+pipeline redis:
+  passos:
+    - url = env "REDIS_URL"
+    - escrever_redis url, "chave-x", "valor-a", {banco: 1}
+    - de_volta = ler_redis url, "chave-x", {banco: 1}
+    - imprimir de_volta
+    - tentar:
+        ausente = ler_redis url, "chave-x"
+        imprimir "inesperado:", ausente
+    capturar erro:
+      imprimir erro
+    - tentar:
+        escrever_redis url, "chave-y", "valor", {senha: "errada"}
+    capturar erro2:
+      imprimir erro2

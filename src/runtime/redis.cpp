@@ -25,16 +25,38 @@ namespace {
 constexpr int kTimeoutSec = 5;
 
 struct UrlParts {
-  std::string host;
-  std::string port;
+  std::string host = "localhost";
+  std::string port = "6379";
+  std::string auth;  // userinfo ":senha@" -> senha (vazio = sem AUTH)
+  int db = -1;       // path "/N" (negativo = sem SELECT)
 };
 
-// "redis://host:porta" -> host/porta; ausente -> localhost:6379.
+// "redis://[:senha@]host[:porta][/N]" -> host/porta/auth/db; ausente ->
+// localhost:6379, sem AUTH, sem SELECT. Query string nao e suportada.
 UrlParts parse_url(const std::string& url) {
   std::string rest = url;
   const std::string prefix = "redis://";
   if (rest.rfind(prefix, 0) == 0) rest = rest.substr(prefix.size());
-  UrlParts parts{"localhost", "6379"};
+  UrlParts parts;
+  // userinfo: tudo antes do '@' ("usuario:senha" ou ":senha"; o usuario,
+  // se houver, e ignorado — o Redis classic AUTH so usa a senha).
+  const std::size_t at = rest.rfind('@');
+  if (at != std::string::npos) {
+    const std::string ui = rest.substr(0, at);
+    rest = rest.substr(at + 1);
+    const std::size_t colon = ui.find(':');
+    parts.auth = colon == std::string::npos ? ui : ui.substr(colon + 1);
+  }
+  // path: "/N" -> numero do banco.
+  const std::size_t slash = rest.find('/');
+  if (slash != std::string::npos) {
+    const std::string dbs = rest.substr(slash + 1);
+    rest = rest.substr(0, slash);
+    if (dbs.empty() || dbs.find_first_not_of("0123456789") != std::string::npos) {
+      die("path da URL deve ser o numero do banco (ex.: redis://host:6379/2)");
+    }
+    parts.db = std::atoi(dbs.c_str());
+  }
   const std::size_t colon = rest.rfind(':');
   if (colon == std::string::npos) {
     if (!rest.empty()) parts.host = rest;
@@ -47,11 +69,19 @@ UrlParts parse_url(const std::string& url) {
   return parts;
 }
 
+// Aplica as opcoes do builtin por cima do que a URL trouxe: opcao informada
+// (senha nao vazia / banco >= 0) vence a URL; ausente herda a URL.
+RedisOpts merge_opts(const UrlParts& parts, const RedisOpts& opts) {
+  RedisOpts eff;
+  eff.auth = opts.auth.empty() ? parts.auth : opts.auth;
+  eff.db = opts.db < 0 ? parts.db : opts.db;
+  return eff;
+}
+
 // Conexao simples: abre, usa, fecha. Bloqueante com timeout de recv/send.
 class Conn {
  public:
-  explicit Conn(const std::string& url) {
-    const UrlParts parts = parse_url(url);
+  explicit Conn(const UrlParts& parts) {
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -187,9 +217,26 @@ std::string encode_cmd(const std::vector<std::string>& args) {
   return out;
 }
 
-// Envia o comando e devolve a resposta; '-ERR...' vira excecao.
-Resp command(const std::string& url, const std::vector<std::string>& args) {
-  Conn conn(url);
+// Envia AUTH/SELECT conforme as opcoes efetivas; ambos exigem +OK.
+void handshake(Conn& conn, const RedisOpts& opts) {
+  if (!opts.auth.empty()) {
+    conn.send_all(encode_cmd({"AUTH", opts.auth}));
+    const Resp r = read_resp(conn);
+    if (r.type != '+') die("auth falhou (senha invalida?)");
+  }
+  if (opts.db >= 0) {
+    conn.send_all(encode_cmd({"SELECT", std::to_string(opts.db)}));
+    const Resp r = read_resp(conn);
+    if (r.type != '+') die("select db " + std::to_string(opts.db) + " falhou");
+  }
+}
+
+// Abre a conexao, faz o handshake opcional, envia o comando e devolve a
+// resposta; '-ERR...' vira excecao.
+Resp command(const UrlParts& parts, const RedisOpts& opts,
+             const std::vector<std::string>& args) {
+  Conn conn(parts);
+  handshake(conn, opts);
   conn.send_all(encode_cmd(args));
   Resp r = read_resp(conn);
   if (r.type == '-') die(r.str);
@@ -272,8 +319,9 @@ std::string value_to_string(const Value& v) {
 
 }  // namespace
 
-Value redis_get(const std::string& url, const std::string& chave) {
-  Resp r = command(url, {"GET", chave});
+Value redis_get(const std::string& url, const std::string& chave, const RedisOpts& opts) {
+  const UrlParts parts = parse_url(url);
+  Resp r = command(parts, merge_opts(parts, opts), {"GET", chave});
   if (r.type != '$') die("resposta inesperada para GET (tipo '" + std::string(1, r.type) + "')");
   if (r.nil) die("chave '" + chave + "' nao encontrada");
 
@@ -288,8 +336,10 @@ Value redis_get(const std::string& url, const std::string& chave) {
   return Value::texto(raw);
 }
 
-void redis_set(const std::string& url, const std::string& chave, const Value& valor) {
-  Resp r = command(url, {"SET", chave, value_to_string(valor)});
+void redis_set(const std::string& url, const std::string& chave, const Value& valor,
+               const RedisOpts& opts) {
+  const UrlParts parts = parse_url(url);
+  Resp r = command(parts, merge_opts(parts, opts), {"SET", chave, value_to_string(valor)});
   if (r.type != '+') die("resposta inesperada para SET (tipo '" + std::string(1, r.type) + "')");
 }
 

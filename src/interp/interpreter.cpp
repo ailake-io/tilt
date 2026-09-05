@@ -3335,13 +3335,32 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     fail(call.span, "ler: esperava uma 'fonte' declarada", DiagCode::ConnectorNotImplemented);
   }
+  // Opcoes {senha:, banco:} comuns a ler_redis/escrever_redis; vencem a URL.
+  auto redis_opts = [&](const std::vector<Value>& a, std::size_t idx) -> rt::RedisOpts {
+    rt::RedisOpts opts;
+    if (a.size() <= idx) return opts;
+    if (a[idx].kind != ValueKind::Mapa || !a[idx].map) {
+      fail(call.span, "redis: opcoes devem ser um mapa {senha:, banco:}");
+    }
+    if (const Value* sv = a[idx].map->find("senha")) {
+      if (sv->kind != ValueKind::Texto) fail(call.span, "redis: 'senha' deve ser texto");
+      opts.auth = sv->s;
+    }
+    if (const Value* bv = a[idx].map->find("banco")) {
+      if (bv->kind != ValueKind::Inteiro) fail(call.span, "redis: 'banco' deve ser inteiro");
+      opts.db = static_cast<int>(bv->i);
+    }
+    return opts;
+  };
   if (name == "ler_redis") {
     auto a = args();
     if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
-      fail(call.span, "ler_redis espera (url, chave), ex.: ler_redis \"redis://localhost:6379\", \"chave\"");
+      fail(call.span,
+           "ler_redis espera (url, chave, {senha:, banco:}), ex.: ler_redis "
+           "\"redis://:segredo@localhost:6379/2\", \"chave\"");
     }
     try {
-      return rt::redis_get(a[0].s, a[1].s);
+      return rt::redis_get(a[0].s, a[1].s, redis_opts(a, 2));
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -3350,10 +3369,11 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     auto a = args();
     if (a.size() < 3 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
       fail(call.span,
-           "escrever_redis espera (url, chave, valor), ex.: escrever_redis url, \"chave\", valor");
+           "escrever_redis espera (url, chave, valor, {senha:, banco:}), ex.: escrever_redis "
+           "url, \"chave\", valor");
     }
     try {
-      rt::redis_set(a[0].s, a[1].s, a[2]);
+      rt::redis_set(a[0].s, a[1].s, a[2], redis_opts(a, 3));
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

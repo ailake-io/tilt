@@ -70,7 +70,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Bancos relacionais: somente consultas SELECT (sem INSERT/UPDATE via SQL,
   sem prepared statements); Postgres carrega `libpq.so.5` e SQLite
   `libsqlite3.so.0` via `dlopen` — precisam estar instalados no sistema.
-- Redis: sem TLS/AUTH/db index, um comando por conexão, timeout fixo de 5s.
+- Redis: sem TLS (fase próxima), um comando por conexão, timeout fixo de 5s.
+  AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT
+  via path numérico (`redis://host:6379/2`) ou opção `banco:`.
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
   id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
   `texto`, que fica no payload do ponto).
