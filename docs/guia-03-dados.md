@@ -199,29 +199,53 @@ próprio (writer e reader, zero dependências) para manifest list + manifest e
 Parquet nativo para os data files:
 
 ```tilt
-- escrever_iceberg vendas, "tabela_iceberg"   # cria/sobrescreve (metadata v0)
-- anexar_iceberg novas, "tabela_iceberg"      # append transacional (metadata v1, ...)
-- tabela = ler_iceberg "tabela_iceberg"       # concatena os data files ativos
+- escrever_iceberg vendas, "tabela_iceberg"                    # cria/sobrescreve (metadata v0)
+- escrever_iceberg vendas, "tabela_iceberg", particionar_por: "estado"
+- anexar_iceberg novas, "tabela_iceberg"                       # append transacional (metadata v1, ...)
+- anexar_iceberg novas, "tabela_iceberg", particionar_por: "estado"
+- tabela = ler_iceberg "tabela_iceberg"                        # concatena os data files ativos
 ```
 
-- layout: `<dir>/data/<uuid>.parquet`, `<dir>/metadata/<uuid>-m0.avro`
+- layout: `<dir>/data/<uuid>.parquet` (tabela sem partição) ou
+  `<dir>/data/<col>=<valor>/00000-0-<uuid>.parquet` (naming iceberg:
+  `<partition-path>/<file>.parquet`), `<dir>/metadata/<uuid>-m0.avro`
   (manifest), `<dir>/metadata/snap-<id>-0-<uuid>.avro` (manifest list) e
   `<dir>/metadata/v<N>-<uuid>.metadata.json` com `format-version: 2`, schema
-  (tipos `texto`→string, `inteiro`→long, `decimal`→double, `logico`→boolean),
-  `partition-specs` vazio e a lista de snapshots com `parent-snapshot-id`;
+  (tipos `texto`→string, `inteiro`→long, `decimal`→double, `logico`→boolean;
+  a coluna de partição fica `required: false`, como no Spark), snapshot e
+  `partition-specs` com `default-spec-id: 0`;
+- partições (1ª passada): `particionar_por: "coluna"` aceita texto, inteiro,
+  decimal ou lógico e cria um partition spec **identity** de uma coluna —
+  `partition-spec` legado (lista de nomes) + `partition-specs` com
+  `{field-id: 1000, source-id, transform: "identity", name}`; a coluna de
+  partição **não vai no parquet** (o field_id das demais colunas no arquivo
+  segue o id do schema Iceberg) e cada `data_file` do manifest ganha um
+  record `partition` com o valor no tipo da coluna (string/long/double/
+  boolean). `ler_iceberg` resolve o spec do metadata e reidrata a coluna a
+  partir dos manifests, convertendo pelo tipo do schema. Valor nulo em coluna
+  de partição e texto com `/` falham com erro claro (sem
+  `__HIVE_DEFAULT_PARTITION__` nem escaping);
 - `anexar_iceberg` valida que o schema é idêntico ao do metadata corrente,
-  grava um novo data file e commita a próxima versão com um novo snapshot cujo
-  manifest lista só o ADD do novo arquivo — os arquivos antigos permanecem
-  visíveis pela cadeia de pais. O commit grava o metadata num temporário do
-  mesmo diretório e publica com `rename()` (atômico no mesmo filesystem);
+  herda o partition spec da tabela (erro se `particionar_por` diverge ou se a
+  tabela não é particionada), grava os novos data files e commita a próxima
+  versão com um novo snapshot cujo manifest lista os arquivos já ativos como
+  EXISTING (status 0) além do ADD (status 1) — como um append rápido de um
+  writer real, para que um reader como pyiceberg resolva só pelos manifests
+  do snapshot corrente. O commit grava o metadata num temporário do mesmo
+  diretório e publica com `rename()` (atômico no mesmo filesystem);
   diretório inexistente ou schema divergente → erro claro;
 - a leitura resolve o snapshot atual percorrendo a cadeia de pais e coletando
   adds menos removes dos manifests (status 2 = DELETED), concatenando os data
   files com validação de schema entre arquivos;
-- limitações: catálogo só Hadoop (diretório local, sem REST/JDBC), sem
-  partições nem schema evolution, codec Avro "null" apenas, lê o que o tilt
-  escreve (sem garantia de tabelas de outros escritores) e single-writer (sem
-  locks nem optimistic concurrency).
+- interop: metadata, manifest list, manifest e parquet carregam no
+  **pyiceberg** (`StaticTable.from_metadata(...).scan().to_arrow()`) — field
+  ids da spec v2 nos schemas Avro, `field.id` nos parquet e coluna de
+  partição reidratada pelo reader de verdade;
+- limitações: catálogo só Hadoop (diretório local, sem REST/JDBC), só
+  transform identity com 1 coluna e sem schema evolution, codec Avro "null"
+  apenas, lê o que o tilt escreve (sem garantia de tabelas de outros
+  escritores), a leitura não filtra por partição (lê tudo e reidrata) e
+  single-writer (sem locks nem optimistic concurrency).
 
 ## Bancos relacionais (SQLite e Postgres)
 

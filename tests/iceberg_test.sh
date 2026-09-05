@@ -4,7 +4,8 @@
 # python3 verifier inspects the table directory — parses the metadata JSON
 # (format-version 2, snapshot chain with parent, snapshot log) and the Avro OCF
 # files (manifest list + manifest) to check the final snapshot references the
-# appended data file with the right record_count.
+# appended data file as ADDED (status 1) and the previous one as EXISTING
+# (status 0), both with the right record_count.
 set -eu
 
 BIN="$1"
@@ -210,7 +211,7 @@ _, mlist = ocf(sem_file(snaps[1]["manifest-list"]))
 if len(mlist) != 1:
     raise Erro("manifest list do append deve ter 1 registro")
 m0 = mlist[0]
-if m0["added_files_count"] != 1 or m0["added_snapshot_id"] != cur_id:
+if m0["added_files_count"] != 1 or m0["existing_files_count"] != 1 or m0["added_snapshot_id"] != cur_id:
     raise Erro("manifest list: contagens/snapshot incorretos")
 mpath = sem_file(m0["manifest_path"])
 if not os.path.exists(mpath):
@@ -219,14 +220,18 @@ if os.path.getsize(mpath) != m0["manifest_length"]:
     raise Erro("manifest_length diverge do tamanho real")
 
 schema, entries = ocf(mpath)
-if len(entries) != 1:
-    raise Erro("manifest do append deve ter 1 entrada")
-e = entries[0]
+# fase 26: append rapido ao estilo writer real — o manifest do novo snapshot
+# lista os arquivos ja ativos como EXISTING (status 0) alem do ADDED (1),
+# porque um reader real (pyiceberg) so le os manifests do snapshot corrente.
+if len(entries) != 2:
+    raise Erro("manifest do append deve ter 2 entradas (EXISTING + ADDED), obtidas %d" % len(entries))
+by_status = {e["status"]: e for e in entries}
+if 0 not in by_status or 1 not in by_status:
+    raise Erro("manifest do append: esperados status 0 (EXISTING) e 1 (ADDED)")
+e = by_status[1]
 df = e["data_file"]
-if e["status"] != 1:
-    raise Erro("entrada do append deve ter status 1 (ADDED)")
-if e["snapshot_id"] != cur_id:
-    raise Erro("snapshot_id da entrada != snapshot corrente")
+if e["snapshot_id"] != cur_id or by_status[0]["snapshot_id"] != cur_id:
+    raise Erro("snapshot_id das entradas != snapshot corrente")
 if df["record_count"] != 1:
     raise Erro("record_count do append deve ser 1, obtido %r" % df["record_count"])
 if df["file_format"] != "PARQUET" or df["content"] != 0:
@@ -238,6 +243,8 @@ if os.path.getsize(dpath) != df["file_size_in_bytes"]:
     raise Erro("file_size_in_bytes diverge do tamanho real")
 if not dpath.endswith(".parquet") or "/data/" not in dpath:
     raise Erro("data file fora de data/: " + dpath)
+if by_status[0]["data_file"]["record_count"] != 2:
+    raise Erro("record_count EXISTING deve ser 2 (data file do overwrite)")
 
 # (c) manifest do snapshot inicial: ainda referencia o 1o data file (2 linhas) -
 _, mlist0 = ocf(sem_file(snaps[0]["manifest-list"]))

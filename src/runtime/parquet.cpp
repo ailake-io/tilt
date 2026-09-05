@@ -746,7 +746,8 @@ void decode_chunk(const std::string& file, const ColMeta& cm, std::vector<Value>
 
 }  // namespace
 
-void parquet_write(const std::string& path, const Value& tabela) {
+void parquet_write(const std::string& path, const Value& tabela,
+                   const std::vector<int>* field_ids) {
   std::vector<Column> cols;
   table_to_columns(tabela, cols);
   const std::size_t nrows = cols[0].rows;
@@ -807,11 +808,13 @@ void parquet_write(const std::string& path, const Value& tabela) {
     fw.field_str(4, "schema");
     fw.field_i32(5, static_cast<std::int32_t>(cols.size()));
     fw.struct_end();
-    for (const Column& c : cols) {
+    for (std::size_t k = 0; k < cols.size(); ++k) {
+      const Column& c = cols[k];
       fw.struct_begin();
       fw.field_i32(1, static_cast<std::int32_t>(c.type));
       fw.field_i32(3, c.optional ? 1 : 0);  // 0 = REQUIRED, 1 = OPTIONAL
       fw.field_str(4, c.name);
+      fw.field_i32(9, field_ids ? (*field_ids)[k] : static_cast<std::int32_t>(k + 1));
       fw.struct_end();
     }
   }

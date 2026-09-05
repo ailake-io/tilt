@@ -19,3 +19,8 @@ tests/golden/run-delta-particionado/erro_barra/
 tests/golden/run-delta-particionado/erro_nulo/
 tests/golden/run-iceberg/saida_iceberg/
 tests/golden/*/*.tilt-offset
+tests/golden/run-iceberg-particionado/vendas/
+tests/golden/run-iceberg-particionado/por_ano/
+tests/golden/run-iceberg-particionado/avulsos/
+tests/golden/run-iceberg-particionado/erro_barra/
+tests/golden/run-iceberg-particionado/erro_nulo/

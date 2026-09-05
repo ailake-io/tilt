@@ -43,13 +43,23 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   reidrata) e não há checkpoints; a leitura herda o subconjunto do Parquet
   acima.
 - Iceberg é de 1ª passada: catálogo só **Hadoop** (diretório local — sem
-  REST/JDBC), sem partições nem schema evolution, codec Avro "null" apenas, a
-  leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
-  escritores sem garantia além dele) e single-writer (sem locks nem
+  REST/JDBC), schema evolution só para leitura do que foi escrito, codec Avro
+  "null" apenas, a leitura cobre o mesmo subconjunto do Parquet acima (tabelas
+  de outros escritores sem garantia além dele) e single-writer (sem locks nem
   optimistic concurrency);
   `escrever_iceberg` sobrescreve a tabela (recria a versão 0) e o append é via
-  `anexar_iceberg` (novo snapshot por commit atômico de `rename`, cadeia de
-  pais com adds menos removes).
+  `anexar_iceberg` (novo snapshot por commit atômico de `rename`; o manifest
+  do novo snapshot lista os arquivos ativos como EXISTING + o ADD — além da
+  cadeia de pais com adds menos removes).
+  Partições existem para **uma coluna** e só com transform `identity`
+  (`particionar_por:`, layout `<col>=<valor>/00000-0-<uuid>.parquet` sem a
+  coluna no parquet, record `partition` no manifest e coluna reidratada na
+  leitura com conversão de tipo), mas: valor nulo em coluna de partição e
+  valores com `/` não são suportados (erro claro, sem escaping), a leitura não
+  filtra por partição (lê tudo e reidrata), não há partitions summary nos
+  manifests e data sequence numbers são sempre 0. A estrutura escrita
+  (metadata, manifest list, manifest e parquet com field-ids) carrega no
+  **pyiceberg**.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, Redis, Kafka,
   MongoDB, Qdrant, pgvector e S3 rodam.

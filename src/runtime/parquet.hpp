@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "runtime/value.hpp"
 
@@ -10,6 +11,10 @@ namespace tilt::rt {
 // - writer: um row group, encoding PLAIN, sem compressao; colunas sem nulos
 //   sao REQUIRED (identico a antes) e colunas com nulos viram OPTIONAL, com
 //   definition levels RLE (0 = nulo, 1 = definido) e valores nulos omitidos;
+//   cada coluna leva o field_id (thrift SchemaElement[9]) — 1..N por padrao,
+//   ou o vetor explicito em `field_ids` (mesma ordem das colunas), para
+//   casar com os ids do schema Iceberg quando uma coluna fica fora do
+//   arquivo (ex.: coluna de particao);
 // - tipos: logico -> BOOLEAN, inteiro -> INT64, decimal -> DOUBLE,
 //   texto -> BYTE_ARRAY (nulo e aceito em qualquer uma delas);
 // - reader: le todos os row groups (concatena), campos REQUIRED e OPTIONAL
@@ -20,7 +25,8 @@ namespace tilt::rt {
 //
 // Lanca std::runtime_error com mensagem acionavel em qualquer limite.
 
-void parquet_write(const std::string& path, const Value& tabela);
+void parquet_write(const std::string& path, const Value& tabela,
+                   const std::vector<int>* field_ids = nullptr);
 Value parquet_read(const std::string& path);  // -> tabela (lista de mapas)
 
 }  // namespace tilt::rt

@@ -3284,11 +3284,19 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
   if (name == "escrever_iceberg") {
     auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "escrever_iceberg espera (tabela, diretorio)");
     }
+    std::string part_col;
+    if (const Value* p = kw.find("particionar_por")) {
+      if (p->kind != ValueKind::Texto) {
+        fail(call.span, "escrever_iceberg: 'particionar_por' deve ser texto (ex.: particionar_por: \"estado\")");
+      }
+      part_col = p->s;
+    }
     try {
-      rt::iceberg_write(a[1].s, a[0]);
+      rt::iceberg_write(a[1].s, a[0], part_col);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -3296,11 +3304,19 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
   if (name == "anexar_iceberg") {
     auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "anexar_iceberg espera (tabela, diretorio)");
     }
+    std::string part_col;
+    if (const Value* p = kw.find("particionar_por")) {
+      if (p->kind != ValueKind::Texto) {
+        fail(call.span, "anexar_iceberg: 'particionar_por' deve ser texto (ex.: particionar_por: \"estado\")");
+      }
+      part_col = p->s;
+    }
     try {
-      rt::iceberg_append(a[1].s, a[0]);
+      rt::iceberg_append(a[1].s, a[0], part_col);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
