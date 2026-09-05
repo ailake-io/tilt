@@ -18,3 +18,4 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 10 | [IA e editores](guia-10-ia-editores.md) | `checar --json`, `referencia`, `checar_tilt`, `tilt lsp`/`completar`, Neovim, VS Code |
 | 11 | [Diagnósticos](guia-11-diagnosticos.md) | todos os códigos `Tnnn` com exemplo |
 | 12 | [Limitações](guia-12-limitacoes.md) | status da 1ª passada — o que ainda não funciona |
+| 13 | [Instalação e distribuição](guia-13-instalacao.md) | requisitos, instalação do fonte, binários pré-compilados, gerar tarball/`.deb`/Release, extensão VS Code |
