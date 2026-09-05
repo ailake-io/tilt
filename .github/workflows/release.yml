@@ -52,3 +52,40 @@ jobs:
             tilt-*.tar.gz
             tilt-*.tar.gz.sha256
           generate_release_notes: true
+
+  # Empacota a extensão VS Code e publica no Marketplace quando o secret
+  # VSCE_PAT está configurado (sem o secret, só anexa o .vsix ao release).
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: install + package
+        working-directory: editors/vscode
+        run: |
+          npm ci
+          npm run package
+
+      # secrets nao sao acessiveis em 'if:'; exporta-se um flag via output.
+      - name: VSCE_PAT configurado?
+        id: pat
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [ -n "$VSCE_PAT" ]; then echo "set=true" >> "$GITHUB_OUTPUT";
+          else echo "set=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: publish to Marketplace
+        if: steps.pat.outputs.set == 'true'
+        working-directory: editors/vscode
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx @vscode/vsce publish -p "$VSCE_PAT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: editors/vscode/*.vsix

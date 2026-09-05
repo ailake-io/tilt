@@ -43,8 +43,15 @@ code --install-extension tilt-0.1.0.vsix
 
 ## Publicar no Marketplace (opcional)
 
+Manual:
+
 ```bash
 npx @vscode/vsce login ailake-io
 npm run package
 npx @vscode/vsce publish
 ```
+
+CI: o workflow `release.yml` empacota a extensão em toda tag `v*` e anexa o
+`.vsix` ao GitHub Release; com o secret `VSCE_PAT` configurado no repositório
+(token do Marketplace / Azure DevOps, publisher `ailake-io`), ela também é
+publicada automaticamente no Marketplace.

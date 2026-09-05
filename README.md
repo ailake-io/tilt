@@ -212,8 +212,10 @@ CI: `.github/workflows/ci.yml` (Linux gcc + macOS + sanitizers) e
 
 ## Roadmap
 
-`M0`–`M12` + instalador + GPU + tooling de IA concluídos (1ª passada). A seguir:
-publicação da extensão no Marketplace.
+`M0`–`M12` + instalador + GPU + tooling de IA + conectores (S3, Kafka,
+MongoDB, Iceberg) + streaming `janela:` + append Delta concluídos (1ª
+passada). Publicação da extensão no Marketplace é automática em tags `v*`
+via `release.yml` ao configurar o secret `VSCE_PAT` no repositório.
 
 ## Licença
 
