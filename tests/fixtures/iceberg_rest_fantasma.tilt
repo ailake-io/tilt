@@ -1,0 +1,4 @@
+pipeline principal:
+  passos:
+    - tabela = ler_iceberg "tabela_fantasma"
+    - imprimir tamanho tabela

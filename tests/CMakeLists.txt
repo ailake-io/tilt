@@ -67,6 +67,15 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_roundtrip.tilt)
 
 add_test(
+  NAME iceberg_rest
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/iceberg_rest_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_roundtrip.tilt
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_rest_evolucao.tilt
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_rest_fantasma.tilt
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_rest_sobrescrita.tilt)
+
+add_test(
   NAME janela_offset
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/janela_offset_test.sh
           $<TARGET_FILE:tilt>

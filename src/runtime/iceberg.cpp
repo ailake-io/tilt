@@ -6,13 +6,17 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -605,6 +609,26 @@ std::string schema_json_fields(const std::vector<Column>& fields) {
            fields[k].type + "\"}";
   }
   out += ']';
+  return out;
+}
+
+// Schema Iceberg como objeto struct (createTable REST e update add-schema):
+// {"type":"struct","schema-id":N,"fields":[...],"identifier-field-ids":[]}.
+std::string schema_struct_json(std::int64_t schema_id, const std::vector<Column>& fields) {
+  return "{\"type\":\"struct\",\"schema-id\":" + std::to_string(schema_id) +
+         ",\"fields\":" + schema_json_fields(fields) + ",\"identifier-field-ids\":[]}";
+}
+
+// Partition spec como objeto (createTable REST): {"spec-id":0,"fields":[...]}.
+std::string partition_spec_json(const std::vector<PartitionField>& spec) {
+  std::string out = "{\"spec-id\":0,\"fields\":[";
+  for (std::size_t k = 0; k < spec.size(); ++k) {
+    const PartitionField& pf = spec[k];
+    out += (k ? ", " : "") + std::string("{ \"field-id\": ") + std::to_string(pf.field_id) +
+           ", \"source-id\": " + std::to_string(pf.source_id) +
+           ", \"transform\": \"identity\", \"name\": \"" + json_escape(pf.name) + "\" }";
+  }
+  out += "]}";
   return out;
 }
 
@@ -1411,20 +1435,37 @@ MergedSchema merge_append_schema(const TableMeta& meta, const Value& tabela) {
   return merged;
 }
 
-}  // namespace
+// ---------------------------------------------------------------------------
+// Nucleos compartilhados pelos modos Hadoop (local) e REST catalog (fase 29):
+// write_core/append_core fazem todo o trabalho de escrita local (data files,
+// manifest, manifest list e metadata JSON) e read_core le a partir de um
+// TableMeta ja carregado. O modo Hadoop so carrega o metadata do diretorio e
+// commita; o modo REST troca essas duas pontas por chamadas ao catalogo.
+// ---------------------------------------------------------------------------
 
-void iceberg_write(const std::string& dir, const Value& tabela, const std::string& part_col) {
-  std::vector<Column> cols = table_columns(tabela, "escrever_iceberg");
+struct WriteCore {
+  Snapshot snap;
+  std::vector<Column> cols;
+  std::vector<PartitionField> spec_fields;
+  std::string json;
+};
+
+// `schema_id` e o id sob o qual o schema desta escrita e registrado (0 na
+// criacao; max+1 quando se sobrescreve uma tabela REST existente).
+WriteCore write_core(const std::string& dir, const Value& tabela, const std::string& part_col,
+                     std::int64_t schema_id) {
+  WriteCore wc;
+  wc.cols = table_columns(tabela, "escrever_iceberg");
   // ids 1..N na ordem do schema; a coluna fonte da particao fica optional
   // no metadata (padrao Spark — readers reais so reidratam campo optional)
-  for (std::size_t k = 0; k < cols.size(); ++k) {
-    cols[k].id = static_cast<std::int64_t>(k + 1);
-    cols[k].required = cols[k].name != part_col;
+  for (std::size_t k = 0; k < wc.cols.size(); ++k) {
+    wc.cols[k].id = static_cast<std::int64_t>(k + 1);
+    wc.cols[k].required = wc.cols[k].name != part_col;
   }
   PartitionSpec spec;
   const PartitionSpec* pspec = nullptr;
   if (!part_col.empty()) {
-    spec = make_spec(cols, part_col, "escrever_iceberg");
+    spec = make_spec(wc.cols, part_col, "escrever_iceberg");
     pspec = &spec;
   }
   mkdir_if_missing(dir);
@@ -1432,67 +1473,64 @@ void iceberg_write(const std::string& dir, const Value& tabela, const std::strin
   mkdir_if_missing(meta_dir);
   mkdir_if_missing(dir + "/data");
 
-  // sobrescreve: remove metadata anterior (data avro/parquet orfao fica para
-  // tras, como no delta — a leitura so enxerga o que o metadata referencia).
-  for (const std::string& old : list_metadata_files(meta_dir)) {
-    if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
-  }
-
   const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, nullptr);
 
   std::vector<std::pair<int, std::string>> changes;
   for (const FileInfo& f : datas) changes.emplace_back(1, f.path);
 
-  const std::vector<PartitionField> spec_fields =
-      pspec ? std::vector<PartitionField>{spec.field} : std::vector<PartitionField>{};
+  wc.spec_fields = pspec ? std::vector<PartitionField>{spec.field} : std::vector<PartitionField>{};
 
   const std::int64_t snapshot_id = new_snapshot_id();
   const std::int64_t ts = now_ms();
 
   const std::string manifest_name =
-      write_manifest(meta_dir, changes, snapshot_id, datas, spec_fields);
+      write_manifest(meta_dir, changes, snapshot_id, datas, wc.spec_fields);
   std::int64_t added_rows = 0;
   for (const FileInfo& f : datas) added_rows += f.records;
   const std::string list_path =
       write_manifest_list(meta_dir, manifest_name, snapshot_id,
                           static_cast<int>(datas.size()), 0, 0, added_rows, 0);
 
-  Snapshot snap;
-  snap.id = snapshot_id;
-  snap.ts = ts;
-  snap.operation = "overwrite";
-  snap.manifest_list = list_path;
-  snap.has_parent = false;
-  snap.parent = -1;
+  wc.snap.id = snapshot_id;
+  wc.snap.ts = ts;
+  wc.snap.operation = "overwrite";
+  wc.snap.manifest_list = list_path;
+  wc.snap.has_parent = false;
+  wc.snap.parent = -1;
 
-  const std::string json = build_metadata_json(dir, {SchemaVer{0, cols}}, 0,
-                                               static_cast<std::int64_t>(cols.size()), spec_fields,
-                                               {snap}, {{ts, snapshot_id}}, snapshot_id, ts);
-  commit_metadata(dir, 0, json);
+  wc.json = build_metadata_json(dir, {SchemaVer{schema_id, wc.cols}}, schema_id,
+                                static_cast<std::int64_t>(wc.cols.size()), wc.spec_fields,
+                                {wc.snap}, {{ts, snapshot_id}}, snapshot_id, ts);
+  return wc;
 }
 
-void iceberg_append(const std::string& dir, const Value& tabela, const std::string& part_col_req) {
-  struct stat st {};
-  if (::stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
-    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
-  }
-  const std::string meta_dir = dir + "/metadata";
-  if (::stat(meta_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
-    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
-  }
+struct AppendCore {
+  Snapshot snap;
+  std::vector<Column> cols;  // schema resultante (merged)
+  std::vector<SchemaVer> schemas;
+  std::int64_t current_schema_id = 0;
+  bool evolved = false;
+  std::int64_t last_column_id = 0;
+  std::int64_t version = 0;
+  std::string json;
+};
 
-  TableMeta meta;
-  latest_metadata_path(dir, meta);
+AppendCore append_core(const std::string& dir, const TableMeta& meta, const Value& tabela,
+                       const std::string& part_col_req) {
+  AppendCore ac;
   // Validacao de schema por nome com merge para evolucao (fase 27): colunas
   // novas entram optional no fim com id novo; remocao/tipo divergente -> erro.
   const MergedSchema merged = merge_append_schema(meta, tabela);
+  ac.cols = merged.cols;
 
   // Particao: herda o spec da tabela existente; erro se explicita e diverge.
   PartitionSpec spec;
   const PartitionSpec* pspec = nullptr;
+  std::vector<PartitionField> spec_fields;
   if (!meta.spec.empty()) {
     spec.field = meta.spec.front();
     pspec = &spec;
+    spec_fields.push_back(spec.field);
     if (!part_col_req.empty() && part_col_req != spec.field.name) {
       die("anexar_iceberg: tabela em '" + dir + "' ja e particionada por '" + spec.field.name +
           "' (recebido particionar_por: '" + part_col_req + "')");
@@ -1504,6 +1542,8 @@ void iceberg_append(const std::string& dir, const Value& tabela, const std::stri
         "' nao e particionada — recrie-a com escrever_iceberg tabela, \"" + dir +
         "\", particionar_por: \"" + part_col_req + "\"");
   }
+
+  mkdir_if_missing(dir + "/data");
 
   // Arquivos ja ativos: entram no novo manifest como EXISTING (status 0),
   // como faz um append rapido de writer real — um reader como pyiceberg so
@@ -1537,52 +1577,49 @@ void iceberg_append(const std::string& dir, const Value& tabela, const std::stri
   const std::int64_t snapshot_id = new_snapshot_id();
   const std::int64_t ts = now_ms();
 
-  const std::vector<PartitionField> spec_fields =
-      pspec ? std::vector<PartitionField>{spec.field} : std::vector<PartitionField>{};
+  const std::string meta_dir = dir + "/metadata";
   const std::string manifest_name =
       write_manifest(meta_dir, changes, snapshot_id, infos, spec_fields);
   const std::string list_path = write_manifest_list(
       meta_dir, manifest_name, snapshot_id, static_cast<int>(datas.size()),
       static_cast<int>(previous.size()), 0, added_rows, existing_rows);
 
-  Snapshot snap;
-  snap.id = snapshot_id;
-  snap.ts = ts;
-  snap.operation = "append";
-  snap.manifest_list = list_path;
-  snap.parent = meta.current_snapshot;
-  snap.has_parent = meta.current_snapshot >= 0;
+  ac.snap.id = snapshot_id;
+  ac.snap.ts = ts;
+  ac.snap.operation = "append";
+  ac.snap.manifest_list = list_path;
+  ac.snap.parent = meta.current_snapshot;
+  ac.snap.has_parent = meta.current_snapshot >= 0;
 
   std::vector<Snapshot> snapshots = meta.snapshots;
-  snapshots.push_back(std::move(snap));
+  snapshots.push_back(ac.snap);
   std::vector<std::pair<std::int64_t, std::int64_t>> log = meta.snapshot_log;
   log.emplace_back(ts, snapshot_id);
 
-  std::vector<SchemaVer> schemas = meta.schemas;
-  if (schemas.empty()) {
+  ac.schemas = meta.schemas;
+  if (ac.schemas.empty()) {
     // metadata legado/externo sem "schemas": registra o deduzido como v0
-    schemas.push_back(SchemaVer{0, merged.cols});
+    ac.schemas.push_back(SchemaVer{0, merged.cols});
   }
-  std::int64_t current_schema_id = meta.current_schema_id;
+  ac.current_schema_id = meta.current_schema_id;
+  ac.evolved = merged.evolved;
   if (merged.evolved) {
     std::int64_t max_id = 0;
-    for (const SchemaVer& s : schemas) max_id = std::max(max_id, s.id);
-    current_schema_id = max_id + 1;
-    schemas.push_back(SchemaVer{current_schema_id, merged.cols});
+    for (const SchemaVer& s : ac.schemas) max_id = std::max(max_id, s.id);
+    ac.current_schema_id = max_id + 1;
+    ac.schemas.push_back(SchemaVer{ac.current_schema_id, merged.cols});
   }
 
-  const std::int64_t version = meta.version < 0 ? 0 : meta.version + 1;
-  const std::string json =
-      build_metadata_json(dir, schemas, current_schema_id, merged.last_column_id, spec_fields,
-                          snapshots, log, snapshot_id, ts);
-  commit_metadata(dir, version, json);
+  ac.last_column_id = merged.last_column_id;
+  ac.version = meta.version < 0 ? 0 : meta.version + 1;
+  ac.json = build_metadata_json(dir, ac.schemas, ac.current_schema_id, merged.last_column_id,
+                                spec_fields, snapshots, log, snapshot_id, ts);
+  return ac;
 }
 
-Value iceberg_read(const std::string& dir) {
-  TableMeta meta;
-  latest_metadata_path(dir, meta);
+Value read_core(const TableMeta& meta) {
   const std::vector<ActiveEntry> active = resolve_active_files(meta);
-  if (active.empty()) die("tabela em '" + dir + "' esta vazia (nenhum data file ativo)");
+  if (active.empty()) die("tabela em '" + meta.location + "' esta vazia (nenhum data file ativo)");
 
   // Tabela particionada: reidrata a coluna de particao a partir do record
   // `partition` dos manifests, na ordem do schema do metadata.
@@ -1691,6 +1728,458 @@ Value iceberg_read(const std::string& dir) {
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// REST catalog (fase 29) — opt-in via ICEBERG_CATALOG=rest + ICEBERG_URI.
+// Subconjunto do Iceberg REST Open API (prefixo v1, namespace "default"):
+//   - loadTable:    GET  /v1/namespaces/default/tables/<tabela>
+//   - createTable:  POST /v1/namespaces/default/tables
+//   - commit:       POST /v1/namespaces/default/tables/<tabela>/transactions
+// O argumento `dir` continua sendo o diretorio local da tabela (a location,
+// enviada como file:// no createTable); o nome da tabela no catalogo e o
+// basename desse caminho. O tilt segue gravando data files/manifests/metadata
+// localmente em <location> e referencia as locations nos updates — downloads
+// de metadata so ocorrem na leitura (metadata-location do loadTable).
+// Subconjunto de updates usado no commit (requirements + updates):
+//   - 1o write (tabela nova):  assert-current-snapshot-id(-1) +
+//     [upgrade-format-version(2), set-location, set-properties, add-snapshot,
+//      set-snapshot-ref(main)];
+//   - append:                  assert-current-snapshot-id(atual) +
+//     [add-snapshot, set-snapshot-ref] (+ add-schema com last-column-id e
+//      set-current-schema quando o schema evoluiu);
+//   - sobrescrita de tabela existente: assert-current-snapshot-id(atual) +
+//     [remove-snapshot-ref(main), remove-snapshots(antigos), add-schema,
+//      set-current-schema, add-snapshot, set-snapshot-ref] (o partition spec
+//      e mantido; divergencia de particionamento -> erro claro).
+// ---------------------------------------------------------------------------
+
+struct RestCfg {
+  bool ativo = false;
+  std::string uri;  // sem barra final
+};
+
+RestCfg rest_cfg() {
+  RestCfg cfg;
+  const char* cat = std::getenv("ICEBERG_CATALOG");
+  if (!cat || std::string(cat) != "rest") return cfg;
+  const char* uri = std::getenv("ICEBERG_URI");
+  if (!uri || !*uri) {
+    die("ICEBERG_CATALOG=rest exige ICEBERG_URI (ex.: ICEBERG_URI=http://localhost:8181)");
+  }
+  cfg.ativo = true;
+  cfg.uri = uri;
+  while (!cfg.uri.empty() && cfg.uri.back() == '/') cfg.uri.pop_back();
+  return cfg;
+}
+
+std::string shell_quote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    out += c == '\'' ? "'\\''" : std::string(1, c);
+  }
+  out += "'";
+  return out;
+}
+
+std::string slurp_file(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return "";
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// Caminho relativo -> absoluto (a location local da tabela no modo REST).
+std::string abs_path(const std::string& dir) {
+  if (!dir.empty() && dir.front() == '/') return dir;
+  std::array<char, 4096> buf{};
+  if (!::getcwd(buf.data(), buf.size())) die("nao foi possivel obter o diretorio atual");
+  return std::string(buf.data()) + "/" + dir;
+}
+
+// Nome da tabela no catalogo: basename da location.
+std::string table_name(const std::string& location) {
+  std::string loc = location;
+  while (!loc.empty() && loc.back() == '/') loc.pop_back();
+  const std::size_t slash = loc.find_last_of('/');
+  const std::string nome = slash == std::string::npos ? loc : loc.substr(slash + 1);
+  if (nome.empty()) die("nome de tabela invalido em '" + location + "'");
+  return nome;
+}
+
+// Percent-encoding de um segmento de path (RFC 3986 unreserved, como no SigV4).
+std::string uri_encode(const std::string& s) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char c : s) {
+    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      out += static_cast<char>(c);
+    } else {
+      out += '%';
+      out += kHex[c >> 4];
+      out += kHex[c & 0xF];
+    }
+  }
+  return out;
+}
+
+// Executa o curl: corpo da resposta vai para arquivo temporario (-o), status
+// vem no stdout (-w). Com falhar=true, falha de transporte ou HTTP >= 400 ->
+// die com o corpo da resposta truncado em ~200 chars. Retorna o status HTTP.
+int rest_http(const std::string& method, const std::string& url, const std::string& body,
+              bool falhar, std::string& corpo) {
+  std::string body_file;
+  std::string cmd = "curl -s ";
+  if (falhar) cmd += "--fail-with-body ";
+  cmd += "-w '%{http_code}' -X " + method;
+  cmd += " -H " + shell_quote("Content-Type: application/json");
+  if (!body.empty()) {
+    char tmpl[] = "/tmp/tilt_iceberg_body_XXXXXX";
+    const int fd = ::mkstemp(tmpl);
+    if (fd < 0) die("nao foi possivel criar arquivo temporario");
+    ::close(fd);
+    {
+      std::ofstream out(tmpl, std::ios::trunc);
+      out << body;
+      if (!out) {
+        ::unlink(tmpl);
+        die("falha ao gravar o corpo da requisicao REST");
+      }
+    }
+    body_file = tmpl;
+    cmd += " --data @" + body_file;
+  }
+  char outmpl[] = "/tmp/tilt_iceberg_resp_XXXXXX";
+  const int ofd = ::mkstemp(outmpl);
+  if (ofd < 0) {
+    if (!body_file.empty()) ::unlink(body_file.c_str());
+    die("nao foi possivel criar arquivo temporario");
+  }
+  ::close(ofd);
+  const std::string out_file = outmpl;
+  cmd += " -o " + shell_quote(out_file) + " " + shell_quote(url);
+
+  std::string resp;
+  {
+    std::array<char, 4096> buf{};
+    FILE* pipe = ::popen(cmd.c_str(), "r");
+    if (!pipe) {
+      if (!body_file.empty()) ::unlink(body_file.c_str());
+      ::unlink(out_file.c_str());
+      die("nao foi possivel executar 'curl'");
+    }
+    std::size_t n;
+    while ((n = ::fread(buf.data(), 1, buf.size(), pipe)) > 0) resp.append(buf.data(), n);
+    const int rc = ::pclose(pipe);
+    if (!body_file.empty()) ::unlink(body_file.c_str());
+    if (rc != 0) {
+      corpo = slurp_file(out_file);
+      ::unlink(out_file.c_str());
+      die("requisicao ao catalogo REST falhou (curl codigo " + std::to_string(rc) +
+          "): verifique ICEBERG_URI. Resposta: " + corpo.substr(0, 200));
+    }
+  }
+  int status = 0;
+  std::istringstream(resp) >> status;
+  corpo = slurp_file(out_file);
+  ::unlink(out_file.c_str());
+  if (falhar && status >= 400) {
+    die("catalogo REST respondeu HTTP " + std::to_string(status) + ": " + corpo.substr(0, 200));
+  }
+  return status;
+}
+
+Value rest_parse_json(const std::string& texto, const char* ctx) {
+  try {
+    return json_parse(texto);
+  } catch (const std::exception& e) {
+    die(std::string(ctx) + ": resposta malformada do catalogo REST (JSON invalido): " + e.what());
+  }
+}
+
+const char* kTablesPath = "/v1/namespaces/default/tables/";
+
+// loadTable. Com falhar=false, 404 retorna o status para o caller tratar
+// (tabela nova no escrever / erro claro no anexar/ler); 200 devolve o JSON da
+// resposta em `resp`; demais >= 400 encerram com o corpo do erro.
+int rest_load_table(const RestCfg& rc, const std::string& table, Value& resp, bool falhar) {
+  std::string corpo;
+  const int status = rest_http("GET", rc.uri + kTablesPath + uri_encode(table), "", falhar, corpo);
+  if (status == 404 && !falhar) return 404;
+  resp = rest_parse_json(corpo, "loadTable");
+  if (const Value* md = map_find(resp, "metadata"); !md || md->kind != ValueKind::Mapa) {
+    die("loadTable: resposta sem 'metadata'");
+  }
+  if (const Value* ml = map_find(resp, "metadata-location");
+      !ml || ml->kind != ValueKind::Texto || ml->s.empty()) {
+    die("loadTable: resposta sem 'metadata-location'");
+  }
+  return status;
+}
+
+// createTable: cria a tabela viva no catalogo (schema + partition-spec ja vao
+// no corpo; o primeiro snapshot entra no commit subsequente).
+void rest_create_table(const RestCfg& rc, const std::string& table, const std::string& location_uri,
+                       const std::vector<Column>& cols,
+                       const std::vector<PartitionField>& spec) {
+  std::string body = "{\"name\":\"" + json_escape(table) + "\",\"location\":\"" +
+                     json_escape(location_uri) + "\",\"schema\":" +
+                     schema_struct_json(0, cols);
+  if (!spec.empty()) body += ",\"partition-spec\":" + partition_spec_json(spec);
+  body += ",\"properties\":{\"engine\":\"tilt\"}}";
+  std::string corpo;
+  rest_http("POST", rc.uri + "/v1/namespaces/default/tables", body, true, corpo);
+  rest_parse_json(corpo, "createTable");
+}
+
+// commit: POST .../transactions com requirements + updates.
+void rest_commit(const RestCfg& rc, const std::string& table, const std::string& requirements,
+                 const std::string& updates) {
+  const std::string body = "{\"requirements\":" + requirements + ",\"updates\":" + updates + "}";
+  std::string corpo;
+  rest_http("POST", rc.uri + kTablesPath + uri_encode(table) + "/transactions", body, true, corpo);
+  rest_parse_json(corpo, "commit");
+}
+
+// metadata-location do loadTable -> caminho de arquivo legivel pelo
+// parse_metadata: file:// le direto do disco; http(s) baixa via curl para um
+// temporario (1a passada: o arquivo temporario vive ate o fim do processo).
+std::string fetch_metadata_path(const std::string& metadata_location) {
+  if (metadata_location.rfind("file://", 0) == 0) return metadata_location.substr(7);
+  if (metadata_location.rfind("http://", 0) == 0 ||
+      metadata_location.rfind("https://", 0) == 0) {
+    std::string corpo;
+    rest_http("GET", metadata_location, "", true, corpo);
+    char tmpl[] = "/tmp/tilt_iceberg_meta_XXXXXX";
+    const int fd = ::mkstemp(tmpl);
+    if (fd < 0) die("nao foi possivel criar arquivo temporario");
+    ::close(fd);
+    {
+      std::ofstream out(tmpl, std::ios::trunc);
+      out << corpo;
+      if (!out) {
+        ::unlink(tmpl);
+        die("falha ao gravar o metadata baixado do catalogo REST");
+      }
+    }
+    return tmpl;
+  }
+  die("metadata-location '" + metadata_location +
+      "' nao suportada (fase 29: somente file:// e http(s)://)");
+}
+
+// Builders de requirements/updates de commit (Iceberg REST Open API).
+std::string join_updates(const std::vector<std::string>& upds) {
+  std::string out;
+  for (std::size_t k = 0; k < upds.size(); ++k) {
+    if (k) out += ',';
+    out += upds[k];
+  }
+  return out;
+}
+
+std::string req_assert_current_snapshot(std::int64_t id) {
+  return "{\"type\":\"assert-current-snapshot-id\",\"snapshot-id\":" + std::to_string(id) + "}";
+}
+
+std::string upd_upgrade_format() {
+  return R"({"action":"upgrade-format-version","format-version":2})";
+}
+
+std::string upd_set_location(const std::string& loc) {
+  return "{\"action\":\"set-location\",\"location\":\"" + json_escape(loc) + "\"}";
+}
+
+std::string upd_set_properties() {
+  return R"({"action":"set-properties","properties":{"engine":"tilt"}})";
+}
+
+std::string upd_add_schema(std::int64_t schema_id, const std::vector<Column>& fields,
+                           std::int64_t last_column_id) {
+  return "{\"action\":\"add-schema\",\"schema\":" +
+         schema_struct_json(schema_id, fields) + ",\"last-column-id\":" +
+         std::to_string(last_column_id) + "}";
+}
+
+std::string upd_set_current_schema(std::int64_t id) {
+  return "{\"action\":\"set-current-schema\",\"schema-id\":" + std::to_string(id) + "}";
+}
+
+std::string upd_add_snapshot(const Snapshot& s, std::int64_t schema_id) {
+  std::string out = "{\"action\":\"add-snapshot\",\"snapshot\":{\"snapshot-id\":" +
+                    std::to_string(s.id) + ",\"timestamp-ms\":" + std::to_string(s.ts) +
+                    ",\"summary\":{\"operation\":\"" + s.operation + "\"}";
+  if (schema_id >= 0) out += ",\"schema-id\":" + std::to_string(schema_id);
+  out += ",\"manifest-list\":\"" + json_escape(s.manifest_list) + "\"}}";
+  return out;
+}
+
+std::string upd_set_snapshot_ref(std::int64_t snapshot_id) {
+  return "{\"action\":\"set-snapshot-ref\",\"ref-name\":\"main\",\"snapshot-id\":" +
+         std::to_string(snapshot_id) + ",\"type\":\"branch\"}";
+}
+
+std::string upd_remove_snapshot_ref() {
+  return R"({"action":"remove-snapshot-ref","ref-name":"main"})";
+}
+
+std::string upd_remove_snapshots(const std::vector<Snapshot>& snaps) {
+  std::string ids;
+  for (std::size_t k = 0; k < snaps.size(); ++k) {
+    if (k) ids += ',';
+    ids += std::to_string(snaps[k].id);
+  }
+  return "{\"action\":\"remove-snapshots\",\"snapshot-ids\":[" + ids + "]}";
+}
+
+void iceberg_write_rest(const RestCfg& rc, const std::string& dir, const Value& tabela,
+                        const std::string& part_col) {
+  const std::string location = abs_path(dir);
+  const std::string tabela_nome = table_name(location);
+  const std::string location_uri = "file://" + location;
+
+  Value resp;
+  const int st = rest_load_table(rc, tabela_nome, resp, /*falhar=*/false);
+  const bool nova = st == 404;
+
+  // metadata anterior (sobrescrita): necessario para versionamento, schema-id
+  // novo e requirement assert-current-snapshot-id.
+  TableMeta meta_antiga;
+  std::int64_t schema_id = 0;
+  if (!nova) {
+    parse_metadata(fetch_metadata_path(map_find(resp, "metadata-location")->s), meta_antiga);
+    for (const SchemaVer& s : meta_antiga.schemas) schema_id = std::max(schema_id, s.id + 1);
+  }
+
+  // sobrescreve: limpa o metadata local anterior (o catalogo e a fonte da
+  // verdade; data/manifest orfao fica para tras, como no modo Hadoop).
+  for (const std::string& old : list_metadata_files(location + "/metadata")) {
+    if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
+  }
+
+  const WriteCore wc = write_core(location, tabela, part_col, schema_id);
+  commit_metadata(location, nova ? 0 : meta_antiga.version + 1, wc.json);
+
+  if (nova) {
+    rest_create_table(rc, tabela_nome, location_uri, wc.cols, wc.spec_fields);
+    const std::vector<std::string> upds = {
+        upd_upgrade_format(), upd_set_location(location_uri), upd_set_properties(),
+        upd_add_snapshot(wc.snap, schema_id), upd_set_snapshot_ref(wc.snap.id)};
+    rest_commit(rc, tabela_nome, "[" + req_assert_current_snapshot(-1) + "]",
+                "[" + join_updates(upds) + "]");
+    return;
+  }
+
+  // Sobrescrita de tabela existente: o subconjunto mantem o partition spec
+  // (divergencia exigiria add-partition-spec — fora do subconjunto da fase 29).
+  const std::string antigo = meta_antiga.spec.empty() ? "" : meta_antiga.spec.front().name;
+  const std::string novo = wc.spec_fields.empty() ? "" : wc.spec_fields.front().name;
+  if (antigo != novo) {
+    die("escrever_iceberg via REST em tabela existente: particionamento divergente nao "
+        "suportado (fase 29: o subconjunto mantem o partition spec da tabela; "
+        "exclua a tabela no catalogo para recriar com outro particionar_por)");
+  }
+  std::vector<std::string> upds;
+  if (meta_antiga.current_snapshot >= 0) {
+    upds.push_back(upd_remove_snapshot_ref());
+    upds.push_back(upd_remove_snapshots(meta_antiga.snapshots));
+  }
+  upds.push_back(upd_add_schema(schema_id, wc.cols,
+                                std::max(meta_antiga.last_column_id,
+                                         static_cast<std::int64_t>(wc.cols.size()))));
+  upds.push_back(upd_set_current_schema(schema_id));
+  upds.push_back(upd_add_snapshot(wc.snap, schema_id));
+  upds.push_back(upd_set_snapshot_ref(wc.snap.id));
+  rest_commit(rc, tabela_nome,
+              "[" + req_assert_current_snapshot(meta_antiga.current_snapshot) + "]",
+              "[" + join_updates(upds) + "]");
+}
+
+void iceberg_append_rest(const RestCfg& rc, const std::string& dir, const Value& tabela,
+                         const std::string& part_col_req) {
+  const std::string location = abs_path(dir);
+  const std::string tabela_nome = table_name(location);
+
+  Value resp;
+  const int st = rest_load_table(rc, tabela_nome, resp, /*falhar=*/false);
+  if (st == 404) {
+    die("tabela '" + tabela_nome + "' nao existe no catalogo REST '" + rc.uri +
+        "' (use escrever_iceberg para criar)");
+  }
+  TableMeta meta;
+  parse_metadata(fetch_metadata_path(map_find(resp, "metadata-location")->s), meta);
+
+  const AppendCore ac = append_core(location, meta, tabela, part_col_req);
+  commit_metadata(location, ac.version, ac.json);
+
+  std::vector<std::string> upds;
+  if (ac.evolved) {
+    upds.push_back(upd_add_schema(ac.current_schema_id, ac.cols, ac.last_column_id));
+    upds.push_back(upd_set_current_schema(ac.current_schema_id));
+  }
+  upds.push_back(upd_add_snapshot(ac.snap, ac.current_schema_id));
+  upds.push_back(upd_set_snapshot_ref(ac.snap.id));
+  rest_commit(rc, tabela_nome, "[" + req_assert_current_snapshot(meta.current_snapshot) + "]",
+              "[" + join_updates(upds) + "]");
+}
+
+Value iceberg_read_rest(const RestCfg& rc, const std::string& dir) {
+  const std::string location = abs_path(dir);
+  const std::string tabela_nome = table_name(location);
+
+  Value resp;
+  const int st = rest_load_table(rc, tabela_nome, resp, /*falhar=*/false);
+  if (st == 404) {
+    die("tabela '" + tabela_nome + "' nao existe no catalogo REST '" + rc.uri + "'");
+  }
+  TableMeta meta;
+  parse_metadata(fetch_metadata_path(map_find(resp, "metadata-location")->s), meta);
+  return read_core(meta);
+}
+
+}  // namespace
+
+void iceberg_write(const std::string& dir, const Value& tabela, const std::string& part_col) {
+  const RestCfg rc = rest_cfg();
+  if (rc.ativo) {
+    iceberg_write_rest(rc, dir, tabela, part_col);
+    return;
+  }
+  const WriteCore wc = write_core(dir, tabela, part_col, /*schema_id=*/0);
+  // sobrescreve: remove metadata anterior (data avro/parquet orfao fica para
+  // tras, como no delta — a leitura so enxerga o que o metadata referencia).
+  for (const std::string& old : list_metadata_files(dir + "/metadata")) {
+    if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
+  }
+  commit_metadata(dir, 0, wc.json);
+}
+
+void iceberg_append(const std::string& dir, const Value& tabela, const std::string& part_col_req) {
+  const RestCfg rc = rest_cfg();
+  if (rc.ativo) {
+    iceberg_append_rest(rc, dir, tabela, part_col_req);
+    return;
+  }
+  struct stat st {};
+  if (::stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
+  }
+  const std::string meta_dir = dir + "/metadata";
+  if (::stat(meta_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
+  }
+
+  TableMeta meta;
+  latest_metadata_path(dir, meta);
+  const AppendCore ac = append_core(dir, meta, tabela, part_col_req);
+  commit_metadata(dir, ac.version, ac.json);
+}
+
+Value iceberg_read(const std::string& dir) {
+  const RestCfg rc = rest_cfg();
+  if (rc.ativo) return iceberg_read_rest(rc, dir);
+  TableMeta meta;
+  latest_metadata_path(dir, meta);
+  return read_core(meta);
 }
 
 }  // namespace tilt::rt

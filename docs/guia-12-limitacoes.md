@@ -47,10 +47,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   fim do `schemaString` com `metaData` novo no commit; arquivos antigos ficam
   sem a coluna e a leitura projeta nulo (union-by-name). Remover coluna ou
   mudar o tipo de uma existente → erro claro.
-- Iceberg é de 1ª passada: catálogo só **Hadoop** (diretório local — sem
-  REST/JDBC), codec Avro "null" apenas, a leitura cobre o mesmo subconjunto do
-  Parquet acima (tabelas de outros escritores sem garantia além dele) e
-  single-writer (sem locks nem optimistic concurrency);
+- Iceberg é de 1ª passada: o catálogo default é **Hadoop** (diretório local).
+  Há um **REST catalog opt-in** (fase 29: `ICEBERG_CATALOG=rest` +
+  `ICEBERG_URI`) falando o subconjunto `loadTable`/`createTable`/`transactions`
+  do Iceberg REST Open API no namespace `default` — sem paginação, sem OAuth,
+  location `file://` apenas (o tilt grava os arquivos localmente e commita as
+  locations) e single-writer como no Hadoop; sobrescrita de tabela existente
+  mantém o partition spec (divergência → erro claro). Sem as env vars o modo
+  Hadoop continua, byte a byte. Demais limites: codec Avro "null" apenas, a
+  leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
+  escritores sem garantia além dele) e single-writer (sem locks nem optimistic
+  concurrency);
   `escrever_iceberg` sobrescreve a tabela (recria a versão 0) e o append é via
   `anexar_iceberg` (novo snapshot por commit atômico de `rename`; o manifest
   do novo snapshot lista os arquivos ativos como EXISTING + o ADD — além da

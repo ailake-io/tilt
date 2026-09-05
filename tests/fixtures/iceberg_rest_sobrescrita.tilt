@@ -1,0 +1,19 @@
+pipeline principal:
+  passos:
+    - t1 = [
+        { nome: "ana", idade: 30 },
+        { nome: "bruno", idade: 40 }
+      ]
+    - t2 = [
+        { nome: "carla", idade: 50 }
+      ]
+    - t3 = [
+        { nome: "duda", idade: 60 },
+        { nome: "eli", idade: 70 }
+      ]
+    - escrever_iceberg t1, "tabela_sobrescrita"
+    - anexar_iceberg t2, "tabela_sobrescrita"
+    - escrever_iceberg t3, "tabela_sobrescrita"
+    - tabela = ler_iceberg "tabela_sobrescrita"
+    - imprimir tamanho tabela
+    - imprimir tabela[0].nome, tabela[1].idade

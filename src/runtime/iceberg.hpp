@@ -35,7 +35,19 @@ namespace tilt::rt {
 //   nome/field-id (coluna ausente no arquivo -> nulo); em tabela particionada
 //   reidrata a coluna de particao a partir dos records `partition` dos
 //   manifests, usando o tipo do schema. Lanca std::runtime_error com mensagem
-//   acionavel em qualquer limite.
+//   acionavel em qualquer limite;
+// - REST catalog (fase 29, opt-in via ICEBERG_CATALOG=rest + ICEBERG_URI):
+//   as tres funcoes passam a operar via Iceberg REST Open API (subconjunto:
+//   loadTable/createTable/transactions no namespace "default", prefixo v1).
+//   O argumento `dir` continua sendo a location local (enviada como file://
+//   no createTable) e o nome da tabela no catalogo e o basename dele; o tilt
+//   segue gravando data files/manifests/metadata localmente e commita as
+//   locations no catalogo. Subconjunto de updates: upgrade-format-version,
+//   set-location, set-properties, add-snapshot, set-snapshot-ref,
+//   add-schema/set-current-schema (evolucao e sobrescrita),
+//   remove-snapshot-ref/remove-snapshots (sobrescrita). Sobrescrita de
+//   tabela existente mantem o partition spec (divergencia -> erro claro).
+//   Sem as env vars o comportamento e o HadoopCatalog local, byte a byte.
 void iceberg_write(const std::string& dir, const Value& tabela, const std::string& part_col);
 void iceberg_append(const std::string& dir, const Value& tabela, const std::string& part_col_req);
 Value iceberg_read(const std::string& dir);  // -> tabela (lista de mapas)

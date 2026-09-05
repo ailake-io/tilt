@@ -256,11 +256,63 @@ Parquet nativo para os data files:
   **pyiceberg** (`StaticTable.from_metadata(...).scan().to_arrow()`) — field
   ids da spec v2 nos schemas Avro, `field.id` nos parquet e coluna de
   partição reidratada pelo reader de verdade;
-- limitações: catálogo só Hadoop (diretório local, sem REST/JDBC), só
-  transform identity com 1 coluna e sem schema evolution, codec Avro "null"
+- limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
+  local, sem JDBC), só transform identity com 1 coluna, codec Avro "null"
   apenas, lê o que o tilt escreve (sem garantia de tabelas de outros
   escritores), a leitura não filtra por partição (lê tudo e reidrata) e
   single-writer (sem locks nem optimistic concurrency).
+
+### Iceberg REST catalog (opt-in, fase 29)
+
+Com `ICEBERG_CATALOG=rest` + `ICEBERG_URI=http://host:porta` (HTTP via
+`curl`, como S3/Qdrant/LLM), `escrever_iceberg`/`anexar_iceberg`/`ler_iceberg`
+passam a operar via **Iceberg REST Open API** em vez do HadoopCatalog local.
+Sem as env vars o comportamento é o local de sempre, byte a byte. O argumento
+`dir` continua sendo a location da tabela — o tilt grava data files,
+manifests e metadata localmente nesse diretório e envia a `location` como
+`file://<caminho absoluto>` no `createTable`; o **nome da tabela no catálogo**
+é o basename desse caminho, no namespace `default`:
+
+```tilt
+- escrever_iceberg vendas, "tabela_iceberg"   # mesmo código dos dois modos
+- anexar_iceberg novas, "tabela_iceberg"
+- total = ler_iceberg "tabela_iceberg"
+```
+
+Subconjunto implementado (prefixo `v1`, namespace `default` — endpoints fora
+dele não são inventados):
+
+| Operação | Endpoint |
+|---|---|
+| loadTable | `GET /v1/namespaces/default/tables/<tabela>` → `config`, `metadata-location`, `metadata` |
+| createTable | `POST /v1/namespaces/default/tables` com `{name, location, schema, partition-spec?, properties}` |
+| commit | `POST /v1/namespaces/default/tables/<tabela>/transactions` com `requirements` + `updates` |
+
+O tilt mantém o metadata em memória, então o commit só **envia updates**
+referenciando as locations dos arquivos que já gravou localmente; o download
+do metadata só acontece na leitura (`metadata-location` do loadTable —
+`file://` lê direto do disco, `http(s)://` baixa via `curl`). Updates por
+operação:
+
+- **tabela nova** (loadTable 404 → createTable): requirement
+  `assert-current-snapshot-id(-1)` + `upgrade-format-version(2)`,
+  `set-location`, `set-properties`, `add-snapshot`, `set-snapshot-ref(main)`;
+- **append**: `assert-current-snapshot-id(atual)` + `add-snapshot`,
+  `set-snapshot-ref` (+ `add-schema` com `last-column-id` e
+  `set-current-schema` quando o schema evoluiu — mesma regra do modo local);
+- **sobrescrita de tabela existente**: `assert-current-snapshot-id(atual)` +
+  `remove-snapshot-ref(main)`, `remove-snapshots(antigos)`, `add-schema`,
+  `set-current-schema`, `add-snapshot`, `set-snapshot-ref` — o **partition
+  spec é mantido**; `particionar_por` divergente em cima de tabela existente
+  → erro claro (exclua a tabela no catálogo para recriar).
+
+Erros claros: `ICEBERG_URI` ausente com `ICEBERG_CATALOG=rest`, respostas
+não-2xx com o corpo do erro, JSON malformado e tabela inexistente no
+`ler_iceberg` ("tabela `<nome>` não existe no catálogo REST"). Ainda é
+single-writer (sem locks no catálogo) e 1ª passada: sem namespaces além de
+`default`, sem paginação, sem OAuth e com location `file://` apenas. Fluxo
+completo coberto por `tests/iceberg_rest_test.sh` (mock HTTP + validação do
+metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
 
 ## Bancos relacionais (SQLite e Postgres)
 
