@@ -1,0 +1,53 @@
+{
+  "format-version": 2,
+  "location": "tabela_evolutiva",
+  "last-updated-ms": 1788624558530,
+  "last-column-id": 3,
+  "schemas": [
+    {
+      "schema-id": 0,
+      "type": "struct",
+      "fields": [{"id":1,"name":"nome","required":true,"type":"string"},{"id":2,"name":"idade","required":true,"type":"long"}]
+    },
+    {
+      "schema-id": 1,
+      "type": "struct",
+      "fields": [{"id":1,"name":"nome","required":true,"type":"string"},{"id":2,"name":"idade","required":true,"type":"long"},{"id":3,"name":"cidade","required":false,"type":"string"}]
+    }
+  ],
+  "current-schema-id": 1,
+  "partition-spec": [],
+  "partition-specs": [
+    { "spec-id": 0, "fields": [] }
+  ],
+  "default-spec-id": 0,
+  "current-snapshot-id": 7206311384285858167,
+  "snapshots": [
+    {
+      "snapshot-id": 375870604031591503,
+      "timestamp-ms": 1788624558474,
+      "summary": { "operation": "overwrite" },
+      "manifest-list": "file://tabela_evolutiva/metadata/snap-375870604031591503-0-97790360-e9c5-4801-9f3b-3171f48c755f.avro"
+    },
+    {
+      "snapshot-id": 3099628700183570925,
+      "timestamp-ms": 1788624558491,
+      "summary": { "operation": "append" },
+      "parent-snapshot-id": 375870604031591503,
+      "manifest-list": "file://tabela_evolutiva/metadata/snap-3099628700183570925-0-64cbb690-bd4f-4276-a145-f11ddc799e26.avro"
+    },
+    {
+      "snapshot-id": 7206311384285858167,
+      "timestamp-ms": 1788624558530,
+      "summary": { "operation": "append" },
+      "parent-snapshot-id": 3099628700183570925,
+      "manifest-list": "file://tabela_evolutiva/metadata/snap-7206311384285858167-0-0045024c-7eb4-47b6-9341-b459adbceb5a.avro"
+    }
+  ],
+  "snapshot-log": [
+    { "timestamp-ms": 1788624558474, "snapshot-id": 375870604031591503 },
+    { "timestamp-ms": 1788624558491, "snapshot-id": 3099628700183570925 },
+    { "timestamp-ms": 1788624558530, "snapshot-id": 7206311384285858167 }
+  ],
+  "metadata-log": []
+}

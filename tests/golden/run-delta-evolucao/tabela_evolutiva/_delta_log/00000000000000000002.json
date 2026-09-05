@@ -1,0 +1,2 @@
+{"commitInfo":{"timestamp":1788624557076,"operation":"APPEND"}}
+{"add":{"path":"part-00000000-0000-4000-8000-57bbb2cf-774.parquet","partitionValues":{},"size":312,"modificationTime":1788624557077,"dataChange":true}}

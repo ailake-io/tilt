@@ -161,14 +161,21 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   log `<dir>/_delta_log/00000000000000000000.json` com `protocol`, `metaData`
   (schemaString no formato JSON do Delta) e `add`;
 - `anexar_delta tabela, "dir"` acrescenta linhas sem apagar o que já existe:
-  valida que o schema (colunas em nome e ordem) é idêntico ao `metaData` da
-  versão atual, grava um novo `part-*.parquet` e commita a próxima versão
-  (`00000000000000000001.json`, ...) com `commitInfo` + `add`. O commit é
+  valida o schema **por nome** — toda coluna do `metaData` atual precisa
+  existir na tabela anexada, colunas em comum com o mesmo tipo (a ordem é
+  livre), e **colunas novas são permitidas** (evolução de schema): entram
+  `nullable` no fim do `schemaString` e o commit carrega um `metaData` novo
+  com o schema estendido. Arquivos antigos ficam sem a coluna nova e a leitura
+  projeta `nulo` nas linhas deles (union-by-name). Remover coluna ou mudar o
+  tipo de uma existente → erro claro. Grava um novo `part-*.parquet` e commita
+  a próxima versão (`00000000000000000001.json`, ...) com `commitInfo` (+
+  `metaData`, se houve evolução) + `add`. O commit é
   atômico: o JSONL é gravado num temporário do mesmo diretório e publicado
   com `rename()` — crash antes do rename só deixa um parquet órfão, ignorado
-  pela leitura. Diretório inexistente ou schema divergente → erro claro;
+  pela leitura. Diretório inexistente ou schema inválido → erro claro;
 - a leitura aplica o log em ordem de versão (`add`/`remove`) e concatena os
-  arquivos ativos, validando que o schema não diverge entre versões;
+  arquivos ativos, projetando cada arquivo no schema corrente por nome
+  (coluna ausente no arquivo → nulo);
 - **partições hive-style**: `escrever_delta tabela, "dir", particionar_por: "col"`
   grava os parquet em `<dir>/<col>=<valor>/part-NNNNN.parquet`, **sem** a coluna
   de partição nos dados (padrão Delta — o valor vive no diretório e no
@@ -225,7 +232,15 @@ Parquet nativo para os data files:
   partir dos manifests, convertendo pelo tipo do schema. Valor nulo em coluna
   de partição e texto com `/` falham com erro claro (sem
   `__HIVE_DEFAULT_PARTITION__` nem escaping);
-- `anexar_iceberg` valida que o schema é idêntico ao do metadata corrente,
+- `anexar_iceberg` valida o schema **por nome** (todas as colunas do metadata
+  corrente presentes na tabela anexada, tipos em comum iguais, ordem livre) e
+  suporta **evolução de schema**: coluna nova entra `required: false` no fim
+  do schema com **field-id novo** (`last-column-id` + 1); o metadata
+  versionado ganha um `schema-id` novo mantendo o histórico de schemas (ids
+  antigos estáveis) e os data files do append são gravados com esses
+  field-ids. Arquivos antigos ficam sem a coluna e a leitura projeta `nulo`
+  nas linhas deles (union-by-name por field-id/nome — lido pelo pyiceberg).
+  Remover coluna ou mudar o tipo de uma existente → erro claro. O append
   herda o partition spec da tabela (erro se `particionar_por` diverge ou se a
   tabela não é particionada), grava os novos data files e commita a próxima
   versão com um novo snapshot cujo manifest lista os arquivos já ativos como
@@ -233,7 +248,7 @@ Parquet nativo para os data files:
   writer real, para que um reader como pyiceberg resolva só pelos manifests
   do snapshot corrente. O commit grava o metadata num temporário do mesmo
   diretório e publica com `rename()` (atômico no mesmo filesystem);
-  diretório inexistente ou schema divergente → erro claro;
+  diretório inexistente ou schema inválido → erro claro;
 - a leitura resolve o snapshot atual percorrendo a cadeia de pais e coletando
   adds menos removes dos manifests (status 2 = DELETED), concatenando os data
   files com validação de schema entre arquivos;

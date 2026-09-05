@@ -1,0 +1,9 @@
+== pipeline principal ==
+4
+ana 30 nulo
+bruno 40 nulo
+carla 50 sp
+duda 60 nulo
+delta: anexar_delta: coluna 'idade' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)
+delta: anexar_delta: coluna 'idade' com tipo divergente (esperado long; recebido string) (evolucao de schema suporta apenas adicao de colunas)
+5

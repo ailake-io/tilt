@@ -1,5 +1,6 @@
 == pipeline principal ==
 3
 ana 40 carla
-delta: anexar_delta: schema divergente em 'saida_delta' (esperado [nome, idade]; recebido [nome, cidade])
-delta: anexar_delta: schema divergente em 'saida_delta' (esperado [nome, idade]; recebido [cidade, nome])
+delta: anexar_delta: coluna 'idade' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)
+delta: anexar_delta: coluna 'idade' com tipo divergente (esperado long; recebido string) (evolucao de schema suporta apenas adicao de colunas)
+4

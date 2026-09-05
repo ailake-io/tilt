@@ -1,0 +1,3 @@
+{"protocol":{"minReaderVersion":1,"minWriterVersion":2}}
+{"metaData":{"id":"cde4d246-fbdc-42b8-bb92-4d5c5d7bc8c7","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"nome\",\"type\":\"string\",\"nullable\":false,\"metadata\":{}},{\"name\":\"idade\",\"type\":\"long\",\"nullable\":false,\"metadata\":{}}]}","partitionColumns":[],"configuration":{},"createdTime":1788624557048}}
+{"add":{"path":"part-00000000-0000-4000-8000-5ab35a53-4b2.parquet","partitionValues":{},"size":262,"modificationTime":1788624557050,"dataChange":true}}

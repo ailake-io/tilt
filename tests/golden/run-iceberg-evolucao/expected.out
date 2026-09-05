@@ -1,0 +1,9 @@
+== pipeline principal ==
+4
+ana 30 nulo
+bruno 40 nulo
+carla 50 sp
+duda 60 nulo
+iceberg: anexar_iceberg: coluna 'idade' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)
+iceberg: anexar_iceberg: coluna 'idade' com tipo divergente (esperado long; recebido string) (evolucao de schema suporta apenas adicao de colunas)
+5

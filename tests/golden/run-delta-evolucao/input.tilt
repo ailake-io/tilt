@@ -1,0 +1,40 @@
+funcao tentar_anexar t, dir -> texto:
+  tentar:
+    anexar_delta t, dir
+    retornar "sem erro"
+  capturar erro:
+    retornar erro
+
+pipeline principal:
+  passos:
+    - t1 = [
+        { nome: "ana", idade: 30 },
+        { nome: "bruno", idade: 40 }
+      ]
+    - escrever_delta t1, "tabela_evolutiva"
+    # append com coluna nova (cidade), ordem das colunas livre:
+    - t2 = [
+        { idade: 50, cidade: "sp", nome: "carla" },
+        { nome: "duda", idade: 60, cidade: nulo }
+      ]
+    - anexar_delta t2, "tabela_evolutiva"
+    - tabela = ler_delta "tabela_evolutiva"
+    - imprimir tamanho tabela
+    - para cada linha em tabela:
+        - imprimir linha.nome, linha.idade, linha.cidade
+    # remocao de coluna -> erro claro
+    - sem_idade = [
+        { nome: "edu", cidade: "rj" }
+      ]
+    - imprimir tentar_anexar sem_idade, "tabela_evolutiva"
+    # tipo divergente em coluna existente -> erro claro
+    - idade_texto = [
+        { nome: "fia", idade: "cinquenta", cidade: "mg" }
+      ]
+    - imprimir tentar_anexar idade_texto, "tabela_evolutiva"
+    # append valido apos a evolucao (schema agora tem 3 colunas)
+    - t3 = [
+        { nome: "gio", cidade: "pr", idade: 70 }
+      ]
+    - anexar_delta t3, "tabela_evolutiva"
+    - imprimir tamanho ler_delta "tabela_evolutiva"

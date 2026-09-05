@@ -559,6 +559,8 @@ struct Column {
   std::string name;
   std::string type;  // iceberg
   Value sample;      // valor da 1a linha (deduzir tipo)
+  std::int64_t id = 0;       // field-id no schema iceberg (0 = nao atribuido)
+  bool required = true;      // false = nullable (colunas novas por evolucao)
 };
 
 // Campo de um partition spec (fase 26: somente transform "identity" e uma
@@ -590,16 +592,17 @@ std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
   return cols;
 }
 
-std::string schema_json_fields(const std::vector<Column>& cols, const std::string& part_col) {
+// Fields de um schema no metadata ({"id","name","required","type"} por campo,
+// ids/required ja resolvidos no vetor). Na escrita os ids sao 1..N e a coluna
+// fonte da particao fica optional (padrao Spark): ela nao esta no parquet e
+// readers reais so reidratam campos optional.
+std::string schema_json_fields(const std::vector<Column>& fields) {
   std::string out = "[";
-  for (std::size_t k = 0; k < cols.size(); ++k) {
+  for (std::size_t k = 0; k < fields.size(); ++k) {
     if (k) out += ',';
-    // coluna fonte da particao fica optional no metadata (padrao Spark):
-    // ela nao esta no parquet e readers reais so reidratam campos optional
-    const bool required = cols[k].name != part_col;
-    out += "{\"id\":" + std::to_string(k + 1) + ",\"name\":\"" + json_escape(cols[k].name) +
-           "\",\"required\":" + (required ? "true" : "false") + ",\"type\":\"" + cols[k].type +
-           "\"}";
+    out += "{\"id\":" + std::to_string(fields[k].id) + ",\"name\":\"" + json_escape(fields[k].name) +
+           "\",\"required\":" + (fields[k].required ? "true" : "false") + ",\"type\":\"" +
+           fields[k].type + "\"}";
   }
   out += ']';
   return out;
@@ -728,10 +731,20 @@ struct Snapshot {
   bool has_parent = false;
 };
 
+// Uma versao do schema no metadata (id + fields com ids/required estáveis —
+// evolucao de schema, fase 27).
+struct SchemaVer {
+  std::int64_t id = 0;
+  std::vector<Column> fields;
+};
+
 struct TableMeta {
   std::int64_t last_updated = 0;
   std::int64_t current_snapshot = -1;
   std::vector<Column> schema_cols;  // do current-schema-id
+  std::vector<SchemaVer> schemas;   // todas as versoes (historico)
+  std::int64_t current_schema_id = 0;
+  std::int64_t last_column_id = 0;
   std::vector<Snapshot> snapshots;
   std::vector<std::pair<std::int64_t, std::int64_t>> snapshot_log;  // (ts, id)
   std::vector<PartitionField> spec;  // do default-spec-id (vazio = sem particao)
@@ -760,26 +773,39 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     out.current_snapshot = cs->i;
   }
 
-  // schema corrente
-  std::int64_t current_schema = 0;
+  // schemas (historico completo; current-schema-id aponta o corrente)
   if (const Value* c = map_find(md, "current-schema-id"); c && c->kind == ValueKind::Inteiro) {
-    current_schema = c->i;
+    out.current_schema_id = c->i;
+  }
+  if (const Value* lc = map_find(md, "last-column-id"); lc && lc->kind == ValueKind::Inteiro) {
+    out.last_column_id = lc->i;
   }
   if (const Value* schemas = map_find(md, "schemas"); schemas && schemas->kind == ValueKind::Lista) {
     for (const Value& s : *schemas->list) {
       const Value* sid = map_find(s, "schema-id");
-      if (!sid || sid->kind != ValueKind::Inteiro || sid->i != current_schema) continue;
+      if (!sid || sid->kind != ValueKind::Inteiro) continue;
+      SchemaVer ver;
+      ver.id = sid->i;
       if (const Value* fields = map_find(s, "fields"); fields && fields->kind == ValueKind::Lista) {
         for (const Value& f : *fields->list) {
+          const Value* fid = map_find(f, "id");
           const Value* name = map_find(f, "name");
           const Value* type = map_find(f, "type");
+          const Value* req = map_find(f, "required");
           Column c;
+          c.id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 0;
           c.name = name && name->kind == ValueKind::Texto ? name->s : "";
           c.type = type && type->kind == ValueKind::Texto ? type->s : "string";
-          out.schema_cols.push_back(std::move(c));
+          c.required = req ? (req->kind == ValueKind::Logico ? req->b : true) : true;
+          out.last_column_id = std::max(out.last_column_id, c.id);
+          ver.fields.push_back(std::move(c));
         }
       }
+      out.schemas.push_back(std::move(ver));
     }
+  }
+  for (const SchemaVer& ver : out.schemas) {
+    if (ver.id == out.current_schema_id) out.schema_cols = ver.fields;
   }
 
   // partition spec corrente (default-spec-id): so "identity" de uma coluna
@@ -803,8 +829,8 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
       die("transform de particao '" + transform + "' nao suportada (fase 26: somente identity)");
     }
     for (std::size_t k = 0; k < out.schema_cols.size(); ++k) {
-      // ids comecam em 1 e seguem a ordem do schema escrito
-      if (static_cast<std::int64_t>(k + 1) == pf.source_id) {
+      // o source-id e o field-id da coluna no schema (estavel entre versoes)
+      if (out.schema_cols[k].id == pf.source_id) {
         pf.avro_ty = out.schema_cols[k].type;
       }
     }
@@ -888,16 +914,6 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     }
   }
   return md;
-}
-
-std::string columns_desc(const std::vector<Column>& cols) {
-  std::string out = "[";
-  for (std::size_t k = 0; k < cols.size(); ++k) {
-    if (k) out += ", ";
-    out += cols[k].name + ": " + cols[k].type;
-  }
-  out += ']';
-  return out;
 }
 
 // le o metadata mais recente (maior versao)
@@ -1046,7 +1062,8 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
 // Metadata JSON (format-version 2)
 // ---------------------------------------------------------------------------
 
-std::string build_metadata_json(const std::string& dir, const std::vector<Column>& cols,
+std::string build_metadata_json(const std::string& dir, const std::vector<SchemaVer>& schemas,
+                                std::int64_t current_schema_id, std::int64_t last_column_id,
                                 const std::vector<PartitionField>& spec,
                                 const std::vector<Snapshot>& snapshots,
                                 std::vector<std::pair<std::int64_t, std::int64_t>> snapshot_log,
@@ -1055,11 +1072,15 @@ std::string build_metadata_json(const std::string& dir, const std::vector<Column
   out += "  \"format-version\": 2,\n";
   out += "  \"location\": \"" + json_escape(dir) + "\",\n";
   out += "  \"last-updated-ms\": " + std::to_string(last_updated) + ",\n";
-  out += "  \"last-column-id\": " + std::to_string(cols.size()) + ",\n";
-  out += "  \"schemas\": [\n    {\n      \"schema-id\": 0,\n      \"type\": \"struct\",\n";
-  out += "      \"fields\": " +
-         schema_json_fields(cols, spec.empty() ? std::string() : spec.front().name) + "\n    }\n  ],\n";
-  out += "  \"current-schema-id\": 0,\n";
+  out += "  \"last-column-id\": " + std::to_string(last_column_id) + ",\n";
+  out += "  \"schemas\": [\n";
+  for (std::size_t k = 0; k < schemas.size(); ++k) {
+    out += (k ? ",\n" : "");
+    out += "    {\n      \"schema-id\": " + std::to_string(schemas[k].id) + ",\n      \"type\": \"struct\",\n";
+    out += "      \"fields\": " + schema_json_fields(schemas[k].fields) + "\n    }";
+  }
+  out += "\n  ],\n";
+  out += "  \"current-schema-id\": " + std::to_string(current_schema_id) + ",\n";
   // "partition-spec" legado (lista de nomes) + "partition-specs" atual com
   // field-id/source-id/transform — um reader real (pyiceberg) resolve ambos.
   out += "  \"partition-spec\": [";
@@ -1228,19 +1249,37 @@ std::string strip_scheme(const std::string& path) {
 // com spec, um arquivo por valor de particao em
 // <dir>/data/<col>=<valor>/00000-0-<uuid>.parquet (naming iceberg:
 // <partition-path>/<file>.parquet), sem a coluna de particao no parquet.
+// `ids_by_name` (append): field-ids do schema iceberg corrente por nome —
+// colunas novas de uma evolucao de schema levam o id novo no parquet;
+// sem ele, os ids seguem a posicao na 1a linha (escrita original).
 std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabela,
-                                       const PartitionSpec* spec) {
+                                       const PartitionSpec* spec,
+                                       const std::vector<Column>* ids_by_name) {
   std::vector<FileInfo> out;
   std::vector<PartitionGroup> grupos;
   // ids das colunas no schema iceberg = posicao (1..N) na 1a linha original;
   // os field_ids do parquet seguem esses ids, nao a posicao dentro do
   // arquivo (a coluna de particao fica fora do parquet mas mantem o id).
   std::vector<std::pair<std::string, int>> col_ids;
-  if (spec != nullptr) {
+  if (spec != nullptr && ids_by_name == nullptr) {
     const Value& first = tabela.list->front();
     for (const auto& kv : first.map->items) {
       col_ids.emplace_back(kv.first, static_cast<int>(col_ids.size()) + 1);
     }
+  }
+  auto resolve_id = [&](const std::string& name) -> int {
+    if (ids_by_name != nullptr) {
+      for (const Column& c : *ids_by_name) {
+        if (c.name == name) return static_cast<int>(c.id);
+      }
+      die("coluna '" + name + "' sem field-id no schema (evolucao de schema inconsistente)");
+    }
+    for (const auto& ci : col_ids) {
+      if (ci.first == name) return ci.second;
+    }
+    die("coluna '" + name + "' fora do schema (evolucao de schema inconsistente)");
+  };
+  if (spec != nullptr) {
     grupos = partition_rows(tabela, spec->field.name);
   } else {
     PartitionGroup g;
@@ -1260,17 +1299,13 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
     }
     const std::string path = subdir + "/" + nome;
     std::vector<int> field_ids;
-    if (spec != nullptr) {
+    if (spec != nullptr || ids_by_name != nullptr) {
       const Value& first = g.rows.list->front();
       for (const auto& kv : first.map->items) {
-        int id = 0;
-        for (const auto& ci : col_ids) {
-          if (ci.first == kv.first) id = ci.second;
-        }
-        field_ids.push_back(id);
+        field_ids.push_back(resolve_id(kv.first));
       }
     }
-    parquet_write(path, g.rows, spec == nullptr ? nullptr : &field_ids);
+    parquet_write(path, g.rows, field_ids.empty() ? nullptr : &field_ids);
     const std::int64_t size = file_size(path);
     if (size <= 0) die("falha ao gravar '" + path + "'");
     FileInfo info;
@@ -1304,24 +1339,88 @@ Value partition_rehydrate(const Value& v, const std::string& iceberg_type) {
   return v;
 }
 
-void validate_schema_match(const std::vector<Column>& expected, const std::vector<Column>& got,
-                           const char* ctx, const std::string& dir) {
-  if (expected.size() != got.size()) {
-    die(std::string(ctx) + ": schema divergente em '" + dir + "' (esperado " +
-        columns_desc(expected) + "; recebido " + columns_desc(got) + ")");
+// Resultado da validacao de schema de um append (evolucao de schema, fase 27).
+struct MergedSchema {
+  std::vector<Column> cols;  // schema resultante: antigas (ids estáveis) + novas no fim
+  bool evolved = false;
+  std::int64_t last_column_id = 0;
+};
+
+// Validacao por nome: toda coluna do schema atual precisa existir na tabela
+// anexada (remover coluna -> erro); coluna em comum precisa ter o mesmo
+// tipo; colunas novas entram optional no fim com id novo (proximo livre
+// apos last-column-id). Ordem das colunas antigas e livre — a projecao dos
+// parquet na leitura e por nome/field-id.
+MergedSchema merge_append_schema(const TableMeta& meta, const Value& tabela) {
+  const std::vector<Column> got = table_columns(tabela, "anexar_iceberg");
+  // tipo deduzido do 1o valor nao nulo de cada coluna (ordem da 1a linha);
+  // tipo vazio = so nulos — o parquet ja falha com erro claro ao gravar
+  std::vector<std::pair<std::string, std::string>> new_types;
+  for (const Column& c : got) {
+    std::string ty;
+    for (const Value& row : *tabela.list) {
+      if (row.kind != ValueKind::Mapa || !row.map) break;
+      const Value* cell = row.map->find(c.name);
+      if (cell && cell->kind != ValueKind::Nulo) {
+        ty = iceberg_type_name(*cell);
+        break;
+      }
+    }
+    new_types.emplace_back(c.name, ty);
   }
-  for (std::size_t k = 0; k < expected.size(); ++k) {
-    if (expected[k].name != got[k].name || expected[k].type != got[k].type) {
-      die(std::string(ctx) + ": schema divergente em '" + dir + "' (esperado " +
-          columns_desc(expected) + "; recebido " + columns_desc(got) + ")");
+  auto find_type = [&](const std::string& name) -> const std::string* {
+    for (const auto& nt : new_types) {
+      if (nt.first == name) return &nt.second;
+    }
+    return nullptr;
+  };
+  MergedSchema merged;
+  merged.cols = meta.schema_cols;
+  merged.last_column_id = meta.last_column_id;
+  if (merged.last_column_id <= 0) {
+    for (const Column& c : merged.cols) {
+      merged.last_column_id = std::max(merged.last_column_id, c.id);
     }
   }
+  for (const Column& old : merged.cols) {
+    const std::string* ty = find_type(old.name);
+    if (!ty) {
+      die("anexar_iceberg: coluna '" + old.name +
+          "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)");
+    }
+    if (!ty->empty() && *ty != old.type) {
+      die("anexar_iceberg: coluna '" + old.name + "' com tipo divergente (esperado " + old.type +
+          "; recebido " + *ty +
+          ") (evolucao de schema suporta apenas adicao de colunas)");
+    }
+  }
+  for (const auto& [name, ty] : new_types) {
+    bool known = false;
+    for (const Column& c : merged.cols) {
+      if (c.name == name) known = true;
+    }
+    if (known) continue;
+    Column c;
+    c.name = name;
+    c.type = ty.empty() ? "string" : ty;
+    c.id = ++merged.last_column_id;
+    c.required = false;  // coluna nova e optional (linhas antigas ficam nulas)
+    merged.cols.push_back(std::move(c));
+    merged.evolved = true;
+  }
+  return merged;
 }
 
 }  // namespace
 
 void iceberg_write(const std::string& dir, const Value& tabela, const std::string& part_col) {
-  const std::vector<Column> cols = table_columns(tabela, "escrever_iceberg");
+  std::vector<Column> cols = table_columns(tabela, "escrever_iceberg");
+  // ids 1..N na ordem do schema; a coluna fonte da particao fica optional
+  // no metadata (padrao Spark — readers reais so reidratam campo optional)
+  for (std::size_t k = 0; k < cols.size(); ++k) {
+    cols[k].id = static_cast<std::int64_t>(k + 1);
+    cols[k].required = cols[k].name != part_col;
+  }
   PartitionSpec spec;
   const PartitionSpec* pspec = nullptr;
   if (!part_col.empty()) {
@@ -1339,7 +1438,7 @@ void iceberg_write(const std::string& dir, const Value& tabela, const std::strin
     if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
   }
 
-  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec);
+  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, nullptr);
 
   std::vector<std::pair<int, std::string>> changes;
   for (const FileInfo& f : datas) changes.emplace_back(1, f.path);
@@ -1366,8 +1465,9 @@ void iceberg_write(const std::string& dir, const Value& tabela, const std::strin
   snap.has_parent = false;
   snap.parent = -1;
 
-  const std::string json =
-      build_metadata_json(dir, cols, spec_fields, {snap}, {{ts, snapshot_id}}, snapshot_id, ts);
+  const std::string json = build_metadata_json(dir, {SchemaVer{0, cols}}, 0,
+                                               static_cast<std::int64_t>(cols.size()), spec_fields,
+                                               {snap}, {{ts, snapshot_id}}, snapshot_id, ts);
   commit_metadata(dir, 0, json);
 }
 
@@ -1383,8 +1483,9 @@ void iceberg_append(const std::string& dir, const Value& tabela, const std::stri
 
   TableMeta meta;
   latest_metadata_path(dir, meta);
-  const std::vector<Column> got = table_columns(tabela, "anexar_iceberg");
-  validate_schema_match(meta.schema_cols, got, "anexar_iceberg", dir);
+  // Validacao de schema por nome com merge para evolucao (fase 27): colunas
+  // novas entram optional no fim com id novo; remocao/tipo divergente -> erro.
+  const MergedSchema merged = merge_append_schema(meta, tabela);
 
   // Particao: herda o spec da tabela existente; erro se explicita e diverge.
   PartitionSpec spec;
@@ -1410,7 +1511,7 @@ void iceberg_append(const std::string& dir, const Value& tabela, const std::stri
   const std::vector<ActiveEntry> previous =
       meta.current_snapshot >= 0 ? resolve_active_files(meta) : std::vector<ActiveEntry>{};
 
-  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec);
+  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, &merged.cols);
 
   std::vector<std::pair<int, std::string>> changes;
   std::vector<FileInfo> infos;
@@ -1457,10 +1558,23 @@ void iceberg_append(const std::string& dir, const Value& tabela, const std::stri
   std::vector<std::pair<std::int64_t, std::int64_t>> log = meta.snapshot_log;
   log.emplace_back(ts, snapshot_id);
 
+  std::vector<SchemaVer> schemas = meta.schemas;
+  if (schemas.empty()) {
+    // metadata legado/externo sem "schemas": registra o deduzido como v0
+    schemas.push_back(SchemaVer{0, merged.cols});
+  }
+  std::int64_t current_schema_id = meta.current_schema_id;
+  if (merged.evolved) {
+    std::int64_t max_id = 0;
+    for (const SchemaVer& s : schemas) max_id = std::max(max_id, s.id);
+    current_schema_id = max_id + 1;
+    schemas.push_back(SchemaVer{current_schema_id, merged.cols});
+  }
+
   const std::int64_t version = meta.version < 0 ? 0 : meta.version + 1;
-  const std::string json = build_metadata_json(
-      dir, meta.schema_cols.empty() ? got : meta.schema_cols, spec_fields, snapshots, log,
-      snapshot_id, ts);
+  const std::string json =
+      build_metadata_json(dir, schemas, current_schema_id, merged.last_column_id, spec_fields,
+                          snapshots, log, snapshot_id, ts);
   commit_metadata(dir, version, json);
 }
 
@@ -1509,6 +1623,46 @@ Value iceberg_read(const std::string& dir) {
     return out;
   }
 
+  // Sem particao, com schema no metadata: projeta no schema corrente
+  // (union-by-name — arquivo de antes da evolucao fica sem a coluna nova e
+  // a projecao devolve nulo nas linhas dele).
+  if (!meta.schema_cols.empty()) {
+    Value out = Value::tabela();
+    for (const ActiveEntry& f : active) {
+      const std::string path = strip_scheme(f.path);
+      Value chunk = parquet_read(path);
+      if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
+        die("arquivo '" + path + "' nao e uma tabela parquet");
+      }
+      for (Value& row : *chunk.list) {
+        if (row.kind != ValueKind::Mapa || !row.map) {
+          die("linha de '" + path + "' nao e um mapa");
+        }
+        Value m = Value::mapa();
+        for (const Column& c : meta.schema_cols) {
+          if (const Value* cell = row.map->find(c.name)) {
+            m.map->set(c.name, *cell);
+          } else {
+            m.map->set(c.name, Value::nulo());
+          }
+        }
+        for (const auto& kv : row.map->items) {
+          bool known = false;
+          for (const Column& c : meta.schema_cols) {
+            if (c.name == kv.first) known = true;
+          }
+          if (!known) {
+            die("schema divergente em '" + path + "' (coluna '" + kv.first +
+                "' fora do metadata)");
+          }
+        }
+        out.list->push_back(std::move(m));
+      }
+    }
+    return out;
+  }
+
+  // Metadata legado sem "schemas": deducao posicional a partir do 1o arquivo.
   Value out = Value::tabela();
   std::vector<Column> schema_cols;
   for (const ActiveEntry& f : active) {

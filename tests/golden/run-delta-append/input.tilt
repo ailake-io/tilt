@@ -19,11 +19,19 @@ pipeline principal:
     - tabela = ler_delta "saida_delta"
     - imprimir tamanho tabela
     - imprimir tabela[0].nome, tabela[1].idade, tabela[2].nome
+    # ordem livre, mesmo schema -> append normal (fase 27: resolucao por nome)
+    - reordenada = [
+        { idade: 55, nome: "caio" }
+      ]
+    - anexar_delta reordenada, "saida_delta"
+    # remocao de coluna -> erro claro (fase 27: so adicao de colunas)
     - t3 = [
         { nome: "duda", cidade: "sp" }
       ]
     - imprimir tentar_anexar t3
+    # tipo divergente em coluna existente -> erro claro
     - t4 = [
-        { cidade: "rj", nome: "edu" }
+        { nome: "edu", idade: "quarenta" }
       ]
     - imprimir tentar_anexar t4
+    - imprimir tamanho ler_delta "saida_delta"

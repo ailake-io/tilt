@@ -25,6 +25,13 @@ namespace tilt::rt {
 //   partitionValues, convertendo para o tipo declarado no schemaString
 //   (falha de conversao mantem texto). Sem filtro por diretorio de particao
 //   (le tudo e reidrata — predicados em `onde` ficam para fase futura);
+// - evolucao de schema (fase 27): o append aceita colunas a mais que o
+//   schema atual (todas as colunas antigas presentes, ordem livre, resolucao
+//   por nome). Coluna nova entra como nullable no fim do schemaString e o
+//   commit carrega um metaData novo; arquivos antigos ficam sem a coluna e a
+//   leitura (union-by-name) projeta nulo nas linhas deles. Remover coluna ou
+//   mudar o tipo de uma existente -> erro claro ("evolucao de schema
+//   suporta apenas adicao de colunas").
 // - leitura aplica o log em ordem de versao (add/remove) e concatena os
 //   parquet listados. Sem transacoes concorrentes.
 void delta_write(const std::string& dir, const Value& tabela, const std::string& part_col = "");

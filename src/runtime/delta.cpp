@@ -142,6 +142,36 @@ std::vector<std::string> table_columns(const Value& tabela, const char* ctx) {
   return cols;
 }
 
+// Colunas (nome + ordem da 1a linha) da tabela com o tipo tilt deduzido do
+// 1o valor nao nulo de cada coluna (tipo vazio = so nulos — o parquet ja
+// falha com erro claro ao gravar). Resolucao por nome, nao por posicao.
+std::vector<std::pair<std::string, std::string>> deduced_column_types(const Value& tabela,
+                                                                      const char* ctx) {
+  const std::vector<std::string> cols = table_columns(tabela, ctx);
+  std::vector<std::pair<std::string, std::string>> out;
+  for (const std::string& col : cols) {
+    std::string ty;
+    for (const Value& row : *tabela.list) {
+      if (row.kind != ValueKind::Mapa || !row.map) break;
+      const Value* cell = row.map->find(col);
+      if (cell && cell->kind != ValueKind::Nulo) {
+        ty = delta_type_name(*cell);
+        break;
+      }
+    }
+    out.emplace_back(col, ty);
+  }
+  return out;
+}
+
+bool contains_col(const std::vector<std::pair<std::string, std::string>>& cols,
+                  const std::string& name) {
+  for (const auto& c : cols) {
+    if (c.first == name) return true;
+  }
+  return false;
+}
+
 std::string delta_schema_string(const Value& tabela, const char* ctx) {
   if (tabela.kind != ValueKind::Lista && tabela.kind != ValueKind::Tabela) {
     die(std::string(ctx) + " espera uma tabela (lista de mapas)");
@@ -202,6 +232,33 @@ std::string current_schema_string(const std::vector<std::string>& versions) {
   return schema;
 }
 
+// Valor do ultimo metaData do log (acoes em ordem de versao); Mapa vazio se
+// nenhum. Usado no append para estender o schemaString preservando o id da
+// tabela e as colunas de particao.
+Value last_metadata_value(const std::vector<std::string>& versions) {
+  Value meta = Value::mapa();
+  for (const std::string& path : versions) {
+    std::ifstream in(path);
+    if (!in) die("nao foi possivel abrir '" + path + "'");
+    std::string line_text;
+    while (std::getline(in, line_text)) {
+      if (line_text.empty()) continue;
+      Value row;
+      try {
+        row = json_parse(line_text);
+      } catch (const std::exception& e) {
+        die("linha invalida no log '" + path + "': " + e.what());
+      }
+      if (row.kind != ValueKind::Mapa || !row.map) continue;
+      if (const Value* md = row.map->find("metaData");
+          md && md->kind == ValueKind::Mapa && md->map) {
+        meta = *md;
+      }
+    }
+  }
+  return meta;
+}
+
 // Pares (nome, tipo delta) das colunas de uma schemaString no formato do
 // Delta — usados na leitura para converter partitionValues (sempre texto no
 // log) de volta ao tipo declarado.
@@ -228,11 +285,7 @@ std::vector<std::pair<std::string, std::string>> schema_string_fields(const std:
 }
 
 // Nomes das colunas de uma schemaString no formato do Delta.
-std::vector<std::string> schema_string_columns(const std::string& schema_json) {
-  std::vector<std::string> cols;
-  for (const auto& f : schema_string_fields(schema_json)) cols.push_back(f.first);
-  return cols;
-}
+// (removida na fase 27: a validacao passou a ser por nome+tipo)
 
 bool fields_contains(const std::vector<std::pair<std::string, std::string>>& fields,
                      const std::string& col) {
@@ -519,16 +572,64 @@ void delta_append(const std::string& dir, const Value& tabela, const std::string
     die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
   }
 
-  // Validacao de schema: as colunas (nome + ordem) da tabela anexada devem
-  // ser identicas as do metaData da versao atual — mesmo criterio da leitura.
-  const std::vector<std::string> cur_cols = schema_string_columns(current_schema_string(versions));
-  const std::vector<std::string> new_cols = table_columns(tabela, "anexar_delta");
-  if (cur_cols.empty()) {
+  // Validacao de schema por nome (evolucao de schema, fase 27): toda coluna
+  // do schema atual precisa existir na tabela anexada (remover coluna ->
+  // erro); coluna em comum precisa ter o mesmo tipo; colunas novas entram
+  // como nullable no fim do schemaString.
+  const Value cur_meta = last_metadata_value(versions);
+  const Value* cur_schema_v = cur_meta.map ? cur_meta.map->find("schemaString") : nullptr;
+  if (!cur_schema_v || cur_schema_v->kind != ValueKind::Texto) {
     die("tabela em '" + dir + "' nao tem schema no log (metaData ausente)");
   }
-  if (cur_cols != new_cols) {
-    die("anexar_delta: schema divergente em '" + dir + "' (esperado " +
-        join_cols(cur_cols) + "; recebido " + join_cols(new_cols) + ")");
+  const std::vector<std::pair<std::string, std::string>> cur_fields =
+      schema_string_fields(cur_schema_v->s);
+  if (cur_fields.empty()) {
+    die("tabela em '" + dir + "' nao tem schema no log (metaData ausente)");
+  }
+  const std::vector<std::pair<std::string, std::string>> new_types =
+      deduced_column_types(tabela, "anexar_delta");
+  std::vector<std::pair<std::string, std::string>> added_cols;
+  for (const auto& old : cur_fields) {
+    const std::string* ty = nullptr;
+    for (const auto& nt : new_types) {
+      if (nt.first == old.first) ty = &nt.second;
+    }
+    if (!ty) {
+      die("anexar_delta: coluna '" + old.first +
+          "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)");
+    }
+    if (!ty->empty() && *ty != old.second) {
+      die("anexar_delta: coluna '" + old.first + "' com tipo divergente (esperado " + old.second +
+          "; recebido " + *ty +
+          ") (evolucao de schema suporta apenas adicao de colunas)");
+    }
+  }
+  for (const auto& nt : new_types) {
+    if (!contains_col(cur_fields, nt.first)) added_cols.push_back(nt);
+  }
+
+  // schemaString estendido (colunas novas nullable no fim) para o commit.
+  std::string new_schema;
+  if (!added_cols.empty()) {
+    Value schema;
+    try {
+      schema = json_parse(cur_schema_v->s);
+    } catch (const std::exception& e) {
+      die("schemaString invalido no log: " + std::string(e.what()));
+    }
+    Value* fields = schema.map ? schema.map->find("fields") : nullptr;
+    if (!fields || fields->kind != ValueKind::Lista || !fields->list) {
+      die("schemaString invalido no log (sem fields)");
+    }
+    for (const auto& [name, ty] : added_cols) {
+      Value f = Value::mapa();
+      f.map->set("name", Value::texto(name));
+      f.map->set("type", Value::texto(ty.empty() ? "string" : ty));
+      f.map->set("nullable", Value::logico(true));
+      f.map->set("metadata", Value::mapa());
+      fields->list->push_back(std::move(f));
+    }
+    new_schema = json_compact(schema);
   }
 
   // Particao: herda a da tabela existente; erro se explicita e divergente.
@@ -585,6 +686,23 @@ void delta_append(const std::string& dir, const Value& tabela, const std::string
     std::ofstream log(tmp_path, std::ios::trunc);
     if (!log) die("nao foi possivel gravar '" + tmp_path + "'");
     log << line("commitInfo", commit) << '\n';
+    if (!new_schema.empty()) {
+      // evolucao de schema: novo metaData com o schemaString estendido
+      // (id da tabela e colunas de particao preservados do metaData atual)
+      Value meta = Value::mapa();
+      const Value* id = cur_meta.map ? cur_meta.map->find("id") : nullptr;
+      meta.map->set("id", id && id->kind == ValueKind::Texto ? *id : Value::texto(new_table_id()));
+      Value format = Value::mapa();
+      format.map->set("provider", Value::texto("parquet"));
+      format.map->set("options", Value::mapa());
+      meta.map->set("format", std::move(format));
+      meta.map->set("schemaString", Value::texto(new_schema));
+      Value part_cols = Value::lista();
+      for (const std::string& c : existing) part_cols.list->push_back(Value::texto(c));
+      meta.map->set("partitionColumns", std::move(part_cols));
+      meta.map->set("configuration", Value::mapa());
+      log << line("metaData", meta) << '\n';
+    }
     for (Value& add : adds) {
       log << line("add", add) << '\n';
     }

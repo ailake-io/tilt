@@ -34,23 +34,34 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   e tipos físicos fora de BOOLEAN/INT64/DOUBLE/BYTE_ARRAY ainda não são lidos.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
-  `rename`, validação de schema, single-writer — sem locks/optimistic
-  concurrency). Partições hive-style existem para **uma coluna**
+  `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
+  single-writer — sem locks/optimistic concurrency). Partições hive-style
+  existem para **uma coluna**
   (`particionar_por:`, layout `<col>=<valor>/part-NNNNN.parquet`, coluna
-  reidratada na leitura), mas: valor nulo em coluna de partição e valores com
+  reidrata na leitura), mas: valor nulo em coluna de partição e valores com
   `/` não são suportados (erro claro, sem `__HIVE_DEFAULT_PARTITION__` nem
   escaping), a leitura não filtra por diretório de partição (lê tudo e
   reidrata) e não há checkpoints; a leitura herda o subconjunto do Parquet
-  acima.
+  acima. **Evolução de schema (fase 27)**: o append aceita colunas a mais —
+  toda coluna antiga presente (ordem livre), coluna nova entra nullable no
+  fim do `schemaString` com `metaData` novo no commit; arquivos antigos ficam
+  sem a coluna e a leitura projeta nulo (union-by-name). Remover coluna ou
+  mudar o tipo de uma existente → erro claro.
 - Iceberg é de 1ª passada: catálogo só **Hadoop** (diretório local — sem
-  REST/JDBC), schema evolution só para leitura do que foi escrito, codec Avro
-  "null" apenas, a leitura cobre o mesmo subconjunto do Parquet acima (tabelas
-  de outros escritores sem garantia além dele) e single-writer (sem locks nem
-  optimistic concurrency);
+  REST/JDBC), codec Avro "null" apenas, a leitura cobre o mesmo subconjunto do
+  Parquet acima (tabelas de outros escritores sem garantia além dele) e
+  single-writer (sem locks nem optimistic concurrency);
   `escrever_iceberg` sobrescreve a tabela (recria a versão 0) e o append é via
   `anexar_iceberg` (novo snapshot por commit atômico de `rename`; o manifest
   do novo snapshot lista os arquivos ativos como EXISTING + o ADD — além da
   cadeia de pais com adds menos removes).
+  **Evolução de schema (fase 27)**: o append aceita colunas a mais — toda
+  coluna antiga presente (ordem livre), coluna nova entra optional no fim do
+  schema com **field-id novo** (`last-column-id` + 1), metadata versionado com
+  `schema-id` novo mantendo o histórico (ids antigos estáveis) e os data files
+  do append gravados com esses field-ids; leitura projeta nulo nas linhas dos
+  arquivos antigos (union-by-name por field-id/nome — validado com pyiceberg).
+  Remover coluna ou mudar o tipo de uma existente → erro claro.
   Partições existem para **uma coluna** e só com transform `identity`
   (`particionar_por:`, layout `<col>=<valor>/00000-0-<uuid>.parquet` sem a
   coluna no parquet, record `partition` no manifest e coluna reidratada na
