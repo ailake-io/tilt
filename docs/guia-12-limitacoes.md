@@ -75,11 +75,14 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, Redis, Kafka,
   MongoDB, Qdrant, pgvector e S3 rodam.
 - MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
-  `mongo_criar_indice`): BSON + OP_MSG próprios com CRUD básico completo —
-  restam: sem `aggregate`, sem `$unset`/`$inc`/demais operadores de update
-  (só `$set`), sem índices de texto/TTL, filtro só por igualdade exata
-  top-level (combinado por E), `mongo_deletar` remove sempre todos que casam
-  (sem `limit 1`), find sem projeção (retorna o documento inteiro), TLS via
+  `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
+  básico completo — restam: `mongo_agregar` lê só o `firstBatch` do cursor
+  (sem `getMore`; use `$limit`/`$skip` para caber no primeiro batch) e não
+  valida as etapas (erro de pipeline vira erro claro do servidor), sem
+  `$unset`/`$inc`/demais operadores de update (só `$set`), sem índices de
+  texto/TTL, filtro de `mongo_buscar` só por igualdade exata top-level
+  (combinado por E), `mongo_deletar` remove sempre todos que casam (sem
+  `limit 1`), find sem projeção (retorna o documento inteiro), TLS via
   esquema `mongodb+srv://` (sem lookup DNS SRV), sem `OP_COMPRESSED`; document
   sequences (section kind 1) são puladas na leitura; uma conexão (com
   handshake `isMaster`) por chamada e payload inteiro em memória; banco por

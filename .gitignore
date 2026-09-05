@@ -24,3 +24,5 @@ tests/golden/run-iceberg-particionado/por_ano/
 tests/golden/run-iceberg-particionado/avulsos/
 tests/golden/run-iceberg-particionado/erro_barra/
 tests/golden/run-iceberg-particionado/erro_nulo/
+tests/golden/run-delta-evolucao/tabela_evolutiva/
+tests/golden/run-iceberg-evolucao/tabela_evolutiva/

@@ -1,0 +1,24 @@
+# Aggregate MongoDB contra o mock mongod do mongo_aggr_test.sh (banco "loja"
+# via path da MONGO_URL). Insere 4 vendas e roda tres pipelines: $match+$group
+# +$sort+$limit (total por cliente com valor >= 100, so o maior), $project com
+# exclusao de _id e $group com $avg por categoria ordenado por _id.
+pipeline mongo_aggr:
+  passos:
+    - mongo_inserir "vendas", {cliente: "ana", valor: 100, cat: "a"}
+    - mongo_inserir "vendas", {cliente: "bob", valor: 200, cat: "b"}
+    - mongo_inserir "vendas", {cliente: "ana", valor: 300, cat: "a"}
+    - mongo_inserir "vendas", {cliente: "ana", valor: 50, cat: "b"}
+    - r1 = mongo_agregar "vendas", [{"$match": {"valor": {"$gte": 100}}}, {"$group": {"_id": "$cliente", "total": {"$sum": "$valor"}}}, {"$sort": {"total": -1}}, {"$limit": 1}]
+    - imprimir tamanho r1
+    - imprimir r1[0]._id
+    - imprimir r1[0].total
+    - r2 = mongo_agregar "vendas", [{"$project": {"cliente": 1, "valor": 1, "_id": 0}}]
+    - imprimir tamanho r2
+    - imprimir r2[0].cliente
+    - imprimir r2[0].valor
+    - r3 = mongo_agregar "vendas", [{"$group": {"_id": "$cat", "media": {"$avg": "$valor"}}}, {"$sort": {"_id": 1}}]
+    - imprimir tamanho r3
+    - imprimir r3[0]._id
+    - imprimir r3[0].media
+    - imprimir r3[1]._id
+    - imprimir r3[1].media

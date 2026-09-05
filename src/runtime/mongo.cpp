@@ -709,4 +709,45 @@ std::string mongo_criar_indice(const std::string& colecao, const Value& campos,
   return name;
 }
 
+Value mongo_agregar(const std::string& colecao, const Value& etapas,
+                    const std::string& banco) {
+  if (etapas.kind != ValueKind::Lista || !etapas.list) {
+    die("agregar espera uma lista de etapas, ex.: [{$group: {_id: \"$cliente\", total: {$sum: 1}}}]");
+  }
+  for (const Value& etapa : *etapas.list) {
+    if (etapa.kind != ValueKind::Mapa || !etapa.map || etapa.map->items.empty()) {
+      die("agregar: cada etapa deve ser um mapa {operador: {...}}");
+    }
+  }
+
+  const MongoUrl url = parse_url();
+  const std::string db = banco_efetivo(url, banco);
+  Sessao sessao(url);
+
+  // As etapas sao traduzidas 1:1 para BSON (bson_encode_doc aceita chaves
+  // como "$group"/"$gte" normalmente); a semantica fica com o servidor.
+  Value cmd = Value::mapa();
+  cmd.map->set("aggregate", Value::texto(colecao));
+  cmd.map->set("$db", Value::texto(db));
+  cmd.map->set("pipeline", etapas);
+  cmd.map->set("cursor", Value::mapa());
+
+  const Value resp = sessao.comando(cmd);
+  if (!ok_de(resp)) die("aggregate em '" + colecao + "': " + errmsg_de(resp));
+  if (!resp.map) die("resposta de aggregate sem documento");
+
+  const Value* cursor = resp.map->find("cursor");
+  if (!cursor || cursor->kind != ValueKind::Mapa || !cursor->map) {
+    die("resposta de aggregate sem 'cursor'");
+  }
+  const Value* batch = cursor->map->find("firstBatch");
+  if (!batch || batch->kind != ValueKind::Lista || !batch->list) {
+    die("resposta de aggregate sem 'cursor.firstBatch'");
+  }
+  // Sem getMore nesta fase: cursor.id != 0 e ignorado e so o firstBatch e
+  // devolvido. Servidores reais podem paginar com batchSize default (101
+  // docs) — use $limit/$skip para resultados maiores.
+  return *batch;
+}
+
 }  // namespace tilt::rt

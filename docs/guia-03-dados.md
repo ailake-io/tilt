@@ -447,6 +447,8 @@ pipeline pedidos:
     - imprimir deletados                         # n deletados (inteiro)
     - nome = mongo_criar_indice "pedidos", {campos: ["cliente"]}
     - imprimir nome                              # "cliente_1"
+    - totais = mongo_agregar "pedidos", [{$group: {_id: "$cliente", total: {$sum: "$valor"}}}]
+    - imprimir totais                            # lista de mapas (firstBatch)
 ```
 
 - `mongo_inserir colecao, documento, {banco: "x"}`: o documento deve ser
@@ -469,14 +471,28 @@ pipeline pedidos:
 - `mongo_criar_indice colecao, {campos: ["a", "b"], banco:}`: cria índice
   ascendente (`{a: 1, b: 1}`) e devolve o `name` gerado dos campos
   (texto, ex.: `"a_1_b_1"`).
+- `mongo_agregar colecao, [etapas], {banco:}`: roda o **pipeline de
+  aggregation** e devolve o `cursor.firstBatch` como `lista` de `mapas`
+  (mesma conversão BSON→tilt de `mongo_buscar`). As etapas são mapas tilt
+  traduzidos **1:1** para BSON — chaves como `"$group"`/`"$gte"` passam como
+  operadores normalmente e os valores usam o mesmo mapeamento do
+  `mongo_inserir`. Uso típico: `$match` (igualdade e `$eq`/`$gt`/`$gte`/
+  `$lt`/`$lte`/`$ne`/`$in`, combinados por `$and`/`$or`), `$project`
+  (`1`/`verdadeiro` inclui, `0`/`falso` exclui), `$group` (`_id: "$campo"`
+  com acumuladores `$sum` (`1` ou `"$campo"`, também usado para `$count`),
+  `$avg`, `$min`, `$max`), `$sort` (`1`/`-1`), `$limit` e `$skip`. A
+  semântica não é validada localmente: etapa inválida vira erro claro com a
+  mensagem do servidor. Sem `getMore` nesta fase — só o primeiro batch é
+  lido (`cursor.id` ignorado); use `$limit`/`$skip` para resultados maiores.
 - banco efetivo: opção `banco:` > path do `MONGO_URL`; sem nenhum dos dois,
   os builtins falham com erro acionável **antes** de tocar a rede.
-- limitações da 1ª passada: sem `aggregate`, sem `$unset`/`$inc`/demais
-  operadores de update (só `$set`), sem índices de texto/TTL, filtro só por
-  igualdade top-level, `mongo_deletar` sempre remove todos que casam (sem
-  `limit 1`), sem auth/TLS, sem `OP_COMPRESSED`; respostas com document
-  sequences (section kind 1) são aceitas, mas `batchSize`/`max` de 100 cabem
-  na section kind 0 de qualquer forma.
+- limitações da 1ª passada: sem `getMore` no `mongo_agregar` (só
+  `firstBatch`), sem `$unset`/`$inc`/demais operadores de update (só `$set`),
+  sem índices de texto/TTL, filtro de `mongo_buscar` só por igualdade
+  top-level, `mongo_deletar` sempre remove todos que casam (sem `limit 1`),
+  sem auth/TLS, sem `OP_COMPRESSED`; respostas com document sequences
+  (section kind 1) são aceitas, mas `batchSize`/`max` de 100 cabem na section
+  kind 0 de qualquer forma.
 
 ## Índice vetorial no Qdrant
 

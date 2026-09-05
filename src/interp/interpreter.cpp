@@ -3714,6 +3714,34 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
   }
+  if (name == "mongo_agregar") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "mongo_agregar espera (colecao, [etapas], {banco:}), ex.: mongo_agregar \"pedidos\", "
+           "[{$group: {_id: \"$cliente\", total: {$sum: 1}}}]");
+    }
+    if (a[1].kind != ValueKind::Lista || !a[1].list) {
+      fail(call.span, "mongo_agregar: 'etapas' deve ser uma lista de mapas [{operador: {...}}]");
+    }
+    std::string banco;
+    if (a.size() >= 3) {
+      if (a[2].kind != ValueKind::Mapa || !a[2].map) {
+        fail(call.span, "mongo_agregar: opcoes devem ser um mapa {banco: \"x\"}");
+      }
+      if (const Value* bv = a[2].map->find("banco")) {
+        if (bv->kind != ValueKind::Texto) {
+          fail(call.span, "mongo_agregar: 'banco' deve ser texto");
+        }
+        banco = bv->s;
+      }
+    }
+    try {
+      return rt::mongo_agregar(a[0].s, a[1], banco);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "ler_s3") {
     auto a = args();
     if (a.size() < 1 || a[0].kind != ValueKind::Texto) {

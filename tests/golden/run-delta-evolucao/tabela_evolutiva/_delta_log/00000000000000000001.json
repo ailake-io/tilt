@@ -1,3 +1,0 @@
-{"commitInfo":{"timestamp":1788624557056,"operation":"APPEND"}}
-{"metaData":{"id":"cde4d246-fbdc-42b8-bb92-4d5c5d7bc8c7","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"nome\",\"type\":\"string\",\"nullable\":false,\"metadata\":{}},{\"name\":\"idade\",\"type\":\"long\",\"nullable\":false,\"metadata\":{}},{\"name\":\"cidade\",\"type\":\"string\",\"nullable\":true,\"metadata\":{}}]}","partitionColumns":[],"configuration":{}}}
-{"add":{"path":"part-00000000-0000-4000-8000-956bb91b-682.parquet","partitionValues":{},"size":340,"modificationTime":1788624557057,"dataChange":true}}

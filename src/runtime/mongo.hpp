@@ -56,4 +56,14 @@ std::int64_t mongo_deletar(const std::string& colecao, const Value& filtro,
 std::string mongo_criar_indice(const std::string& colecao, const Value& campos,
                                const std::string& banco);
 
+// Agrega na colecao com o `pipeline` (lista de mapas, traduzidos 1:1 para
+// BSON: $match/$project/$group/$sort/$limit/$skip e operadores como $gte,
+// $sum, $avg passam como chaves normais). Comando {aggregate, $db, pipeline,
+// cursor: {}}; ok:0 vira excecao com o errmsg. Devolve o cursor.firstBatch
+// como lista de mapas (mesma conversao BSON->tilt de buscar). Sem getMore
+// nesta fase: se o cursor do servidor tiver id != 0, apenas o firstBatch e
+// devolvido — use $limit/$skip para caber no primeiro batch.
+Value mongo_agregar(const std::string& colecao, const Value& etapas,
+                    const std::string& banco);
+
 }  // namespace tilt::rt
