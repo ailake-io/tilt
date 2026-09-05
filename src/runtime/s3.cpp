@@ -1,5 +1,6 @@
 #include "runtime/s3.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdio>
@@ -40,6 +41,8 @@ struct Objeto {
   std::string chave;
 };
 
+// Aceita "s3://bucket", "s3://bucket/" ou "s3://bucket/chave" (a chave pode
+// conter '/'); chave vazia = operacao no bucket (ex.: LIST).
 Objeto parse_url(const std::string& url) {
   const std::string prefix = "s3://";
   if (url.rfind(prefix, 0) != 0) {
@@ -47,12 +50,12 @@ Objeto parse_url(const std::string& url) {
   }
   const std::string rest = url.substr(prefix.size());
   const std::size_t slash = rest.find('/');
-  if (slash == std::string::npos || slash == 0 || slash + 1 >= rest.size()) {
+  if (slash == 0) {
     die("esperado 's3://bucket/chave'");
   }
   Objeto o;
-  o.bucket = rest.substr(0, slash);
-  o.chave = rest.substr(slash + 1);
+  o.bucket = slash == std::string::npos ? rest : rest.substr(0, slash);
+  o.chave = slash == std::string::npos ? "" : rest.substr(slash + 1);
   return o;
 }
 
@@ -67,23 +70,62 @@ std::string env_obrigatorio(const char* nome) {
   return v;
 }
 
+bool unreserved(unsigned char c) {
+  return std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~';
+}
+
 // Codifica cada segmento (entre '/') preservando os caracteres unreserved do
 // SigV4 (RFC 3986): letras, digitos, '-', '_', '.', '~'. Espaco vira %20 etc.
 std::string uri_encode_segmentos(const std::string& path) {
   static constexpr char kHex[] = "0123456789ABCDEF";
   std::string out;
   for (unsigned char c : path) {
-    const bool unreserved =
-        std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~';
     if (c == '/') {
       out += '/';
-    } else if (unreserved) {
+    } else if (unreserved(c)) {
       out += static_cast<char>(c);
     } else {
       out += '%';
       out += kHex[(c >> 4) & 0x0F];
       out += kHex[c & 0x0F];
     }
+  }
+  return out;
+}
+
+// URI-encoding integral (RFC 3986 unreserved, sem preservar '/') para chaves e
+// valores da query string — usado tanto no CanonicalRequest quanto na URL.
+std::string uri_encode(const std::string& s) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char c : s) {
+    if (unreserved(c)) {
+      out += static_cast<char>(c);
+    } else {
+      out += '%';
+      out += kHex[(c >> 4) & 0x0F];
+      out += kHex[c & 0x0F];
+    }
+  }
+  return out;
+}
+
+// CanonicalQueryString do SigV4: pares ordenados lexicograficamente por chave
+// encoded, "chave=valor" (ambos encoded), separados por '&'; valor vazio vira
+// so a chave encoded.
+std::string canonical_query(
+    const std::vector<std::pair<std::string, std::string>>& query) {
+  std::vector<std::pair<std::string, std::string>> enc;
+  enc.reserve(query.size());
+  for (const auto& [k, v] : query) {
+    enc.emplace_back(uri_encode(k), uri_encode(v));
+  }
+  std::sort(enc.begin(), enc.end());
+  std::string out;
+  for (std::size_t i = 0; i < enc.size(); ++i) {
+    if (i) out += '&';
+    out += enc[i].first;
+    if (!enc[i].second.empty()) out += "=" + enc[i].second;
   }
   return out;
 }
@@ -128,7 +170,7 @@ struct Assinatura {
   std::string amz_date;
 };
 
-// AWS SigV4 (service "s3", query string vazia nesta 1a passada).
+// AWS SigV4 (service "s3"), com CanonicalQueryString generica.
 std::string hex_lower(const std::array<std::uint8_t, 32>& bytes) {
   static constexpr char kDigits[] = "0123456789abcdef";
   std::string out(64, '0');
@@ -140,8 +182,8 @@ std::string hex_lower(const std::array<std::uint8_t, 32>& bytes) {
 }
 
 Assinatura assinar(const Credenciais& c, const std::string& method,
-                   const std::string& canonical_uri, const std::string& host,
-                   const std::string& payload_hash) {
+                   const std::string& canonical_uri, const std::string& query,
+                   const std::string& host, const std::string& payload_hash) {
   const std::time_t agora = std::time(nullptr);
   std::tm tm_utc{};
   gmtime_r(&agora, &tm_utc);
@@ -163,9 +205,9 @@ Assinatura assinar(const Credenciais& c, const std::string& method,
     signed_headers += ";x-amz-security-token";
   }
 
-  const std::string canonical_request = method + "\n" + canonical_uri + "\n" + "\n" +
-                                        canonical_headers + "\n" + signed_headers +
-                                        "\n" + payload_hash;
+  const std::string canonical_request = method + "\n" + canonical_uri + "\n" +
+                                        query + "\n" + canonical_headers + "\n" +
+                                        signed_headers + "\n" + payload_hash;
 
   const std::string string_to_sign = "AWS4-HMAC-SHA256\n" + amz_date + "\n" + scope +
                                      "\n" + sha256_hex(canonical_request);
@@ -185,14 +227,16 @@ Assinatura assinar(const Credenciais& c, const std::string& method,
 }
 
 // Executa o curl: corpo da resposta vai para `out_file`, status vem no stdout
-// (`-w '%{http_code}'`). HTTP >= 400 (ou falha de transporte) -> die com o
-// corpo da resposta truncado em ~200 chars. Retorna o status HTTP.
+// (`-w '%{http_code}'`). Com falhar=true (default), HTTP >= 400 (ou falha de
+// transporte) -> die com o corpo da resposta truncado em ~200 chars. Retorna
+// o status HTTP.
 int http(const std::string& method, const std::string& url,
          const std::vector<std::pair<std::string, std::string>>& headers,
-         const std::string& body, const std::string& out_file) {
+         const std::string& body, const std::string& out_file, bool falhar) {
   std::string body_file;
-  std::string cmd = "curl -s --fail-with-body -o " + shell_quote(out_file) +
-                    " -w '%{http_code}' -X " + method;
+  std::string cmd = "curl -s ";
+  if (falhar) cmd += "--fail-with-body ";
+  cmd += "-o " + shell_quote(out_file) + " -w '%{http_code}' -X " + method;
   for (const auto& [nome, valor] : headers) {
     cmd += " -H " + shell_quote(nome + ": " + valor);
   }
@@ -232,7 +276,7 @@ int http(const std::string& method, const std::string& url,
   int status = 0;
   std::istringstream iss(resp);
   iss >> status;
-  if (status >= 400) {
+  if (falhar && status >= 400) {
     std::ifstream in(out_file);
     std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     die("HTTP " + std::to_string(status) + ": " + corpo.substr(0, 200));
@@ -240,14 +284,25 @@ int http(const std::string& method, const std::string& url,
   return status;
 }
 
-std::string exec(const Credenciais& c, const std::string& method, const Objeto& o,
-                 const std::string& body) {
+}  // namespace
+
+// Nucleo comum: monta URI + query canonical, assina SigV4 e executa o HTTP.
+// Retorna (status, corpo). Com falhar=false nao die em HTTP >= 400 (o caller
+// inspeciona o status, ex.: DELETE 404 -> "objeto nao encontrado").
+std::pair<int, std::string> s3_request(
+    const std::string& method, const std::string& bucket, const std::string& key,
+    const std::vector<std::pair<std::string, std::string>>& query_map,
+    const std::string& body, bool falhar = true) {
+  const Credenciais c = credenciais();
   const std::string host = endpoint_host(c.endpoint);
-  const std::string canonical_uri = "/" + o.bucket + "/" + uri_encode_segmentos(o.chave);
-  const std::string url = endpoint_base(c.endpoint) + canonical_uri;
+  const std::string canonical_uri =
+      key.empty() ? "/" + bucket : "/" + bucket + "/" + uri_encode_segmentos(key);
+  const std::string query = canonical_query(query_map);
+  std::string url = endpoint_base(c.endpoint) + canonical_uri;
+  if (!query.empty()) url += "?" + query;
   const std::string payload_hash = sha256_hex(body);
 
-  const Assinatura a = assinar(c, method, canonical_uri, host, payload_hash);
+  const Assinatura a = assinar(c, method, canonical_uri, query, host, payload_hash);
   std::vector<std::pair<std::string, std::string>> headers = {
       {"Host", host},
       {"X-Amz-Content-Sha256", payload_hash},
@@ -262,26 +317,94 @@ std::string exec(const Credenciais& c, const std::string& method, const Objeto& 
   if (fd < 0) die("nao foi possivel criar arquivo temporario");
   ::close(fd);
   const std::string out_file = tmpl;
-  http(method, url, headers, body, out_file);
+  const int status = http(method, url, headers, body, out_file, falhar);
 
   std::ifstream in(out_file, std::ios::binary);
   std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   ::unlink(out_file.c_str());
-  return corpo;
+  return {status, corpo};
+}
+
+namespace {
+
+// Decodifica as entidades XML que o S3 escapa em <Key>: &amp; &lt; &gt;
+// &quot; &#39;.
+std::string decodificar_xml(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (std::size_t i = 0; i < s.size();) {
+    if (s[i] == '&') {
+      if (s.compare(i, 5, "&amp;") == 0) {
+        out += '&';
+        i += 5;
+      } else if (s.compare(i, 4, "&lt;") == 0) {
+        out += '<';
+        i += 4;
+      } else if (s.compare(i, 4, "&gt;") == 0) {
+        out += '>';
+        i += 4;
+      } else if (s.compare(i, 6, "&quot;") == 0) {
+        out += '"';
+        i += 6;
+      } else if (s.compare(i, 5, "&#39;") == 0) {
+        out += '\'';
+        i += 5;
+      } else {
+        out += s[i];
+        ++i;
+      }
+    } else {
+      out += s[i];
+      ++i;
+    }
+  }
+  return out;
 }
 
 }  // namespace
 
 std::string s3_get(const std::string& url) {
   const Objeto o = parse_url(url);
-  const Credenciais c = credenciais();
-  return exec(c, "GET", o, "");
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  return s3_request("GET", o.bucket, o.chave, {}, "").second;
 }
 
 void s3_put(const std::string& url, const std::string& body) {
   const Objeto o = parse_url(url);
-  const Credenciais c = credenciais();
-  exec(c, "PUT", o, body);
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  s3_request("PUT", o.bucket, o.chave, {}, body);
+}
+
+std::vector<std::string> s3_list(const std::string& bucket_url,
+                                 const std::string& prefixo, int max) {
+  const Objeto o = parse_url(bucket_url);
+  if (max <= 0) die("max deve ser positivo");
+  const auto r = s3_request("GET", o.bucket, "",
+                            {{"list-type", "2"},
+                             {"prefix", prefixo},
+                             {"max-keys", std::to_string(max)}},
+                            "");
+  std::vector<std::string> chaves;
+  const std::string& xml = r.second;
+  std::size_t pos = 0;
+  while ((pos = xml.find("<Key>", pos)) != std::string::npos) {
+    pos += 5;
+    const std::size_t fim = xml.find("</Key>", pos);
+    if (fim == std::string::npos) break;
+    chaves.push_back(decodificar_xml(xml.substr(pos, fim - pos)));
+    pos = fim + 6;
+  }
+  return chaves;
+}
+
+void s3_delete(const std::string& url) {
+  const Objeto o = parse_url(url);
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  const int status = s3_request("DELETE", o.bucket, o.chave, {}, "", false).first;
+  if (status == 404) die("objeto nao encontrado: " + o.chave);
+  if (status != 204 && status != 200) {
+    die("delete falhou com HTTP " + std::to_string(status));
+  }
 }
 
 }  // namespace tilt::rt

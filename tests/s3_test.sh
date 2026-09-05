@@ -21,12 +21,13 @@ command -v python3 >/dev/null 2>&1 || {
 tmp=$(mktemp -d)
 trap 'kill "$mock_pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
 
-# --- mock S3 com validacao SigV4 ------------------------------------------------
+# --- mock S3 com validacao SigV4 (query string faz parte da assinatura) ---------
 python3 - "$PORT_BASE" "$tmp/porta" "$tmp/log" <<'PYEOF' >"$tmp/mock_out" 2>&1 &
 import hashlib
 import hmac
 import http.server
 import sys
+from urllib.parse import parse_qsl, quote
 
 port_base = int(sys.argv[1])
 port_file = sys.argv[2]
@@ -40,7 +41,19 @@ store = {}
 log = open(log_path, "a", encoding="utf-8")
 
 
-def sig_ok(method, path, headers, payload):
+def canonical_query(qs):
+    # Mesma regra do cliente SigV4: pares ordenados por chave encoded,
+    # "chave=valor" ambos encoded (RFC 3986 unreserved), '&' separador;
+    # valor vazio vira so a chave encoded.
+    if not qs:
+        return ""
+    enc = [(quote(k, safe="-_.~"), quote(v, safe="-_.~"))
+           for k, v in parse_qsl(qs, keep_blank_values=True)]
+    enc.sort()
+    return "&".join(k + "=" + v if v else k for k, v in enc)
+
+
+def sig_ok(method, path, qs, headers, payload):
     auth = headers.get("Authorization", "")
     parts = {}
     for item in auth[len("AWS4-HMAC-SHA256 "):].split(","):
@@ -64,8 +77,8 @@ def sig_ok(method, path, headers, payload):
         if valor is None:
             return False, "header-ausente:" + h
         canonical_headers += h + ":" + valor.strip() + "\n"
-    canonical = (method + "\n" + path + "\n\n" + canonical_headers + "\n" +
-                 ";".join(signed) + "\n" + payload_hash)
+    canonical = (method + "\n" + path + "\n" + canonical_query(qs) + "\n" +
+                 canonical_headers + "\n" + ";".join(signed) + "\n" + payload_hash)
     string_to_sign = ("AWS4-HMAC-SHA256\n" + amz_date + "\n" + scope + "\n" +
                       hashlib.sha256(canonical.encode()).hexdigest())
     k = hmac.new(("AWS4" + SECRET).encode(), date_stamp.encode(), hashlib.sha256).digest()
@@ -74,6 +87,11 @@ def sig_ok(method, path, headers, payload):
     k = hmac.new(k, terminal.encode(), hashlib.sha256).digest()
     esperado = hmac.new(k, string_to_sign.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(esperado, parts.get("Signature", "")), "assinatura"
+
+
+def xml_esc(s):
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;").replace("'", "&#39;"))
 
 
 class MockS3(http.server.BaseHTTPRequestHandler):
@@ -92,20 +110,48 @@ class MockS3(http.server.BaseHTTPRequestHandler):
     def _handle(self, method):
         length = int(self.headers.get("Content-Length", 0))
         payload = self.rfile.read(length) if length else b""
-        ok, motivo = sig_ok(method, self.path, self.headers, payload)
+        path, _, qs = self.path.partition("?")
+        ok, motivo = sig_ok(method, path, qs, self.headers, payload)
         if not ok:
             log.write("%s %s sig=INVALIDA %s\n" % (method, self.path, motivo))
             log.flush()
             self._responder(403, b'{"message":"assinatura invalida"}')
             return
-        log.write("%s %s sig=ok\n" % (method, self.path))
-        log.flush()
+        params = dict(parse_qsl(qs, keep_blank_values=True))
         if method == "PUT":
-            store[self.path] = payload
+            store[path] = payload
+            log.write("PUT %s sig=ok\n" % path)
+            log.flush()
             self._responder(200, b"")
+        elif method == "DELETE":
+            if path in store:
+                del store[path]
+                self._responder(204, b"")
+            else:
+                self._responder(404, b'{"message":"nao encontrado"}')
+            log.write("DELETE %s sig=ok\n" % path)
+            log.flush()
+        elif "list-type" in params:
+            prefix = params.get("prefix", "")
+            maxk = int(params.get("max-keys", "1000"))
+            base = path + "/"  # path == "/bucket"
+            chaves = sorted(k for k in store if k.startswith(base + prefix))
+            chaves = [k[len(base):] for k in chaves][:maxk]
+            corpos = "".join("<Contents><Key>%s</Key></Contents>" % xml_esc(k)
+                             for k in chaves)
+            xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+                   '<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">'
+                   "<Name>%s</Name><Prefix>%s</Prefix><KeyCount>%d</KeyCount>"
+                   "%s</ListBucketResult>" %
+                   (xml_esc(path.strip("/")), xml_esc(prefix), len(chaves), corpos))
+            log.write("LIST prefix=%s max=%d sig=ok\n" % (prefix, maxk))
+            log.flush()
+            self._responder(200, xml.encode())
         else:
-            if self.path in store:
-                self._responder(200, store[self.path])
+            log.write("GET %s sig=ok\n" % path)
+            log.flush()
+            if path in store:
+                self._responder(200, store[path])
             else:
                 self._responder(404, b'{"message":"nao encontrado"}')
 
@@ -114,6 +160,9 @@ class MockS3(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._handle("GET")
+
+    def do_DELETE(self):
+        self._handle("DELETE")
 
 
 for porta in range(port_base, port_base + 20):
@@ -139,15 +188,18 @@ done
 PORTA=$(cat "$tmp/porta")
 
 # --- roundtrip via tilt executar -------------------------------------------------
-out=$(
+env_s3() {
   env \
     AWS_ACCESS_KEY_ID=AKIAEXEMPLO1234567 \
     AWS_SECRET_ACCESS_KEY=chave-de-teste-1234567890abcdef \
     AWS_SESSION_TOKEN= \
     AWS_REGION=us-east-1 \
     S3_ENDPOINT="http://127.0.0.1:$PORTA" \
-    "$BIN" executar "${2:-${0%/*}/fixtures/s3_roundtrip.tilt}"
-)
+    "$@"
+}
+
+out=$(env_s3 "$BIN" executar "${2:-${0%/*}/fixtures/s3_roundtrip.tilt}")
+out_ops=$(env_s3 "$BIN" executar "${3:-${0%/*}/fixtures/s3_ops.tilt}")
 
 kill "$mock_pid" 2>/dev/null || true
 mock_pid=""
@@ -155,10 +207,25 @@ mock_pid=""
 fail=0
 echo "$out" | grep -q "ola s3" || { echo "saida sem 'ola s3': $out"; fail=1; }
 
+# listar_s3/apagar_s3: 2 listagens com prefixo (2 chaves, depois 1) + 1 delete
+echo "$out_ops" | grep -q "^== pipeline ops ==$" || { echo "ops sem cabecalho: $out_ops"; fail=1; }
+linha1=$(printf '%s\n' "$out_ops" | sed -n 2p)
+linha2=$(printf '%s\n' "$out_ops" | sed -n 3p)
+linha3=$(printf '%s\n' "$out_ops" | sed -n 4p)
+linha4=$(printf '%s\n' "$out_ops" | sed -n 5p)
+[ "$linha1" = "relatorios/a.txt" ] || { echo "ops linha 1 inesperada: $linha1"; fail=1; }
+[ "$linha2" = "relatorios/b.txt" ] || { echo "ops linha 2 inesperada: $linha2"; fail=1; }
+[ "$linha3" = "relatorios/b.txt" ] || { echo "ops linha 3 inesperada (pos-delete): $linha3"; fail=1; }
+[ -z "$linha4" ] || { echo "ops com saida extra: $out_ops"; fail=1; }
+
 puts=$(grep -c "^PUT .* sig=ok$" "$tmp/log" || true)
 gets=$(grep -c "^GET .* sig=ok$" "$tmp/log" || true)
-[ "$puts" = "1" ] || { echo "esperado 1 PUT com assinatura ok, obtido $puts"; cat "$tmp/log"; fail=1; }
+[ "$puts" = "4" ] || { echo "esperado 4 PUT com assinatura ok, obtido $puts"; cat "$tmp/log"; fail=1; }
 [ "$gets" = "1" ] || { echo "esperado 1 GET com assinatura ok, obtido $gets"; cat "$tmp/log"; fail=1; }
+lists=$(grep -c "^LIST prefix=relatorios/ max=100 sig=ok$" "$tmp/log" || true)
+[ "$lists" = "2" ] || { echo "esperado 2 LIST com prefixo 'relatorios/', obtido $lists"; cat "$tmp/log"; fail=1; }
+dels=$(grep -c "^DELETE /bucket/relatorios/a\.txt sig=ok$" "$tmp/log" || true)
+[ "$dels" = "1" ] || { echo "esperado 1 DELETE de relatorios/a.txt, obtido $dels"; cat "$tmp/log"; fail=1; }
 if grep -q "sig=INVALIDA" "$tmp/log"; then
   echo "mock rejeitou assinatura:"; cat "$tmp/log"; fail=1
 fi

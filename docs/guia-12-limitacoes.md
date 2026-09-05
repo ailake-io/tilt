@@ -61,10 +61,11 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   consumidores no mesmo grupo não dividem as partições de forma coordenada),
   sem SASL/TLS (plain), produce v1/fetch v1 apenas, um broker líder por
   chamada e payload inteiro em memória.
-- S3 (`ler_s3`/`escrever_s3`): 1ª passada com GET/PUT só — sem
-  list/delete/multipart, sem query string (versão/versionamento, ACL etc.) e
-  payload inteiro em memória; HTTP depende do binário `curl` e das
-  credenciais via env (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`).
+- S3 (`ler_s3`/`escrever_s3`/`listar_s3`/`apagar_s3`): GET/PUT/LIST/DELETE
+  com query string assinada (ListObjectsV2) — sem multipart/copy/presigned
+  URLs e payload inteiro em memória; o parse do XML de listagem é por string
+  simples (conteúdo de `<Key>`, entidades básicas); HTTP depende do binário
+  `curl` e das credenciais via env (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`).
   Funciona com S3-compatível (MinIO etc.) via `S3_ENDPOINT`.
 - Bancos relacionais: somente consultas SELECT (sem INSERT/UPDATE via SQL,
   sem prepared statements); Postgres carrega `libpq.so.5` e SQLite

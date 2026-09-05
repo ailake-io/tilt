@@ -264,6 +264,7 @@ pipeline arquivos:
     - escrever_s3 "s3://meu-bucket/relatorios/vendas.txt", "ola s3"
     - conteudo = ler_s3 "s3://meu-bucket/relatorios/vendas.txt"
     - imprimir conteudo
+    - apagar_s3 "s3://meu-bucket/relatorios/vendas.txt"
 ```
 
 - `ler_s3 "s3://bucket/chave"`: GET do objeto, conteúdo devolvido como
@@ -271,12 +272,19 @@ pipeline arquivos:
 - `escrever_s3 "s3://bucket/chave", valor`: PUT; `texto` vai bruto, demais
   valores são serializados com `json_dump`. Content-Type
   `application/octet-stream`.
+- `listar_s3 "s3://bucket", {prefixo: "relatorios/", max: 100}`: listagem
+  via ListObjectsV2 (`GET` no bucket com `list-type=2&prefix=...&max-keys=...`,
+  chave e valor entram na assinatura SigV4); devolve `lista` de `texto` com
+  as chaves ordenadas. Sem chaves no prefixo → lista vazia.
+- `apagar_s3 "s3://bucket/chave"`: DELETE da chave; `204`/`200` ok, `404`
+  levanta erro claro (`s3: objeto nao encontrado: <chave>`).
 - credenciais por variáveis de ambiente: `AWS_ACCESS_KEY_ID` e
   `AWS_SECRET_ACCESS_KEY` (obrigatórias, string vazia conta como ausente),
   `AWS_SESSION_TOKEN` (opcional), `AWS_REGION` (default `us-east-1`).
 - `S3_ENDPOINT` (default `https://s3.<region>.amazonaws.com`): aponte para
   `http://host:porta` para S3-compatível (ex.: MinIO). O path do objeto é
-  codificado por segmento e a query string fica vazia nesta 1ª passada.
+  codificado por segmento e a query string (quando há, ex.: `listar_s3`) é
+  codificada por chave/valor e incluída na assinatura.
 
 ## Kafka (wire protocol nativo)
 

@@ -38,7 +38,7 @@ const std::array<std::string_view, 20> kDeclKeywords = {
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 43> kBuiltins = {
+const std::array<std::string_view, 45> kBuiltins = {
     "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
     "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
     "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
@@ -47,7 +47,7 @@ const std::array<std::string_view, 43> kBuiltins = {
     "ler_iceberg", "escrever_iceberg", "anexar_iceberg",
     "ler_redis", "escrever_redis", "ler_kafka", "escrever_kafka", "mongo_inserir",
     "mongo_buscar", "mongo_atualizar", "mongo_deletar", "mongo_criar_indice",
-    "ler_s3", "escrever_s3"};
+    "ler_s3", "escrever_s3", "listar_s3", "apagar_s3"};
 
 const std::array<std::string_view, 11> kTableMethods = {
     "filtrar",  "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",

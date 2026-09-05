@@ -1,0 +1,14 @@
+# Lista/delete S3 contra o mock SigV4 do s3_test.sh (S3_ENDPOINT aponta p/ ele).
+# Escreve 3 objetos, lista com prefixo (2 chaves), apaga uma e lista de novo (1).
+pipeline ops:
+  passos:
+    - escrever_s3 "s3://bucket/relatorios/a.txt", "A"
+    - escrever_s3 "s3://bucket/relatorios/b.txt", "B"
+    - escrever_s3 "s3://bucket/outro/c.txt", "C"
+    - chaves = listar_s3 "s3://bucket", {prefixo: "relatorios/", max: 100}
+    - para cada c em chaves:
+        imprimir c
+    - apagar_s3 "s3://bucket/relatorios/a.txt"
+    - resto = listar_s3 "s3://bucket", {prefixo: "relatorios/", max: 100}
+    - para cada c em resto:
+        imprimir c

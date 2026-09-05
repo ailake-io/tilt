@@ -3629,6 +3629,50 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "listar_s3") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "listar_s3 espera (url_do_bucket, {prefixo:, max:}), ex.: listar_s3 "
+           "\"s3://bucket\", {prefixo: \"x\", max: 100}");
+    }
+    std::string prefixo;
+    int max = 1000;
+    if (a.size() >= 2) {
+      if (a[1].kind != ValueKind::Mapa || !a[1].map) {
+        fail(call.span, "listar_s3: opcoes devem ser um mapa {prefixo:, max:}");
+      }
+      if (const Value* p = a[1].map->find("prefixo")) {
+        if (p->kind != ValueKind::Texto) {
+          fail(call.span, "listar_s3: 'prefixo' deve ser texto");
+        }
+        prefixo = p->s;
+      }
+      if (const Value* m = a[1].map->find("max")) {
+        max = static_cast<int>(m->as_number());
+      }
+    }
+    try {
+      const auto chaves = rt::s3_list(a[0].s, prefixo, max);
+      rt::ValueList lst;
+      for (const auto& c : chaves) lst.push_back(Value::texto(c));
+      return Value::lista(std::move(lst));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "apagar_s3") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "apagar_s3 espera (url), ex.: apagar_s3 \"s3://bucket/chave\"");
+    }
+    try {
+      rt::s3_delete(a[0].s);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
   if (word_in(name, {"escrever"}) || (name.rfind("ler_", 0) == 0) ||
       (name.rfind("escrever_", 0) == 0)) {
     fail(call.span, "'" + name + "': conector/formato nao implementado (M5.2)",
