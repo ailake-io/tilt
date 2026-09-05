@@ -1375,7 +1375,46 @@ float activation_deriv(const std::string& fn, float pre, float post) {
     float s = 1.0F / (1.0F + std::exp(-pre));
     return s * (1.0F + pre * (1.0F - s));
   }
-  return 1.0F;  // gelu et al.: approximated as identity during training (M6.3)
+  if (fn == "gelu") {
+    // Mesma aproximacao tanh da forward (rt::apply_unary):
+    // gelu(x) = 0.5 x (1 + tanh(u)), u = c (x + 0.044715 x^3), c = 0.7978845608
+    // d/dx = 0.5 (1 + tanh(u)) + 0.5 x sech^2(u) c (1 + 0.134145 x^2)
+    const float c = 0.7978845608F;
+    const float u = c * (pre + 0.044715F * pre * pre * pre);
+    const float t = std::tanh(u);
+    return 0.5F * (1.0F + t) +
+           0.5F * pre * (1.0F - t * t) * c * (1.0F + 0.134145F * pre * pre);
+  }
+  return 1.0F;
+}
+
+// Backward de norma_camada (sem affine), por linha da ultima dimensao:
+// dL/dx = inv * (g - mean(g) - y * mean(g*y)), com y a saida normalizada do
+// forward e inv = 1/sqrt(var + eps) recomputado da entrada (eps = 1e-5).
+void layer_norm_backward(rt::Tensor& grad, const rt::Tensor& in, const rt::Tensor& y) {
+  const auto w = static_cast<std::size_t>(in.shape.back());
+  for (std::size_t base = 0; base < grad.data.size(); base += w) {
+    float mean = 0.0F;
+    for (std::size_t k = 0; k < w; ++k) mean += in.data[base + k];
+    mean /= static_cast<float>(w);
+    float var = 0.0F;
+    for (std::size_t k = 0; k < w; ++k) {
+      const float d = in.data[base + k] - mean;
+      var += d * d;
+    }
+    var /= static_cast<float>(w);
+    const float inv = 1.0F / std::sqrt(var + 1e-5F);
+    float mg = 0.0F, mgy = 0.0F;
+    for (std::size_t k = 0; k < w; ++k) {
+      mg += grad.data[base + k];
+      mgy += grad.data[base + k] * y.data[base + k];
+    }
+    mg /= static_cast<float>(w);
+    mgy /= static_cast<float>(w);
+    for (std::size_t k = 0; k < w; ++k) {
+      grad.data[base + k] = inv * (grad.data[base + k] - mg - y.data[base + k] * mgy);
+    }
+  }
 }
 
 }  // namespace
@@ -1428,11 +1467,6 @@ void Interpreter::run_treino(const Item& decl) {
   if (!ce && !mse) {
     fail(decl.span, "treino: perda '" + perda +
                         "' nao suportada (use 'entropia_cruzada' | 'quadratica')");
-  }
-  for (const Layer& l : layers) {
-    if (l.kind == Layer::LayerNorm) {
-      fail(decl.span, "treino: 'norma_camada' ainda nao tem backward (M6.3); remova-a para treinar");
-    }
   }
   if (layers.empty()) fail(decl.span, "treino '" + name + "': modelo sem camadas");
   if (ce && layers.back().kind != Layer::Softmax) {
@@ -1526,6 +1560,15 @@ void Interpreter::run_treino(const Item& decl) {
         Layer& l = layers[static_cast<std::size_t>(li)];
         const rt::Tensor& in = ins[static_cast<std::size_t>(li)];
         if (l.kind == Layer::Softmax || l.kind == Layer::Dropout) continue;
+        if (l.kind == Layer::LayerNorm) {
+          // Saida normalizada do forward: entrada da proxima camada, ou a
+          // propria saida final (probs) quando norma_camada e a ultima camada.
+          const rt::Tensor& y = static_cast<std::size_t>(li) + 1 < ins.size()
+                                    ? ins[static_cast<std::size_t>(li) + 1]
+                                    : probs;
+          layer_norm_backward(grad, in, y);
+          continue;
+        }
         if (l.kind == Layer::Activation) {
           const rt::Tensor& out_act = ins[static_cast<std::size_t>(li) + 1 < ins.size()
                                               ? static_cast<std::size_t>(li) + 1

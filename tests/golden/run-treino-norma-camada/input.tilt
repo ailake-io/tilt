@@ -1,0 +1,16 @@
+modelo LN:
+  entrada: tensor[f32, 4]
+  camadas:
+    - linear: [4, 8]
+    - norma_camada
+    - gelu
+    - linear: [8, 2]
+    - softmax
+
+treino LN:
+  dados: carregador "d.csv", alvo: "y"
+  perda: entropia_cruzada
+  otimizador: adam
+  taxa: 0.05
+  epocas: 3
+  verboso: verdadeiro

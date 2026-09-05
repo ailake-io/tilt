@@ -97,10 +97,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - `pesos: "arquivo"` carrega no formato tilt-pesos (ver guia 04); arquivo
   ausente mantém o init Xavier com `[nota]`.
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
-  `perda: quadratica` (regressão escalar); `gelu` no backward é aproximada
-  como identidade.
-- `norma_camada` funciona na inferência (sem affine); `treino` com ela →
-  erro (backward ainda não existe). `conv2d`/`norma_lote` → erro claro.
+  `perda: quadratica` (regressão escalar); backward completo de `densa`,
+  ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
+  forward) e `norma_camada` (sem affine).
+- `conv2d`/`norma_lote` → erro claro (ainda não existem).
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.
 

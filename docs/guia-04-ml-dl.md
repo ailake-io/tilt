@@ -56,8 +56,8 @@ modelo Classificador:
 
 Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmoide|tanh`,
 `softmax`, `abandono: p` / `dropout: p`, `norma_camada` (normalização sobre a
-última dimensão, sem affine, só inferência). `norma_lote`/`conv2d` ainda não
-são suportadas — erro claro em vez de ignorar silenciosamente.
+última dimensão, sem affine — na inferência e no treino). `norma_lote`/`conv2d`
+ainda não são suportadas — erro claro em vez de ignorar silenciosamente.
 
 ### Pesos de arquivo
 
@@ -100,7 +100,9 @@ treino Classificador:
 
 Perdas: `entropia_cruzada` (classificação, exige `softmax` final) e
 `quadratica` (regressão escalar — a saída deve ter largura 1 e não ter
-`softmax`). Resumo determinístico:
+`softmax`). O backward cobre todas as camadas: `densa`/`linear` (com SGD/Adam),
+ativações (derivada exata da mesma aproximação da forward — inclusive `gelu`)
+e `norma_camada` (sem affine). Resumo determinístico:
 
 ```
 treino Classificador: perda caiu sim | acuracia 90/90
