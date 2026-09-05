@@ -613,6 +613,23 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
   const JanelaSpec spec = parse_janela(janela);
   if (!spec.valid) fail(janela.span, "janela: " + spec.erro);
 
+  // `sobreposicao: M` (default 0 = tumbling): o lote mantem os M ultimos
+  // elementos do lote anterior no inicio de `linhas` — janela deslizante.
+  long sobreposicao = 0;
+  if (const Item* sp = find_field(*pipeline.block, "sobreposicao")) {
+    if (!sp->value || sp->value->kind != ExprKind::IntLit) {
+      fail(sp->span, "sobreposicao: espera um inteiro (elementos mantidos entre lotes)");
+    }
+    sobreposicao = std::strtol(sp->value->text.c_str(), nullptr, 10);
+    if (sobreposicao < 0) fail(sp->span, "sobreposicao: precisa ser >= 0");
+    if (spec.kind != JanelaSpec::Contagem) {
+      fail(sp->span, "sobreposicao: exige janela de contagem (janela: N inteiro)");
+    }
+    if (sobreposicao >= spec.count) {
+      fail(sp->span, "sobreposicao: precisa ser menor que a janela");
+    }
+  }
+
   const Item* entrada = find_field(*pipeline.block, "entrada");
   std::string fonte;
   if (entrada) {
@@ -628,7 +645,18 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
     fail(janela.span, "janela: contagem exige 'entrada:' (fonte)");
   }
 
-  WindowState& st = window_states_[decl_name(pipeline)];
+  const std::string pipe_name = decl_name(pipeline);
+  WindowState& st = window_states_[pipe_name];
+  // Offset persistente: so janela de contagem com fonte de arquivo, e nunca
+  // com TILT_JANELA_ESTADO=memoria (pipelines efemeros/testes).
+  std::string offset_file;
+  if (spec.kind == JanelaSpec::Contagem && !fonte.empty()) {
+    const char* estado = std::getenv("TILT_JANELA_ESTADO");
+    if (!estado || std::string(estado) != "memoria") {
+      offset_file = janela_offset_file(fonte);
+      if (!offset_file.empty()) janela_offset_load(st, pipe_name, offset_file);
+    }
+  }
   if (!fonte.empty()) {
     // Le a fonte inteira a cada tick; so os elementos alem do offset acumulam.
     Value data = read_fonte(fonte, entrada->span);
@@ -639,14 +667,21 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
       }
       st.offset = data.list->size();
     }
+    // Grava so quando o offset avanca (nada consumido = sem arquivo novo).
+    if (!offset_file.empty() && st.offset > st.persisted_offset) {
+      janela_offset_save(st, pipe_name, offset_file);
+    }
   }
 
   bool roda = false;
   if (spec.kind == JanelaSpec::Contagem) {
     // Contagem nao depende do relogio: fecha com novos elementos suficientes.
+    // Com sobreposicao M, o lote inteiro tem N elementos mas so (N - M) saem
+    // do buffer — os M ultimos repetem no proximo lote.
+    const long consome = spec.count - sobreposicao;
     if (st.buffer.size() >= static_cast<std::size_t>(spec.count)) {
       batch.assign(st.buffer.begin(), st.buffer.begin() + spec.count);
-      st.buffer.erase(st.buffer.begin(), st.buffer.begin() + spec.count);
+      st.buffer.erase(st.buffer.begin(), st.buffer.begin() + consome);
       roda = true;
     }
   } else {
@@ -752,6 +787,92 @@ void Interpreter::run_verificar(const Item& field, Env& env) {
   throw RuntimeAbort{field.span, summary, DiagCode::DataQualityViolation, violations};
 }
 
+// ------------------------------------------------------------------ fontes
+// Valor de texto de um campo de `fonte` (aceita texto, nome e env("...")).
+std::string fonte_field_text(const ast::Block& block, std::string_view key) {
+  const Item* f = find_field(block, key);
+  if (!f || !f->value) return "";
+  const Expr* v = f->value.get();
+  if (v->kind == ExprKind::TextLit || v->kind == ExprKind::Name) return v->text;
+  if (v->kind == ExprKind::Call && v->lhs && v->lhs->kind == ExprKind::Name &&
+      v->lhs->text == "env" && !v->args.empty() &&
+      v->args[0].value->kind == ExprKind::TextLit) {
+    const char* e = std::getenv(v->args[0].value->text.c_str());
+    return e ? std::string(e) : "";
+  }
+  return "";
+}
+
+// Arquivo de offset da janela de contagem para uma fonte: `<caminho>.tilt-offset`,
+// compartilhado entre pipelines pela mesma fonte (o JSON dentro e um mapa por
+// pipeline). Somente fontes baseadas em arquivo (csv/json); Kafka com `grupo:`
+// ja tem checkpoint no broker e os demais conectores nao usam offset de arquivo.
+std::string Interpreter::janela_offset_file(const std::string& fonte) {
+  const Item* decl = entities_.at(fonte);
+  if (!decl->block) return "";
+  const std::string tipo = fonte_field_text(*decl->block, "tipo");
+  if (tipo != "csv" && tipo != "json") return "";
+  std::string path = fonte_field_text(*decl->block, "caminho");
+  if (path.empty()) path = fonte_field_text(*decl->block, "arquivo");
+  if (path.empty()) path = fonte_field_text(*decl->block, "url");
+  if (path.rfind("file://", 0) == 0) path = path.substr(7);
+  if (path.empty()) return "";
+  return path + ".tilt-offset";
+}
+
+void Interpreter::janela_offset_load(WindowState& st, const std::string& pipeline,
+                                     const std::string& offset_file) {
+  if (st.offset_loaded) return;
+  st.offset_loaded = true;
+  std::ifstream in(offset_file);
+  if (!in) return;  // sem arquivo: comeca do zero e nada cria ainda
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  Value parsed;
+  try {
+    parsed = rt::json_parse(ss.str());
+  } catch (const std::exception&) {
+    return;  // arquivo corrompido/incompleto: recomeca do zero
+  }
+  if (parsed.kind != ValueKind::Mapa || !parsed.map) return;
+  if (const Value* v = parsed.map->find(pipeline); v && v->is_number()) {
+    st.offset = static_cast<std::size_t>(v->as_number());
+    st.persisted_offset = st.offset;
+  }
+}
+
+void Interpreter::janela_offset_save(WindowState& st, const std::string& pipeline,
+                                     const std::string& offset_file) {
+  Value map = Value::mapa();
+  std::ifstream in(offset_file);
+  if (in) {
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    try {
+      Value parsed = rt::json_parse(ss.str());
+      if (parsed.kind == ValueKind::Mapa && parsed.map) {
+        for (const auto& [k, v] : parsed.map->items) {
+          if (k != pipeline && v.is_number()) map.map->set(k, v);  // offsets dos demais pipelines
+        }
+      }
+    } catch (const std::exception&) {
+      // sobrescreve arquivo ilegivel
+    }
+  }
+  map.map->set(pipeline, Value::inteiro(static_cast<std::int64_t>(st.offset)));
+  const std::string tmp = offset_file + ".tmp";
+  {
+    std::ofstream out(tmp, std::ios::trunc);
+    if (!out) return;  // sem permissao: segue so com offset em memoria
+    out << rt::json_dump(map) << "\n";
+  }
+  if (std::rename(tmp.c_str(), offset_file.c_str()) != 0) {
+    std::remove(tmp.c_str());
+    return;
+  }
+  st.persisted_offset = st.offset;
+}
+
 Value Interpreter::read_csv_file(const std::string& path, Span span) {
   std::ifstream in(path);
   if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
@@ -780,19 +901,7 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
   const Item* decl = entities_.at(name);
   if (!decl->block) fail(span, "fonte '" + name + "' sem configuracao");
 
-  auto field_text = [&](std::string_view key) -> std::string {
-    const Item* f = find_field(*decl->block, key);
-    if (!f || !f->value) return "";
-    const Expr* v = f->value.get();
-    if (v->kind == ExprKind::TextLit || v->kind == ExprKind::Name) return v->text;
-    if (v->kind == ExprKind::Call && v->lhs && v->lhs->kind == ExprKind::Name &&
-        v->lhs->text == "env" && !v->args.empty() &&
-        v->args[0].value->kind == ExprKind::TextLit) {
-      const char* e = std::getenv(v->args[0].value->text.c_str());
-      return e ? std::string(e) : "";
-    }
-    return "";
-  };
+  auto field_text = [&](std::string_view key) { return fonte_field_text(*decl->block, key); };
 
   const std::string tipo = field_text("tipo");
   std::string path = field_text("caminho");

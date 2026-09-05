@@ -12,3 +12,4 @@ tests/golden/run-fonte-parquet/entrada.parquet
 tests/golden/run-delta/tabela_delta/
 tests/golden/run-delta-append/saida_delta/
 tests/golden/run-iceberg/saida_iceberg/
+tests/golden/*/*.tilt-offset

@@ -48,6 +48,12 @@ add_test(
           $<TARGET_FILE:tilt>
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_roundtrip.tilt)
 
+add_test(
+  NAME janela_offset
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/janela_offset_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/janela_offset)
+
 find_program(PYTHON3 python3)
 if(PYTHON3)
   add_test(NAME lsp COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/lsp_test.py $<TARGET_FILE:tilt>)

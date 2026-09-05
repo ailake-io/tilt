@@ -153,15 +153,26 @@ class Interpreter {
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
   // Streaming (`janela:`) por pipeline: offset de elementos ja consumidos da
-  // fonte, buffer de pendentes e relogio da ultima execucao dos passos. Vive
-  // em memoria e reinicia a cada processo (offset nao e persistente).
+  // fonte, buffer de pendentes e relogio da ultima execucao dos passos. Para
+  // janela de contagem sobre fonte de arquivo (csv/json) o offset persiste em
+  // `<caminho>.tilt-offset` (mapa por pipeline), salvo quando avanca.
   struct WindowState {
     std::size_t offset = 0;
     std::vector<rt::Value> buffer;
     bool ran_once = false;
     std::time_t last_run = 0;
+    std::size_t persisted_offset = 0;  // ultimo offset gravado no arquivo
+    bool offset_loaded = false;        // arquivo de offset ja foi consultado
   };
   std::unordered_map<std::string, WindowState> window_states_;
+  // Offset persistente da janela de contagem: resolve o arquivo
+  // `<fonte>.tilt-offset` quando a fonte e baseada em arquivo (csv/json)
+  // — vazio para os demais conectores. Gravacao atomica (tmp + rename).
+  std::string janela_offset_file(const std::string& fonte);
+  void janela_offset_load(WindowState& st, const std::string& pipeline,
+                          const std::string& offset_file);
+  void janela_offset_save(WindowState& st, const std::string& pipeline,
+                          const std::string& offset_file);
   bool gpu_announced_ = false;  // printed the backend banner once
 
   // Serializam caches/armazenamento mutavel compartilhado entre as threads

@@ -67,6 +67,14 @@ pipeline limitado:
   janela: "30s"           # 3) throttle: no máximo 1 execução por 30s
   passos:
     - imprimir "tick"
+
+pipeline deslizante:      # janela de contagem com sobreposição entre lotes
+  agenda: "*/1 * * * *"
+  entrada: eventos
+  janela: 3
+  sobreposicao: 1         # mantém os 1 últimos elementos do lote anterior
+  passos:
+    - imprimir tamanho(linhas), linhas[0].id, linhas[-1].id
 ```
 
 1. **Contagem** (`janela: N` inteiro, exige `entrada:`): a cada tick a fonte é
@@ -82,10 +90,25 @@ pipeline limitado:
    pipeline agendado — o primeiro tick executa e os seguintes só rodam quando
    a duração decorreu.
 
+**Janela deslizante** (`sobreposicao: M`, irmão de `janela:`, default `0`):
+com `janela: N` + `sobreposicao: M` (exige `N > M`), `linhas` continua tendo
+os `N` elementos do lote, mas apenas `N - M` saem do buffer — os `M` últimos
+repetem no início do próximo lote (janela deslizante clássica). Ex.: fonte
+`1..5`, `janela: 3`, `sobreposicao: 1` → lotes `[1,2,3]` e `[3,4,5]`.
+
+**Offset persistente**: em janela de contagem sobre fonte de arquivo
+(`tipo: csv`/`json`), o offset fica gravado em `<caminho-da-fonte>.tilt-offset`
+(JSON com um mapa por pipeline, p. ex. `{"contagens": 120}` — a chave é o
+par pipeline + fonte, então pipelines diferentes sobre a mesma fonte não
+interferem). O arquivo é gravado atomicamente (tmp + rename) sempre que o
+offset avança, e lido na inicialização — reiniciar o processo continua de onde
+parou, sem reprocessar elementos. Defina `TILT_JANELA_ESTADO=memoria` para
+voltar ao comportamento antigo (só memória, sem arquivo — útil para testes e
+pipelines efêmeros). Fonte Kafka com `grupo:` não usa arquivo: o checkpoint é
+o commit de offsets do grupo no broker.
+
 Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
-(a janela "fecha" na primeira execução). O estado (offset, buffer e relógio da
-última execução) fica **em memória** e reinicia a cada processo — não há
-persistência entre execuções de `tilt`. Durações aceitas: `"Ns"`, `"Nmin"`,
+(a janela "fecha" na primeira execução). Durações aceitas: `"Ns"`, `"Nmin"`,
 `"Nh"` com `N` inteiro positivo.
 
 ## Leitura e escrita

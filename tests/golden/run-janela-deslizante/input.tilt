@@ -1,0 +1,11 @@
+fonte eventos:
+  tipo: csv
+  caminho: "dados.csv"
+
+pipeline contagens:
+  agenda: "*/1 * * * *"
+  entrada: eventos
+  janela: 3
+  sobreposicao: 1
+  passos:
+    - imprimir "janela:", tamanho(linhas), linhas[0].id, linhas[-1].id
