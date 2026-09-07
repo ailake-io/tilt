@@ -1,15 +1,10 @@
 #include "runtime/gpu_runtime.hpp"
 
+#include "runtime/compat.hpp"
+
 #include <cstdlib>
 #include <cstring>
 #include <vector>
-
-#if defined(__unix__) || defined(__APPLE__)
-#include <dlfcn.h>
-#define TILT_HAS_DLOPEN 1
-#else
-#define TILT_HAS_DLOPEN 0
-#endif
 
 namespace tilt::rt {
 
@@ -49,10 +44,10 @@ extern "C" __global__ void tilt_relu(float* D, int n) {
 }
 )cuda";
 
-// --- CUDA Driver API + NVRTC, bound lazily via dlopen -----------------------
+// --- CUDA Driver API + NVRTC, bound lazily via tilt_dlopen (dlopen no POSIX,
+// LoadLibrary no Windows) ----------------------------------------------------
 
 struct CudaState {
-#if TILT_HAS_DLOPEN
   void* lib_cuda = nullptr;
   void* lib_nvrtc = nullptr;
 
@@ -83,14 +78,18 @@ struct CudaState {
 
   template <typename T>
   bool bind(void* lib, T& fp, const char* name) {
-    fp = reinterpret_cast<T>(::dlsym(lib, name));
+    fp = reinterpret_cast<T>(tilt_dlsym(lib, name));
     return fp != nullptr;
   }
 
   bool init() {
-    lib_cuda = ::dlopen("libcuda.so.1", RTLD_NOW | RTLD_GLOBAL);
-    if (!lib_cuda) lib_cuda = ::dlopen("libcuda.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!lib_cuda) lib_cuda = ::dlopen("nvcuda.dll", RTLD_NOW | RTLD_GLOBAL);
+#if defined(_WIN32)
+    lib_cuda = tilt_dlopen("nvcuda.dll", true);
+#else
+    lib_cuda = tilt_dlopen("libcuda.so.1", true);
+    if (!lib_cuda) lib_cuda = tilt_dlopen("libcuda.so", true);
+    if (!lib_cuda) lib_cuda = tilt_dlopen("nvcuda.dll", true);
+#endif
     if (!lib_cuda) return false;
 
     bool ok = bind(lib_cuda, cuInit, "cuInit") && bind(lib_cuda, cuDeviceGetCount, "cuDeviceGetCount") &&
@@ -112,7 +111,17 @@ struct CudaState {
     if (cuDeviceGet(&dev, 0) != 0) return false;
     if (cuCtxCreate(&ctx, 0, dev) != 0) return false;
 
-    lib_nvrtc = ::dlopen("libnvrtc.so", RTLD_NOW);
+#if defined(_WIN32)
+    // NVRTC no Windows vem como nvrtc64_<major><minor>_0.dll; versões CUDA
+    // recentes instalam também um nvrtc.dll alias. Sem NVRTC o estado fica
+    // no CPU (fallback já existente).
+    lib_nvrtc = tilt_dlopen("nvrtc.dll");
+    if (!lib_nvrtc) lib_nvrtc = tilt_dlopen("nvrtc64_124_0.dll");
+    if (!lib_nvrtc) lib_nvrtc = tilt_dlopen("nvrtc64_120_0.dll");
+    if (!lib_nvrtc) lib_nvrtc = tilt_dlopen("nvrtc64_110_0.dll");
+#else
+    lib_nvrtc = tilt_dlopen("libnvrtc.so");
+#endif
     if (!lib_nvrtc) return false;  // no runtime compiler -> stay on CPU
     if (!(bind(lib_nvrtc, nvrtcCreateProgram, "nvrtcCreateProgram") &&
           bind(lib_nvrtc, nvrtcCompileProgram, "nvrtcCompileProgram") &&
@@ -170,11 +179,6 @@ struct CudaState {
     cuMemFree(dd);
     return rc == 0;
   }
-#else
-  bool init() { return false; }
-  bool gemm(const float*, const float*, float*, int, int, int) { return false; }
-  bool relu(float*, std::size_t) { return false; }
-#endif
 };
 
 std::string env_gpu() {

@@ -1,6 +1,8 @@
 #include "cli/cli.hpp"
 
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +25,7 @@
 #include "lsp/lsp_server.hpp"
 #include "parser/ast_dump.hpp"
 #include "parser/parser.hpp"
+#include "runtime/compat.hpp"
 #include "runtime/json.hpp"
 #include "runtime/value.hpp"
 #include "semantic/checker.hpp"
@@ -36,7 +39,16 @@ constexpr int kDiagnostics = 1;
 constexpr int kUsage = 2;
 constexpr int kNotImplemented = 3;
 
-bool want_color() { return std::getenv("NO_COLOR") == nullptr && isatty(STDERR_FILENO) != 0; }
+// Cores no stderr: 1a passada do port Windows roda sem VT processing
+// (ENABLE_VIRTUAL_TERMINAL_PROCESSING fica para uma fase posterior); POSIX
+// segue com isatty + NO_COLOR.
+bool want_color() {
+#if defined(_WIN32)
+  return false;
+#else
+  return std::getenv("NO_COLOR") == nullptr && isatty(STDERR_FILENO) != 0;
+#endif
+}
 
 void print_usage(std::ostream& os) {
   os << "tilt " << kVersion << "\n\n"
@@ -530,6 +542,10 @@ int cmd_servir(const std::vector<std::string_view>& args) {
 }  // namespace
 
 int run_cli(int argc, char** argv) {
+#if defined(_WIN32)
+  // WSAStartup para os conectores (kafka/mongo/redis) e o servidor HTTP.
+  const rt::TiltWsaGuard wsa_guard;
+#endif
   const std::vector<std::string_view> args(argv + (argc > 0 ? 1 : 0), argv + argc);
 
   if (args.empty()) {

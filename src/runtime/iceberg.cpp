@@ -1,9 +1,6 @@
 #include "runtime/iceberg.hpp"
 
-#include <dirent.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
+#include "runtime/compat.hpp"
 
 #include <algorithm>
 #include <array>
@@ -32,15 +29,13 @@ namespace {
 [[noreturn]] void die(const std::string& m) { throw std::runtime_error("iceberg: " + m); }
 
 void mkdir_if_missing(const std::string& path) {
-  if (::mkdir(path.c_str(), 0755) != 0 && errno != EEXIST) {
+  if (tilt_mkdir(path) != 0 && errno != EEXIST) {
     die("nao foi possivel criar o diretorio '" + path + "'");
   }
 }
 
 std::int64_t file_size(const std::string& path) {
-  struct stat st {};
-  if (::stat(path.c_str(), &st) != 0) return -1;
-  return static_cast<std::int64_t>(st.st_size);
+  return tilt_file_size(path);
 }
 
 std::int64_t now_ms() {
@@ -729,16 +724,14 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela, const std::strin
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> list_metadata_files(const std::string& meta_dir) {
-  DIR* d = ::opendir(meta_dir.c_str());
-  if (!d) return {};
+  std::vector<std::string> entries;
+  if (!tilt_listdir(meta_dir, entries)) return {};
   std::vector<std::pair<std::string, std::string>> found;
-  while (dirent* e = ::readdir(d)) {
-    const std::string name = e->d_name;
+  for (const std::string& name : entries) {
     if (name.size() > 14 && name.compare(name.size() - 14, 14, ".metadata.json") == 0) {
       found.emplace_back(name, meta_dir + "/" + name);
     }
   }
-  ::closedir(d);
   std::sort(found.begin(), found.end());
   std::vector<std::string> out;
   out.reserve(found.size());
@@ -1162,8 +1155,8 @@ void commit_metadata(const std::string& dir, std::int64_t version, const std::st
     out.flush();
     if (!out) die("falha ao gravar '" + tmp_path + "'");
   }
-  if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
-    ::unlink(tmp_path.c_str());
+  if (std::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+    std::remove(tmp_path.c_str());
     die("falha ao commitar o metadata em '" + final_path + "'");
   }
 }
@@ -1833,47 +1826,46 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
   cmd += "-w '%{http_code}' -X " + method;
   cmd += " -H " + shell_quote("Content-Type: application/json");
   if (!body.empty()) {
-    char tmpl[] = "/tmp/tilt_iceberg_body_XXXXXX";
-    const int fd = ::mkstemp(tmpl);
+    std::string body_path;
+    const int fd = tilt_tempfile("iceberg_body", body_path);
     if (fd < 0) die("nao foi possivel criar arquivo temporario");
-    ::close(fd);
+    tilt_close_file(fd);
     {
-      std::ofstream out(tmpl, std::ios::trunc);
+      std::ofstream out(body_path, std::ios::trunc);
       out << body;
       if (!out) {
-        ::unlink(tmpl);
+        std::remove(body_path.c_str());
         die("falha ao gravar o corpo da requisicao REST");
       }
     }
-    body_file = tmpl;
+    body_file = body_path;
     cmd += " --data @" + body_file;
   }
-  char outmpl[] = "/tmp/tilt_iceberg_resp_XXXXXX";
-  const int ofd = ::mkstemp(outmpl);
+  std::string out_file;
+  const int ofd = tilt_tempfile("iceberg_resp", out_file);
   if (ofd < 0) {
-    if (!body_file.empty()) ::unlink(body_file.c_str());
+    if (!body_file.empty()) std::remove(body_file.c_str());
     die("nao foi possivel criar arquivo temporario");
   }
-  ::close(ofd);
-  const std::string out_file = outmpl;
+  tilt_close_file(ofd);
   cmd += " -o " + shell_quote(out_file) + " " + shell_quote(url);
 
   std::string resp;
   {
     std::array<char, 4096> buf{};
-    FILE* pipe = ::popen(cmd.c_str(), "r");
+    FILE* pipe = tilt_popen(cmd.c_str(), "r");
     if (!pipe) {
-      if (!body_file.empty()) ::unlink(body_file.c_str());
-      ::unlink(out_file.c_str());
+      if (!body_file.empty()) std::remove(body_file.c_str());
+      std::remove(out_file.c_str());
       die("nao foi possivel executar 'curl'");
     }
     std::size_t n;
     while ((n = ::fread(buf.data(), 1, buf.size(), pipe)) > 0) resp.append(buf.data(), n);
-    const int rc = ::pclose(pipe);
-    if (!body_file.empty()) ::unlink(body_file.c_str());
+    const int rc = tilt_pclose(pipe);
+    if (!body_file.empty()) std::remove(body_file.c_str());
     if (rc != 0) {
       corpo = slurp_file(out_file);
-      ::unlink(out_file.c_str());
+      std::remove(out_file.c_str());
       die("requisicao ao catalogo REST falhou (curl codigo " + std::to_string(rc) +
           "): verifique ICEBERG_URI. Resposta: " + corpo.substr(0, 200));
     }
@@ -1881,7 +1873,7 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
   int status = 0;
   std::istringstream(resp) >> status;
   corpo = slurp_file(out_file);
-  ::unlink(out_file.c_str());
+  std::remove(out_file.c_str());
   if (falhar && status >= 400) {
     die("catalogo REST respondeu HTTP " + std::to_string(status) + ": " + corpo.substr(0, 200));
   }
@@ -1949,19 +1941,19 @@ std::string fetch_metadata_path(const std::string& metadata_location) {
       metadata_location.rfind("https://", 0) == 0) {
     std::string corpo;
     rest_http("GET", metadata_location, "", true, corpo);
-    char tmpl[] = "/tmp/tilt_iceberg_meta_XXXXXX";
-    const int fd = ::mkstemp(tmpl);
+    std::string meta_path;
+    const int fd = tilt_tempfile("iceberg_meta", meta_path);
     if (fd < 0) die("nao foi possivel criar arquivo temporario");
-    ::close(fd);
+    tilt_close_file(fd);
     {
-      std::ofstream out(tmpl, std::ios::trunc);
+      std::ofstream out(meta_path, std::ios::trunc);
       out << corpo;
       if (!out) {
-        ::unlink(tmpl);
+        std::remove(meta_path.c_str());
         die("falha ao gravar o metadata baixado do catalogo REST");
       }
     }
-    return tmpl;
+    return meta_path;
   }
   die("metadata-location '" + metadata_location +
       "' nao suportada (fase 29: somente file:// e http(s)://)");
@@ -2053,7 +2045,7 @@ void iceberg_write_rest(const RestCfg& rc, const std::string& dir, const Value& 
   // sobrescreve: limpa o metadata local anterior (o catalogo e a fonte da
   // verdade; data/manifest orfao fica para tras, como no modo Hadoop).
   for (const std::string& old : list_metadata_files(location + "/metadata")) {
-    if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
+    if (std::remove(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
   }
 
   const WriteCore wc = write_core(location, tabela, part_col, schema_id);
@@ -2148,7 +2140,7 @@ void iceberg_write(const std::string& dir, const Value& tabela, const std::strin
   // sobrescreve: remove metadata anterior (data avro/parquet orfao fica para
   // tras, como no delta — a leitura so enxerga o que o metadata referencia).
   for (const std::string& old : list_metadata_files(dir + "/metadata")) {
-    if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
+    if (std::remove(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
   }
   commit_metadata(dir, 0, wc.json);
 }
@@ -2159,12 +2151,11 @@ void iceberg_append(const std::string& dir, const Value& tabela, const std::stri
     iceberg_append_rest(rc, dir, tabela, part_col_req);
     return;
   }
-  struct stat st {};
-  if (::stat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+  if (!tilt_is_directory(dir)) {
     die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
   }
   const std::string meta_dir = dir + "/metadata";
-  if (::stat(meta_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+  if (!tilt_is_directory(meta_dir)) {
     die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
   }
 

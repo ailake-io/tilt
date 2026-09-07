@@ -13,8 +13,8 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <unistd.h>
 
+#include "runtime/compat.hpp"
 #include "runtime/sha256.hpp"
 
 namespace tilt::rt {
@@ -185,8 +185,7 @@ Assinatura assinar(const Credenciais& c, const std::string& method,
                    const std::string& canonical_uri, const std::string& query,
                    const std::string& host, const std::string& payload_hash) {
   const std::time_t agora = std::time(nullptr);
-  std::tm tm_utc{};
-  gmtime_r(&agora, &tm_utc);
+  const std::tm tm_utc = tilt_gmtime(agora);
   char data_buf[9];
   std::strftime(data_buf, sizeof data_buf, "%Y%m%d", &tm_utc);
   const std::string date_stamp = data_buf;
@@ -241,14 +240,15 @@ int http(const std::string& method, const std::string& url,
     cmd += " -H " + shell_quote(nome + ": " + valor);
   }
   if (method == "PUT") {
-    char tmpl[] = "/tmp/tilt_s3_body_XXXXXX";
-    const int fd = ::mkstemp(tmpl);
+    std::string body_path;
+    const int fd = tilt_tempfile("s3_body", body_path);
     if (fd < 0) die("nao foi possivel criar arquivo temporario");
-    std::ofstream out(tmpl, std::ios::trunc);
-    out << body;
-    out.close();
-    ::close(fd);
-    body_file = tmpl;
+    tilt_close_file(fd);
+    {
+      std::ofstream out(body_path, std::ios::trunc);
+      out << body;
+    }
+    body_file = body_path;
     cmd += " --data @" + body_file;
   }
   cmd += " " + shell_quote(url);
@@ -256,15 +256,15 @@ int http(const std::string& method, const std::string& url,
   std::string resp;
   {
     std::array<char, 4096> buf{};
-    FILE* pipe = ::popen(cmd.c_str(), "r");
+    FILE* pipe = tilt_popen(cmd.c_str(), "r");
     if (!pipe) {
-      if (!body_file.empty()) ::unlink(body_file.c_str());
+      if (!body_file.empty()) std::remove(body_file.c_str());
       die("nao foi possivel executar 'curl'");
     }
     std::size_t n;
     while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) resp.append(buf.data(), n);
-    const int rc = ::pclose(pipe);
-    if (!body_file.empty()) ::unlink(body_file.c_str());
+    const int rc = tilt_pclose(pipe);
+    if (!body_file.empty()) std::remove(body_file.c_str());
     if (rc != 0) {
       std::ifstream in(out_file);
       std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -312,16 +312,15 @@ std::pair<int, std::string> s3_request(
   if (!c.token.empty()) headers.emplace_back("X-Amz-Security-Token", c.token);
   if (method == "PUT") headers.emplace_back("Content-Type", "application/octet-stream");
 
-  char tmpl[] = "/tmp/tilt_s3_resp_XXXXXX";
-  const int fd = ::mkstemp(tmpl);
+  std::string out_file;
+  const int fd = tilt_tempfile("s3_resp", out_file);
   if (fd < 0) die("nao foi possivel criar arquivo temporario");
-  ::close(fd);
-  const std::string out_file = tmpl;
+  tilt_close_file(fd);
   const int status = http(method, url, headers, body, out_file, falhar);
 
   std::ifstream in(out_file, std::ios::binary);
   std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  ::unlink(out_file.c_str());
+  std::remove(out_file.c_str());
   return {status, corpo};
 }
 

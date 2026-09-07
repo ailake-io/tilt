@@ -150,12 +150,23 @@ O job `homebrew` valida a sintaxe da fórmula
 preencha a `sha256` do tarball da Release e os usuários instalam com
 `brew install ailake-io/tap/tilt`.
 
-### Windows (.msi)
+### Windows (MSVC/MinGW)
 
-O empacotamento `.msi` (CPack WIX) está previsto, mas o runtime ainda é
-POSIX (sockets BSD, epoll no servidor HTTP, dlopen). Antes do `.msi` é
-precisa uma fase de portabilidade (camada de compat + backend
-`select()`/IOCP no servidor HTTP). Ver `docs/guia-12-limitacoes.md`.
+O build Windows é feito pelo CI (job `windows` em `.github/workflows/ci.yml`,
+`windows-latest` com MSVC): compila com `cmake --preset release` e roda um
+smoke (`tilt versao` / `checar` / `executar`). Para reproduzir localmente:
+
+```powershell
+cmake --preset release
+cmake --build --preset release
+./build/release/bin/tilt.exe versao
+```
+
+Não há instalador `.msi` ainda (CPack WIX fica para uma fase posterior). As
+limitações do port (camada de compat em `src/runtime/compat.*`, servidor HTTP
+com `select()` ao invés de epoll, conectores HTTP externos não validados por
+dependerem do quoting shell POSIX) estão listadas em
+`docs/guia-12-limitacoes.md`, seção Plataforma.
 
 ## 5. Extensão do VS Code
 

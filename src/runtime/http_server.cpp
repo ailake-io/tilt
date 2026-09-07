@@ -1,9 +1,6 @@
 #include "runtime/http_server.hpp"
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include "runtime/compat.hpp"
 
 #include <cctype>
 #include <cerrno>
@@ -705,7 +702,205 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
   return served;
 }
 
-#else  // !__linux__ : fallback bloqueante, uma conexao por vez
+#elif defined(_WIN32)
+
+// Backend do event loop para Windows: select() sobre sockets nao-bloqueantes
+// (o Winsock nao tem epoll; FD_SETSIZE e ampliado em runtime/compat.hpp para
+// caber kMaxConns). Mesma semantica do run_epoll serial: keep-alive, cota de
+// requisicoes, timeout de ociosidade e respostas em linha. O caminho paralelo
+// (pool de workers com ordenacao por sequencia) fica por enquanto so no
+// backend epoll do Linux.
+struct WinConn {
+  explicit WinConn(int f) : fd(f), arena(kArenaCap) {}
+  int fd;
+  std::string in;    // bytes ainda nao consumidos (inclui request pipeline)
+  std::string out;   // resposta aguardando envio
+  bool close_after = false;   // fecha quando `out` esvaziar
+  bool peer_eof = false;      // recv() retornou 0; so falta drenar `out`
+  std::uint64_t last_active;  // epoch seconds
+  TiltArena arena;
+};
+
+std::uint64_t win_now_sec() {
+  return static_cast<std::uint64_t>(std::time(nullptr));
+}
+
+int win_set_nonblocking(int fd) {
+  u_long mode = 1;
+  return ioctlsocket(static_cast<SOCKET>(fd), FIONBIO, &mode);
+}
+
+int run_event_loop(int listen_fd, const std::function<HttpResponse(const HttpRequest&)>& handler,
+                   int max_requests, std::string& fatal) {
+  if (win_set_nonblocking(listen_fd) != 0) {
+    fatal = "ioctlsocket(FIONBIO) falhou";
+    return -1;
+  }
+
+  std::unordered_map<int, std::unique_ptr<WinConn>> conns;
+  int served = 0;
+  bool stopping = false;
+
+  auto close_conn = [&](int fd) {
+    tilt_close_socket(fd);
+    conns.erase(fd);
+  };
+
+  // Cota atingida: para de aceitar, fecha conexoes ociosas e marca as demais
+  // para fechar assim que a resposta pendente terminar de ser enviada.
+  auto begin_shutdown = [&]() {
+    if (stopping) return;
+    stopping = true;
+    std::vector<int> droppable;
+    for (const auto& [fd, c] : conns) {
+      c->close_after = true;
+      if (c->out.empty()) droppable.push_back(fd);
+    }
+    for (int fd : droppable) close_conn(fd);
+  };
+
+  auto drain_out = [&](WinConn& c) {
+    while (!c.out.empty()) {
+      const ssize_t n = tilt_send(c.fd, c.out.data(), c.out.size());
+      if (n > 0) {
+        c.out.erase(0, static_cast<std::size_t>(n));
+        continue;
+      }
+      if (n < 0 && tilt_last_net_error() == kNetWouldBlock) return;  // select avisa quando der
+      close_conn(c.fd);                                              // erro: desiste da conexao
+      return;
+    }
+    if (c.close_after || c.peer_eof) close_conn(c.fd);
+  };
+
+  // Le tudo que esta pronto e consome requests completos do buffer.
+  auto service_conn = [&](WinConn& c) {
+    char chunk[8192];
+    while (true) {
+      const ssize_t n = tilt_recv(c.fd, chunk, sizeof(chunk));
+      if (n > 0) {
+        c.in.append(chunk, static_cast<std::size_t>(n));
+        continue;
+      }
+      if (n == 0) c.peer_eof = true;
+      else if (tilt_last_net_error() != kNetWouldBlock) {
+        close_conn(c.fd);
+        return;
+      }
+      break;
+    }
+
+    while (true) {
+      HttpRequest req;
+      c.arena.resetar();
+      const ParseResult r = parse_request(c.in, c.arena, req);
+      if (r == ParseResult::NeedMore) break;
+      if (r == ParseResult::Bad) {
+        HttpResponse bad;
+        bad.status = 400;
+        bad.body = R"({"erro":"requisicao malformada"})";
+        c.out += build_response(bad, false);
+        c.close_after = true;
+        c.arena.resetar();
+        break;
+      }
+
+      HttpResponse resp;
+      try {
+        resp = handler(req);
+      } catch (...) {
+        resp.status = 500;
+        resp.body = R"({"erro":"falha interna"})";
+      }
+      const bool keep = req.keep_alive && (max_requests <= 0 || served + 1 < max_requests);
+      c.out += build_response(resp, keep);
+      c.close_after = !keep;
+      ++served;
+      c.arena.resetar();  // liberacao instantanea do scratch da requisicao
+      if (c.close_after) break;
+    }
+  };
+
+  while (true) {
+    if (stopping && conns.empty()) break;
+
+    fd_set rfds;
+    fd_set wfds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_SET(listen_fd, &rfds);
+    int maxfd = listen_fd;
+    for (const auto& [fd, c] : conns) {
+      FD_SET(fd, &rfds);
+      if (!c->out.empty()) FD_SET(fd, &wfds);
+      if (fd > maxfd) maxfd = fd;
+    }
+    timeval tv{};
+    tv.tv_sec = 1;  // varredura de ociosas + cota, como o timeout do epoll_wait
+    const int rc = ::select(maxfd + 1, &rfds, &wfds, nullptr, &tv);
+    if (rc < 0) {
+      fatal = "select() falhou";
+      break;
+    }
+    if (rc == 0) {  // timeout: varre conexoes ociosas
+      const std::uint64_t now = win_now_sec();
+      std::vector<int> stale;
+      for (const auto& [fd, c] : conns) {
+        if (c->out.empty() && now - c->last_active > static_cast<std::uint64_t>(kIdleTimeoutSec)) {
+          stale.push_back(fd);
+        }
+      }
+      for (int fd : stale) close_conn(fd);
+      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      continue;
+    }
+
+    if (FD_ISSET(listen_fd, &rfds) && !stopping) {
+      while (true) {
+        const int client = static_cast<int>(::accept(listen_fd, nullptr, nullptr));
+        if (client < 0) break;  // WSAEWOULDBLOCK: nada mais pronto
+        if (conns.size() >= static_cast<std::size_t>(kMaxConns) ||
+            win_set_nonblocking(client) != 0) {
+          const char* busy = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+          tilt_send(client, busy, std::strlen(busy));
+          tilt_close_socket(client);
+          continue;
+        }
+        auto c = std::make_unique<WinConn>(client);
+        c->last_active = win_now_sec();
+        conns.emplace(client, std::move(c));
+      }
+      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+    }
+
+    // Snapshot dos prontos: service_conn/drain_out fecham conexoes e
+    // invalidariam o iterador do mapa durante o proprio percurso.
+    std::vector<std::pair<int, bool>> ready;
+    for (const auto& [fd, c] : conns) {
+      const bool readable = FD_ISSET(fd, &rfds) != 0;
+      const bool writable = FD_ISSET(fd, &wfds) != 0;
+      if (readable || writable) ready.emplace_back(fd, readable);
+    }
+    for (const auto& [fd, readable] : ready) {
+      auto it = conns.find(fd);
+      if (it == conns.end()) continue;
+      WinConn& c = *it->second;
+      c.last_active = win_now_sec();
+
+      if (readable && !c.peer_eof) service_conn(c);
+      it = conns.find(fd);
+      if (it == conns.end()) continue;
+      drain_out(*it->second);
+      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+    }
+  }
+
+  for (const auto& [fd, c] : conns) tilt_close_socket(fd);
+  if (!fatal.empty()) return -1;
+  return served;
+}
+
+#else  // !__linux__ && !_WIN32 : fallback bloqueante, uma conexao por vez
 
 int run_blocking(int listen_fd, const std::function<HttpResponse(const HttpRequest&)>& handler,
                  int max_requests, std::string& fatal) {
@@ -775,15 +970,14 @@ int run_blocking(int listen_fd, const std::function<HttpResponse(const HttpReque
 }  // namespace
 
 HttpServer::~HttpServer() {
-  if (fd_ >= 0) ::close(fd_);
+  if (fd_ >= 0) tilt_close_socket(fd_);
 }
 
 std::string HttpServer::listen_on(const std::string& host, int port) {
-  fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+  fd_ = tilt_socket(AF_INET, SOCK_STREAM, 0);
   if (fd_ < 0) return "socket() falhou";
 
-  int on = 1;
-  ::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+  tilt_set_reuseaddr(fd_);
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
@@ -791,7 +985,7 @@ std::string HttpServer::listen_on(const std::string& host, int port) {
   if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
     return "endereco invalido: " + host;
   }
-  if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+  if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), static_cast<int>(sizeof(addr))) != 0) {
     return "bind() falhou na porta " + std::to_string(port) + " (" + std::strerror(errno) + ")";
   }
   if (::listen(fd_, kBacklog) != 0) return "listen() falhou";
@@ -803,6 +997,9 @@ int HttpServer::run(const std::function<HttpResponse(const HttpRequest&)>& handl
 #if defined(__linux__)
   if (threads > 1) return run_epoll_parallel(fd_, handler, max_requests, threads, last_error_);
   return run_epoll(fd_, handler, max_requests, last_error_);
+#elif defined(_WIN32)
+  (void)threads;  // caminho paralelo por enquanto so no backend epoll (Linux)
+  return run_event_loop(fd_, handler, max_requests, last_error_);
 #else
   (void)threads;
   return run_blocking(fd_, handler, max_requests, last_error_);

@@ -1,6 +1,6 @@
 #include "runtime/tls.hpp"
 
-#include <dlfcn.h>
+#include "runtime/compat.hpp"
 
 #include <cerrno>
 #include <cstdio>
@@ -52,22 +52,39 @@ struct SslApi {
 
 template <typename F>
 bool bind_sym(void* lib, F& fn, const char* name) {
-  fn = reinterpret_cast<F>(::dlsym(lib, name));
+  fn = reinterpret_cast<F>(tilt_dlsym(lib, name));
   return fn != nullptr;
 }
 
 const SslApi& openssl() {
   static const SslApi instance = [] {
     SslApi a;
-    a.ssl_lib = ::dlopen("libssl.so.3", RTLD_NOW | RTLD_LOCAL);
-    if (!a.ssl_lib) a.ssl_lib = ::dlopen("libssl.so", RTLD_NOW | RTLD_LOCAL);
-    a.crypto_lib = ::dlopen("libcrypto.so.3", RTLD_NOW | RTLD_LOCAL);
-    if (!a.crypto_lib) a.crypto_lib = ::dlopen("libcrypto.so", RTLD_NOW | RTLD_LOCAL);
+#if defined(_WIN32)
+    // OpenSSL para Windows (MSVC/MinGW): libssl-3-x64.dll e libcrypto-3-x64.dll
+    // (instaladores slproweb/MSYS2); o SSL_set_fd do OpenSSL aceita o
+    // SOCKET do Winsock diretamente.
+    a.ssl_lib = tilt_dlopen("libssl-3-x64.dll");
+    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl-3.dll");
+    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.dll");
+    a.crypto_lib = tilt_dlopen("libcrypto-3-x64.dll");
+    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto-3.dll");
+    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.dll");
     if (!a.ssl_lib || !a.crypto_lib) {
-      if (a.ssl_lib) ::dlclose(a.ssl_lib);
-      if (a.crypto_lib) ::dlclose(a.crypto_lib);
+      if (a.ssl_lib) tilt_dlclose(a.ssl_lib);
+      if (a.crypto_lib) tilt_dlclose(a.crypto_lib);
       return SslApi{};
     }
+#else
+    a.ssl_lib = tilt_dlopen("libssl.so.3");
+    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.so");
+    a.crypto_lib = tilt_dlopen("libcrypto.so.3");
+    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.so");
+    if (!a.ssl_lib || !a.crypto_lib) {
+      if (a.ssl_lib) tilt_dlclose(a.ssl_lib);
+      if (a.crypto_lib) tilt_dlclose(a.crypto_lib);
+      return SslApi{};
+    }
+#endif
     const bool ok = bind_sym(a.ssl_lib, a.tls_client_method, "TLS_client_method") &&
                     bind_sym(a.ssl_lib, a.ssl_ctx_new, "SSL_CTX_new") &&
                     bind_sym(a.ssl_lib, a.ssl_ctx_free, "SSL_CTX_free") &&
@@ -89,8 +106,8 @@ const SslApi& openssl() {
                     bind_sym(a.crypto_lib, a.x509_verify_param_set1_host,
                              "X509_VERIFY_PARAM_set1_host");
     if (!ok) {
-      ::dlclose(a.ssl_lib);
-      ::dlclose(a.crypto_lib);
+      tilt_dlclose(a.ssl_lib);
+      tilt_dlclose(a.crypto_lib);
       return SslApi{};
     }
     return a;
@@ -117,7 +134,12 @@ std::string erro_openssl(const SslApi& api) {
 TlsStream::TlsStream(int fd, const std::string& host) : fd_(fd) {
   const SslApi& api = openssl();
   if (!api.ssl_lib) {
+#if defined(_WIN32)
+    die("OpenSSL nao encontrado: instale o OpenSSL para Windows "
+        "(libssl-3-x64.dll / libcrypto-3-x64.dll no PATH)");
+#else
     die("OpenSSL nao encontrado: instale libssl3 (libssl.so.3 / libcrypto.so.3)");
+#endif
   }
 
   ctx_ = api.ssl_ctx_new(api.tls_client_method());

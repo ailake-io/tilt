@@ -1,6 +1,6 @@
 #include "runtime/postgres.hpp"
 
-#include <dlfcn.h>
+#include "runtime/compat.hpp"
 
 #include <cstdlib>
 #include <stdexcept>
@@ -44,7 +44,7 @@ struct PqApi {
 
 template <typename F>
 bool bind_sym(void* lib, F& fn, const char* name) {
-  fn = reinterpret_cast<F>(::dlsym(lib, name));
+  fn = reinterpret_cast<F>(tilt_dlsym(lib, name));
   return fn != nullptr;
 }
 
@@ -53,7 +53,11 @@ bool bind_sym(void* lib, F& fn, const char* name) {
 const PqApi& api() {
   static const PqApi instance = [] {
     PqApi a;
-    a.lib = ::dlopen("libpq.so.5", RTLD_NOW | RTLD_LOCAL);
+#if defined(_WIN32)
+    a.lib = tilt_dlopen("libpq.dll");
+#else
+    a.lib = tilt_dlopen("libpq.so.5");
+#endif
     if (!a.lib) return a;
     const bool ok = bind_sym(a.lib, a.connectdb, "PQconnectdb") &&
                     bind_sym(a.lib, a.status, "PQstatus") &&
@@ -70,7 +74,7 @@ const PqApi& api() {
                     bind_sym(a.lib, a.error_message, "PQerrorMessage") &&
                     bind_sym(a.lib, a.set_notice_processor, "PQsetNoticeProcessor");
     if (!ok) {
-      ::dlclose(a.lib);
+      tilt_dlclose(a.lib);
       a = PqApi{};
     }
     return a;
@@ -98,7 +102,13 @@ void* connect_or_die(const PqApi& pq, const std::string& url) {
 
 Value postgres_query(const std::string& url, const std::string& sql) {
   const PqApi& pq = api();
-  if (!pq.lib) die("libpq.so.5 nao encontrada; instale o pacote libpq5");
+  if (!pq.lib) {
+#if defined(_WIN32)
+    die("libpq.dll nao encontrada; instale o PostgreSQL client para Windows");
+#else
+    die("libpq.so.5 nao encontrada; instale o pacote libpq5");
+#endif
+  }
 
   void* conn = connect_or_die(pq, url);
 
@@ -160,7 +170,13 @@ Value postgres_query(const std::string& url, const std::string& sql) {
 
 void postgres_exec(const std::string& url, const std::string& sql) {
   const PqApi& pq = api();
-  if (!pq.lib) die("libpq.so.5 nao encontrada; instale o pacote libpq5");
+  if (!pq.lib) {
+#if defined(_WIN32)
+    die("libpq.dll nao encontrada; instale o PostgreSQL client para Windows");
+#else
+    die("libpq.so.5 nao encontrada; instale o pacote libpq5");
+#endif
+  }
 
   void* conn = connect_or_die(pq, url);
   void* res = pq.exec(conn, sql.c_str());

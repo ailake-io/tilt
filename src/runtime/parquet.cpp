@@ -1,6 +1,6 @@
 #include "runtime/parquet.hpp"
 
-#include <dlfcn.h>
+#include "runtime/compat.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -450,22 +450,27 @@ struct ZlibApi {
 
 template <typename F>
 bool bind_zsym(void* lib, F& fn, const char* name) {
-  fn = reinterpret_cast<F>(::dlsym(lib, name));
+  fn = reinterpret_cast<F>(tilt_dlsym(lib, name));
   return fn != nullptr;
 }
 
 const ZlibApi& zlib() {
   static const ZlibApi instance = [] {
     ZlibApi a;
-    a.lib = ::dlopen("libz.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!a.lib) a.lib = ::dlopen("libz.so", RTLD_NOW | RTLD_LOCAL);
+#if defined(_WIN32)
+    a.lib = tilt_dlopen("zlib1.dll");
+    if (!a.lib) a.lib = tilt_dlopen("zlib.dll");
+#else
+    a.lib = tilt_dlopen("libz.so.1");
+    if (!a.lib) a.lib = tilt_dlopen("libz.so");
+#endif
     if (!a.lib) return a;
     const bool ok = bind_zsym(a.lib, a.version, "zlibVersion") &&
                     bind_zsym(a.lib, a.inflate_init2, "inflateInit2_") &&
                     bind_zsym(a.lib, a.inflate, "inflate") &&
                     bind_zsym(a.lib, a.inflate_end, "inflateEnd");
     if (!ok) {
-      ::dlclose(a.lib);
+      tilt_dlclose(a.lib);
       a = ZlibApi{};
     }
     return a;
@@ -481,7 +486,8 @@ std::string gunzip_payload(const std::string& in, const std::string& col) {
   const ZlibApi& z = zlib();
   if (!z.lib) {
     die("coluna '" + col +
-        "': gzip/deflate requer libz.so.1, que nao foi encontrada; instale o pacote zlib");
+        "': gzip/deflate requer zlib (libz.so.1 no Linux, zlib1.dll no Windows), "
+        "que nao foi encontrada; instale o pacote zlib");
   }
   ZStream s{};
   s.next_in = reinterpret_cast<const std::uint8_t*>(in.data());

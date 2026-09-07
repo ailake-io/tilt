@@ -203,3 +203,20 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 - `tilt compilar` gera x86-64; em ARM o teste `native` é pulado.
 - Binário estático de libstdc++ só no Linux (no macOS usa a libc++ do sistema).
+- **Port Windows (1ª passada)**: o projeto compila no MSVC/MinGW via CI
+  (job `windows` em `.github/workflows/ci.yml`). A camada de compatibilidade
+  vive em `src/runtime/compat.*`: sockets POSIX viram Winsock2
+  (`WSAStartup` no CLI), `dlopen` vira `LoadLibrary` (nomes de DLL:
+  `libssl-3-x64.dll`, `sqlite3.dll`, `libpq.dll`, `zlib1.dll`, `nvcuda.dll`),
+  `epoll` do servidor HTTP vira um event loop com `select()` (sem o caminho
+  paralelo de workers — `--threads N` é serial no Windows por enquanto),
+  cores do terminal ficam desligadas. Limites atuais do port:
+  - HTTP externo (S3, LLM, Qdrant, Iceberg REST) continua dependendo do
+    binário `curl` — no Windows, `curl.exe` do sistema (Windows 10+), mas o
+    quoting de argumentos segue o padrão shell POSIX (aspas simples), o que
+    o `cmd.exe` não interpreta; trate esses conectores como não validados
+    no Windows nesta fase.
+  - TLS carrega OpenSSL via DLL (`libssl-3-x64.dll`/`libcrypto-3-x64.dll`)
+    no `PATH`; sem elas, `rediss://`/`mongodb+srv://`/kafka TLS erros claros.
+  - A suíte `ctest` é em shell script e só roda em Linux/macOS — o job
+    Windows valida build + smoke (`versao`, `checar`, `executar`).

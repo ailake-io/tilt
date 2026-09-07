@@ -6,9 +6,10 @@
 namespace tilt::rt {
 
 // Camada TLS minima sobre um socket conectado (fd). O OpenSSL e carregado em
-// runtime via dlopen("libssl.so.3") com fallback para "libssl.so" (e
-// libcrypto correspondente) — zero dependencia de link, mesmo padrao de
-// sqlite.cpp (libsqlite3) e parquet.cpp (libz).
+// runtime via tilt_dlopen ("libssl.so.3" no POSIX, "libssl-3-x64.dll" no
+// Windows; ver runtime/compat.hpp) com fallback para o nome curto — zero
+// dependencia de link, mesmo padrao de sqlite.cpp (libsqlite3) e
+// parquet.cpp (libz).
 //
 // Handshake de cliente (TLS_client_method), verificacao de certificado com o
 // trust store padrao do sistema (SSL_CTX_set_default_verify_paths) e

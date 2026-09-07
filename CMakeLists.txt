@@ -10,15 +10,21 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_compile_options(-Wall -Wextra -Wpedantic)
+if(NOT MSVC)
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
 option(TILT_WERROR "Treat warnings as errors" OFF)
 if(TILT_WERROR)
-  add_compile_options(-Werror)
+  if(MSVC)
+    add_compile_options(/WX)
+  else()
+    add_compile_options(-Werror)
+  endif()
 endif()
 
 option(TILT_SANITIZE "Enable AddressSanitizer + UBSan" OFF)
-if(TILT_SANITIZE)
+if(TILT_SANITIZE AND NOT MSVC)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
 endif()
@@ -37,6 +43,7 @@ add_library(tilt_core STATIC
   src/parser/ast_dump.cpp
   src/semantic/type.cpp
   src/semantic/checker.cpp
+  src/runtime/compat.cpp
   src/runtime/value.cpp
   src/runtime/json.cpp
   src/runtime/tensor.cpp
@@ -68,6 +75,10 @@ target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(tilt_core PUBLIC ${CMAKE_DL_LIBS})
+if(WIN32)
+  # Camada de compat: sockets (Winsock2) no runtime kafka/mongo/redis/http.
+  target_link_libraries(tilt_core PUBLIC ws2_32)
+endif()
 
 add_executable(tilt src/main.cpp)
 target_link_libraries(tilt PRIVATE tilt_core)

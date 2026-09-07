@@ -1,7 +1,5 @@
 #include "runtime/llm.hpp"
 
-#include <unistd.h>
-
 #include <array>
 #include <cctype>
 #include <cmath>
@@ -9,11 +7,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "runtime/compat.hpp"
 #include "runtime/json.hpp"
 #include "runtime/value.hpp"
 
@@ -47,11 +47,11 @@ std::string shell_quote(const std::string& s) {
 std::string run(const std::string& cmd) {
   std::string out;
   std::array<char, 4096> buf{};
-  FILE* pipe = ::popen(cmd.c_str(), "r");
+  FILE* pipe = tilt_popen(cmd.c_str(), "r");
   if (!pipe) throw std::runtime_error("nao foi possivel executar 'curl'");
   std::size_t n;
   while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
-  int rc = ::pclose(pipe);
+  int rc = tilt_pclose(pipe);
   if (rc != 0) {
     throw std::runtime_error("curl retornou codigo " + std::to_string(rc) +
                              " (verifique rede/chave/URL)");
@@ -62,33 +62,31 @@ std::string run(const std::string& cmd) {
 // Writes `body` to a temp file and POSTs it with curl; returns the response body.
 std::string http_post_json(const std::string& url, const std::vector<std::string>& headers,
                            const std::string& body) {
-  char tmpl[] = "/tmp/tilt_llm_XXXXXX";
-  int fd = ::mkstemp(tmpl);
+  std::string body_file;
+  const int fd = tilt_tempfile("llm", body_file);
   if (fd < 0) throw std::runtime_error("nao foi possivel criar arquivo temporario");
-  std::size_t written = 0;
-  while (written < body.size()) {
-    ssize_t w = ::write(fd, body.data() + written, body.size() - written);
-    if (w <= 0) {
-      ::close(fd);
-      ::unlink(tmpl);
+  tilt_close_file(fd);
+  {
+    std::ofstream out(body_file, std::ios::trunc);
+    out << body;
+    if (!out) {
+      std::remove(body_file.c_str());
       throw std::runtime_error("falha ao escrever o corpo da requisicao");
     }
-    written += static_cast<std::size_t>(w);
   }
-  ::close(fd);
 
   std::string cmd = "curl -sS --fail-with-body -X POST -H 'content-type: application/json'";
   for (const std::string& h : headers) cmd += " -H " + shell_quote(h);
-  cmd += " --data @" + std::string(tmpl) + " " + shell_quote(url);
+  cmd += " --data @" + body_file + " " + shell_quote(url);
 
   std::string resp;
   try {
     resp = run(cmd);
   } catch (...) {
-    ::unlink(tmpl);
+    std::remove(body_file.c_str());
     throw;
   }
-  ::unlink(tmpl);
+  std::remove(body_file.c_str());
   return resp;
 }
 

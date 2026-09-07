@@ -7,8 +7,8 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 
+#include "runtime/compat.hpp"
 #include "runtime/json.hpp"
 
 namespace tilt::rt {
@@ -52,14 +52,15 @@ std::string http_json(const std::string& method, const std::string& url, const s
   std::string cmd =
       "curl -s --fail-with-body -X " + method + " -H 'content-type: application/json'";
   if (!body.empty()) {
-    char tmpl[] = "/tmp/tilt_qdrant_XXXXXX";
-    int fd = ::mkstemp(tmpl);
+    std::string body_path;
+    const int fd = tilt_tempfile("qdrant", body_path);
     if (fd < 0) die("nao foi possivel criar arquivo temporario");
-    std::ofstream out(tmpl, std::ios::trunc);
-    out << body;
-    out.close();
-    ::close(fd);
-    body_file = tmpl;
+    tilt_close_file(fd);
+    {
+      std::ofstream out(body_path, std::ios::trunc);
+      out << body;
+    }
+    body_file = body_path;
     cmd += " --data @" + body_file;
   }
   cmd += " " + shell_quote(url);
@@ -67,15 +68,15 @@ std::string http_json(const std::string& method, const std::string& url, const s
   std::string resp;
   {
     std::array<char, 4096> buf{};
-    FILE* pipe = ::popen(cmd.c_str(), "r");
+    FILE* pipe = tilt_popen(cmd.c_str(), "r");
     if (!pipe) {
-      if (!body_file.empty()) ::unlink(body_file.c_str());
+      if (!body_file.empty()) std::remove(body_file.c_str());
       die("nao foi possivel executar 'curl'");
     }
     std::size_t n;
     while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) resp.append(buf.data(), n);
-    const int rc = ::pclose(pipe);
-    if (!body_file.empty()) ::unlink(body_file.c_str());
+    const int rc = tilt_pclose(pipe);
+    if (!body_file.empty()) std::remove(body_file.c_str());
     if (rc != 0) {
       die("requisicao falhou (curl codigo " + std::to_string(rc) +
           "): verifique URL/colecao/servidor. Resposta: " + resp.substr(0, 200));

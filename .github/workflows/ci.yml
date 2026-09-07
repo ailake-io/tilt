@@ -30,6 +30,27 @@ jobs:
           ./build/release/bin/tilt checar exemplos/soma.tilt
           ./build/release/bin/tilt executar exemplos/resumo_vendas.tilt
 
+  # Port Windows (MSVC, windows-latest): a suíte de testes é em shell script
+  # (bash/sh), então aqui o job garante apenas que o projeto compila com o
+  # MSVC e o binário responde. Cobertura funcional segue em Linux/macOS.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure (Release, MSVC)
+        run: cmake --preset release
+
+      - name: build
+        run: cmake --build --preset release
+
+      - name: smoke
+        shell: pwsh
+        run: |
+          ./build/release/bin/tilt.exe versao
+          ./build/release/bin/tilt.exe checar exemplos/soma.tilt
+          ./build/release/bin/tilt.exe executar exemplos/resumo_vendas.tilt
+
   sanitizers:
     runs-on: ubuntu-latest
     steps:

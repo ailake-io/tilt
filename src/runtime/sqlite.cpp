@@ -1,7 +1,6 @@
 #include "runtime/sqlite.hpp"
 
-#include <dlfcn.h>
-#include <unistd.h>
+#include "runtime/compat.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -43,7 +42,7 @@ struct SqliteApi {
 
 template <typename F>
 bool bind_sym(void* lib, F& fn, const char* name) {
-  fn = reinterpret_cast<F>(::dlsym(lib, name));
+  fn = reinterpret_cast<F>(tilt_dlsym(lib, name));
   return fn != nullptr;
 }
 
@@ -52,7 +51,11 @@ bool bind_sym(void* lib, F& fn, const char* name) {
 const SqliteApi& api() {
   static const SqliteApi instance = [] {
     SqliteApi a;
-    a.lib = ::dlopen("libsqlite3.so.0", RTLD_NOW | RTLD_LOCAL);
+#if defined(_WIN32)
+    a.lib = tilt_dlopen("sqlite3.dll");
+#else
+    a.lib = tilt_dlopen("libsqlite3.so.0");
+#endif
     if (!a.lib) return a;
     const bool ok = bind_sym(a.lib, a.open_v2, "sqlite3_open_v2") &&
                     bind_sym(a.lib, a.prepare_v2, "sqlite3_prepare_v2") &&
@@ -69,7 +72,7 @@ const SqliteApi& api() {
                     bind_sym(a.lib, a.close, "sqlite3_close") &&
                     bind_sym(a.lib, a.errmsg, "sqlite3_errmsg");
     if (!ok) {
-      ::dlclose(a.lib);
+      tilt_dlclose(a.lib);
       a = SqliteApi{};
     }
     return a;
@@ -93,8 +96,14 @@ std::string blob_hex(const void* data, int n) {
 
 Value sqlite_query(const std::string& db_path, const std::string& sql) {
   const SqliteApi& db = api();
-  if (!db.lib) die("libsqlite3.so.0 nao encontrada; instale o pacote libsqlite3");
-  if (::access(db_path.c_str(), F_OK) != 0) {
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("sqlite3.dll nao encontrada; instale o SQLite para Windows");
+#else
+    die("libsqlite3.so.0 nao encontrada; instale o pacote libsqlite3");
+#endif
+  }
+  if (!tilt_file_exists(db_path)) {
     die("banco '" + db_path + "' nao encontrado");
   }
 

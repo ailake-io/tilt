@@ -25,6 +25,7 @@
 #include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
+#include "runtime/compat.hpp"
 #include "runtime/parquet.hpp"
 #include "runtime/delta.hpp"
 #include "runtime/iceberg.hpp"
@@ -333,13 +334,11 @@ CronSpec parse_cron(const std::string& expr) {
 std::time_t next_cron_fire(const CronSpec& c, std::time_t after) {
   // arredonda para o inicio do proximo minuto
   std::time_t t = after + 60;
-  std::tm local{};
-  localtime_r(&t, &local);
+  std::tm local = rt::tilt_localtime(t);
   local.tm_sec = 0;
   t = std::mktime(&local);
   for (int i = 0; i < 366 * 24 * 60; ++i, t += 60) {
-    std::tm cur{};
-    localtime_r(&t, &cur);
+    std::tm cur = rt::tilt_localtime(t);
     const int dow = cur.tm_wday;
     if (c.min.matches(cur.tm_min) && c.hour.matches(cur.tm_hour) &&
         c.dom.matches(cur.tm_mday) && c.mon.matches(cur.tm_mon + 1) && c.dow.matches(dow)) {
@@ -350,9 +349,8 @@ std::time_t next_cron_fire(const CronSpec& c, std::time_t after) {
 }
 
 std::string format_local(std::time_t t) {
-  std::tm local{};
+  const std::tm local = rt::tilt_localtime(t);
   char buf[64];
-  localtime_r(&t, &local);
   std::snprintf(buf, sizeof buf, "%04d-%02d-%02d %02d:%02d", local.tm_year + 1900,
                 local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min);
   return buf;

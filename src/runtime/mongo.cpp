@@ -1,10 +1,5 @@
 #include "runtime/mongo.hpp"
 
-#include <netdb.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
-
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -18,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/compat.hpp"
 #include "runtime/tls.hpp"
 
 namespace tilt::rt {
@@ -359,25 +355,22 @@ class Conn {
     const int gai = ::getaddrinfo(host.c_str(), port.c_str(), &hints, &res);
     if (gai != 0) die("nao foi possivel conectar em '" + host + ":" + port + "'");
     for (addrinfo* ai = res; ai; ai = ai->ai_next) {
-      fd_ = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+      fd_ = tilt_socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
       if (fd_ < 0) continue;
       if (::connect(fd_, ai->ai_addr, ai->ai_addrlen) == 0) break;
-      ::close(fd_);
+      tilt_close_socket(fd_);
       fd_ = -1;
     }
     ::freeaddrinfo(res);
     if (fd_ < 0) die("nao foi possivel conectar em '" + host + ":" + port + "'");
 
-    timeval tv{};
-    tv.tv_sec = kTimeoutSec;
-    ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    tilt_set_sock_timeouts(fd_, kTimeoutSec);
 
     if (tls) tls_.emplace(fd_, host);
   }
 
   ~Conn() {
-    if (fd_ >= 0) ::close(fd_);
+    if (fd_ >= 0) tilt_close_socket(fd_);
   }
 
   Conn(const Conn&) = delete;
@@ -409,11 +402,11 @@ class Conn {
       tls_->write_all(p, n);
       return static_cast<ssize_t>(n);
     }
-    return ::send(fd_, p, n, MSG_NOSIGNAL);
+    return tilt_send(fd_, p, n);
   }
   ssize_t recv_raw(char* p, std::size_t n) {
     if (tls_) return static_cast<ssize_t>(tls_->read_some(p, n));
-    return ::recv(fd_, p, n, 0);
+    return tilt_recv(fd_, p, n);
   }
 
   int fd_ = -1;

@@ -7,8 +7,9 @@ namespace tilt::rt {
 
 enum class GpuBackend { Cpu, Cuda, Fake };
 
-// GPU dispatch. The CUDA path binds libcuda + libnvrtc at runtime (dlopen) and
-// compiles small CUDA-C kernels on first use; when no driver is present it
+// GPU dispatch. The CUDA path binds libcuda + libnvrtc at runtime (tilt_dlopen:
+// dlopen no POSIX, LoadLibrary no Windows) and compiles small CUDA-C kernels
+// on first use; when no driver is present it
 // reports unavailable and callers fall back to the CPU kernels in tensor.cpp.
 // `TILT_GPU` overrides detection: off | auto | fake.
 class GpuRuntime {

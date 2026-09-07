@@ -1,9 +1,6 @@
 #include "runtime/delta.hpp"
 
-#include <dirent.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <unistd.h>
+#include "runtime/compat.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -29,15 +26,13 @@ namespace {
 std::string json_compact(const Value& v);
 
 void mkdir_if_missing(const std::string& path) {
-  if (::mkdir(path.c_str(), 0755) != 0 && errno != EEXIST) {
+  if (tilt_mkdir(path) != 0 && errno != EEXIST) {
     die("nao foi possivel criar o diretorio '" + path + "'");
   }
 }
 
 std::int64_t file_size(const std::string& path) {
-  struct stat st {};
-  if (::stat(path.c_str(), &st) != 0) return -1;
-  return static_cast<std::int64_t>(st.st_size);
+  return tilt_file_size(path);
 }
 
 std::int64_t now_ms() {
@@ -385,16 +380,16 @@ void ensure_partition_column(const Value& tabela, const std::string& col, const 
 
 // Lista os arquivos de <dir>/_delta_log/NNN.json em ordem crescente de versao.
 std::vector<std::string> list_delta_versions(const std::string& log_dir) {
-  DIR* d = ::opendir(log_dir.c_str());
-  if (!d) die("diretorio '" + log_dir + "' nao encontrado (nao e uma tabela delta?)");
+  std::vector<std::string> entries;
+  if (!tilt_listdir(log_dir, entries)) {
+    die("diretorio '" + log_dir + "' nao encontrado (nao e uma tabela delta?)");
+  }
   std::vector<std::pair<std::string, std::string>> found;  // (nome, caminho)
-  while (dirent* e = ::readdir(d)) {
-    const std::string name = e->d_name;
+  for (const std::string& name : entries) {
     if (name.size() > 5 && name.compare(name.size() - 5, 5, ".json") == 0) {
       found.emplace_back(name, log_dir + "/" + name);
     }
   }
-  ::closedir(d);
   std::sort(found.begin(), found.end());
   std::vector<std::string> out;
   out.reserve(found.size());
@@ -406,17 +401,15 @@ std::vector<std::string> list_delta_versions(const std::string& log_dir) {
 // particao: conta os part-*.parquet ja presentes (reescrita e append nao
 // colidem com arquivos de versoes anteriores, que permanecem no disco).
 int next_part_index(const std::string& dir) {
-  DIR* d = ::opendir(dir.c_str());
-  if (!d) return 0;
+  std::vector<std::string> entries;
+  if (!tilt_listdir(dir, entries)) return 0;
   int n = 0;
-  while (dirent* e = ::readdir(d)) {
-    const std::string name = e->d_name;
+  for (const std::string& name : entries) {
     if (name.rfind("part-", 0) == 0 && name.size() > 8 &&
         name.compare(name.size() - 8, 8, ".parquet") == 0) {
       ++n;
     }
   }
-  ::closedir(d);
   return n;
 }
 
@@ -520,7 +513,7 @@ void delta_write(const std::string& dir, const Value& tabela, const std::string&
   // 1a passada: tabela nova por escrita. Remove log anterior para nao
   // misturar versoes (sem merge/ACID concorrente).
   for (const std::string& old : list_delta_versions(log_dir)) {
-    if (::unlink(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
+    if (std::remove(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
   }
 
   const std::int64_t ts = now_ms();
@@ -563,8 +556,7 @@ void delta_write(const std::string& dir, const Value& tabela, const std::string&
 
 void delta_append(const std::string& dir, const Value& tabela, const std::string& part_col_req) {
   const std::string log_dir = dir + "/_delta_log";
-  struct stat st {};
-  if (::stat(log_dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+  if (!tilt_is_directory(log_dir)) {
     die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
   }
   const std::vector<std::string> versions = list_delta_versions(log_dir);
@@ -710,7 +702,7 @@ void delta_append(const std::string& dir, const Value& tabela, const std::string
     if (!log) die("falha ao gravar '" + tmp_path + "'");
   }
   if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
-    ::unlink(tmp_path.c_str());
+    std::remove(tmp_path.c_str());
     die("falha ao commitar a versao em '" + final_path + "'");
   }
 }

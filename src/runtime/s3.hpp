@@ -6,9 +6,9 @@
 namespace tilt::rt {
 
 // Cliente S3 minimo: GET/PUT/LIST/DELETE de objetos via REST + AWS SigV4
-// proprio (sha256.hpp) e HTTP pelo binario curl (::popen), mesmo padrao do
-// qdrant.cpp. Query string suportada na assinatura (list-type/prefix/max-keys
-// do LIST); payload inteiro em memoria.
+// proprio (sha256.hpp) e HTTP pelo binario curl (tilt_popen; _popen no
+// Windows, mesmo padrao do qdrant.cpp). Query string suportada na assinatura
+// (list-type/prefix/max-keys do LIST); payload inteiro em memoria.
 //
 // `url` tem o formato "s3://bucket/chave" (a chave pode conter '/');
 // `bucket_url` e "s3://bucket" (sem chave).
