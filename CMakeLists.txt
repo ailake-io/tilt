@@ -98,8 +98,23 @@ set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
     "Linguagem Tilt: compilador/runtime C++20 para ML, DL, engenharia de dados, LLMs e agentes")
 set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
 set(CPACK_STRIP_FILES ON)
-set(CPACK_GENERATOR "TGZ")
-set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, curl")
+set(CPACK_PACKAGE_HOMEPAGE "https://github.com/ailake-io/tilt")
+
+# Geradores de pacote por plataforma. TGZ em todas; DEB no Linux;
+# DragNDrop (.dmg) no macOS. Windows (.msi via WIX) fica para quando o
+# runtime ganhar camada de portabilidade (epoll/fork/dlopen sao POSIX).
+if(APPLE)
+  set(CPACK_GENERATOR "TGZ;DragNDrop")
+else()
+  set(CPACK_GENERATOR "TGZ;DEB;RPM")
+  set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, curl")
+  set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
+  set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${CPACK_PACKAGE_HOMEPAGE}")
+  set(CPACK_RPM_PACKAGE_REQUIRES "glibc, curl")
+  set(CPACK_RPM_PACKAGE_GROUP "Development/Languages")
+  set(CPACK_RPM_PACKAGE_LICENSE "MIT")
+  set(CPACK_RPM_PACKAGE_URL "${CPACK_PACKAGE_HOMEPAGE}")
+endif()
 if(CMAKE_SYSTEM_PROCESSOR)
   set(CPACK_SYSTEM_NAME "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 endif()

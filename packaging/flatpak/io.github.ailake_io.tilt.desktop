@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tilt
+Comment=Linguagem de programação para dados e IA
+Exec=tilt
+Icon=io.github.ailake_io.tilt
+Terminal=true
+Categories=Development;IDE;
+Keywords=language;data;ml;ai;

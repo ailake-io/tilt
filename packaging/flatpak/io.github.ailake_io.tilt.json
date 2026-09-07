@@ -1,0 +1,31 @@
+{
+  "app-id": "io.github.ailake_io.tilt",
+  "runtime": "org.freedesktop.Platform",
+  "runtime-version": "24.08",
+  "sdk": "org.freedesktop.Sdk",
+  "command": "tilt",
+  "finish-args": [
+    "--filesystem=host",
+    "--share=network"
+  ],
+  "modules": [
+    {
+      "name": "tilt",
+      "buildsystem": "cmake",
+      "config-opts": [
+        "-DCMAKE_BUILD_TYPE=Release"
+      ],
+      "post-install": [
+        "install -Dm644 io.github.ailake_io.tilt.metainfo.xml /app/share/metainfo/io.github.ailake_io.tilt.metainfo.xml",
+        "install -Dm644 io.github.ailake_io.tilt.desktop /app/share/applications/io.github.ailake_io.tilt.desktop",
+        "install -Dm644 io.github.ailake_io.tilt.svg /app/share/icons/hicolor/scalable/apps/io.github.ailake_io.tilt.svg"
+      ],
+      "sources": [
+        { "type": "dir", "path": "../.." },
+        { "type": "file", "path": "io.github.ailake_io.tilt.metainfo.xml" },
+        { "type": "file", "path": "io.github.ailake_io.tilt.desktop" },
+        { "type": "file", "path": "io.github.ailake_io.tilt.svg" }
+      ]
+    }
+  ]
+}

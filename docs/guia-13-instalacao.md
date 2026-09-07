@@ -89,14 +89,25 @@ O binário Linux é portável: linka `libstdc++`/`libgcc` estaticamente
 (opção `TILT_STATIC_LIBSTDCXX`, ligada por padrão), então roda em
 distribuições antigas sem depender da versão do compilador do sistema.
 
-**Pacote Debian** (`cpack -G DEB`) — dependências declaradas
-(`Depends: libc6, curl`), instalável e removível com o gerenciador:
+**Pacote Debian/RPM** — `cpack` gera os dois de uma vez (o gerador TGZ é
+sempre incluído):
 
 ```bash
-sudo dpkg -i tilt-0.1.0-Linux-x86_64.deb
-sudo apt -f install        # se faltar alguma dependência
-sudo dpkg -r tilt          # desinstala
+cd build/release && cpack     # .tar.gz + .deb + .rpm de uma vez
 ```
+
+- **Debian** (`tilt-<versao>-<os>-<arch>.deb`) — `Depends: libc6, curl`:
+  ```bash
+  sudo dpkg -i tilt-0.1.0-Linux-x86_64.deb
+  sudo apt -f install        # se faltar alguma dependência
+  sudo dpkg -r tilt          # desinstala
+  ```
+- **RPM** (`tilt-<versao>-<os>-<arch>.rpm`) — `Requires: glibc, curl`:
+  ```bash
+  sudo dnf install tilt-0.1.0-Linux-x86_64.rpm   # Fedora/RHEL
+  sudo zypper install tilt-0.1.0-Linux-x86_64.rpm # openSUSE
+  sudo rpm -e tilt                                 # desinstala
+  ```
 
 **Checksum** (para publicar o pacote):
 
@@ -113,10 +124,38 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Ele compila em release, roda a suíte de testes, gera o tarball +
-`.sha256` por plataforma (Linux x86_64 e macOS arm64) e anexa tudo à
-Release do GitHub. Para versionar o projeto, basta criar a tag — o
-pacote é produto do CI.
+Ele compila em release, roda a suíte de testes e gera/anexa por
+plataforma (Linux x86_64 e macOS arm64):
+
+- `tilt-*.tar.gz` + `.sha256` (todas as plataformas);
+- `tilt-*.deb` e `tilt-*.rpm` + `.sha256` (Linux, do CPack);
+- `tilt-*.dmg` (macOS, do CPack DragNDrop);
+- `tilt_*.snap` (job `snap`, via `snapcraft` em `snap/snapcraft.yaml` —
+  publica na Snap Store automaticamente se o secret `SNAPCRAFT_TOKEN`
+  estiver configurado, senão só anexa o arquivo);
+- `tilt-*.vsix` (extensão VS Code).
+
+O job `flatpak` valida o manifesto
+(`packaging/flatpak/io.github.ailake_io.tilt.json`) com
+`flatpak-builder`; para gerar o pacote localmente:
+
+```bash
+sudo apt install flatpak flatpak-builder
+flatpak-builder --force-clean build-flatpak packaging/flatpak/io.github.ailake_io.tilt.json
+```
+
+O job `homebrew` valida a sintaxe da fórmula
+(`packaging/homebrew/tilt.rb`). Para distribuir via Homebrew, crie um tap
+(`ailake-io/homebrew-tilt`), copie a fórmula para `Formula/tilt.rb`,
+preencha a `sha256` do tarball da Release e os usuários instalam com
+`brew install ailake-io/tap/tilt`.
+
+### Windows (.msi)
+
+O empacotamento `.msi` (CPack WIX) está previsto, mas o runtime ainda é
+POSIX (sockets BSD, epoll no servidor HTTP, dlopen). Antes do `.msi` é
+precisa uma fase de portabilidade (camada de compat + backend
+`select()`/IOCP no servidor HTTP). Ver `docs/guia-12-limitacoes.md`.
 
 ## 5. Extensão do VS Code
 

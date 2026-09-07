@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="console-application">
+  <id>io.github.ailake_io.tilt</id>
+  <name>Tilt</name>
+  <summary>Linguagem de programação para dados e IA</summary>
+  <description>
+    <p>
+      Tilt é uma linguagem de programação com compilador/runtime em C++20
+      voltada a engenharia de dados, ML/DL, LLMs/RAG, agentes e serviços
+      HTTP. Sem dependências de link: SQLite, zlib, OpenSSL e libpq são
+      carregadas em runtime via dlopen.
+    </p>
+  </description>
+  <project_license>MIT</project_license>
+  <metadata_license>MIT</metadata_license>
+  <developer_name>ailake-io</developer_name>
+  <url type="homepage">https://github.com/ailake-io/tilt</url>
+  <url type="bugtracker">https://github.com/ailake-io/tilt/issues</url>
+  <launchable type="desktop-id">io.github.ailake_io.tilt.desktop</launchable>
+  <provides>
+    <binary>tilt</binary>
+  </provides>
+  <releases>
+    <release version="0.1.0" date="2026-09-07">
+      <description><p>Versão inicial empacotada para Flatpak.</p></description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

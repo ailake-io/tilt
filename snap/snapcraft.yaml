@@ -1,0 +1,23 @@
+name: tilt
+base: core24
+adopt-info: tilt
+summary: Linguagem de programação para dados e IA
+description: |
+  Tilt: compilador/runtime C++20 para engenharia de dados, ML/DL,
+  LLMs/RAG, agentes e serviços HTTP. Sem dependências de link —
+  SQLite, zlib, OpenSSL e libpq são carregadas em runtime via dlopen.
+grade: stable
+confinement: classic
+
+apps:
+  tilt:
+    command: bin/tilt
+
+parts:
+  tilt:
+    plugin: cmake
+    source: .
+    cmake-parameters:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DTILT_WERROR=ON
+    build-snaps: [cmake]

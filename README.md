@@ -71,8 +71,7 @@ sem dependência de libstdc++) e macOS arm64. Extraia e ponha `bin/tilt` no
 
 ```bash
 cmake --preset release && cmake --build --preset release
-cd build/release && cpack           # gera tilt-<versao>-<os>-<arch>.tar.gz
-cpack -G DEB                        # e/ou pacote .deb (Depends: libc6, curl)
+cd build/release && cpack           # gera .tar.gz + .deb + .rpm de uma vez
 ```
 
 Instalação, requisitos, tarball, `.deb`, checksum e Release automatizada por

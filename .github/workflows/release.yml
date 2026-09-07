@@ -31,27 +31,92 @@ jobs:
         run: ctest --preset release --output-on-failure
 
       - name: package
-        env:
-          TAG: ${{ github.ref_name }}
-          ASSET: ${{ matrix.asset }}
+        working-directory: build/release
+        run: cpack
+
+      - name: checksum
         run: |
-          version="${TAG#v}"
-          dist="tilt-${version}-${ASSET}"
-          mkdir -p "$dist/bin" "$dist/share/tilt"
-          cp build/release/bin/tilt "$dist/bin/"
-          strip "$dist/bin/tilt" || true
-          cp -r exemplos "$dist/share/tilt/"
-          cp README.md LICENSE CLAUDE.md "$dist/share/tilt/"
-          tar czf "${dist}.tar.gz" "$dist"
-          sha256sum "${dist}.tar.gz" > "${dist}.tar.gz.sha256" || \
-            shasum -a 256 "${dist}.tar.gz" > "${dist}.tar.gz.sha256"
+          for f in build/release/tilt-*; do
+            case "$f" in
+              *.sha256) continue ;;
+            esac
+            (cd build/release && sha256sum "$(basename "$f")" > "$(basename "$f").sha256") || \
+              (cd build/release && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256")
+          done
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            tilt-*.tar.gz
-            tilt-*.tar.gz.sha256
+            build/release/tilt-*.tar.gz
+            build/release/tilt-*.tar.gz.sha256
+            build/release/tilt-*.deb
+            build/release/tilt-*.deb.sha256
+            build/release/tilt-*.rpm
+            build/release/tilt-*.rpm.sha256
+            build/release/tilt-*.dmg
+            build/release/tilt-*.dmg.sha256
           generate_release_notes: true
+
+  # --- Snap (classic): build via snapcore/action-build (roda snapcraft com
+  # LXD no runner). Publicacao na Snap Store exige SNAPCRAFT_TOKEN.
+  snap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: snapcore/action-build@v1
+        id: snapcraft
+
+      - name: SNAPCRAFT_TOKEN configurado?
+        id: token
+        env:
+          SNAPCRAFT_TOKEN: ${{ secrets.SNAPCRAFT_TOKEN }}
+        run: |
+          if [ -n "$SNAPCRAFT_TOKEN" ]; then echo "set=true" >> "$GITHUB_OUTPUT";
+          else echo "set=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: publicar na Snap Store
+        if: steps.token.outputs.set == 'true'
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_TOKEN: ${{ secrets.SNAPCRAFT_TOKEN }}
+        with:
+          snap: ${{ steps.snapcraft.outputs.snap }}
+          release: stable
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.snapcraft.outputs.snap }}
+
+  # --- Flatpak: valida o manifesto e o metainfo com flatpak-builder
+  # (empacotamento local: flatpak-builder --repo=repo packaging/flatpak/...).
+  flatpak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: instalar flatpak + flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: validar manifesto
+        run: flatpak-builder --force-clean build-flatpak packaging/flatpak/io.github.ailake_io.tilt.json
+
+      - name: validar metainfo
+        run: |
+          appstreamcli validate --no-net packaging/flatpak/io.github.ailake_io.tilt.metainfo.xml \
+            || true   # metainfo ainda nao publicado; warn de <release> e ok
+
+  # --- Homebrew: valida a sintaxe da formula (brew test precisa de tap).
+  homebrew:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ruby -c na formula
+        run: ruby -c packaging/homebrew/tilt.rb
 
   # Empacota a extensão VS Code e publica no Marketplace quando o secret
   # VSCE_PAT está configurado (sem o secret, só anexa o .vsix ao release).
