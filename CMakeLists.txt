@@ -111,11 +111,18 @@ set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
 set(CPACK_STRIP_FILES ON)
 set(CPACK_PACKAGE_HOMEPAGE "https://github.com/ailake-io/tilt")
 
-# Geradores de pacote por plataforma. TGZ em todas; DEB no Linux;
-# DragNDrop (.dmg) no macOS. Windows (.msi via WIX) fica para quando o
-# runtime ganhar camada de portabilidade (epoll/fork/dlopen sao POSIX).
+# Geradores de pacote por plataforma. TGZ em todas; DEB+RPM no Linux;
+# DragNDrop (.dmg) no macOS; WIX (.msi) + ZIP no Windows (port fase 30).
 if(APPLE)
   set(CPACK_GENERATOR "TGZ;DragNDrop")
+elseif(WIN32)
+  set(CPACK_GENERATOR "ZIP;WIX")
+  # GUID fixo: identidade do produto para upgrades do .msi entre versoes.
+  # NAO trocar entre releases — trocar quebra o upgrade path do instalador.
+  set(CPACK_WIX_UPGRADE_GUID "8F4C1A2B-6D3E-4A5F-9B7C-2E1D0A8F6C43")
+  set(CPACK_WIX_PROGRAM_MENU_FOLDER "Tilt")
+  set(CPACK_PACKAGE_INSTALL_DIRECTORY "Tilt")
+  set(CPACK_WIX_LICENSE_RTF ${CMAKE_CURRENT_SOURCE_DIR}/packaging/wix/license.rtf)
 else()
   set(CPACK_GENERATOR "TGZ;DEB;RPM")
   set(CPACK_DEBIAN_PACKAGE_DEPENDS "libc6, curl")

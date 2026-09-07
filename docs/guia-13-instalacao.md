@@ -150,22 +150,36 @@ O job `homebrew` valida a sintaxe da fórmula
 preencha a `sha256` do tarball da Release e os usuários instalam com
 `brew install ailake-io/tap/tilt`.
 
-### Windows (MSVC/MinGW)
+### Windows (.msi + winget)
 
-O build Windows é feito pelo CI (job `windows` em `.github/workflows/ci.yml`,
-`windows-latest` com MSVC): compila com `cmake --preset release` e roda um
-smoke (`tilt versao` / `checar` / `executar`). Para reproduzir localmente:
+O build Windows é feito pelo CI (`windows-latest` com MSVC): o job `windows`
+de `.github/workflows/ci.yml` compila e roda um smoke (`tilt versao` /
+`checar` / `executar`), e o job `windows` de `.github/workflows/release.yml`
+gera o **`.msi`** (CPack WIX, com upgrade GUID fixo entre versões) e um
+`.zip` com o binário solto, anexando ambos à Release. Para reproduzir
+localmente (Visual Studio Build Tools + WiX Toolset):
 
 ```powershell
-cmake --preset release
-cmake --build --preset release
-./build/release/bin/tilt.exe versao
+cmake -S . -B build\release -DCMAKE_BUILD_TYPE=Release
+cmake --build build\release --config Release
+cd build\release; cpack -C Release
 ```
 
-Não há instalador `.msi` ainda (CPack WIX fica para uma fase posterior). As
-limitações do port (camada de compat em `src/runtime/compat.*`, servidor HTTP
-com `select()` ao invés de epoll, conectores HTTP externos não validados por
-dependerem do quoting shell POSIX) estão listadas em
+Instalação pelo usuário final:
+
+```powershell
+winget install ailake-io.tilt     # apos o PR de manifestos no winget-pkgs
+# ou, com o .msi baixado da Release:
+msiexec /i tilt-0.1.0-win64.msi
+```
+
+Os manifestos winget moram em `packaging/winget/` (a URL/SHA256 do `.msi`
+precisam ser preenchidas por release — rota descrita no cabeçalho do
+arquivo).
+
+Limitações do runtime no Windows: servidor HTTP em modo serial (`select()`
+ao invés de epoll, sem `--threads`), sem cores de terminal, e o quoting de
+comandos `curl` (S3/LLM/Qdrant/Iceberg REST) ainda é POSIX — veja
 `docs/guia-12-limitacoes.md`, seção Plataforma.
 
 ## 5. Extensão do VS Code

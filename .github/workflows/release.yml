@@ -57,6 +57,47 @@ jobs:
             build/release/tilt-*.dmg.sha256
           generate_release_notes: true
 
+  # --- Windows (.msi via WIX + .zip): build MSVC, smoke, empacota com
+  # cpack. O WiX Toolset ja vem no runner windows-latest (candle/light).
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure
+        run: cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
+
+      - name: build
+        run: cmake --build build/release --config Release
+
+      - name: smoke
+        run: |
+          build\release\bin\Release\tilt.exe versao
+          build\release\bin\Release\tilt.exe checar exemplos\soma.tilt
+          build\release\bin\Release\tilt.exe executar exemplos\resumo_vendas.tilt
+
+      - name: package
+        working-directory: build/release
+        run: cpack -C Release
+
+      - name: checksum
+        working-directory: build/release
+        shell: bash
+        run: |
+          for f in tilt-*.msi tilt-*.zip; do
+            [ -e "$f" ] || continue
+            sha256sum "$f" > "$f.sha256"
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/release/tilt-*.msi
+            build/release/tilt-*.msi.sha256
+            build/release/tilt-*.zip
+            build/release/tilt-*.zip.sha256
+          generate_release_notes: true
+
   # --- Snap (classic): build via snapcore/action-build (roda snapcraft com
   # LXD no runner). Publicacao na Snap Store exige SNAPCRAFT_TOKEN.
   snap:

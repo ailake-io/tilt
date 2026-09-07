@@ -1,0 +1,39 @@
+# Manifestos winget do Tilt (schema 1.6).
+#
+# Publicacao: os manifestos da ULTIMA versao vao para o repositorio
+# microsoft/winget-pkgs em manifests/a/ailake-io/tilt/<versao>/, via PR
+# (winget-pkgs fork + wingetcreate, ou manual). Esta pasta e a fonte de
+# verdade: ao lançar vX.Y.Z, copie o dir da versao, ajuste versao/URL e
+# SHA256 do .msi da Release e submeta o PR.
+#
+# Instalacao pelo usuario final:
+#   winget install ailake-io.tilt
+PackageIdentifier: ailake-io.tilt
+PackageVersion: 0.1.0
+PackageLocale: pt-BR
+Publisher: ailake-io
+PublisherUrl: https://github.com/ailake-io
+PackageName: Tilt
+PackageUrl: https://github.com/ailake-io/tilt
+License: MIT
+LicenseUrl: https://github.com/ailake-io/tilt/blob/main/LICENSE
+ShortDescription: Linguagem de programacao para dados e IA
+Description: |-
+  Tilt: compilador/runtime C++20 para engenharia de dados, ML/DL,
+  LLMs/RAG, agentes e servicos HTTP. Sem dependencias de link —
+  SQLite, zlib, OpenSSL e libpq sao carregadas em runtime via dlopen.
+Moniker: tilt
+Tags:
+  - linguagem
+  - dados
+  - machine-learning
+  - llm
+  - etl
+ReleaseNotesUrl: https://github.com/ailake-io/tilt/releases
+Installers:
+  - Architecture: x64
+    InstallerType: wix
+    InstallerUrl: https://github.com/ailake-io/tilt/releases/download/v0.1.0/tilt-0.1.0-win64.msi
+    InstallerSha256: TROCAR_PELA_SHA256_DO_MSI_DA_RELEASE
+ManifestType: singleton
+ManifestVersion: 1.6.0
