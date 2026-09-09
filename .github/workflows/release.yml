@@ -72,9 +72,11 @@ jobs:
 
       - name: smoke
         run: |
-          build\release\bin\Release\tilt.exe versao
-          build\release\bin\Release\tilt.exe checar exemplos\soma.tilt
-          build\release\bin\Release\tilt.exe executar exemplos\resumo_vendas.tilt
+          $exe = (Get-ChildItem -Recurse -Filter tilt.exe build/release | Select-Object -First 1).FullName
+          if (-not $exe) { throw "tilt.exe nao encontrado em build/release" }
+          & $exe versao
+          & $exe checar exemplos/soma.tilt
+          & $exe executar exemplos/resumo_vendas.tilt
 
       - name: package
         working-directory: build/release

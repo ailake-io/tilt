@@ -47,9 +47,12 @@ jobs:
       - name: smoke
         shell: pwsh
         run: |
-          ./build/release/bin/tilt.exe versao
-          ./build/release/bin/tilt.exe checar exemplos/soma.tilt
-          ./build/release/bin/tilt.exe executar exemplos/resumo_vendas.tilt
+          # MSVC gera em bin\Release (multi-config); achar o tilt.exe por glob.
+          $exe = (Get-ChildItem -Recurse -Filter tilt.exe build/release | Select-Object -First 1).FullName
+          if (-not $exe) { throw "tilt.exe nao encontrado em build/release" }
+          & $exe versao
+          & $exe checar exemplos/soma.tilt
+          & $exe executar exemplos/resumo_vendas.tilt
 
   sanitizers:
     runs-on: ubuntu-latest
