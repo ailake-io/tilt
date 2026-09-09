@@ -1147,7 +1147,7 @@ void commit_metadata(const std::string& dir, std::int64_t version, const std::st
   const std::string final_path =
       meta_dir + "/v" + std::to_string(version) + "-" + new_uuid() + ".metadata.json";
   const std::string tmp_path =
-      meta_dir + "/.commit-" + std::to_string(::getpid()) + ".tmp";
+      meta_dir + "/.commit-" + std::to_string(tilt::rt::tilt_getpid()) + ".tmp";
   {
     std::ofstream out(tmp_path, std::ios::trunc);
     if (!out) die("nao foi possivel gravar '" + tmp_path + "'");
@@ -1783,10 +1783,10 @@ std::string slurp_file(const std::string& path) {
 
 // Caminho relativo -> absoluto (a location local da tabela no modo REST).
 std::string abs_path(const std::string& dir) {
-  if (!dir.empty() && dir.front() == '/') return dir;
-  std::array<char, 4096> buf{};
-  if (!::getcwd(buf.data(), buf.size())) die("nao foi possivel obter o diretorio atual");
-  return std::string(buf.data()) + "/" + dir;
+  if (!dir.empty() && (dir.front() == '/' || (dir.size() > 2 && dir[1] == ':'))) return dir;
+  std::string cwd;
+  if (!tilt::rt::tilt_getcwd(cwd)) die("nao foi possivel obter o diretorio atual");
+  return cwd + "/" + dir;
 }
 
 // Nome da tabela no catalogo: basename da location.

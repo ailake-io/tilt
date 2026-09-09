@@ -175,6 +175,10 @@ bool tilt_listdir(const std::string& path, std::vector<std::string>& out);
 std::tm tilt_gmtime(std::time_t t);
 std::tm tilt_localtime(std::time_t t);
 
+// getpid/_getpid e getcwd/_getcwd (buffer de PATH_MAX; false em erro).
+int tilt_getpid();
+bool tilt_getcwd(std::string& out);
+
 // --------------------------------------------------------------------------
 // Carregamento dinamico de bibliotecas (dlopen vs LoadLibrary).
 // tilt_dlopen tenta `path`; `global` corresponde a RTLD_GLOBAL (POSIX-only,

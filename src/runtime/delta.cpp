@@ -673,7 +673,7 @@ void delta_append(const std::string& dir, const Value& tabela, const std::string
 
   // Commit atomico: JSONL num temporario do mesmo diretorio, fecha e rename()
   // para o nome final (rename atomico no mesmo filesystem).
-  const std::string tmp_path = log_dir + "/.commit-" + std::to_string(::getpid()) + ".tmp";
+  const std::string tmp_path = log_dir + "/.commit-" + std::to_string(tilt::rt::tilt_getpid()) + ".tmp";
   {
     std::ofstream log(tmp_path, std::ios::trunc);
     if (!log) die("nao foi possivel gravar '" + tmp_path + "'");

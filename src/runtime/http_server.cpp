@@ -33,9 +33,11 @@ namespace {
 constexpr std::size_t kMaxRequest = 1 << 20;   // 1 MiB por requisicao
 constexpr std::size_t kArenaCap = 1 << 16;     // 64 KiB de scratch por conexao
 constexpr int kBacklog = 128;
+#if defined(__linux__) || defined(_WIN32)
 constexpr int kMaxConns = 256;
 constexpr int kIdleTimeoutSec = 30;
 constexpr int kMaxEvents = 64;
+#endif
 
 const char* status_text(int code) {
   switch (code) {

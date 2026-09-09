@@ -5,10 +5,13 @@
 
 #if defined(_WIN32)
   #include <cerrno>
+  #include <direct.h>   // _mkdir
   #include <fcntl.h>
   #include <io.h>
+  #include <process.h>  // _getpid
 #else
   #include <cerrno>
+  #include <unistd.h>   // getpid, getcwd
 #endif
 
 namespace tilt::rt {
@@ -149,6 +152,15 @@ std::tm tilt_localtime(std::time_t t) {
   return out;
 }
 
+int tilt_getpid() { return ::_getpid(); }
+
+bool tilt_getcwd(std::string& out) {
+  char buf[4096];
+  if (!::_getcwd(buf, sizeof(buf))) return false;
+  out = buf;
+  return true;
+}
+
 #else  // POSIX
 
 void* tilt_dlopen(const char* path, bool global) {
@@ -209,6 +221,15 @@ std::tm tilt_localtime(std::time_t t) {
   std::tm out {};
   localtime_r(&t, &out);
   return out;
+}
+
+int tilt_getpid() { return ::getpid(); }
+
+bool tilt_getcwd(std::string& out) {
+  char buf[4096];
+  if (!::getcwd(buf, sizeof(buf))) return false;
+  out = buf;
+  return true;
 }
 
 #endif
