@@ -26,8 +26,14 @@ python3 - "$PORT_BASE" "$tmp/porta" "$tmp/log" <<'PYEOF' >"$tmp/mock_out" 2>&1 &
 import hashlib
 import hmac
 import http.server
+import socket as _socket
 import sys
 from urllib.parse import parse_qsl, quote
+
+# HTTPServer.__init__ chama socket.getfqdn(host): no macOS a resolucao DNS
+# reversa pode travar no runner (timeout de varios segundos) e o mock nunca
+# chega a escrever o arquivo de porta. O nome do servidor e irrelevante.
+_socket.getfqdn = lambda host="": "localhost"
 
 port_base = int(sys.argv[1])
 port_file = sys.argv[2]

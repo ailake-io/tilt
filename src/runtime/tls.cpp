@@ -77,8 +77,12 @@ const SslApi& openssl() {
 #else
     a.ssl_lib = tilt_dlopen("libssl.so.3");
     if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.so");
+    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.3.dylib");
+    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.dylib");
     a.crypto_lib = tilt_dlopen("libcrypto.so.3");
     if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.so");
+    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.3.dylib");
+    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.dylib");
     if (!a.ssl_lib || !a.crypto_lib) {
       if (a.ssl_lib) tilt_dlclose(a.ssl_lib);
       if (a.crypto_lib) tilt_dlclose(a.crypto_lib);

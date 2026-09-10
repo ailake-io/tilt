@@ -15,6 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: deps (macOS)
+        if: runner.os == 'macOS'
+        # libpq e openssl sao keg-only no homebrew: o dlopen resolve via
+        # DYLD_LIBRARY_PATH no step de teste.
+        run: brew install libpq openssl@3
+
       - name: configure (Release, -Werror)
         run: cmake --preset release -DTILT_WERROR=ON
 
@@ -23,6 +29,8 @@ jobs:
 
       - name: test
         run: ctest --preset release --output-on-failure
+        env:
+          DYLD_LIBRARY_PATH: /opt/homebrew/lib:/opt/homebrew/opt/libpq/lib:/usr/local/lib:/usr/local/opt/libpq/lib
 
       - name: smoke
         run: |

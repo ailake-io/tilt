@@ -51,9 +51,14 @@ python3 - "$PORT_BASE" "$tmp/porta" "$tmp/log" <<'PYEOF' >"$tmp/mock_out" 2>&1 &
 import http.server
 import json
 import os
+import socket as _socket
 import sys
 import time
 import uuid
+
+# HTTPServer.__init__ chama socket.getfqdn(); a resolucao DNS reversa trava no
+# runner do macOS (mock vivo, sem output, arquivo de porta nunca escrito).
+_socket.getfqdn = lambda host="": "localhost"
 
 port_base = int(sys.argv[1])
 port_file = sys.argv[2]

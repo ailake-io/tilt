@@ -57,6 +57,9 @@ const PqApi& api() {
     a.lib = tilt_dlopen("libpq.dll");
 #else
     a.lib = tilt_dlopen("libpq.so.5");
+    if (!a.lib) a.lib = tilt_dlopen("libpq.so");
+    if (!a.lib) a.lib = tilt_dlopen("libpq.5.dylib");
+    if (!a.lib) a.lib = tilt_dlopen("libpq.dylib");
 #endif
     if (!a.lib) return a;
     const bool ok = bind_sym(a.lib, a.connectdb, "PQconnectdb") &&

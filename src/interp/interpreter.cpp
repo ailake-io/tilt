@@ -1626,8 +1626,10 @@ void Interpreter::run_treino(const Item& decl) {
       out_ << "treino " << name << ": perda caiu " << (last_loss < first_loss ? "sim" : "nao")
            << " | acuracia " << correct << "/" << n << "\n";
     } else {
+      char mse_buf[64];
+      std::snprintf(mse_buf, sizeof(mse_buf), "%.4f", last_loss);
       out_ << "treino " << name << ": perda caiu " << (last_loss < first_loss ? "sim" : "nao")
-           << " | mse " << last_loss << "\n";
+           << " | mse " << mse_buf << "\n";
     }
   } catch (const std::exception& e) {
     fail(decl.span, std::string("treino ") + name + ": " + e.what());

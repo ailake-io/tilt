@@ -55,6 +55,9 @@ const SqliteApi& api() {
     a.lib = tilt_dlopen("sqlite3.dll");
 #else
     a.lib = tilt_dlopen("libsqlite3.so.0");
+    if (!a.lib) a.lib = tilt_dlopen("libsqlite3.so");
+    if (!a.lib) a.lib = tilt_dlopen("libsqlite3.dylib");
+    if (!a.lib) a.lib = tilt_dlopen("libsqlite3.0.dylib");
 #endif
     if (!a.lib) return a;
     const bool ok = bind_sym(a.lib, a.open_v2, "sqlite3_open_v2") &&

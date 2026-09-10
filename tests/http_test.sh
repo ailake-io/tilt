@@ -81,11 +81,15 @@ srv_pid=$!
 wait_listen "$tmp/log_cx"
 
 i=1
+pids=""
 while [ "$i" -le 8 ]; do
   curl -s -o "$tmp/cx_$i" "localhost:$cx_port/saude" &
+  pids="$pids $!"
   i=$((i + 1))
 done
-wait
+# `wait` sem argumentos quebra no bash 3.2 do macOS ("pid is not a child of
+# this shell"); esperar os pids coletados funciona em qualquer bash.
+wait $pids 2>/dev/null || true
 wait "$srv_pid"
 srv_pid=""
 

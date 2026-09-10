@@ -463,6 +463,8 @@ const ZlibApi& zlib() {
 #else
     a.lib = tilt_dlopen("libz.so.1");
     if (!a.lib) a.lib = tilt_dlopen("libz.so");
+    if (!a.lib) a.lib = tilt_dlopen("libz.1.dylib");
+    if (!a.lib) a.lib = tilt_dlopen("libz.dylib");
 #endif
     if (!a.lib) return a;
     const bool ok = bind_zsym(a.lib, a.version, "zlibVersion") &&

@@ -79,13 +79,17 @@ wait_listen "$tmp/log_p"
 
 t0=$(date +%s%N)
 i=1
+pids=""
 while [ "$i" -le 4 ]; do
   curl -s -m 120 -o "$tmp/par_$i" "localhost:$((PORT + 1))/lento" &
+  pids="$pids $!"
   i=$((i + 1))
 done
-# O `wait` sem argumentos espera os curls E o servidor (que so encerra ao
-# esgotar a cota), garantindo aqui que nenhum dos dois ficou pendurado.
-wait
+# Esperar os curls explicitamente (bare `wait` quebra no bash 3.2 do macOS)
+# e depois o servidor, que so encerra ao esgotar a cota --requisicoes 4;
+# assim nenhum dos dois fica pendurado.
+wait $pids 2>/dev/null || true
+wait "$srv_pid"
 t1=$(date +%s%N)
 srv_pid=""
 TPAR=$(( (t1 - t0) / 1000000 ))
