@@ -61,9 +61,27 @@ Filtro por prefixo (case-insensitive).
 
 ### Servidor LSP
 
-`tilt lsp` fala Language Server Protocol por stdio: diagnósticos ao salvar/editar
-e autocomplete (gatilhos `.` e `:`). Configuração de editor em
-[`../editors/`](../editors/).
+`tilt lsp` fala Language Server Protocol por stdio. Capabilities atuais:
+
+- diagnósticos push ao abrir/editar (`textDocumentSync` full);
+- autocomplete com gatilhos `.` e `:` (contexto por posição, ver tabela acima);
+- **hover** (`hoverProvider`): documentação em markdown para builtins
+  (assinatura + o que faz + exemplo), palavras-chave da linguagem, métodos de
+  tabela/tensor e nomes declarados no arquivo (com a linha da declaração);
+- **go-to-definition** (`definitionProvider`): mesma arquivo — variáveis de
+  `seja`/`constante`, atribuições, parâmetros de `funcao`, variáveis de
+  `para cada`/`capturar` e nomes de declarações (`pipeline x:`, `funcao y`,
+  `agente z`, ...). Sem resolução cross-file;
+- **signatureHelp** (`signatureHelpProvider`, gatilhos `,` e `(`): assinatura
+  do builtin mais interno na linha, com o parâmetro ativo destacado (só
+  argumentos na mesma linha);
+- **formatting** (`documentFormattingProvider`): indentação normalizada para
+  2 espaços por nível de bloco (derivada do stream de tokens do lexer),
+  remoção de espaços trailing e newline final único. Linhas dentro de strings
+  multilinha (`"""`), linhas de comentário e continuações dentro de
+  `(`/`[`/`{` não são alteradas.
+
+Configuração de editor em [`../editors/`](../editors/).
 
 ## VS Code
 

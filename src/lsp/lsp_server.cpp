@@ -81,6 +81,22 @@ Value make_response(const Value& id, Value result) {
   return r;
 }
 
+Value span_to_range(const Span& s) {
+  const long l = static_cast<long>(s.line) - 1;
+  const long ch = static_cast<long>(s.column) - 1;
+  const long len = s.length > 0 ? static_cast<long>(s.length) : 1;
+  Value start = Value::mapa();
+  start.map->set("line", Value::inteiro(l < 0 ? 0 : l));
+  start.map->set("character", Value::inteiro(ch < 0 ? 0 : ch));
+  Value end = Value::mapa();
+  end.map->set("line", Value::inteiro(l < 0 ? 0 : l));
+  end.map->set("character", Value::inteiro((ch < 0 ? 0 : ch) + len));
+  Value range = Value::mapa();
+  range.map->set("start", std::move(start));
+  range.map->set("end", std::move(end));
+  return range;
+}
+
 void publish_diagnostics(std::ostream& out, const std::string& uri, const std::string& text) {
   SourceFile src(uri_to_path(uri), text);
   DiagnosticEngine diag(&src);
@@ -150,6 +166,15 @@ int run_lsp(std::istream& in, std::ostream& out) {
       triggers.list->push_back(Value::texto(":"));
       comp.map->set("triggerCharacters", std::move(triggers));
       caps.map->set("completionProvider", std::move(comp));
+      caps.map->set("hoverProvider", Value::logico(true));
+      caps.map->set("definitionProvider", Value::logico(true));
+      caps.map->set("documentFormattingProvider", Value::logico(true));
+      Value sig = Value::mapa();
+      Value sig_triggers = Value::lista();
+      sig_triggers.list->push_back(Value::texto(","));
+      sig_triggers.list->push_back(Value::texto("("));
+      sig.map->set("triggerCharacters", std::move(sig_triggers));
+      caps.map->set("signatureHelpProvider", std::move(sig));
       Value result = Value::mapa();
       result.map->set("capabilities", std::move(caps));
       write_message(out, make_response(id, std::move(result)));
@@ -194,6 +219,96 @@ int run_lsp(std::istream& in, std::ostream& out) {
       result.map->set("isIncomplete", Value::logico(false));
       result.map->set("items", std::move(arr));
       write_message(out, make_response(id, std::move(result)));
+    } else if (method == "textDocument/hover" && params) {
+      const Value* td = member(*params, "textDocument");
+      const Value* pos = member(*params, "position");
+      const std::string uri = td ? member_str(*td, "uri") : "";
+      const long l = pos ? member_int(*pos, "line") : 0;
+      const long ch = pos ? member_int(*pos, "character") : 0;
+      SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
+      const std::string md = hover(src, static_cast<std::uint32_t>(l + 1),
+                                   static_cast<std::uint32_t>(ch + 1));
+      if (md.empty()) {
+        write_message(out, make_response(id, Value::nulo()));
+      } else {
+        Value contents = Value::mapa();
+        contents.map->set("kind", Value::texto("markdown"));
+        contents.map->set("value", Value::texto(md));
+        Value result = Value::mapa();
+        result.map->set("contents", std::move(contents));
+        write_message(out, make_response(id, std::move(result)));
+      }
+    } else if (method == "textDocument/definition" && params) {
+      const Value* td = member(*params, "textDocument");
+      const Value* pos = member(*params, "position");
+      const std::string uri = td ? member_str(*td, "uri") : "";
+      const long l = pos ? member_int(*pos, "line") : 0;
+      const long ch = pos ? member_int(*pos, "character") : 0;
+      SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
+      const Span def = definition(src, static_cast<std::uint32_t>(l + 1),
+                                  static_cast<std::uint32_t>(ch + 1));
+      if (def.length == 0 && def.line == 0) {
+        write_message(out, make_response(id, Value::nulo()));
+      } else {
+        Value result = Value::mapa();
+        result.map->set("uri", Value::texto(uri));
+        result.map->set("range", span_to_range(def));
+        write_message(out, make_response(id, std::move(result)));
+      }
+    } else if (method == "textDocument/signatureHelp" && params) {
+      const Value* td = member(*params, "textDocument");
+      const Value* pos = member(*params, "position");
+      const std::string uri = td ? member_str(*td, "uri") : "";
+      const long l = pos ? member_int(*pos, "line") : 0;
+      const long ch = pos ? member_int(*pos, "character") : 0;
+      SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
+      const SigHelp help = signature_help(src, static_cast<std::uint32_t>(l + 1),
+                                          static_cast<std::uint32_t>(ch + 1));
+      if (!help.found) {
+        write_message(out, make_response(id, Value::nulo()));
+      } else {
+        Value sig0 = Value::mapa();
+        sig0.map->set("label", Value::texto(help.label));
+        Value ps = Value::lista();
+        for (const std::string& p : help.params) {
+          Value pi = Value::mapa();
+          pi.map->set("label", Value::texto(p));
+          ps.list->push_back(std::move(pi));
+        }
+        sig0.map->set("parameters", std::move(ps));
+        Value sigs = Value::lista();
+        sigs.list->push_back(std::move(sig0));
+        Value result = Value::mapa();
+        result.map->set("signatures", std::move(sigs));
+        result.map->set("activeSignature", Value::inteiro(0));
+        result.map->set("activeParameter", Value::inteiro(static_cast<long>(help.active_parameter)));
+        write_message(out, make_response(id, std::move(result)));
+      }
+    } else if (method == "textDocument/formatting" && params) {
+      const Value* td = member(*params, "textDocument");
+      const std::string uri = td ? member_str(*td, "uri") : "";
+      const std::string text = docs.count(uri) ? docs[uri] : std::string();
+      const std::string formatted = format_document(text);
+      if (formatted == text) {
+        write_message(out, make_response(id, Value::nulo()));
+      } else {
+        SourceFile src(uri_to_path(uri), text);
+        Value start = Value::mapa();
+        start.map->set("line", Value::inteiro(0));
+        start.map->set("character", Value::inteiro(0));
+        Value end = Value::mapa();
+        end.map->set("line", Value::inteiro(static_cast<long>(src.line_count())));
+        end.map->set("character", Value::inteiro(0));
+        Value range = Value::mapa();
+        range.map->set("start", std::move(start));
+        range.map->set("end", std::move(end));
+        Value edit = Value::mapa();
+        edit.map->set("range", std::move(range));
+        edit.map->set("newText", Value::texto(formatted));
+        Value edits = Value::lista();
+        edits.list->push_back(std::move(edit));
+        write_message(out, make_response(id, std::move(edits)));
+      }
     } else if (!method.empty() && idp) {
       // Unknown request: reply with an empty result so the client doesn't hang.
       write_message(out, make_response(id, Value::nulo()));
