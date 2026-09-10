@@ -1,7 +1,7 @@
-erro[T901]: modelo 'C': camada 'conv2d' ainda nao suportada (M6.3); remova-a do modelo por ora
-  --> input.tilt:1:1
+erro[T901]: tensor: conv2d: nucleo 3x3 maior que a entrada 2x2
+  --> input.tilt:5:11
    |
- 1 | modelo C:
-   | ^^^^^^
+ 5 |     - y = x.conv2d k
+   |           ^
    |
 

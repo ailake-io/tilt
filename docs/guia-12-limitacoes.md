@@ -173,7 +173,11 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward) e `norma_camada` (sem affine).
-- `conv2d`/`norma_lote` → erro claro (ainda não existem).
+- `conv2d`/`norma_lote` existem como **operações de tensor** (guia 04):
+  `conv2d` com padding válido e `passo:` (stride) 1+; `norma_lote` com
+  `eps:`/`em_treino:`. Limites: sem pooling, sem dilation nem padding
+  explícito; não são camadas de `modelo`/`treino` (erro claro no `modelo`),
+  sem integração com o carregador de pesos tilt-pesos e sem backward.
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.
 

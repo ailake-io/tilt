@@ -23,12 +23,15 @@ viés `[N]` no último eixo) e entre tensor e escalar.
 | Método / propriedade | Efeito |
 |---|---|
 | `.forma` | lista das dimensões |
+| `.dados` | lista plana dos valores (row-major) |
 | `.matmul(outro)` | produto matricial 1D/2D |
 | `.mais(outro)` | soma (alias de `+`) |
 | `.transposta` | transposta 2D |
 | `.reformar [d, d]` | reshape (mesmo número de elementos) |
 | `.relu` `.gelu` `.silu` `.sigmoide` `.tanh` | ativação elementwise |
 | `.softmax` | softmax no último eixo |
+| `.conv2d(nucleo, passo: N)` | convolução 2D NCHW, padding válido (ver abaixo) |
+| `.norma_lote(gama, beta, media, variancia, eps: e, em_treino: b)` | batch norm por canal (ver abaixo) |
 | `.soma` `.media` | redução total → `decimal` |
 | `.argmax` | índice do maior no último eixo |
 | `.item` | escalar de um tensor de 1 elemento |
@@ -38,6 +41,36 @@ viés `[N]` no último eixo) e entre tensor e escalar.
 - imprimir x.forma, (x * 2).soma
 - m = tensor [[1, 2], [3, 4]]
 - imprimir m.matmul(m).forma
+```
+
+### Convolução 2D e batch norm
+
+`conv2d` é uma operação de tensor (não uma camada de `modelo`): entrada
+`[N, C_in, H, W]` convoluída com núcleo `[C_out, C_in, KH, KW]`, padding
+**válido** (sem borda), `passo:` (stride) opcional default 1 — saída
+`[N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]`. Sem dilation nem padding
+explícito por ora.
+
+```tilt
+- x = tensor [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]]  # [1,1,3,3]
+- k = tensor [[[[1.0, 0.0], [0.0, 1.0]]]]                            # [1,1,2,2]
+- y = x.conv2d k                                                      # [1,1,2,2]
+- imprimir y.dados                                                    # [6, 8, 12, 14]
+- y2 = x.conv2d k, passo: 2                                           # stride 2
+```
+
+`norma_lote` normaliza por canal sobre `[N, C, ...]`:
+`y = gama * (x - media) / sqrt(var + eps) + beta`. `gama`, `beta`, `media`
+e `variancia` são tensores `[C]` (ou escalares, broadcast). Na inferência
+passe `media`/`variancia` dos lotes de treino; com `em_treino: verdadeiro`
+elas são calculadas do próprio lote (variância populacional) e podem ser
+omitidas. `eps:` default `0.00001`.
+
+```tilt
+- xb = tensor [[[1.0, 4.0], [3.0, 8.0]]]     # [N=1, C=2, 2]
+- nb = xb.norma_lote uns [2], zeros [2], tensor [2.0, 6.0], tensor [0.25, 4.0]
+- imprimir nb.dados                           # [-2, 4, -1.5, 1]
+- nt = xb.norma_lote uns [2], zeros [2], em_treino: verdadeiro
 ```
 
 ## `modelo`
@@ -57,7 +90,8 @@ modelo Classificador:
 Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmoide|tanh`,
 `softmax`, `abandono: p` / `dropout: p`, `norma_camada` (normalização sobre a
 última dimensão, sem affine — na inferência e no treino). `norma_lote`/`conv2d`
-ainda não são suportadas — erro claro em vez de ignorar silenciosamente.
+não são camadas de `modelo` — existem como operações de tensor (ver acima) e
+no `modelo` produzem erro claro em vez de serem ignoradas silenciosamente.
 
 ### Pesos de arquivo
 

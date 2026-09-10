@@ -58,9 +58,10 @@ const std::array<std::string_view, 11> kTableMethods = {
     "filtrar",  "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",
     "limite",   "primeiros", "distinto", "tamanho",     "inserir"};
 
-const std::array<std::string_view, 12> kTensorMethods = {
-    "forma", "matmul", "transposta", "reformar", "relu",  "gelu",
-    "tanh",  "softmax", "soma",       "media",    "argmax", "item"};
+const std::array<std::string_view, 17> kTensorMethods = {
+    "forma",      "dados", "matmul", "transposta", "reformar", "conv2d", "norma_lote",
+    "relu",       "gelu",  "silu",   "sigmoide",   "tanh",     "softmax",
+    "soma",       "media", "argmax", "item"};
 
 struct FieldSet {
   std::string_view decl;

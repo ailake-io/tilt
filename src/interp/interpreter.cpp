@@ -2730,6 +2730,11 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
             for (std::int64_t d : t.shape) dims.push_back(Value::inteiro(d));
             return Value::lista(std::move(dims));
           }
+          if (m == "dados") {
+            rt::ValueList vals;
+            for (float fv : t.data) vals.push_back(Value::decimal(fv));
+            return Value::lista(std::move(vals));
+          }
           if (m == "soma") return Value::decimal(rt::sum_all(t));
           if (m == "media") return Value::decimal(rt::mean_all(t));
           if (m == "argmax") return Value::inteiro(rt::argmax_last(t));
@@ -4286,6 +4291,11 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         for (std::int64_t d : t.shape) dims.push_back(Value::inteiro(d));
         return Value::lista(std::move(dims));
       }
+      if (method == "dados") {
+        rt::ValueList vals;
+        for (float fv : t.data) vals.push_back(Value::decimal(fv));
+        return Value::lista(std::move(vals));
+      }
       if (method == "matmul" || method == "mais") {
         auto a = eval_args(call, env);
         if (a.empty() || a[0].kind != ValueKind::Tensor) {
@@ -4295,6 +4305,40 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
                                                    : rt::add(t, *a[0].tensor));
       }
       if (method == "transposta") return Value::tensor_de(rt::transpose2d(t));
+      if (method == "conv2d") {
+        auto a = eval_args(call, env);
+        if (a.empty() || a[0].kind != ValueKind::Tensor) {
+          fail(call.span, "conv2d espera o nucleo (tensor [C_out, C_in, KH, KW])");
+        }
+        std::int64_t passo = 1;
+        const rt::ValueMap kw = eval_kwargs(call, env);
+        if (const Value* pv = kw.find("passo")) {
+          passo = static_cast<std::int64_t>(pv->as_number());
+        }
+        return Value::tensor_de(rt::conv2d(t, *a[0].tensor, passo));
+      }
+      if (method == "norma_lote") {
+        auto a = eval_args(call, env);
+        if (a.size() < 2 || a[0].kind != ValueKind::Tensor || a[1].kind != ValueKind::Tensor) {
+          fail(call.span, "norma_lote espera gama e beta (tensores [C] ou escalares)");
+        }
+        const rt::ValueMap kw = eval_kwargs(call, env);
+        bool em_treino = false;
+        float eps = 1e-5F;
+        if (const Value* pv = kw.find("em_treino")) {
+          em_treino = pv->kind == ValueKind::Logico && pv->b;
+        }
+        if (const Value* pv = kw.find("eps")) eps = static_cast<float>(pv->as_number());
+        rt::Tensor media, var;
+        if (a.size() >= 3) media = value_to_tensor(a[2], call.span);
+        if (a.size() >= 4) var = value_to_tensor(a[3], call.span);
+        if (!em_treino && a.size() < 4) {
+          fail(call.span,
+               "norma_lote na inferencia precisa de media e variancia (ou use em_treino: verdadeiro)");
+        }
+        return Value::tensor_de(
+            rt::norma_lote(t, *a[0].tensor, *a[1].tensor, media, var, eps, em_treino));
+      }
       if (method == "reformar") {
         auto a = eval_args(call, env);
         std::vector<std::int64_t> shape;

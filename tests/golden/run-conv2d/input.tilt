@@ -1,0 +1,23 @@
+pipeline p:
+  passos:
+    - x = tensor [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]]
+    - k = tensor [[[[1.0, 0.0], [0.0, 1.0]]]]
+    - y = x.conv2d k
+    - imprimir "basica:", y.forma, y.dados
+    - x2 = tensor [[[[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]], [[2.0, 2.0, 2.0], [2.0, 2.0, 2.0], [2.0, 2.0, 2.0]]]]
+    - k2 = uns [1, 2, 2, 2]
+    - y2 = x2.conv2d k2
+    - imprimir "2 canais in:", y2.forma, y2.dados
+    - x3 = tensor [[[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0], [13.0, 14.0, 15.0, 16.0]]]]
+    - k3 = uns [1, 1, 2, 2]
+    - y3 = x3.conv2d k3, passo: 2
+    - imprimir "passo 2:", y3.dados
+    - g = uns [2]
+    - b = zeros [2]
+    - m = tensor [2.0, 6.0]
+    - v = tensor [0.25, 4.0]
+    - xb = tensor [[[1.0, 4.0], [3.0, 8.0]]]
+    - nb = xb.norma_lote g, b, m, v, eps: 0.0
+    - imprimir "norma_lote:", nb.dados
+    - nt = xb.norma_lote g, b, em_treino: verdadeiro, eps: 0.0
+    - imprimir "em_treino:", nt.dados

@@ -39,6 +39,16 @@ Tensor apply_unary(const Tensor& a, const std::string& fn);  // relu/gelu/silu/s
 Tensor softmax_last(const Tensor& a);
 Tensor layer_norm_last(const Tensor& a);  // normaliza sobre a ultima dimensao (sem affine)
 
+// Convolucao 2D NCHW, padding valido: [N, C_in, H, W] x [C_out, C_in, KH, KW]
+// -> [N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]. Sem dilation.
+Tensor conv2d(const Tensor& x, const Tensor& nucleo, std::int64_t passo = 1);
+
+// Batch norm por canal sobre [N, C, ...]: y = gama * (x - media) / sqrt(var + eps) + beta.
+// gama/beta/media/var aceitos como [C] ou escalar; com em_treino, media/var sao
+// calculadas do proprio lote (variancia populacional) e os tensores media/var ignorados.
+Tensor norma_lote(const Tensor& x, const Tensor& gama, const Tensor& beta, const Tensor& media,
+                  const Tensor& var, float eps, bool em_treino);
+
 float sum_all(const Tensor& a);
 float mean_all(const Tensor& a);
 std::int64_t argmax_last(const Tensor& a);  // index of max in the last dim (rank-1 tensor)

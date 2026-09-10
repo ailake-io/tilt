@@ -264,6 +264,145 @@ Tensor layer_norm_last(const Tensor& a) {
   return out;
 }
 
+Tensor conv2d(const Tensor& x, const Tensor& k, std::int64_t passo) {
+  if (x.rank() != 4) die("conv2d espera uma entrada [N, C_in, H, W] (" + x.shape_str() + ")");
+  if (k.rank() != 4) die("conv2d espera um nucleo [C_out, C_in, KH, KW] (" + k.shape_str() + ")");
+  if (passo < 1) die("conv2d: passo deve ser >= 1");
+  const std::int64_t n = x.shape[0];
+  const std::int64_t cin = x.shape[1];
+  const std::int64_t h = x.shape[2];
+  const std::int64_t w = x.shape[3];
+  const std::int64_t cout = k.shape[0];
+  if (k.shape[1] != cin) {
+    die("conv2d: nucleo tem " + std::to_string(k.shape[1]) + " canais de entrada, mas a entrada tem " +
+        std::to_string(cin));
+  }
+  const std::int64_t kh = k.shape[2];
+  const std::int64_t kw = k.shape[3];
+  if (kh > h || kw > w) {
+    die("conv2d: nucleo " + std::to_string(kh) + "x" + std::to_string(kw) +
+        " maior que a entrada " + std::to_string(h) + "x" + std::to_string(w));
+  }
+  const std::int64_t oh = (h - kh) / passo + 1;
+  const std::int64_t ow = (w - kw) / passo + 1;
+
+  Tensor out = Tensor::zeros({n, cout, oh, ow});
+
+  // Um bloco de trabalho = par (amostra, canal de saida).
+  const std::int64_t jobs = n * cout;
+  auto block = [&](std::int64_t j0, std::int64_t j1) {
+    for (std::int64_t j = j0; j < j1; ++j) {
+      const std::int64_t nn = j / cout;
+      const std::int64_t co = j % cout;
+      const float* xbase = x.data.data() + static_cast<std::size_t>(nn * cin * h * w);
+      const float* kbase = k.data.data() + static_cast<std::size_t>(co * cin * kh * kw);
+      float* obase = out.data.data() + static_cast<std::size_t>(j * oh * ow);
+      for (std::int64_t i = 0; i < oh; ++i) {
+        for (std::int64_t jj = 0; jj < ow; ++jj) {
+          float acc = 0.0F;
+          for (std::int64_t c = 0; c < cin; ++c) {
+            const float* xc = xbase + static_cast<std::size_t>(c * h * w);
+            const float* kc = kbase + static_cast<std::size_t>(c * kh * kw);
+            for (std::int64_t u = 0; u < kh; ++u) {
+              for (std::int64_t v = 0; v < kw; ++v) {
+                acc += xc[static_cast<std::size_t>((i * passo + u) * w + (jj * passo + v))] *
+                       kc[static_cast<std::size_t>(u * kw + v)];
+              }
+            }
+          }
+          obase[static_cast<std::size_t>(i * ow + jj)] = acc;
+        }
+      }
+    }
+  };
+
+  // Acima de ~256k FLOPs: divide os pares (amostra, canal de saida) entre threads.
+  const std::int64_t work = jobs * oh * ow * cin * kh * kw;
+  unsigned hw = std::thread::hardware_concurrency();
+  if (hw == 0) hw = 1;
+  const int nthreads = static_cast<int>(std::min<unsigned>(hw, 8));
+  if (work > (1 << 18) && nthreads > 1) {
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(nthreads));
+    const std::int64_t chunk = (jobs + nthreads - 1) / nthreads;
+    for (int t = 0; t < nthreads; ++t) {
+      const std::int64_t j0 = t * chunk;
+      const std::int64_t j1 = std::min(jobs, j0 + chunk);
+      if (j0 >= j1) break;
+      pool.emplace_back(block, j0, j1);
+    }
+    for (std::thread& th : pool) th.join();
+  } else {
+    block(0, jobs);
+  }
+  return out;
+}
+
+namespace {
+
+// Parametro por canal: escalar (broadcast) ou rank-1 [C].
+float param_por_canal(const Tensor& p, std::int64_t c, std::int64_t canais, const char* nome) {
+  if (p.size() == 1) return p.data[0];
+  if (p.rank() == 1 && p.shape[0] == canais) return p.data[static_cast<std::size_t>(c)];
+  die(std::string("norma_lote: '") + nome + "' deve ser escalar ou [" + std::to_string(canais) +
+      "] (" + p.shape_str() + ")");
+}
+
+}  // namespace
+
+Tensor norma_lote(const Tensor& x, const Tensor& gama, const Tensor& beta, const Tensor& media,
+                  const Tensor& var, float eps, bool em_treino) {
+  if (x.rank() < 2) die("norma_lote espera um tensor [N, C, ...] (" + x.shape_str() + ")");
+  const std::int64_t n = x.shape[0];
+  const std::int64_t canais = x.shape[1];
+  const std::int64_t rest = x.size() / (n * canais);  // elementos por (amostra, canal)
+
+  std::vector<float> mean(static_cast<size_t>(canais), 0.0F);
+  std::vector<float> varc(static_cast<size_t>(canais), 0.0F);
+  if (em_treino) {
+    // Media/variancia populacional por canal sobre N * rest.
+    for (std::int64_t nn = 0; nn < n; ++nn) {
+      for (std::int64_t c = 0; c < canais; ++c) {
+        const float* base = x.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+        for (std::int64_t k = 0; k < rest; ++k) mean[static_cast<size_t>(c)] += base[k];
+      }
+    }
+    const float cnt = static_cast<float>(n * rest);
+    for (std::int64_t c = 0; c < canais; ++c) mean[static_cast<size_t>(c)] /= cnt;
+    for (std::int64_t nn = 0; nn < n; ++nn) {
+      for (std::int64_t c = 0; c < canais; ++c) {
+        const float* base = x.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+        float acc = 0.0F;
+        for (std::int64_t k = 0; k < rest; ++k) {
+          const float d = base[k] - mean[static_cast<size_t>(c)];
+          acc += d * d;
+        }
+        varc[static_cast<size_t>(c)] += acc;
+      }
+    }
+    for (std::int64_t c = 0; c < canais; ++c) varc[static_cast<size_t>(c)] /= cnt;
+  } else {
+    for (std::int64_t c = 0; c < canais; ++c) {
+      mean[static_cast<size_t>(c)] = param_por_canal(media, c, canais, "media");
+      varc[static_cast<size_t>(c)] = param_por_canal(var, c, canais, "variancia");
+    }
+  }
+
+  Tensor out = x;
+  for (std::int64_t nn = 0; nn < n; ++nn) {
+    for (std::int64_t c = 0; c < canais; ++c) {
+      const float g = param_por_canal(gama, c, canais, "gama");
+      const float b = param_por_canal(beta, c, canais, "beta");
+      const float inv = 1.0F / std::sqrt(varc[static_cast<size_t>(c)] + eps);
+      float* base = out.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      for (std::int64_t k = 0; k < rest; ++k) {
+        base[k] = g * (base[k] - mean[static_cast<size_t>(c)]) * inv + b;
+      }
+    }
+  }
+  return out;
+}
+
 float sum_all(const Tensor& a) {
   float s = 0.0F;
   for (float v : a.data) s += v;
