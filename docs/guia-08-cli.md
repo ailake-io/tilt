@@ -32,11 +32,13 @@ Funções puras compilam para bytecode e rodam na VM. `--agendar` valida o
 Sobe o primeiro `servico` declarado. `--porta` sobrepõe `porta:`.
 `--requisicoes N` atende N e encerra (0 = para sempre). Ver [guia 07](guia-07-http.md).
 
-## `tilt compilar <arquivo> --saida <bin> [--asm]`
+## `tilt compilar <arquivo> --saida <bin> [--asm] [--arch x86_64|arm64]`
 
-Gera Assembly x86-64 do subconjunto **inteiro puro** e monta/linka com `$CC`
-(padrão `cc`, flags `-O2 -no-pie`) + um runtime C de uma função. Exige `funcao
-principal`. `--asm` mantém o `.s` e o `.rt.c`. Ver [guia 09](guia-09-vm-nativo.md).
+Gera Assembly do subconjunto **inteiro puro** (backends x86-64 e ARM64/AArch64,
+ELF) e monta/linka com `$CC` (alvo do host; flags `-O2 -no-pie` no x86-64) +
+um runtime C. Alvo cruzado usa `aarch64-linux-gnu-gcc` / `x86_64-linux-gnu-gcc`
+ou o env `CC_AARCH64` / `CC_X86_64`. Exige `funcao principal` ou pipelines.
+`--asm` mantém o `.s` e o `.rt.c`. Ver [guia 09](guia-09-vm-nativo.md).
 
 ## `tilt completar <arquivo> --linha L --coluna C [--json]`
 

@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,6 +22,7 @@
 #include "lexer/lexer.hpp"
 #include "lexer/token.hpp"
 #include "codegen/codegen_x86_64.hpp"
+#include "codegen/codegen_arm64.hpp"
 #include "interp/interpreter.hpp"
 #include "lsp/completion.hpp"
 #include "lsp/lsp_server.hpp"
@@ -34,6 +36,36 @@
 
 namespace tilt {
 namespace {
+
+// Arquitetura nativa desta build (macro do compilador); nullptr se fora das
+// duas suportadas pelo codegen.
+constexpr const char* host_arch() {
+#if defined(__aarch64__) || defined(_M_ARM64)
+  return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
+  return "x86_64";
+#else
+  return nullptr;
+#endif
+}
+
+// Procura uma ferramenta no PATH (sem execucao).
+bool in_path(const std::string& tool) {
+#if defined(_WIN32)
+  (void)tool;
+  return false;  // toolchain cross fica fora do port Windows (1a passada)
+#else
+  const char* path_env = std::getenv("PATH");
+  if (!path_env) return false;
+  std::string dir;
+  std::istringstream ps(path_env);
+  while (std::getline(ps, dir, ':')) {
+    std::error_code ec;
+    if (std::filesystem::exists(std::filesystem::path(dir) / tool, ec)) return true;
+  }
+  return false;
+#endif
+}
 
 constexpr int kOk = 0;
 constexpr int kDiagnostics = 1;
@@ -61,6 +93,7 @@ void print_usage(std::ostream& os) {
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "                                     [--requisicoes N] [--threads N]\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
+     << "                                     [--asm] [--arch x86_64|arm64]\n"
      << "  referencia                         referencia compacta da linguagem\n"
      << "  completar <arq> --linha L --coluna C   candidatos de autocomplete\n"
      << "  lsp                                servidor Language Server (stdio)\n"
@@ -403,7 +436,7 @@ BUILTINS
 CLI
   tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
   tilt servir <a> [--porta N] [--requisicoes N] [--threads N]
-  tilt compilar <a> --saida <bin> [--asm]
+  tilt compilar <a> --saida <bin> [--asm] [--arch x86_64|arm64]
   tilt tokens <a>   referencia   versao
 
 DIAGNOSTICOS (codigo estavel Tnnn)
@@ -421,12 +454,15 @@ DIAGNOSTICOS (codigo estavel Tnnn)
 int cmd_compilar(const std::vector<std::string_view>& args) {
   std::string_view path;
   std::string out_bin = "a.out";
+  std::string arch = "auto";
   bool keep_asm = false;
   for (std::size_t k = 1; k < args.size(); ++k) {
     if ((args[k] == "--saida" || args[k] == "-o") && k + 1 < args.size()) {
       out_bin = std::string(args[++k]);
     } else if (args[k] == "--asm") {
       keep_asm = true;
+    } else if (args[k] == "--arch" && k + 1 < args.size()) {
+      arch = std::string(args[++k]);
     } else if (args[k].rfind("--", 0) == 0) {
       std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
       return kUsage;
@@ -435,7 +471,21 @@ int cmd_compilar(const std::vector<std::string_view>& args) {
     }
   }
   if (path.empty()) {
-    std::cerr << "tilt: uso: tilt compilar <arquivo> --saida <bin> [--asm]\n";
+    std::cerr << "tilt: uso: tilt compilar <arquivo> --saida <bin> [--asm] [--arch x86_64|arm64]\n";
+    return kUsage;
+  }
+
+  std::string target = arch;
+  if (target == "auto") {
+    const char* host = host_arch();
+    if (!host) {
+      std::cerr << "tilt: arquitetura do host nao reconhecida; use --arch x86_64|arm64\n";
+      return kUsage;
+    }
+    target = host;
+  }
+  if (target != "x86_64" && target != "arm64") {
+    std::cerr << "tilt: arquitetura desconhecida '" << target << "' (use x86_64 ou arm64)\n";
     return kUsage;
   }
 
@@ -458,9 +508,10 @@ int cmd_compilar(const std::vector<std::string_view>& args) {
     return kDiagnostics;
   }
 
-  codegen::Result r = codegen::emit_program(program);
+  codegen::Result r = target == "arm64" ? codegen::arm64::emit_program(program)
+                                        : codegen::emit_program(program);
   if (!r.ok) {
-    std::cerr << "tilt: codegen nativo: " << r.error << "\n";
+    std::cerr << "tilt: codegen nativo (" << target << "): " << r.error << "\n";
     return kNotImplemented;
   }
 
@@ -474,9 +525,33 @@ int cmd_compilar(const std::vector<std::string_view>& args) {
     c << codegen::runtime_source();
   }
 
-  const char* cc_env = std::getenv("CC");
-  const std::string cc = cc_env ? cc_env : "cc";
-  const std::string cmd = cc + " -O2 -no-pie -o " + out_bin + " " + asm_path + " " + rt_path + " -lm";
+  const char* host = host_arch();
+  std::string cc;
+  std::string flags = "-O2";
+  if (target == "x86_64") flags += " -no-pie";  // enderecamento absoluto do ASM
+  if (host && target == host) {
+    const char* cc_env = std::getenv("CC");
+    cc = cc_env ? cc_env : "cc";
+  } else {
+    // Alvo cruzado: o cc do host nao monta ASM de outra arquitetura. Aceita
+    // override por env (CC_AARCH64/CC_X86_64) ou a toolchain cross canonica.
+    const std::string var = target == "arm64" ? "CC_AARCH64" : "CC_X86_64";
+    const std::string canonical = target == "arm64" ? "aarch64-linux-gnu-gcc" : "x86_64-linux-gnu-gcc";
+    const char* cross_env = std::getenv(var.c_str());
+    cc = cross_env ? cross_env : canonical;
+    if (!cross_env && !in_path(cc)) {
+      if (!keep_asm) {
+        std::remove(asm_path.c_str());
+        std::remove(rt_path.c_str());
+      }
+      std::cerr << "tilt: compilador para '" << target << "' nao encontrado no PATH "
+                << "(defina " << var << " ou instale a toolchain cross, ex.: " << canonical
+                << ")\n";
+      return kDiagnostics;
+    }
+  }
+
+  const std::string cmd = cc + " " + flags + " -o " + out_bin + " " + asm_path + " " + rt_path + " -lm";
   const int rc = std::system(cmd.c_str());
 
   if (!keep_asm) {

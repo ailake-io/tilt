@@ -67,6 +67,7 @@ add_library(tilt_core STATIC
   src/vm/compiler.cpp
   src/vm/vm.cpp
   src/codegen/codegen_x86_64.cpp
+  src/codegen/codegen_arm64.cpp
   src/lsp/completion.cpp
   src/lsp/lsp_server.cpp
   src/interp/interpreter.cpp

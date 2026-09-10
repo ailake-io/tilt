@@ -239,6 +239,14 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ao interpretador (runtime C espelhando `value.cpp`; teste `native`
   diferencial). Fora do subconjunto (builtins como `ler_csv`, interpolação,
   membros, `agenda:`/`ao_falhar:`) rejeita com mensagem clara.
+- Backends de codegen nativo: **x86-64** e **ARM64 (AArch64)**, o mesmo
+  subconjunto nos dois (`--arch x86_64|arm64`, `auto` = host). O backend
+  ARM64 emite ELF/AAPCS (validado por geração + montagem cross no teste
+  `native_arm64`; a execução sob `qemu-aarch64` no ctest depende de toolchain
+  cross + qemu instalados — sem ela, a validação end-to-end fica para CI /
+  máquina ARM). Mach-O (macOS) e PE/COFF (Windows) ficam fora: o codegen
+  é ELF-only. **JIT** (compilação em runtime, sem passar por `.s`+`cc`)
+  segue como evolução futura.
 
 ## Stdlib
 
@@ -264,7 +272,9 @@ A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
 
 ## Plataforma
 
-- `tilt compilar` gera x86-64; em ARM o teste `native` é pulado.
+- `tilt compilar` gera ELF para x86-64 e ARM64 (AArch64); em outras
+  arquiteturas de host não há backend (`--arch` rejeita com erro claro) e o
+  teste `native` é pulado fora de x86-64.
 - Binário estático de libstdc++ só no Linux (no macOS usa a libc++ do sistema).
 - **Port Windows (1ª passada)**: o projeto compila no MSVC/MinGW via CI
   (job `windows` em `.github/workflows/ci.yml`). A camada de compatibilidade

@@ -9,6 +9,7 @@ comandos:
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
                                      [--requisicoes N] [--threads N]
   compilar <arquivo> --saida <bin>   gera binario nativo
+                                     [--asm] [--arch x86_64|arm64]
   referencia                         referencia compacta da linguagem
   completar <arq> --linha L --coluna C   candidatos de autocomplete
   lsp                                servidor Language Server (stdio)

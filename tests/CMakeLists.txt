@@ -67,6 +67,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo2.tilt)
 
 add_test(
+  NAME native_arm64
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/native_arm64_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo2.tilt)
+
+add_test(
   NAME iceberg
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/iceberg_test.sh
           $<TARGET_FILE:tilt>

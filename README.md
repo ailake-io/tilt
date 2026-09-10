@@ -119,7 +119,7 @@ total: 102 -> grande
 | `tilt executar <a> [--agendar]` | roda no interpretador (VM para `funcao` pura) |
 | `tilt executar --vm <a>` | roda pipelines pelo bytecode VM (fall-back por pipeline) |
 | `tilt servir <a> [--porta N] [--requisicoes N] [--threads N]` | sobe o `servico` HTTP declarado |
-| `tilt compilar <a> --saida <bin> [--asm]` | binário nativo x86-64 (programa inteiro no subconjunto da VM) |
+| `tilt compilar <a> --saida <bin> [--asm] [--arch x86_64\|arm64]` | binário nativo x86-64/ARM64 (programa inteiro no subconjunto da VM) |
 | `tilt completar <a> --linha L --coluna C [--json]` | candidatos de autocomplete |
 | `tilt lsp` | servidor Language Server (stdio) |
 | `tilt referencia` | referência compacta da linguagem |
