@@ -1,0 +1,5 @@
+== pipeline listas ==
+ana [ml, dados] [1, 2, 3] verdadeiro
+bruno [] [] falso
+nulo nulo nulo nulo
+v1: [ml, dados] [] nulo

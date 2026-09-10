@@ -1,0 +1,14 @@
+pipeline listas:
+  passos:
+    - dados = [
+        { nome: "ana", tags: ["ml", "dados"], nums: [1, 2, 3], ok: verdadeiro },
+        { nome: "bruno", tags: [], nums: [], ok: falso },
+        { nome: nulo, tags: nulo, nums: nulo, ok: nulo }
+      ]
+    - escrever_parquet dados, "saida_listas.parquet", codec: "snappy", paginas: "v2"
+    - escrever_parquet dados, "saida_listas_v1.parquet"
+    - volta = ler_parquet "saida_listas.parquet"
+    - para cada linha em volta:
+        - imprimir linha.nome, linha.tags, linha.nums, linha.ok
+    - outra = ler_parquet "saida_listas_v1.parquet"
+    - imprimir "v1:", outra[0].tags, outra[1].nums, outra[2].nome

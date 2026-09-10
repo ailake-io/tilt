@@ -1,6 +1,7 @@
 #include "runtime/parquet.hpp"
 
 #include "runtime/compat.hpp"
+#include "runtime/snappy_codec.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -195,8 +196,13 @@ struct Column {
   std::string name;
   PType type = PT_BYTE_ARRAY;
   bool has_type = false;
+  // Coluna de lista (REPEATED + anotacao LIST): `cells` guarda a celula
+  // original (Lista ou Nulo) de cada linha; nums/strings/bools guardam os
+  // elementos achatados de todas as linhas, na ordem.
+  bool repeated = false;
+  std::vector<Value> cells;
   // vetores de valores guardam apenas os valores definidos (nao nulos);
-  // `defined` se alinha por linha e marca onde ha nulo.
+  // `defined` se alinha por linha e marca onde ha nulo (colunas flat).
   std::vector<double> nums;
   std::vector<std::string> strings;
   std::vector<bool> bools;
@@ -213,7 +219,8 @@ PType type_of(const Value& v) {
     case ValueKind::Texto: return PT_BYTE_ARRAY;
     default:
       die("tipo '" + std::string(v.type_name()) +
-          "' nao suportado em parquet (use logico, inteiro, decimal, texto ou nulo)");
+          "' nao suportado em parquet (use logico, inteiro, decimal, texto, "
+          "lista de escalares ou nulo)");
   }
 }
 
@@ -227,6 +234,27 @@ const char* type_name(PType t) {
   return "?";
 }
 
+// Confere um elemento de lista e devolve o tipo fisico dele.
+PType element_type_of(const std::string& col, const Value& v) {
+  if (v.kind == ValueKind::Nulo) {
+    die("coluna '" + col + "': elementos nulos dentro de listas ainda nao suportados");
+  }
+  if (v.kind == ValueKind::Lista || v.kind == ValueKind::Mapa) {
+    die("coluna '" + col +
+        "': listas aninhadas e structs dentro de listas ainda nao suportados");
+  }
+  return type_of(v);
+}
+
+void note_type(Column& c, PType t) {
+  if (!c.has_type) {
+    c.type = t;
+    c.has_type = true;
+  } else if (t != c.type) {
+    die("coluna '" + c.name + "' mistura tipos (parquet e tipado por coluna)");
+  }
+}
+
 std::string table_to_columns(const Value& tabela, std::vector<Column>& cols) {
   if (tabela.kind != ValueKind::Tabela && tabela.kind != ValueKind::Lista) {
     die("esperada uma tabela (lista de mapas)");
@@ -238,12 +266,33 @@ std::string table_to_columns(const Value& tabela, std::vector<Column>& cols) {
   for (const auto& [k, v] : first.map->items) {
     Column c;
     c.name = k;
-    if (v.kind != ValueKind::Nulo) {
-      c.type = type_of(v);
-      c.has_type = true;
-    }
     cols.push_back(std::move(c));
   }
+  // fase 1: modo (escalar ou lista) e tipo de cada coluna, pela 1a celula
+  // nao nula; as demais linhas sao validadas na fase 2.
+  for (Column& c : cols) {
+    for (const Value& row : *tabela.list) {
+      const Value* cell = row.map->find(c.name);
+      if (!cell) {
+        die("coluna '" + c.name +
+            "' ausente em uma das linhas (parquet exige as mesmas colunas em todas as linhas)");
+      }
+      if (cell->kind == ValueKind::Nulo) continue;
+      if (cell->kind == ValueKind::Lista) {
+        c.repeated = true;
+        for (const Value& e : *cell->list) note_type(c, element_type_of(c.name, e));
+      } else {
+        note_type(c, type_of(*cell));
+      }
+      break;
+    }
+    if (!c.has_type) {
+      die("coluna '" + c.name +
+          "' so tem valores nulos/listas vazias; forneca ao menos um valor nao nulo para inferir "
+          "o tipo");
+    }
+  }
+  // fase 2: valida e achata todas as linhas
   for (const Value& row : *tabela.list) {
     if (row.kind != ValueKind::Mapa || !row.map) die("linhas devem ser mapas { campo: valor }");
     for (Column& c : cols) {
@@ -252,17 +301,38 @@ std::string table_to_columns(const Value& tabela, std::vector<Column>& cols) {
         die("coluna '" + c.name +
             "' ausente em uma das linhas (parquet exige as mesmas colunas em todas as linhas)");
       }
+      ++c.rows;
+      if (c.repeated) {
+        if (cell->kind == ValueKind::Nulo) {
+          c.optional = true;
+          c.cells.push_back(Value::nulo());
+          continue;
+        }
+        if (cell->kind != ValueKind::Lista) {
+          die("coluna '" + c.name + "' mistura listas e escalares em uma das linhas");
+        }
+        for (const Value& e : *cell->list) {
+          const PType t = element_type_of(c.name, e);
+          note_type(c, t);
+          switch (c.type) {
+            case PT_BOOLEAN: c.bools.push_back(e.b); break;
+            case PT_INT64:
+            case PT_DOUBLE: c.nums.push_back(e.as_number()); break;
+            case PT_BYTE_ARRAY: c.strings.push_back(e.s); break;
+          }
+        }
+        c.cells.push_back(*cell);
+        continue;
+      }
+      if (cell->kind == ValueKind::Lista) {
+        die("coluna '" + c.name + "' mistura listas e escalares em uma das linhas");
+      }
       if (cell->kind == ValueKind::Nulo) {
         c.defined.push_back(false);
         c.optional = true;
         continue;
       }
-      if (!c.has_type) {
-        c.type = type_of(*cell);
-        c.has_type = true;
-      } else if (type_of(*cell) != c.type) {
-        die("coluna '" + c.name + "' mistura tipos (parquet e tipado por coluna)");
-      }
+      note_type(c, type_of(*cell));
       switch (c.type) {
         case PT_BOOLEAN: c.bools.push_back(cell->b); break;
         case PT_INT64:
@@ -270,13 +340,6 @@ std::string table_to_columns(const Value& tabela, std::vector<Column>& cols) {
         case PT_BYTE_ARRAY: c.strings.push_back(cell->s); break;
       }
       c.defined.push_back(true);
-    }
-    for (Column& c : cols) ++c.rows;
-  }
-  for (const Column& c : cols) {
-    if (!c.has_type) {
-      die("coluna '" + c.name +
-          "' so tem valores nulos; forneca ao menos um valor nao nulo para inferir o tipo");
     }
   }
   return "";
@@ -335,23 +398,75 @@ void put_uvarint(std::string& out, std::uint64_t v) {
   out.push_back(static_cast<char>(v));
 }
 
-// Definition levels (largura 1 bit: 0 = nulo, 1 = definido) em RLE runs,
-// com o prefixo de 4 bytes little-endian exigido nas DATA_PAGE v1.
-std::string encode_def_levels(const std::vector<bool>& defined) {
+// Niveis (definition/repetition) como RLE puro em runs, sem prefixo de
+// tamanho. Cada run: header uvarint (count << 1) seguido do valor em
+// ceil(bw/8) bytes little-endian — valido no hibrido RLE/bit-pack do Parquet.
+std::string rle_encode_levels(const std::vector<std::uint32_t>& levels, unsigned bw) {
   std::string rle;
+  const std::size_t nbytes = (bw + 7) / 8;
   std::size_t i = 0;
-  while (i < defined.size()) {
+  while (i < levels.size()) {
     std::size_t j = i + 1;
-    while (j < defined.size() && defined[j] == defined[i]) ++j;
+    while (j < levels.size() && levels[j] == levels[i]) ++j;
     put_uvarint(rle, static_cast<std::uint64_t>(j - i) << 1);  // header de run RLE
-    rle.push_back(defined[i] ? '\x01' : '\x00');
+    for (std::size_t k = 0; k < nbytes; ++k) {
+      rle.push_back(static_cast<char>((levels[i] >> (8 * k)) & 0xFF));
+    }
     i = j;
   }
-  std::string out;
-  const std::uint32_t len = static_cast<std::uint32_t>(rle.size());
-  out.append(reinterpret_cast<const char*>(&len), 4);
-  out += rle;
-  return out;
+  return rle;
+}
+
+// Definition/repetition levels de uma coluna, ja no formato de escrita.
+// `num_values` conta as entradas de level (= linhas em coluna flat) e
+// `num_nulls` as entradas sem valor de folha (nulos + listas vazias) —
+// a aritmetica num_values - num_nulls = valores de folha do DATA_PAGE_V2.
+struct ColumnLevels {
+  std::vector<std::uint32_t> defs;
+  std::vector<std::uint32_t> reps;
+  int max_def = 0;
+  int max_rep = 0;
+  std::int64_t num_values = 0;
+  std::int64_t num_nulls = 0;
+};
+
+ColumnLevels column_levels(const Column& c) {
+  ColumnLevels lv;
+  if (!c.repeated) {
+    lv.max_def = c.optional ? 1 : 0;
+    lv.num_values = static_cast<std::int64_t>(c.rows);
+    lv.defs.reserve(c.defined.size());
+    for (bool d : c.defined) {
+      lv.defs.push_back(d ? 1u : 0u);
+      if (!d) ++lv.num_nulls;
+    }
+    return lv;
+  }
+  lv.max_rep = 1;
+  lv.max_def = c.optional ? 2 : 1;
+  for (const Value& cell : c.cells) {
+    if (cell.kind == ValueKind::Nulo) {  // so com grupo externo OPTIONAL
+      lv.defs.push_back(0);
+      lv.reps.push_back(0);
+      ++lv.num_nulls;
+      ++lv.num_values;
+      continue;
+    }
+    const ValueList& elems = *cell.list;
+    if (elems.empty()) {  // lista vazia: grupo externo definido, sem elemento
+      lv.defs.push_back(static_cast<std::uint32_t>(lv.max_def - 1));
+      lv.reps.push_back(0);
+      ++lv.num_nulls;
+      ++lv.num_values;
+      continue;
+    }
+    for (std::size_t k = 0; k < elems.size(); ++k) {
+      lv.defs.push_back(static_cast<std::uint32_t>(lv.max_def));
+      lv.reps.push_back(k == 0 ? 0u : 1u);
+      ++lv.num_values;
+    }
+  }
+  return lv;
 }
 
 // ---------------------------------------------------------------- leitura: RLE e zlib
@@ -446,6 +561,9 @@ struct ZlibApi {
   int (*inflate_init2)(ZStream*, int, const char*, int) = nullptr;
   int (*inflate)(ZStream*, int) = nullptr;
   int (*inflate_end)(ZStream*) = nullptr;
+  int (*deflate_init2)(ZStream*, int, int, int, int, int, const char*, int) = nullptr;
+  int (*deflate)(ZStream*, int) = nullptr;
+  int (*deflate_end)(ZStream*) = nullptr;
 };
 
 template <typename F>
@@ -470,7 +588,10 @@ const ZlibApi& zlib() {
     const bool ok = bind_zsym(a.lib, a.version, "zlibVersion") &&
                     bind_zsym(a.lib, a.inflate_init2, "inflateInit2_") &&
                     bind_zsym(a.lib, a.inflate, "inflate") &&
-                    bind_zsym(a.lib, a.inflate_end, "inflateEnd");
+                    bind_zsym(a.lib, a.inflate_end, "inflateEnd") &&
+                    bind_zsym(a.lib, a.deflate_init2, "deflateInit2_") &&
+                    bind_zsym(a.lib, a.deflate, "deflate") &&
+                    bind_zsym(a.lib, a.deflate_end, "deflateEnd");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = ZlibApi{};
@@ -481,15 +602,23 @@ const ZlibApi& zlib() {
 }
 
 constexpr int kZNoFlush = 0;
+constexpr int kZFinish = 4;
 constexpr int kZStreamEnd = 1;
-constexpr int kWindowBitsAuto = 15 + 32;  // aceita zlib (RFC1950) e gzip (RFC1952)
+constexpr int kZDefaultCompression = -1;
+constexpr int kZDeflated = 8;
+constexpr int kWindowBitsAuto = 15 + 32;      // aceita zlib (RFC1950) e gzip (RFC1952)
+constexpr int kWindowBitsGzip = 15 + 16;      // emite container gzip (RFC1952)
+
+std::string zlib_ausente(const std::string& col) {
+  return "coluna '" + col +
+         "': gzip/deflate requer zlib (libz.so.1 no Linux, zlib1.dll no Windows), "
+         "que nao foi encontrada; instale o pacote zlib";
+}
 
 std::string gunzip_payload(const std::string& in, const std::string& col) {
   const ZlibApi& z = zlib();
   if (!z.lib) {
-    die("coluna '" + col +
-        "': gzip/deflate requer zlib (libz.so.1 no Linux, zlib1.dll no Windows), "
-        "que nao foi encontrada; instale o pacote zlib");
+    die(zlib_ausente(col));
   }
   ZStream s{};
   s.next_in = reinterpret_cast<const std::uint8_t*>(in.data());
@@ -513,6 +642,55 @@ std::string gunzip_payload(const std::string& in, const std::string& col) {
   }
   out.resize(s.total_out);
   return out;
+}
+
+// Comprime `in` num container gzip (RFC1952) com a zlib via dlopen.
+std::string gzip_payload(const std::string& in, const std::string& col) {
+  const ZlibApi& z = zlib();
+  if (!z.lib) {
+    die(zlib_ausente(col));
+  }
+  ZStream s{};
+  if (z.deflate_init2(&s, kZDefaultCompression, kZDeflated, kWindowBitsGzip, 8, 0, z.version(),
+                      static_cast<int>(sizeof(ZStream))) != 0) {
+    die("falha ao inicializar a zlib (deflateInit2)");
+  }
+  s.next_in = reinterpret_cast<const std::uint8_t*>(in.data());
+  s.avail_in = static_cast<unsigned int>(in.size());
+  std::string out;
+  int ret;
+  do {
+    const std::size_t base = out.size();
+    out.resize(base + 65536);
+    s.next_out = reinterpret_cast<std::uint8_t*>(out.data() + base);
+    s.avail_out = 65536;
+    ret = z.deflate(&s, kZFinish);
+  } while (ret == 0);
+  z.deflate_end(&s);
+  if (ret != kZStreamEnd) {
+    die("coluna '" + col + "': falha ao comprimir pagina gzip (zlib retornou " +
+        std::to_string(ret) + ")");
+  }
+  out.resize(s.total_out);
+  return out;
+}
+
+std::string decompress_payload(std::string payload, int codec, const std::string& col) {
+  if (codec == C_GZIP) return gunzip_payload(payload, col);
+  if (codec == C_SNAPPY) {
+    try {
+      return snappy_decompress(payload);
+    } catch (const std::exception& e) {
+      die("coluna '" + col + "': stream snappy invalido (" + e.what() + ")");
+    }
+  }
+  return payload;
+}
+
+std::string compress_payload(const std::string& payload, int codec, const std::string& col) {
+  if (codec == C_GZIP) return gzip_payload(payload, col);
+  if (codec == C_SNAPPY) return snappy_compress_literals(payload);
+  return payload;
 }
 
 // Decodifica `count` valores definidos em encoding PLAIN.
@@ -568,32 +746,41 @@ std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t a
 }
 
 struct ColMeta {
-  PType type = PT_BYTE_ARRAY;
   int codec = 0;
   std::int64_t num_values = 0;
   std::int64_t data_page_offset = -1;
   std::int64_t dictionary_page_offset = -1;
+};
+
+// Descritor de coluna extraido da arvore de schema: nome exposto (grupo
+// externo no caso de lista), tipo da folha e niveis maximos de
+// definicao/repeticao (0/0 = REQUIRED flat, 1/0 = OPTIONAL flat, 1/1 ou 2/1 =
+// lista com outer REQUIRED ou OPTIONAL).
+struct ColDesc {
   std::string name;
-  int rep = 0;  // 0 = REQUIRED, 1 = OPTIONAL, 2 = REPEATED
+  PType type = PT_BYTE_ARRAY;
+  int max_def = 0;
+  int max_rep = 0;
+  bool repeated = false;
+  bool elem_nullable = false;  // lista com element OPTIONAL (max_def 3): def max-1 = elemento nulo
 };
 
 // Le um chunk de coluna (todas as paginas entre dictionary/data_page_offset)
-// e anexa os valores em `out`. Suporta: DATA_PAGE v1 PLAIN e DICTIONARY
-// (PLAIN_DICTIONARY/RLE_DICTIONARY), definition levels RLE para campos
-// OPTIONAL, multiplas paginas por chunk e codec gzip/deflate (zlib dlopen).
-void decode_chunk(const std::string& file, const ColMeta& cm, std::vector<Value>& out) {
-  if (cm.codec != C_NONE && cm.codec != C_GZIP) {
-    if (cm.codec == C_SNAPPY) {
-      die("coluna '" + cm.name +
-          "': codec snappy nao suportado: compile com snappy ou use gzip/deflate");
-    }
-    die("coluna '" + cm.name + "': codec " + std::to_string(cm.codec) +
-        " nao suportado (suportados: sem compressao, gzip/deflate)");
+// e anexa UM valor por linha em `out` (lista -> Value::lista, nulo ->
+// Value::nulo). Suporta: DATA_PAGE v1 e v2, PLAIN e DICTIONARY
+// (PLAIN_DICTIONARY/RLE_DICTIONARY), definition/repetition levels RLE para
+// campos OPTIONAL e REPEATED (listas aninhadas de escalares, anotacao LIST
+// de 3 ou 2 niveis), multiplas paginas por chunk e codecs gzip/deflate
+// (zlib dlopen) e snappy (codec proprio).
+void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
+                  std::int64_t expected_rows, std::vector<Value>& out) {
+  const std::string ctx = "coluna '" + cd.name + "'";
+  if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY) {
+    die(ctx + ": codec " + std::to_string(cm.codec) +
+        " nao suportado (suportados: sem compressao, gzip/deflate, snappy)");
   }
-  if (cm.rep == 2) {
-    die("coluna '" + cm.name + "': campos REPEATED (listas aninhadas) ainda nao suportados");
-  }
-  const int max_def = cm.rep == 1 ? 1 : 0;
+  const int max_def = cd.max_def;
+  const int max_rep = cd.max_rep;
 
   std::size_t pos = static_cast<std::size_t>(cm.data_page_offset);
   if (cm.dictionary_page_offset >= 0 &&
@@ -601,18 +788,21 @@ void decode_chunk(const std::string& file, const ColMeta& cm, std::vector<Value>
     pos = static_cast<std::size_t>(cm.dictionary_page_offset);
   }
   if (cm.data_page_offset < 0 || pos >= file.size() - 8) {
-    die("coluna '" + cm.name + "': data_page_offset invalido");
+    die(ctx + ": data_page_offset invalido");
   }
 
   std::vector<Value> dict;
   bool has_dict = false;
-  const std::int64_t target = static_cast<std::int64_t>(out.size()) + cm.num_values;
-  while (static_cast<std::int64_t>(out.size()) < target) {
+  const std::size_t start = out.size();
+  while (static_cast<std::int64_t>(out.size() - start) < expected_rows) {
     Tr pr{reinterpret_cast<const std::uint8_t*>(file.data()), file.size(), pos};
     int page_type = -1;
+    std::int64_t uncompressed = -1;
     std::int64_t compressed = -1;
     std::int64_t page_values = -1;
     int encoding = -1, def_enc = -1, dict_enc = -1;
+    int v2_def_len = -1, v2_rep_len = -1;
+    bool v2_compressed = true;
     {
       short last = 0;
       while (true) {  // PageHeader
@@ -623,11 +813,13 @@ void decode_chunk(const std::string& file, const ColMeta& cm, std::vector<Value>
         last = id;
         if (id == 1 && tt == T_I32) {
           page_type = static_cast<int>(pr.zz());
+        } else if (id == 2 && tt == T_I32) {
+          uncompressed = pr.zz();
         } else if (id == 3 && tt == T_I32) {
           compressed = pr.zz();
         } else if (id == 5 && tt == T_STRUCT) {
           short dlast = 0;
-          while (true) {  // DataPageHeader
+          while (true) {  // DataPageHeader (v1)
             const std::uint8_t dh = pr.byte();
             const auto dt = static_cast<TType>(dh & 0xF);
             if (dt == T_STOP) break;
@@ -653,81 +845,153 @@ void decode_chunk(const std::string& file, const ColMeta& cm, std::vector<Value>
             else pr.skip(dt);
           }
         } else if (id == 8 && tt == T_STRUCT) {
-          die("coluna '" + cm.name + "': DATA_PAGE_V2 ainda nao suportada nesta versao");
+          page_type = PG_DATA_V2;
+          short dlast = 0;
+          while (true) {  // DataPageHeaderV2
+            const std::uint8_t dh = pr.byte();
+            const auto dt = static_cast<TType>(dh & 0xF);
+            if (dt == T_STOP) break;
+            const short did =
+                (dh >> 4) ? static_cast<short>(dlast + (dh >> 4)) : static_cast<short>(pr.zz());
+            dlast = did;
+            if (did == 1 && dt == T_I32) page_values = pr.zz();
+            else if (did == 4 && dt == T_I32) encoding = static_cast<int>(pr.zz());
+            else if (did == 5 && dt == T_I32) v2_def_len = static_cast<int>(pr.zz());
+            else if (did == 6 && dt == T_I32) v2_rep_len = static_cast<int>(pr.zz());
+            else if (did == 7 && (dt == T_TRUE || dt == T_FALSE)) v2_compressed = dt == T_TRUE;
+            else pr.skip(dt);
+          }
         } else {
           pr.skip(tt);
         }
       }
     }
+    (void)uncompressed;
     if (compressed < 0 || pr.pos + static_cast<std::size_t>(compressed) > file.size()) {
-      die("coluna '" + cm.name + "': pagina truncada ou tamanho comprimido ausente");
+      die(ctx + ": pagina truncada ou tamanho comprimido ausente");
     }
     std::string payload(file.data() + pr.pos, static_cast<std::size_t>(compressed));
     pos = pr.pos + static_cast<std::size_t>(compressed);
-    if (cm.codec == C_GZIP) payload = gunzip_payload(payload, cm.name);
+    const bool v2 = page_type == PG_DATA_V2;
+    // nas v1 o payload inteiro (levels + valores) e comprimido; dictionary
+    // pages tambem seguem o codec da coluna. Em v2 so a secao de valores pode
+    // estar comprimida — os levels sao tratados adiante.
+    if (!v2) payload = decompress_payload(payload, cm.codec, cd.name);
 
     if (page_type == PG_DICTIONARY) {
       if (dict_enc != E_PLAIN) {
-        die("coluna '" + cm.name + "': dictionary page com encoding nao-PLAIN");
+        die(ctx + ": dictionary page com encoding nao-PLAIN");
       }
-      dict = plain_values(cm.type, reinterpret_cast<const std::uint8_t*>(payload.data()),
-                          payload.size(), static_cast<std::size_t>(page_values), cm.name);
+      dict = plain_values(cd.type, reinterpret_cast<const std::uint8_t*>(payload.data()),
+                          payload.size(), static_cast<std::size_t>(page_values), cd.name);
       has_dict = true;
       continue;
     }
-    if (page_type != PG_DATA) {
-      die("coluna '" + cm.name + "': tipo de pagina " + std::to_string(page_type) +
-          " inesperado (apenas DATA_PAGE v1 e DICTIONARY_PAGE)");
+    if (page_type != PG_DATA && page_type != PG_DATA_V2) {
+      die(ctx + ": tipo de pagina " + std::to_string(page_type) +
+          " inesperado (apenas DATA_PAGE v1/v2 e DICTIONARY_PAGE)");
     }
     if (page_values < 0) {
-      die("coluna '" + cm.name + "': num_values da pagina ausente");
+      die(ctx + ": num_values da pagina ausente");
     }
 
-    const std::uint8_t* d = reinterpret_cast<const std::uint8_t*>(payload.data());
-    std::size_t avail = payload.size();
-    const std::string ctx = "coluna '" + cm.name + "'";
+    const std::uint8_t* base = reinterpret_cast<const std::uint8_t*>(payload.data());
+    const std::size_t psize = payload.size();
 
-    // definition levels (apenas campos OPTIONAL: max_def_level = 1)
-    std::vector<std::uint32_t> defs;
-    if (max_def > 0) {
-      if (def_enc != E_RLE) {
-        die(ctx + ": definition levels com encoding " + std::to_string(def_enc) +
-            " (apenas RLE e suportado)");
+    // repetition levels (apenas campos REPEATED: max_rep_level = 1) seguidas
+    // dos definition levels; depois os valores. Em v1 as secoes levam prefixo
+    // de 4 bytes e o restante da pagina e o payload comprimido; em v2 as
+    // secoes tem comprimento explicito no header e so os valores podem estar
+    // comprimidos.
+    std::vector<std::uint32_t> reps, defs;
+    const std::uint8_t* vdata = base;
+    std::size_t vavail = psize;
+    if (v2) {
+      std::size_t off = 0;
+      if (max_rep > 0) {
+        if (v2_rep_len < 0) die(ctx + ": DATA_PAGE_V2 sem repetition_levels_byte_length");
+        if (static_cast<std::size_t>(v2_rep_len) > psize - off) {
+          die(ctx + ": repetition levels truncados");
+        }
+        rle_decode(base + off, static_cast<std::size_t>(v2_rep_len), bit_width(max_rep + 1),
+                   static_cast<std::size_t>(page_values), reps, ctx);
+        off += static_cast<std::size_t>(v2_rep_len);
       }
-      if (avail < 4) die(ctx + ": definition levels truncados");
-      std::uint32_t len;
-      std::memcpy(&len, d, 4);
-      d += 4;
-      avail -= 4;
-      if (len > avail) die(ctx + ": definition levels truncados");
-      rle_decode(d, len, bit_width(static_cast<std::size_t>(max_def) + 1),
-                 static_cast<std::size_t>(page_values), defs, ctx);
-      d += len;
-      avail -= len;
+      if (max_def > 0) {
+        if (v2_def_len < 0) die(ctx + ": DATA_PAGE_V2 sem definition_levels_byte_length");
+        if (static_cast<std::size_t>(v2_def_len) > psize - off) {
+          die(ctx + ": definition levels truncados");
+        }
+        rle_decode(base + off, static_cast<std::size_t>(v2_def_len), bit_width(max_def + 1),
+                   static_cast<std::size_t>(page_values), defs, ctx);
+        off += static_cast<std::size_t>(v2_def_len);
+      }
+      if (v2_compressed && cm.codec != C_NONE) {
+        std::string values = decompress_payload(
+            std::string(reinterpret_cast<const char*>(base + off), psize - off), cm.codec, cd.name);
+        payload = std::move(values);
+        base = reinterpret_cast<const std::uint8_t*>(payload.data());
+        vdata = base;
+        vavail = payload.size();
+      } else {
+        vdata = base + off;
+        vavail = psize - off;
+      }
     } else {
-      defs.assign(static_cast<std::size_t>(page_values), 0);
+      std::size_t off = 0;
+      auto read_levels = [&](int maxlevel, std::vector<std::uint32_t>& to) {
+        if (psize - off < 4) die(ctx + ": levels truncados");
+        std::uint32_t len;
+        std::memcpy(&len, base + off, 4);
+        off += 4;
+        if (len > psize - off) die(ctx + ": levels truncados");
+        rle_decode(base + off, len, bit_width(static_cast<std::size_t>(maxlevel) + 1),
+                   static_cast<std::size_t>(page_values), to, ctx);
+        off += len;
+      };
+      if (max_rep > 0) {
+        read_levels(max_rep, reps);
+      }
+      if (max_def > 0) {
+        if (def_enc != E_RLE && def_enc >= 0) {
+          die(ctx + ": definition levels com encoding " + std::to_string(def_enc) +
+              " (apenas RLE e suportado)");
+        }
+        read_levels(max_def, defs);
+      }
+      vdata = base + off;
+      vavail = psize - off;
     }
+    if (max_rep == 0) reps.assign(static_cast<std::size_t>(page_values), 0);
+    if (max_def == 0) defs.assign(static_cast<std::size_t>(page_values), 0);
+
     std::size_t defined_count = 0;
-    for (std::uint32_t dv : defs) {
-      if (static_cast<int>(dv) == max_def) ++defined_count;
+    for (std::size_t k = 0; k < static_cast<std::size_t>(page_values); ++k) {
+      if (defs[k] > static_cast<std::uint32_t>(max_def)) {
+        die(ctx + ": definition level " + std::to_string(defs[k]) + " acima do maximo (" +
+            std::to_string(max_def) + ")");
+      }
+      if (max_rep > 0 && reps[k] > static_cast<std::uint32_t>(max_rep)) {
+        die(ctx + ": repetition level " + std::to_string(reps[k]) + " acima do maximo (" +
+            std::to_string(max_rep) + ")");
+      }
+      if (static_cast<int>(defs[k]) == max_def) ++defined_count;
     }
 
     std::vector<Value> vals;
     if (encoding == E_PLAIN) {
-      vals = plain_values(cm.type, d, avail, defined_count, cm.name);
+      vals = plain_values(cd.type, vdata, vavail, defined_count, cd.name);
     } else if (encoding == E_PLAIN_DICTIONARY || encoding == E_RLE_DICTIONARY) {
       if (!has_dict) {
         die(ctx + ": pagina dictionary-encoded sem dictionary page");
       }
-      if (avail < 1) die(ctx + ": indices de dictionary truncados");
+      if (vavail < 1) die(ctx + ": indices de dictionary truncados");
       // indices RLE: 1 byte de bit width seguido do stream (sem length
       // prefix — o stream termina quando `defined_count` valores sao lidos)
-      const unsigned bw = d[0];
+      const unsigned bw = vdata[0];
       if (bw > 32) die(ctx + ": bit width de dictionary invalido (" + std::to_string(bw) + ")");
-      d += 1;
-      avail -= 1;
       std::vector<std::uint32_t> idx;
-      rle_decode(d, avail, bw, defined_count, idx, ctx);
+      rle_decode(vdata + 1, vavail - 1, bw, defined_count, idx, ctx);
       vals.reserve(defined_count);
       for (std::uint32_t ix : idx) {
         if (ix >= dict.size()) {
@@ -741,65 +1005,168 @@ void decode_chunk(const std::string& file, const ColMeta& cm, std::vector<Value>
           " nao suportado (apenas PLAIN e DICTIONARY)");
     }
 
+    if (!cd.repeated) {
+      std::size_t vi = 0;
+      for (std::int64_t k = 0; k < page_values; ++k) {
+        if (static_cast<int>(defs[static_cast<std::size_t>(k)]) == max_def) {
+          out.push_back(vals[vi++]);
+        } else {
+          out.push_back(Value::nulo());
+        }
+      }
+      continue;
+    }
+    // REPEATED: cada linha comeca numa entrada com rep == 0; def == max_def
+    // acrescenta um elemento a lista da linha; def intermediario sem rep
+    // marca lista vazia (ou nula, quando o grupo externo e OPTIONAL e
+    // def == 0). Elemento nulo (def == max_def-1 com element OPTIONAL, como
+    // o pyarrow grava) nao tem representacao em tilt: erro claro.
     std::size_t vi = 0;
+    bool have_row = false;
+    bool cur_null = false;
+    Value cur = Value::lista();
     for (std::int64_t k = 0; k < page_values; ++k) {
-      if (static_cast<int>(defs[static_cast<std::size_t>(k)]) == max_def) {
-        out.push_back(vals[vi++]);
-      } else {
-        out.push_back(Value::nulo());
+      const std::uint32_t def = defs[static_cast<std::size_t>(k)];
+      if (reps[static_cast<std::size_t>(k)] == 0) {
+        if (have_row) out.push_back(cur_null ? Value::nulo() : cur);
+        have_row = true;
+        cur_null = max_def >= 2 && def == 0;
+        cur = Value::lista();
+      }
+      if (static_cast<int>(def) == max_def) {
+        cur.list->push_back(vals[vi++]);
+      } else if (cd.elem_nullable && static_cast<int>(def) == max_def - 1) {
+        die(ctx + ": elementos nulos dentro de listas ainda nao suportados");
       }
     }
+    if (have_row) out.push_back(cur_null ? Value::nulo() : cur);
+  }
+  if (static_cast<std::int64_t>(out.size() - start) != expected_rows) {
+    die("coluna '" + cd.name + "': chunk com " + std::to_string(out.size() - start) +
+        " linhas, esperado " + std::to_string(expected_rows));
   }
 }
 
 }  // namespace
 
+// Anota logica UTF8 (LogicalType.STRING + ConvertedType.UTF8) em um
+// SchemaElement de string. `w` ja deve ter escrito os campos de id < 10.
+void write_logical_string(Tw& w) {
+  w.field(10, T_STRUCT);  // logicalType: union LogicalType
+  w.struct_begin();
+  w.field(1, T_STRUCT);  // LogicalType.STRING (StringType vazio)
+  w.struct_begin();
+  w.struct_end();
+  w.struct_end();
+}
+
 void parquet_write(const std::string& path, const Value& tabela,
-                   const std::vector<int>* field_ids) {
+                   const std::vector<int>* field_ids, const ParquetWriteOpts& opts) {
   std::vector<Column> cols;
   table_to_columns(tabela, cols);
   const std::size_t nrows = cols[0].rows;
+  const int codec = opts.codec;
+  if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY) {
+    die("codec " + std::to_string(codec) + " invalido (use 0=sem compressao, 1=snappy, 2=gzip)");
+  }
 
   std::string body = "PAR1";
   struct ChunkInfo {
     PType type;
-    std::string path_in_schema;
+    bool repeated;
+    std::vector<std::string> path;  // path_in_schema completo ate a folha
     std::int64_t data_page_offset = 0;
-    std::int64_t total_size = 0;  // header + payload
-    std::int64_t payload_size = 0;
+    std::int64_t compressed_size = 0;    // header + payload comprimido
+    std::int64_t uncompressed_size = 0;  // header + payload sem compressao
+    std::int64_t num_values = 0;         // entradas de level
+    std::int64_t num_nulls = 0;
   };
   std::vector<ChunkInfo> infos;
 
   for (const Column& c : cols) {
-    // Colunas com nulos viram OPTIONAL (repetition_type=1, max_def_level=1):
-    // a pagina leva definition levels RLE (0 = nulo, 1 = definido) seguidos
-    // dos valores definidos em PLAIN. Colunas sem nulos seguem REQUIRED, sem
-    // definition levels — byte a byte igual a antes.
+    const ColumnLevels lv = column_levels(c);
+    // Niveis e valores da pagina. Em v1 as secoes levam prefixo de 4 bytes e
+    // o payload inteiro (levels + valores) e comprimido; em v2 so os valores
+    // sao comprimidos — os levels ficam fora, sem prefixo, com o comprimento
+    // de cada secao no header.
+    const unsigned rep_bw = bit_width(static_cast<std::size_t>(lv.max_rep) + 1);
+    const unsigned def_bw = bit_width(static_cast<std::size_t>(lv.max_def) + 1);
+    const std::string rep_rle =
+        lv.max_rep > 0 ? rle_encode_levels(lv.reps, rep_bw) : std::string();
+    const std::string def_rle =
+        lv.max_def > 0 ? rle_encode_levels(lv.defs, def_bw) : std::string();
+    const std::string levels = rep_rle + def_rle;
+
+    const std::string values_plain = plain_encode(c);
     std::string payload;
-    if (c.optional) payload = encode_def_levels(c.defined);
-    payload += plain_encode(c);
+    std::int64_t payload_uncompressed;
+    if (opts.paginas_v2) {
+      const std::string values_comp = compress_payload(values_plain, codec, c.name);
+      payload = levels + values_comp;
+      payload_uncompressed = static_cast<std::int64_t>(levels.size() + values_plain.size());
+    } else {
+      std::string raw;
+      if (lv.max_rep > 0) {
+        const std::uint32_t rl = static_cast<std::uint32_t>(rep_rle.size());
+        raw.append(reinterpret_cast<const char*>(&rl), 4);
+        raw += rep_rle;
+      }
+      if (lv.max_def > 0) {
+        const std::uint32_t dl = static_cast<std::uint32_t>(def_rle.size());
+        raw.append(reinterpret_cast<const char*>(&dl), 4);
+        raw += def_rle;
+      }
+      raw += values_plain;
+      payload = compress_payload(raw, codec, c.name);
+      payload_uncompressed = static_cast<std::int64_t>(raw.size());
+    }
 
     ChunkInfo ci;
     ci.type = c.type;
-    ci.path_in_schema = c.name;
+    ci.repeated = c.repeated;
+    ci.path = c.repeated ? std::vector<std::string>{c.name, "list", "element"}
+                         : std::vector<std::string>{c.name};
     ci.data_page_offset = static_cast<std::int64_t>(body.size());
+    ci.num_values = lv.num_values;
+    ci.num_nulls = lv.num_nulls;
 
     Tw hw{body};
     hw.struct_begin();  // PageHeader
-    hw.field_i32(1, 0);  // PageType::DATA_PAGE
-    hw.field_i32(2, static_cast<std::int32_t>(payload.size()));
-    hw.field_i32(3, static_cast<std::int32_t>(payload.size()));
-    hw.field(5, T_STRUCT);
-    hw.struct_begin();
-    hw.field_i32(1, static_cast<std::int32_t>(c.rows));
-    hw.field_i32(2, E_PLAIN);
-    hw.field_i32(3, E_RLE);
-    hw.field_i32(4, E_RLE);
-    hw.struct_end();
+    if (!opts.paginas_v2) {
+      hw.field_i32(1, PG_DATA);
+      hw.field_i32(2, static_cast<std::int32_t>(payload_uncompressed));
+      hw.field_i32(3, static_cast<std::int32_t>(payload.size()));
+      hw.field(5, T_STRUCT);
+      hw.struct_begin();
+      hw.field_i32(1, static_cast<std::int32_t>(lv.num_values));
+      hw.field_i32(2, E_PLAIN);
+      hw.field_i32(3, E_RLE);  // def/rep encodings: RLE, como em parquet-cpp
+      hw.field_i32(4, E_RLE);
+      hw.struct_end();
+    } else {
+      // secoes de levels em v2 (sem prefixo): comprimento de cada uma
+      const std::size_t rep_len = lv.max_rep > 0 ? rep_rle.size() : 0;
+      const std::size_t def_len = lv.max_def > 0 ? def_rle.size() : 0;
+      hw.field_i32(1, PG_DATA_V2);
+      hw.field_i32(2, static_cast<std::int32_t>(payload_uncompressed));
+      hw.field_i32(3, static_cast<std::int32_t>(payload.size()));
+      hw.field(8, T_STRUCT);
+      hw.struct_begin();  // DataPageHeaderV2
+      hw.field_i32(1, static_cast<std::int32_t>(lv.num_values));
+      hw.field_i32(2, static_cast<std::int32_t>(lv.num_nulls));
+      hw.field_i32(3, static_cast<std::int32_t>(c.rows));
+      hw.field_i32(4, E_PLAIN);
+      hw.field_i32(5, static_cast<std::int32_t>(def_len));
+      hw.field_i32(6, static_cast<std::int32_t>(rep_len));
+      hw.field_bool(7, codec != C_NONE);  // is_compressed
+      hw.struct_end();
+    }
     hw.struct_end();  // STOP do PageHeader
 
-    ci.total_size = static_cast<std::int64_t>(body.size()) - ci.data_page_offset +
-                    static_cast<std::int64_t>(payload.size());
+    ci.uncompressed_size = static_cast<std::int64_t>(body.size()) - ci.data_page_offset +
+                           payload_uncompressed;
+    ci.compressed_size = static_cast<std::int64_t>(body.size()) - ci.data_page_offset +
+                         static_cast<std::int64_t>(payload.size());
     infos.push_back(ci);
     body += payload;
   }
@@ -810,7 +1177,9 @@ void parquet_write(const std::string& path, const Value& tabela,
   std::string footer;
   Tw fw{footer};
   fw.field_i32(1, 1);  // version
-  fw.list_begin(2, T_STRUCT, cols.size() + 1);
+  std::size_t schema_elems = 1;
+  for (const Column& c : cols) schema_elems += c.repeated ? 3 : 1;
+  fw.list_begin(2, T_STRUCT, schema_elems);
   {
     fw.struct_begin();
     fw.field_str(4, "schema");
@@ -818,11 +1187,48 @@ void parquet_write(const std::string& path, const Value& tabela,
     fw.struct_end();
     for (std::size_t k = 0; k < cols.size(); ++k) {
       const Column& c = cols[k];
+      const std::int32_t fid = field_ids ? (*field_ids)[k] : static_cast<std::int32_t>(k + 1);
+      if (!c.repeated) {
+        fw.struct_begin();
+        fw.field_i32(1, static_cast<std::int32_t>(c.type));
+        fw.field_i32(3, c.optional ? 1 : 0);  // 0 = REQUIRED, 1 = OPTIONAL
+        fw.field_str(4, c.name);
+        if (c.type == PT_BYTE_ARRAY) fw.field_i32(6, 0);  // ConvertedType.UTF8
+        fw.field_i32(9, fid);
+        if (c.type == PT_BYTE_ARRAY) write_logical_string(fw);
+        fw.struct_end();
+        continue;
+      }
+      // lista aninhada (3-level, padrao parquet-mr/pyarrow):
+      //   optional|required group <nome> (LIST) {
+      //     repeated group list { required <tipo> element; }
+      //   }
+      fw.struct_begin();
+      fw.field_i32(3, c.optional ? 1 : 0);
+      fw.field_str(4, c.name);
+      fw.field_i32(5, 1);   // num_children
+      fw.field_i32(6, 3);   // ConvertedType.LIST
+      fw.field(10, T_STRUCT);
+      fw.struct_begin();
+      fw.field(3, T_STRUCT);  // LogicalType.LIST (ListType vazio)
+      fw.struct_begin();
+      fw.struct_end();
+      fw.struct_end();
+      fw.struct_end();
+      fw.struct_begin();
+      fw.field_i32(3, 2);  // REPEATED
+      fw.field_str(4, "list");
+      fw.field_i32(5, 1);
+      fw.struct_end();
       fw.struct_begin();
       fw.field_i32(1, static_cast<std::int32_t>(c.type));
-      fw.field_i32(3, c.optional ? 1 : 0);  // 0 = REQUIRED, 1 = OPTIONAL
-      fw.field_str(4, c.name);
-      fw.field_i32(9, field_ids ? (*field_ids)[k] : static_cast<std::int32_t>(k + 1));
+      fw.field_i32(3, 0);  // element REQUIRED (lista de escalares sem nulos)
+      fw.field_str(4, "element");
+      fw.field_i32(9, fid);
+      if (c.type == PT_BYTE_ARRAY) {
+        fw.field_i32(6, 0);  // ConvertedType.UTF8
+        write_logical_string(fw);
+      }
       fw.struct_end();
     }
   }
@@ -837,15 +1243,18 @@ void parquet_write(const std::string& path, const Value& tabela,
       fw.field(3, T_STRUCT);                        // ColumnChunk.meta_data
       fw.struct_begin();
       fw.field_i32(1, static_cast<std::int32_t>(infos[k].type));
-      fw.list_begin(2, T_I32, 1);
+      fw.list_begin(2, T_I32, 2);
       fw.zz(E_PLAIN);
-      fw.list_begin(3, T_BINARY, 1);
-      fw.varint(infos[k].path_in_schema.size());
-      fw.raw(infos[k].path_in_schema.data(), infos[k].path_in_schema.size());
-      fw.field_i32(4, C_NONE);
-      fw.field_i64(5, static_cast<std::int64_t>(cols[k].rows));
-      fw.field_i64(6, infos[k].total_size);
-      fw.field_i64(7, infos[k].total_size);
+      fw.zz(E_RLE);
+      fw.list_begin(3, T_BINARY, infos[k].path.size());
+      for (const std::string& p : infos[k].path) {
+        fw.varint(p.size());
+        fw.raw(p.data(), p.size());
+      }
+      fw.field_i32(4, codec);
+      fw.field_i64(5, infos[k].num_values);
+      fw.field_i64(6, infos[k].uncompressed_size);
+      fw.field_i64(7, infos[k].compressed_size);
       fw.field_i64(9, infos[k].data_page_offset);
       fw.struct_end();
       fw.struct_end();
@@ -854,7 +1263,10 @@ void parquet_write(const std::string& path, const Value& tabela,
     fw.field_i64(3, static_cast<std::int64_t>(nrows));
     fw.struct_end();
   }
-  fw.field_str(6, "tilt 0.1.0 (parquet: plain, colunas opcionais com nulos, sem compressao)");
+  const char* codec_nome = codec == C_GZIP ? "gzip" : codec == C_SNAPPY ? "snappy" : "sem compressao";
+  fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain, paginas ") +
+                      (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
+                      ", opcionais com nulos, listas)");
   fw.struct_end();
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -881,10 +1293,19 @@ Value parquet_read(const std::string& path) {
   Tr tr{reinterpret_cast<const std::uint8_t*>(file.data() + file.size() - 8 - flen), flen, 0};
 
   std::vector<std::vector<ColMeta>> row_groups;  // [row group][coluna]
+  std::vector<std::int64_t> rg_num_rows;
   std::int64_t num_rows = -1;
-  std::vector<std::string> schema_names;
-  std::vector<int> schema_types;
-  std::vector<int> schema_rep;
+  // arvore de schema (pre-ordem; elem 0 = raiz): tipo -1 = grupo
+  struct SchemaElem {
+    std::string name;
+    int type = -1;
+    int rep = 0;
+    int converted = -1;
+    bool logical_list = false;
+    int num_children = 0;
+    int parent = -1;
+  };
+  std::vector<SchemaElem> selem;
 
   // le FileMetaData (apenas os campos que interessam; o resto e pulado)
   {
@@ -898,12 +1319,12 @@ Value parquet_read(const std::string& path) {
       if (id == 2 && tt == T_LIST) {  // schema
         const std::uint8_t lh = tr.byte();
         const std::size_t sz = (lh >> 4) == 0xF ? static_cast<std::size_t>(tr.varint()) : (lh >> 4);
+        std::vector<int> pend_idx;   // pilha de grupos abertos
+        std::vector<int> pend_left;  // filhos restantes de cada grupo
+        int parent = -1;
         for (std::size_t k = 0; k < sz; ++k) {
           short slast = 0;
-          int ctype = -1;
-          int rep = 0;
-          std::string cname;
-          bool is_root = false;
+          SchemaElem e;
           while (true) {
             const std::uint8_t sh = tr.byte();
             const auto st = static_cast<TType>(sh & 0xF);
@@ -911,23 +1332,43 @@ Value parquet_read(const std::string& path) {
             const short sid =
                 (sh >> 4) ? static_cast<short>(slast + (sh >> 4)) : static_cast<short>(tr.zz());
             slast = sid;
-            if (sid == 1 && st == T_I32) ctype = static_cast<int>(tr.zz());
-            else if (sid == 3 && st == T_I32) rep = static_cast<int>(tr.zz());
+            if (sid == 1 && st == T_I32) e.type = static_cast<int>(tr.zz());
+            else if (sid == 3 && st == T_I32) e.rep = static_cast<int>(tr.zz());
             else if (sid == 4 && st == T_BINARY) {
               const std::uint64_t len = tr.varint();
-              cname.assign(reinterpret_cast<const char*>(tr.p + tr.pos),
-                           static_cast<std::size_t>(len));
+              e.name.assign(reinterpret_cast<const char*>(tr.p + tr.pos),
+                            static_cast<std::size_t>(len));
               tr.pos += static_cast<std::size_t>(len);
             } else if (sid == 5 && st == T_I32) {
-              is_root = true;
-              tr.skip(st);
+              e.num_children = static_cast<int>(tr.zz());
+            } else if (sid == 6 && st == T_I32) {
+              e.converted = static_cast<int>(tr.zz());
+            } else if (sid == 10 && st == T_STRUCT) {  // logicalType (union)
+              short llast = 0;
+              while (true) {
+                const std::uint8_t lh2 = tr.byte();
+                const auto lt = static_cast<TType>(lh2 & 0xF);
+                if (lt == T_STOP) break;
+                const short lid = (lh2 >> 4) ? static_cast<short>(llast + (lh2 >> 4))
+                                             : static_cast<short>(tr.zz());
+                llast = lid;
+                if (lid == 3) e.logical_list = true;  // LogicalType.LIST
+                tr.skip(lt);
+              }
             } else tr.skip(st);
           }
-          if (!is_root && ctype >= 0) {
-            schema_names.push_back(cname);
-            schema_types.push_back(ctype);
-            schema_rep.push_back(rep);
+          e.parent = parent;
+          const int idx = static_cast<int>(selem.size());
+          selem.push_back(std::move(e));
+          if (!pend_left.empty() && --pend_left.back() == 0) {
+            pend_idx.pop_back();
+            pend_left.pop_back();
           }
+          if (selem.back().num_children > 0) {
+            pend_idx.push_back(idx);
+            pend_left.push_back(selem.back().num_children);
+          }
+          parent = pend_idx.empty() ? -1 : pend_idx.back();
         }
       } else if (id == 3 && tt == T_I64) {
         num_rows = tr.zz();
@@ -936,6 +1377,7 @@ Value parquet_read(const std::string& path) {
         const std::size_t rgs = (lh >> 4) == 0xF ? static_cast<std::size_t>(tr.varint()) : (lh >> 4);
         for (std::size_t rg = 0; rg < rgs; ++rg) {
           row_groups.emplace_back();
+          rg_num_rows.push_back(-1);
           short rlast = 0;
           while (true) {  // RowGroup
             const std::uint8_t rh = tr.byte();
@@ -967,8 +1409,7 @@ Value parquet_read(const std::string& path) {
                       const short mid =
                           (mh >> 4) ? static_cast<short>(mlast + (mh >> 4)) : static_cast<short>(tr.zz());
                       mlast = mid;
-                      if (mid == 1 && mt == T_I32) cm.type = static_cast<PType>(tr.zz());
-                      else if (mid == 4 && mt == T_I32) cm.codec = static_cast<int>(tr.zz());
+                      if (mid == 4 && mt == T_I32) cm.codec = static_cast<int>(tr.zz());
                       else if (mid == 5 && (mt == T_I32 || mt == T_I64)) cm.num_values = tr.zz();
                       else if (mid == 9 && mt == T_I64) cm.data_page_offset = tr.zz();
                       else if (mid == 11 && mt == T_I64) cm.dictionary_page_offset = tr.zz();
@@ -980,6 +1421,8 @@ Value parquet_read(const std::string& path) {
                 }
                 row_groups.back().push_back(std::move(cm));
               }
+            } else if (rid == 3 && rt == T_I64) {  // num_rows do RowGroup
+              rg_num_rows.back() = tr.zz();
             } else {
               tr.skip(rt);
             }
@@ -992,13 +1435,96 @@ Value parquet_read(const std::string& path) {
   }
 
   if (num_rows < 0 || row_groups.empty()) die("metadados ausentes ou incompletos em '" + path + "'");
-  const std::size_t ncols = schema_types.size();
+
+  // extrai as colunas da arvore de schema (filhos da raiz): escalares
+  // REQUIRED/OPTIONAL, listas aninhadas (anotacao LIST de 3 ou 2 niveis,
+  // incluindo o legado `repeated <tipo>` direto) e erro claro para o resto
+  // (structs, listas de listas, elementos opcionais em lista).
+  auto children_of = [&](int idx) {
+    std::vector<int> out;
+    for (int k = 0; k < static_cast<int>(selem.size()); ++k) {
+      if (selem[static_cast<std::size_t>(k)].parent == idx) out.push_back(k);
+    }
+    return out;
+  };
+  auto check_leaf_type = [&](const std::string& col, int t) {
+    if (t != PT_BOOLEAN && t != PT_INT64 && t != PT_DOUBLE && t != PT_BYTE_ARRAY) {
+      die("coluna '" + col + "': tipo fisico " + std::to_string(t) + " nao suportado");
+    }
+  };
+  std::vector<ColDesc> cols_desc;
+  if (selem.empty()) die("schema vazio em '" + path + "'");
+  for (int ci : children_of(0)) {
+    const SchemaElem& e = selem[static_cast<std::size_t>(ci)];
+    ColDesc d;
+    d.name = e.name;
+    if (e.type >= 0) {  // primitivo direto: coluna flat (ou lista 2-level legado)
+      check_leaf_type(e.name, e.type);
+      d.type = static_cast<PType>(e.type);
+      if (e.rep == 2) {  // `repeated <tipo>` direto sob a raiz: lista legada
+        d.repeated = true;
+        d.max_rep = 1;
+        d.max_def = 1;
+      } else {
+        if (e.rep > 1) die("coluna '" + e.name + "': repetition_type invalido");
+        d.max_def = e.rep == 1 ? 1 : 0;
+      }
+      cols_desc.push_back(std::move(d));
+      continue;
+    }
+    // grupo: so aceitamos anotacao LIST (senao seria struct)
+    if (e.converted != 3 && !e.logical_list) {
+      die("grupo '" + e.name +
+          "' (struct) ainda nao suportado: apenas colunas escalares e listas de escalares");
+    }
+    const std::vector<int> gk = children_of(ci);
+    if (gk.size() != 1) {
+      die("coluna '" + e.name + "': grupo LIST com " + std::to_string(gk.size()) +
+          " filhos (esperado 1: lista de escalares)");
+    }
+    const SchemaElem& g = selem[static_cast<std::size_t>(gk[0])];
+    d.repeated = true;
+    d.max_rep = 1;
+    const int outer = e.rep == 1 ? 1 : 0;
+    if (e.rep > 1) die("coluna '" + e.name + "': grupo LIST com repetition_type invalido");
+    if (g.type >= 0) {  // 2-level: repeated <tipo> dentro do grupo LIST
+      check_leaf_type(e.name, g.type);
+      d.type = static_cast<PType>(g.type);
+      d.max_def = outer + 1;
+      cols_desc.push_back(std::move(d));
+      continue;
+    }
+    // 3-level: repeated group <x> { <tipo> element }
+    if (g.rep != 2) {
+      die("coluna '" + e.name + "': grupo intermediario de LIST nao e REPEATED");
+    }
+    const std::vector<int> ek = children_of(gk[0]);
+    if (ek.size() != 1) {
+      die("coluna '" + e.name + "': listas de structs/elementos multiplos ainda nao suportadas");
+    }
+    const SchemaElem& el = selem[static_cast<std::size_t>(ek[0])];
+    if (el.type < 0) {
+      die("coluna '" + e.name + "': listas aninhadas (list<list<...>>) ainda nao suportadas");
+    }
+    if (el.rep > 1) {
+      die("coluna '" + e.name +
+          "': elementos REPEATED dentro de lista (listas aninhadas) ainda nao suportados");
+    }
+    check_leaf_type(e.name, el.type);
+    d.type = static_cast<PType>(el.type);
+    d.elem_nullable = el.rep == 1;  // pyarrow grava element OPTIONAL (max_def 3)
+    d.max_def = outer + 1 + (d.elem_nullable ? 1 : 0);
+    cols_desc.push_back(std::move(d));
+  }
+
+  const std::size_t ncols = cols_desc.size();
   if (ncols == 0) die("schema sem colunas em '" + path + "'");
-  for (const auto& rg : row_groups) {
-    if (rg.size() != ncols) {
-      die("row group com " + std::to_string(rg.size()) + " colunas, mas o schema tem " +
+  for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
+    if (row_groups[rg].size() != ncols) {
+      die("row group com " + std::to_string(row_groups[rg].size()) + " colunas, mas o schema tem " +
           std::to_string(ncols));
     }
+    if (rg_num_rows[rg] < 0) rg_num_rows[rg] = num_rows;
   }
 
   // decodifica cada coluna: percorre os row groups concatenando os chunks
@@ -1006,11 +1532,7 @@ Value parquet_read(const std::string& path) {
   for (std::size_t ci = 0; ci < ncols; ++ci) {
     auto& col = columns[ci];
     for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
-      ColMeta cm = row_groups[rg][ci];
-      cm.type = static_cast<PType>(schema_types[ci]);
-      cm.name = schema_names[ci];
-      cm.rep = schema_rep[ci];
-      decode_chunk(file, cm, col);
+      decode_chunk(file, row_groups[rg][ci], cols_desc[ci], rg_num_rows[rg], col);
     }
   }
 
@@ -1020,9 +1542,9 @@ Value parquet_read(const std::string& path) {
     for (std::size_t ci = 0; ci < ncols; ++ci) {
       const auto& col = columns[ci];
       if (static_cast<std::size_t>(r) >= col.size()) {
-        die("coluna '" + schema_names[ci] + "' tem menos valores que 'num_rows'");
+        die("coluna '" + cols_desc[ci].name + "' tem menos valores que 'num_rows'");
       }
-      row.map->set(schema_names[ci], col[static_cast<std::size_t>(r)]);
+      row.map->set(cols_desc[ci].name, col[static_cast<std::size_t>(r)]);
     }
     tabela.list->push_back(std::move(row));
   }

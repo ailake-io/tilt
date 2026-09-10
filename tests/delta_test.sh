@@ -56,11 +56,11 @@ assert sorted(est) == ["rj", "rj", "sp", "sp", "sp"], est
 assert sorted(ano) == [2024, 2024, 2024, 2025, 2025], ano
 assert sum(val) == 180, val
 # equivalencia com o pruning do tilt: estado=sp AND ano=2024 -> 2 linhas
-# (o writer tilt grava texto como BYTE_ARRAY sem anotacao UTF8, entao o
-# pyarrow le `cidade` como binary)
+# (o writer tilt grava texto como BYTE_ARRAY com anotacao UTF8, entao o
+# pyarrow le `cidade` como string)
 sel = t.filter((pc.field("estado") == "sp") & (pc.field("ano") == 2024))
 assert sel.num_rows == 2, sel.num_rows
-assert sorted(sel.column("cidade").to_pylist()) == [b"santos", b"sorocaba"]
+assert sorted(sel.column("cidade").to_pylist()) == ["santos", "sorocaba"]
 # predicado residual em coluna comum: cidade=niteroi -> 1 linha
 sel2 = t.filter(pc.field("cidade") == "niteroi")
 assert sel2.num_rows == 1, sel2.num_rows

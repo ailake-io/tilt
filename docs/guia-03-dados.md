@@ -129,27 +129,39 @@ Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
 `ler_parquet`/`escrever_parquet` e `fonte tipo: parquet` usam o reader/writer
 próprio do tilt (zero dependências), interoperável com pyarrow/parquet-cpp:
 
-- tipos: `logico`→BOOLEAN, `inteiro`→INT64, `decimal`→DOUBLE, `texto`→BYTE_ARRAY;
+- tipos: `logico`→BOOLEAN, `inteiro`→INT64, `decimal`→DOUBLE,
+  `texto`→BYTE_ARRAY com anotação **UTF8** (lê como `string` no pyarrow);
+  **listas de escalares** (`["a", "b"]`) viram campos REPEATED com anotação
+  LIST (`list<string>`, `list<int64>`, `list<double>`, `list<bool>`);
 - **nulos**: coluna com `nulo` vira **OPTIONAL** (definition levels RLE,
   valores nulos omitidos das páginas); coluna sem nulos segue REQUIRED.
-  Uma coluna só de nulos gera erro — o tipo não pode ser inferido;
-- escrita: encoding **PLAIN**, **sem compressão**, um row group por arquivo;
+  Uma coluna só de nulos (ou só de listas vazias) gera erro — o tipo não pode
+  ser inferido;
+- **compressão**: `escrever_parquet tabela, "saida.parquet", codec: "gzip"`
+  (padrão) ou `codec: "snappy"` — o compressor snappy próprio é
+  "literal-only" (emite um bloco snappy válido sem matching, sem redução de
+  espaço), então qualquer leitor descomprime; a leitura descomprime snappy
+  genérico (com matching) e gzip/deflate (zlib via `dlopen("libz.so.1")`);
+- **páginas**: DATA_PAGE v1 por padrão; `paginas: "v2"` grava DATA_PAGE_V2
+  (definition/repetition levels fora da seção comprimida). A leitura aceita
+  v1 e v2 de qualquer escritor;
+- escrita: encoding **PLAIN** (sem dictionary), um row group por arquivo;
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;
-- leitura: **todos os row groups** (concatenados), campos REQUIRED e
-  OPTIONAL, páginas **PLAIN** e **DICTIONARY** (`PLAIN_DICTIONARY`/
-  `RLE_DICTIONARY`) e compressão **gzip/deflate** (zlib carregada em
-  `dlopen("libz.so.1")`, zero dependência de link). Snappy e demais codecs,
-  DATA_PAGE_V2 e campos REPEATED levantam erro claro.
+- leitura: **todos os row groups** (concatenados), campos REQUIRED, OPTIONAL
+  e REPEATED, páginas **PLAIN** e **DICTIONARY** (`PLAIN_DICTIONARY`/
+  `RLE_DICTIONARY`) e compressão **gzip/deflate** e **snappy**. Listas de
+  listas, structs e elementos nulos dentro de lista seguem com erro claro.
 
 Exemplo de interoperabilidade com Python (arquivos de outras ferramentas —
-dictionary, gzip e vários row groups — são lidos diretamente):
+dictionary, gzip/snappy, v2 e listas — são lidos diretamente):
 
 ```python
 import pyarrow as pa, pyarrow.parquet as pq
-schema = pa.schema([("nome", pa.string()), ("idade", pa.int64())])
+schema = pa.schema([("nome", pa.string()), ("tags", pa.list_(pa.string()))])
 pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
-               use_dictionary=True, compression="gzip")
+               use_dictionary=True, compression="snappy",
+               data_page_version="2.0")
 ```
 
 ## Delta Lake mínimo

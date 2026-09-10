@@ -26,12 +26,19 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## Dados
 
 - Parquet é nativo (reader/writer próprio, zero dependências de link): a
-  escrita é PLAIN, sem compressão, um row group por arquivo, com colunas
-  REQUIRED ou OPTIONAL (nulos via definition levels RLE). A leitura cobre
-  múltiplos row groups, campos REQUIRED/OPTIONAL, páginas PLAIN e DICTIONARY
-  (PLAIN_DICTIONARY/RLE_DICTIONARY) e gzip/deflate (zlib via `dlopen`;
-  snappy e demais codecs levantam erro claro). DATA_PAGE_V2, campos REPEATED
-  e tipos físicos fora de BOOLEAN/INT64/DOUBLE/BYTE_ARRAY ainda não são lidos.
+  escrita é PLAIN com compressão **gzip** (padrão) ou **snappy** (`codec:
+  "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
+  páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
+  por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
+  RLE) e **listas de escalares** (anotação LIST, elementos sempre required na
+  escrita). A leitura cobre múltiplos row groups, campos REQUIRED/OPTIONAL/
+  REPEATED (listas aninhadas de escalares, inclusive o element OPTIONAL que o
+  pyarrow grava — erro claro apenas para elemento nulo de fato), páginas v1 e
+  v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
+  gzip/deflate (zlib via `dlopen`) e **snappy** (codec próprio, sem dlopen).
+  Ainda fora do subconjunto: dictionary encoding na escrita, listas de
+  listas/structs, elementos nulos em listas e tipos físicos fora de
+  BOOLEAN/INT64/DOUBLE/BYTE_ARRAY.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,

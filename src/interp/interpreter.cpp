@@ -3255,11 +3255,44 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
   if (name == "escrever_parquet") {
     auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "escrever_parquet espera (tabela, caminho)");
     }
+    if (a[1].kind != ValueKind::Texto) {
+      fail(call.span, "escrever_parquet espera (tabela, caminho)");
+    }
+    rt::ParquetWriteOpts opts;
+    const Value* codec = kw.find("codec");
+    if (codec) {
+      if (codec->kind != ValueKind::Texto) {
+        fail(call.span, "escrever_parquet: 'codec' deve ser \"gzip\" ou \"snappy\"");
+      }
+      if (codec->s == "gzip") {
+        opts.codec = 2;
+      } else if (codec->s == "snappy") {
+        opts.codec = 1;
+      } else {
+        fail(call.span, "escrever_parquet: codec '" + codec->s +
+                            "' invalido (use \"gzip\" ou \"snappy\")");
+      }
+    }
+    const Value* paginas = kw.find("paginas");
+    if (paginas) {
+      if (paginas->kind != ValueKind::Texto) {
+        fail(call.span, "escrever_parquet: 'paginas' deve ser \"v1\" ou \"v2\"");
+      }
+      if (paginas->s == "v1") {
+        opts.paginas_v2 = false;
+      } else if (paginas->s == "v2") {
+        opts.paginas_v2 = true;
+      } else {
+        fail(call.span, "escrever_parquet: paginas '" + paginas->s +
+                            "' invalido (use \"v1\" ou \"v2\")");
+      }
+    }
     try {
-      rt::parquet_write(a[1].s, a[0]);
+      rt::parquet_write(a[1].s, a[0], nullptr, opts);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
