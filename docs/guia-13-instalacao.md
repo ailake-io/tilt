@@ -173,9 +173,14 @@ winget install ailake-io.tilt     # apos o PR de manifestos no winget-pkgs
 msiexec /i tilt-0.1.0-win64.msi
 ```
 
-Os manifestos winget moram em `packaging/winget/` (a URL/SHA256 do `.msi`
-precisam ser preenchidas por release — rota descrita no cabeçalho do
-arquivo).
+Os manifestos winget moram em `packaging/winget/`. O job `winget` do release
+atualiza versão/URL/SHA256 automaticamente a partir do `.msi` da Release: com o
+secret `WINGET_TOKEN` configurado (fork de `microsoft/winget-pkgs` com escopo
+`public_repo`) o PR é aberto via `wingetcreate`; sem o token, o manifesto
+atualizado é anexado à Release para submissão manual com `wingetcreate submit`
+(rota descrita no cabeçalho do arquivo). O mesmo vale para a extensão VS Code:
+o job `vscode` publica no Marketplace quando o secret `VSCE_PAT` está
+configurado, e sempre anexa o `.vsix` à Release.
 
 Limitações do runtime no Windows: servidor HTTP em modo serial (`select()`
 ao invés de epoll, sem `--threads`), sem cores de terminal, e o quoting de

@@ -197,3 +197,73 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: editors/vscode/*.vsix
+
+  # --- winget: atualiza o manifesto ailake-io.tilt no microsoft/winget-pkgs.
+  # Com WINGET_TOKEN (fork do winget-pkgs + escopo public_repo) o PR é aberto
+  # automaticamente via wingetcreate; sem o secret, o job gera o manifesto
+  # atualizado (versao/URL/SHA256 do .msi da release) e anexa ao release para
+  # submissao manual com 'wingetcreate submit'.
+  winget:
+    needs: [windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8
+
+      - name: computa versao e url do .msi
+        id: meta
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          echo "msi_url=https://github.com/ailake-io/tilt/releases/download/${TAG}/tilt-${ver}-win64.msi" >> "$GITHUB_OUTPUT"
+
+      - name: baixa o .msi e calcula SHA256
+        run: |
+          curl -fSL -o tilt.msi "${{ steps.meta.outputs.msi_url }}"
+          sha256sum tilt.msi | cut -d' ' -f1 > tilt.msi.sha256
+          echo "sha256=$(cat tilt.msi.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: manifesto atualizado (artifact de fallback)
+        id: manifesto
+        run: |
+          tmp=$(mktemp -d)
+          cp packaging/winget/ailake-io.tilt.yaml "$tmp/"
+          sed -i "s/^PackageVersion: .*/PackageVersion: ${{ steps.meta.outputs.ver }}/" \
+            "$tmp/ailake-io.tilt.yaml"
+          sed -i "s|^\( *\)InstallerUrl: .*|\1InstallerUrl: ${{ steps.meta.outputs.msi_url }}|" \
+            "$tmp/ailake-io.tilt.yaml"
+          sed -i "s/^\( *\)InstallerSha256: .*/\1InstallerSha256: ${{ steps.meta.outputs.sha256 }}/" \
+            "$tmp/ailake-io.tilt.yaml"
+          echo "dir=$tmp" >> "$GITHUB_OUTPUT"
+
+      # secrets nao sao acessiveis em 'if:'; exporta-se um flag via output.
+      - name: WINGET_TOKEN configurado?
+        id: tok
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -n "$WINGET_TOKEN" ]; then echo "set=true" >> "$GITHUB_OUTPUT";
+          else echo "set=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: instalar wingetcreate
+        run: dotnet tool install --global wingetcreate
+
+      - name: submeter PR ao winget-pkgs
+        if: steps.tok.outputs.set == 'true'
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          "$HOME/.dotnet/tools/wingetcreate" update ailake-io.tilt \
+            --version "${{ steps.meta.outputs.ver }}" \
+            --urls "${{ steps.meta.outputs.msi_url }}" \
+            --submit --token "$WINGET_TOKEN"
+
+      - uses: softprops/action-gh-release@v2
+        if: steps.tok.outputs.set == 'false'
+        with:
+          files: ${{ steps.manifesto.outputs.dir }}/ailake-io.tilt*.yaml

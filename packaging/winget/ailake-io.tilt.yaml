@@ -1,10 +1,10 @@
-# Manifestos winget do Tilt (schema 1.6).
+# Manifesto winget do Tilt (singleton, schema 1.6).
 #
-# Publicacao: os manifestos da ULTIMA versao vao para o repositorio
-# microsoft/winget-pkgs em manifests/a/ailake-io/tilt/<versao>/, via PR
-# (winget-pkgs fork + wingetcreate, ou manual). Esta pasta e a fonte de
-# verdade: ao lançar vX.Y.Z, copie o dir da versao, ajuste versao/URL e
-# SHA256 do .msi da Release e submeta o PR.
+# Publicacao: o job 'winget' do .github/workflows/release.yml atualiza versao,
+# URL e SHA256 a partir do .msi da Release. Com WINGET_TOKEN configurado o PR
+# vai automaticamente para microsoft/winget-pkgs (manifests/a/ailake-io/tilt/
+# <versao>/) via wingetcreate; sem o token, o manifesto atualizado e anexado
+# a Release para submissao manual com 'wingetcreate submit'.
 #
 # Instalacao pelo usuario final:
 #   winget install ailake-io.tilt
