@@ -81,5 +81,9 @@ primeiro literal da união.
 - dimensões da cadeia de camadas `densa`/`linear` de `modelo` (`T012`) —
   propaga a dimensão corrente a partir de `entrada: tensor[...]`.
 
-> O solver de formas ainda não cobre `conv2d`, `norma_lote` nem `norma_camada`,
-> e não há inferência completa de tipos entre expressões.
+> O solver de formas cobre `conv2d`/`norma_lote`/`reformar`/`transposta`/
+> `matmul` com formas literais ou anotadas (ver guia 04), e `tilt checar`
+> agora infere e verifica tipos entre expressões (`T011`): operadores
+> aritméticos/comparação, builtins (aridade e 1º/2º argumentos), métodos e
+> campos de receiver conhecido e o retorno de `funcao` anotada. Ainda não há
+> unificação de tipos genericos nem checagem de `verificar`/`ao_falhar`.

@@ -1,0 +1,6 @@
+pipeline p:
+  passos:
+    - n = tamanho 42
+    - tabela = ler_csv 123
+    - escrever_csv "nao e tabela", "saida.csv"
+    - partes = dividir "so-um"

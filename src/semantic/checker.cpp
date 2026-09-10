@@ -251,9 +251,9 @@ void SemanticChecker::resolve_type_annotations(const Item& decl) {
 
   if (kw == "funcao") {
     for (const auto& p : decl.params) {
-      if (p.value) resolve_type_expr(*p.value);
+      if (p.value) annotation_cache_[p.value.get()] = resolve_type_expr(*p.value);
     }
-    if (decl.value) resolve_type_expr(*decl.value);
+    if (decl.value) annotation_cache_[decl.value.get()] = resolve_type_expr(*decl.value);
     return;
   }
 
@@ -273,10 +273,12 @@ void SemanticChecker::resolve_type_annotations(const Item& decl) {
       }
       if ((target->key == "entrada" || target->key == "saida")) {
         if (target->value) {
-          resolve_type_expr(*target->value);
+          annotation_cache_[target->value.get()] = resolve_type_expr(*target->value);
         } else if (target->block) {
           for (const auto& sub : target->block->items) {
-            if (sub && sub->kind == ItemKind::Field && sub->value) resolve_type_expr(*sub->value);
+            if (sub && sub->kind == ItemKind::Field && sub->value) {
+              annotation_cache_[sub->value.get()] = resolve_type_expr(*sub->value);
+            }
           }
         }
       }
@@ -517,6 +519,154 @@ const Expr* first_positional_arg(const Expr& call) {
   return nullptr;
 }
 
+// ---------------------------------------------------------- type inference
+//
+// Conservador como o shape solver: so valida quando os dois lados tem tipo
+// conhecido. O runtime da tilt e permissivo (coage valores nao numericos
+// para 0.0 via as_number()), entao aqui so se rejeita o que seria lixo
+// silencioso em runtime — espelhando o que o runtime aceita de verdade
+// (ex.: texto + numero concatena; "a" < "b" compara lexicograficamente).
+
+using TypeKind = sema::TypeKind;
+
+std::string type_kind_name(TypeKind k) {
+  switch (k) {
+    case TypeKind::Nulo: return "nulo";
+    case TypeKind::Texto: return "texto";
+    case TypeKind::Inteiro: return "inteiro";
+    case TypeKind::Decimal: return "decimal";
+    case TypeKind::Logico: return "logico";
+    case TypeKind::Lista: return "lista";
+    case TypeKind::Mapa: return "mapa";
+    case TypeKind::Tabela: return "tabela";
+    case TypeKind::Tensor: return "tensor";
+    default: return "?";
+  }
+}
+
+// Numericos no runtime incluem logico (as_number(verdadeiro) == 1).
+bool is_number_kind(TypeKind k) {
+  return k == TypeKind::Inteiro || k == TypeKind::Decimal || k == TypeKind::Logico;
+}
+
+bool kind_in_vec(TypeKind k, const std::vector<TypeKind>& set) {
+  for (TypeKind e : set) {
+    if (k == e) return true;
+  }
+  return false;
+}
+
+// Assinaturas parciais dos builtins de runtime: aridade minima, tipos
+// esperados dos dois primeiros args posicionais (vazio = qualquer) e tipo
+// de retorno. So espelha falhas que o runtime ja teria (fail por tipo/arity).
+struct BuiltinSig {
+  const char* name;
+  int min_args;
+  std::vector<TypeKind> arg0;
+  std::vector<TypeKind> arg1;
+  TypeKind ret;
+  const char* usage;
+};
+
+const BuiltinSig* find_builtin_sig(std::string_view name) {
+  static const std::vector<BuiltinSig> kSigs = {
+      // saida e log — aceitam qualquer coisa
+      {"imprimir", 0, {}, {}, TypeKind::Nulo, nullptr},
+      {"imprima", 0, {}, {}, TypeKind::Nulo, nullptr},
+      {"print", 0, {}, {}, TypeKind::Nulo, nullptr},
+      {"registrar", 0, {}, {}, TypeKind::Nulo, nullptr},
+      {"log", 0, {}, {}, TypeKind::Nulo, nullptr},
+      // ambiente
+      {"env", 1, {TypeKind::Texto}, {}, TypeKind::Texto, "env \"NOME_DA_VARIAVEL\""},
+      // tamanhos e agregacoes
+      {"tamanho", 0, {}, {}, TypeKind::Inteiro, nullptr},
+      {"contar", 0, {}, {}, TypeKind::Inteiro, nullptr},
+      {"somar", 1, {TypeKind::Lista}, {}, TypeKind::Unknown, "somar [1, 2, 3]"},
+      {"media", 1, {TypeKind::Lista}, {}, TypeKind::Decimal, "media [1, 2, 3]"},
+      {"min", 1, {TypeKind::Lista}, {}, TypeKind::Unknown, "min [1, 2, 3]"},
+      {"max", 1, {TypeKind::Lista}, {}, TypeKind::Unknown, "max [1, 2, 3]"},
+      {"intervalo", 1, {TypeKind::Inteiro, TypeKind::Decimal}, {}, TypeKind::Lista, "intervalo 0, 10"},
+      {"ate", 1, {TypeKind::Inteiro, TypeKind::Decimal}, {}, TypeKind::Lista, nullptr},
+      {"dividir", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Lista, "dividir texto, \",\""},
+      {"dividir_texto", 1, {TypeKind::Texto}, {}, TypeKind::Lista, "dividir_texto texto, tamanho: 4"},
+      // tensores
+      {"tensor", 0, {}, {}, TypeKind::Tensor, nullptr},
+      {"zeros", 0, {}, {}, TypeKind::Tensor, nullptr},
+      {"uns", 0, {}, {}, TypeKind::Tensor, nullptr},
+      {"aleatorio", 0, {}, {}, TypeKind::Tensor, nullptr},
+      // leitura
+      {"ler_csv", 1, {TypeKind::Texto}, {}, TypeKind::Tabela, "ler_csv \"dados.csv\""},
+      {"ler_parquet", 1, {TypeKind::Texto}, {}, TypeKind::Tabela, nullptr},
+      {"ler_delta", 1, {TypeKind::Texto}, {}, TypeKind::Tabela, nullptr},
+      {"ler_iceberg", 1, {TypeKind::Texto}, {}, TypeKind::Tabela, nullptr},
+      {"ler_json", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"carregador", 1, {TypeKind::Texto}, {}, TypeKind::Mapa, "carregador \"d.csv\", alvo: \"col\""},
+      // escrita
+      {"escrever_csv", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
+       "escrever_csv tabela, \"saida.csv\""},
+      {"escrever_parquet", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
+       nullptr},
+      {"escrever_delta", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
+       nullptr},
+      {"anexar_delta", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
+       nullptr},
+      {"escrever_iceberg", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
+       nullptr},
+      {"anexar_iceberg", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
+       nullptr},
+      {"escrever_json", 2, {}, {TypeKind::Texto}, TypeKind::Nulo, "escrever_json valor, \"saida.json\""},
+      // LLM / utilidades
+      {"incorporar", 1, {TypeKind::Texto}, {}, TypeKind::Tensor, "incorporar \"modelo\", \"texto\""},
+      {"checar_tilt", 1, {TypeKind::Texto}, {}, TypeKind::Mapa, nullptr},
+      // conectores
+      {"executar_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown, nullptr},
+      {"escrever_kafka", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
+      {"ler_kafka", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"escrever_redis", 3, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Nulo, nullptr},
+      {"ler_redis", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown, nullptr},
+      {"redis_executar", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown, nullptr},
+      {"redis_lote", 2, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"ler_s3", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"escrever_s3", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
+      {"apagar_s3", 1, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
+      {"copiar_s3", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Nulo, nullptr},
+      {"listar_s3", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"cabecalho_s3", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"s3_iniciar_upload", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"s3_enviar_parte", 4, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"s3_concluir_upload", 3, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"s3_abortar_upload", 2, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"mongo_inserir", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
+      {"mongo_buscar", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"mongo_atualizar", 3, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
+      {"mongo_deletar", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
+      {"mongo_criar_indice", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
+      {"mongo_agregar", 2, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+  };
+  for (const auto& s : kSigs) {
+    if (name == s.name) return &s;
+  }
+  return nullptr;
+}
+
+// Metodos que o runtime despacha por tipo de receiver (eval_method).
+bool is_tensor_method(std::string_view m) {
+  return word_in(m, {"matmul", "mais", "conv2d", "norma_lote", "reformar", "softmax", "relu",
+                     "gelu", "silu", "sigmoide", "tanh", "soma", "media", "argmax", "item",
+                     "forma", "dados", "transposta", "tamanho"});
+}
+bool is_table_method(std::string_view m) {
+  return word_in(m, {"filtrar", "derivar", "mapear", "agrupar_por", "selecionar", "ordenar_por",
+                     "limite", "primeiros", "distinto", "tamanho"});
+}
+bool is_texto_method(std::string_view m) { return word_in(m, {"maiusculas", "minusculas"}); }
+// Metodos resolvidos dinamicamente sobre texto-nome-de-entidade (agente,
+// equipe, ferramenta, indice, modelo) — nunca rejeitar esses.
+bool is_entity_method(std::string_view m) {
+  return word_in(m, {"responder", "perguntar", "executar", "para_frente", "inserir", "buscar",
+                     "salvar_pesos"});
+}
+
 void collect_entrada_names(const ast::Block& block, std::unordered_set<std::string>& scope) {
   for (const auto& it : block.items) {
     const Item* f = it.get();
@@ -733,6 +883,279 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const E
   }
 }
 
+sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) {
+  using sema::TypeKind;
+  switch (e.kind) {
+    case ExprKind::IntLit: return TypeKind::Inteiro;
+    case ExprKind::DecimalLit: return TypeKind::Decimal;
+    case ExprKind::TextLit: return TypeKind::Texto;
+    case ExprKind::BoolLit: return TypeKind::Logico;
+    case ExprKind::NullLit: return TypeKind::Nulo;
+    case ExprKind::ListLit: return TypeKind::Lista;
+    case ExprKind::MapLit: return TypeKind::Mapa;
+    case ExprKind::Device:
+      return e.lhs ? infer_type(*e.lhs, types) : TypeKind::Unknown;
+    case ExprKind::Name: {
+      auto it = types.find(e.text);
+      if (it != types.end()) return it->second;
+      if (const Symbol* s = lookup(e.text)) {
+        if (s->type.kind == TypeKind::Entidade) return TypeKind::Entidade;
+      }
+      return TypeKind::Unknown;
+    }
+    case ExprKind::Unary: {
+      if (e.text == "nao") return TypeKind::Logico;
+      if (e.text == "-") {
+        const TypeKind t = e.rhs ? infer_type(*e.rhs, types) : TypeKind::Unknown;
+        if (t != TypeKind::Unknown && !is_number_kind(t)) {
+          report(DiagCode::TypeMismatch, e.span,
+                 "'-' espera um numero, encontrou '" + type_kind_name(t) + "'",
+                 {"se queria o oposto logico, use 'nao' antes de um valor logico"});
+          return TypeKind::Unknown;
+        }
+        return t;
+      }
+      return TypeKind::Unknown;
+    }
+    case ExprKind::Binary: {
+      const std::string& op = e.text;
+      const TypeKind a = e.lhs ? infer_type(*e.lhs, types) : TypeKind::Unknown;
+      const TypeKind b = e.rhs ? infer_type(*e.rhs, types) : TypeKind::Unknown;
+      if (op == "e" || op == "ou" || op == "==" || op == "!=" || op == "contem") {
+        return TypeKind::Logico;
+      }
+      if (op == "|") return TypeKind::Texto;  // em valor: display(a) + " | " + display(b)
+      const bool cmp = op == "<" || op == "<=" || op == ">" || op == ">=";
+      const bool arith = op == "+" || op == "-" || op == "*" || op == "/" || op == "%";
+      if (!cmp && !arith) return TypeKind::Unknown;
+      if (a != TypeKind::Unknown && b != TypeKind::Unknown) {
+        const bool a_bad = kind_in_vec(a, {TypeKind::Lista, TypeKind::Mapa, TypeKind::Tabela});
+        const bool b_bad = kind_in_vec(b, {TypeKind::Lista, TypeKind::Mapa, TypeKind::Tabela});
+        if (cmp) {
+          if (a == TypeKind::Tensor || b == TypeKind::Tensor || a_bad || b_bad) {
+            report(DiagCode::TypeMismatch, e.span,
+                   "comparacao '" + op + "' nao se aplica a '" + type_kind_name(a_bad ? a : b_bad ? b : TypeKind::Tensor) +
+                       "'",
+                   {"compare numeros ou textos (strings comparam lexicograficamente)"});
+            return TypeKind::Unknown;
+          }
+          if ((a == TypeKind::Texto) != (b == TypeKind::Texto)) {
+            report(DiagCode::TypeMismatch, e.span,
+                   "comparacao '" + op + "' mistura '" + type_kind_name(a) + "' e '" +
+                       type_kind_name(b) + "'",
+                   {"para igualdade entre tipos diferentes use '=='"});
+            return TypeKind::Unknown;
+          }
+        } else {  // aritmetica
+          if (a_bad || b_bad) {
+            report(DiagCode::TypeMismatch, e.span,
+                   "operacao '" + op + "' nao se aplica a '" +
+                       type_kind_name(a_bad ? a : b) + "': aritmetica espera numeros, texto (so com '+') ou tensor",
+                   {"se queria concatenar, use '+' entre textos; para juntar listas, "
+                    "construa uma nova lista com os elementos"});
+            return TypeKind::Unknown;
+          }
+          if ((a == TypeKind::Texto || b == TypeKind::Texto) && op != "+") {
+            report(DiagCode::TypeMismatch, e.span,
+                   "texto so concatena com '+'; '" + op + "' nao se aplica a '" +
+                       type_kind_name(a == TypeKind::Texto ? a : b) + "'",
+                   {"converta para numero antes (ex.: valor vindo de ler_csv ja e numerico)"});
+            return TypeKind::Unknown;
+          }
+          if ((a == TypeKind::Tensor) != (b == TypeKind::Tensor)) {
+            const TypeKind other = a == TypeKind::Tensor ? b : a;
+            if (!is_number_kind(other)) {
+              report(DiagCode::TypeMismatch, e.span,
+                     "operacao '" + op + "' entre tensor e '" + type_kind_name(other) +
+                         "' espera um numero ou outro tensor",
+                     {"use um escalar numerico (ex.: x * 2.0) ou um tensor de mesma forma"});
+              return TypeKind::Unknown;
+            }
+          }
+        }
+      }
+      if (cmp) return TypeKind::Logico;
+      // tipo resultante da aritmetica (espelhando apply_binop)
+      if (a == TypeKind::Texto || b == TypeKind::Texto) return TypeKind::Texto;
+      if (a == TypeKind::Tensor || b == TypeKind::Tensor) return TypeKind::Tensor;
+      if (a == TypeKind::Inteiro && b == TypeKind::Inteiro && op != "/") return TypeKind::Inteiro;
+      return is_number_kind(a) && is_number_kind(b) ? TypeKind::Decimal : TypeKind::Unknown;
+    }
+    case ExprKind::Index: {
+      const std::string base = (e.lhs && e.lhs->kind == ExprKind::Name) ? e.lhs->text : "";
+      if (word_in(base, {"tensor", "zeros", "uns", "aleatorio"})) return TypeKind::Tensor;
+      return TypeKind::Unknown;  // indexacao e dinamica
+    }
+    case ExprKind::Member: {
+      if (e.optional || !e.lhs) return TypeKind::Unknown;
+      const TypeKind base = infer_type(*e.lhs, types);
+      if (base == TypeKind::Unknown || base == TypeKind::Entidade) return TypeKind::Unknown;
+      const std::string& m = e.text;
+      if (base == TypeKind::Tensor) {
+        if (m == "forma" || m == "dados") return TypeKind::Lista;
+        if (m == "soma" || m == "media" || m == "item") return TypeKind::Decimal;
+        if (m == "argmax" || m == "tamanho") return TypeKind::Inteiro;
+        if (m == "transposta" || m == "softmax" || word_in(m, {"relu", "gelu", "silu", "sigmoide", "tanh"})) {
+          return TypeKind::Tensor;
+        }
+      } else if (base == TypeKind::Tabela || base == TypeKind::Lista) {
+        if (m == "tamanho") return TypeKind::Inteiro;
+      } else if (base == TypeKind::Texto) {
+        if (m == "tamanho") return TypeKind::Inteiro;
+      } else if (base == TypeKind::Mapa || base == TypeKind::Registro) {
+        return TypeKind::Unknown;  // campos dinamicos
+      }
+      // Inteiro/Decimal/Logico/Nulo: sem campos validos; Tabela/Lista so tem
+      // 'tamanho' (nome de metodo usado como campo cai no erro abaixo,
+      // espelhando o runtime).
+      if (base == TypeKind::Tabela && is_table_method(m)) return TypeKind::Unknown;
+      report(DiagCode::TypeMismatch, e.span,
+             "'" + type_kind_name(base) + "' nao tem o campo '" + m + "'",
+             {base == TypeKind::Tensor    ? "campos de tensor: forma, dados, soma, media, argmax, transposta, softmax, item, tamanho"
+              : base == TypeKind::Tabela  ? "campos de tabela: tamanho (metodos: filtrar, derivar, agrupar_por, ...)"
+              : base == TypeKind::Lista   ? "campos de lista: tamanho"
+              : base == TypeKind::Texto   ? "campos de texto: tamanho (metodos: maiusculas, minusculas)"
+                                          : "tipos numericos e logicos nao tem campos"});
+      return TypeKind::Unknown;
+    }
+    case ExprKind::Call: {
+      if (!e.lhs) return TypeKind::Unknown;
+      if (e.lhs->kind == ExprKind::Member) {
+        // Metodo com receiver de tipo conhecido.
+        if (!e.lhs->lhs) return TypeKind::Unknown;
+        const TypeKind base = infer_type(*e.lhs->lhs, types);
+        if (base == TypeKind::Unknown || base == TypeKind::Entidade) return TypeKind::Unknown;
+        const std::string& m = e.lhs->text;
+        if (base == TypeKind::Tabela || base == TypeKind::Lista) {
+          if (is_table_method(m) && m != "tamanho") return TypeKind::Tabela;
+        } else if (base == TypeKind::Tensor) {
+          if (word_in(m, {"matmul", "mais", "conv2d", "norma_lote", "reformar", "softmax"}) ||
+              word_in(m, {"relu", "gelu", "silu", "sigmoide", "tanh", "transposta"})) {
+            return TypeKind::Tensor;
+          }
+          if (m == "soma" || m == "media" || m == "item") return TypeKind::Decimal;
+          if (m == "argmax") return TypeKind::Inteiro;
+          if (m == "forma" || m == "dados") return TypeKind::Lista;
+        } else if (base == TypeKind::Texto) {
+          if (is_texto_method(m)) return TypeKind::Texto;
+          if (is_entity_method(m)) return TypeKind::Unknown;  // despacho dinamico
+        } else if (base == TypeKind::Mapa) {
+          if (is_entity_method(m)) return TypeKind::Unknown;
+          report(DiagCode::TypeMismatch, e.span, "'mapa' nao tem o metodo '" + m + "'",
+                 {"mapas tem campos; metodos como filtrar/mapear so existem em tabelas"});
+          return TypeKind::Unknown;
+        }
+        if ((base == TypeKind::Tabela || base == TypeKind::Lista) && m == "tamanho") {
+          report(DiagCode::TypeMismatch, e.span,
+                 "'tamanho' e um campo, nao um metodo — use 'tabela.tamanho' sem parenteses",
+                 {});
+          return TypeKind::Inteiro;
+        }
+        if ((base == TypeKind::Tabela || base == TypeKind::Lista) && !is_table_method(m) &&
+            !is_entity_method(m)) {
+          report(DiagCode::TypeMismatch, e.span,
+                 "'" + type_kind_name(base) + "' nao tem o metodo '" + m + "'",
+                 {"metodos de tabela: filtrar, derivar, mapear, agrupar_por, selecionar, ordenar_por, limite, primeiros, distinto"});
+          return TypeKind::Unknown;
+        }
+        if (base == TypeKind::Tensor && !is_tensor_method(m) && !is_entity_method(m)) {
+          report(DiagCode::TypeMismatch, e.span, "'tensor' nao tem o metodo '" + m + "'",
+                 {"metodos de tensor: matmul, mais, conv2d, norma_lote, reformar, softmax, soma, media, argmax, item"});
+          return TypeKind::Unknown;
+        }
+        if (base == TypeKind::Texto && !is_texto_method(m) && !is_entity_method(m)) {
+          report(DiagCode::TypeMismatch, e.span, "'texto' nao tem o metodo '" + m + "'",
+                 {"metodos de texto: maiusculas, minusculas"});
+          return TypeKind::Unknown;
+        }
+        if (is_number_kind(base) || base == TypeKind::Nulo) {
+          report(DiagCode::TypeMismatch, e.span,
+                 "'" + type_kind_name(base) + "' nao tem o metodo '" + m + "'",
+                 {"tipos numericos, logicos e nulo nao tem metodos"});
+        }
+        return TypeKind::Unknown;
+      }
+      if (e.lhs->kind != ExprKind::Name) return TypeKind::Unknown;
+      const std::string& name = e.lhs->text;
+      // `funcao` do usuario sobrescreve builtin no runtime.
+      if (const Symbol* s = lookup(name); s && s->kind == "funcao") return TypeKind::Unknown;
+      const BuiltinSig* sig = find_builtin_sig(name);
+      if (!sig) return TypeKind::Unknown;
+      // aridade minima (só onde o runtime falha com menos args)
+      int npos = 0;
+      for (const auto& arg : e.args) {
+        if (arg.name.empty()) ++npos;
+      }
+      if (npos < sig->min_args) {
+        report(DiagCode::TypeMismatch, e.span,
+               "'" + name + "' espera pelo menos " + std::to_string(sig->min_args) +
+                   " argumento(s) posicionais",
+               {sig->usage ? "uso: " + std::string(sig->usage)
+                           : "veja o guia 03 para a assinatura de '" + name + "'"});
+      }
+      // tipos dos dois primeiros args posicionais
+      auto check_arg = [&](int idx, const std::vector<TypeKind>& expected, const char* what) {
+        if (expected.empty()) return;
+        int seen = -1;
+        const Expr* arg = nullptr;
+        for (const auto& ar : e.args) {
+          if (ar.name.empty()) {
+            ++seen;
+            if (seen == idx) arg = ar.value.get();
+          }
+        }
+        if (!arg) return;
+        const TypeKind t = infer_type(*arg, types);
+        if (t == TypeKind::Unknown || kind_in_vec(t, expected)) return;
+        report(DiagCode::TypeMismatch, arg->span,
+               "'" + name + "' espera " + what + " (" + type_kind_name(expected.front()) +
+                   (expected.size() > 1 ? " ou " + type_kind_name(expected.back()) : "") +
+                   "), encontrou '" + type_kind_name(t) + "'",
+               {sig->usage ? "uso: " + std::string(sig->usage)
+                           : "ajuste o argumento para o tipo esperado"});
+      };
+      check_arg(0, sig->arg0, "um primeiro argumento");
+      check_arg(1, sig->arg1, "um segundo argumento");
+      // validacao especifica: tamanho/contar so aceitam colecoes e texto
+      if ((name == "tamanho" || name == "contar") && npos >= 1) {
+        const Expr* arg = first_positional_arg(e);
+        if (arg) {
+          const TypeKind t = infer_type(*arg, types);
+          if (t != TypeKind::Unknown &&
+              !kind_in_vec(t, {TypeKind::Lista, TypeKind::Tabela, TypeKind::Texto, TypeKind::Mapa})) {
+            report(DiagCode::TypeMismatch, arg->span,
+                   "tamanho espera lista, tabela, texto ou mapa; encontrou '" +
+                       type_kind_name(t) + "'",
+                   {"numeros nao tem tamanho; para digitos, converta para texto antes"});
+          }
+        }
+      }
+      return sig->ret;
+    }
+    default:
+      return TypeKind::Unknown;
+  }
+}
+
+void SemanticChecker::check_return(const Expr* value, Span span, const TypeEnv& types,
+                                   const ShapeEnv& shapes) {
+  if (!current_ret_ || current_ret_->kind == sema::TypeKind::Unknown) return;
+  sema::Type vt = sema::Type::scalar(value ? infer_type(*value, types) : sema::TypeKind::Nulo);
+  // Tensores inferidos carregam a forma conhecida para comparar dimensoes.
+  if (vt.kind == sema::TypeKind::Tensor && value) {
+    if (auto sh = infer_shape(*value, shapes)) {
+      vt.name = "f32";
+      vt.dims = *sh;
+    }
+  }
+  if (vt.kind == sema::TypeKind::Unknown) return;
+  if (sema::assignable(*current_ret_, vt)) return;
+  report(DiagCode::TypeMismatch, span,
+         "a funcao declara retorno '" + std::string(sema::type_to_string(*current_ret_)) +
+             "' mas retorna '" + sema::type_to_string(vt) + "'",
+         {"ajuste o valor retornado ou o tipo da assinatura '-> ...'"});
+}
+
 void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
   switch (e.kind) {
     case ExprKind::Name: {
@@ -807,17 +1230,23 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
   }
 }
 
-void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes) {
+void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, TypeEnv& types) {
   switch (s.kind) {
     case ast::StmtKind::Assign:
       if (s.b) {
         check_expr(*s.b, scope);
-        // Registra (ou invalida) a forma conhecida do nome atribuido.
+        // Registra (ou invalida) a forma e o tipo conhecidos do nome atribuido.
         if (s.a && s.a->kind == ExprKind::Name) {
           if (auto sh = infer_shape(*s.b, shapes)) {
             shapes[s.a->text] = *sh;
           } else {
             shapes.erase(s.a->text);
+          }
+          const sema::TypeKind t = infer_type(*s.b, types);
+          if (t != sema::TypeKind::Unknown) {
+            types[s.a->text] = t;
+          } else {
+            types.erase(s.a->text);
           }
         }
       }
@@ -831,80 +1260,92 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes) {
       if (s.a) {
         check_expr(*s.a, scope);
         infer_shape(*s.a, shapes);  // valida dimensoes mesmo sem atribuicao
+        infer_type(*s.a, types);
       }
       return;
     case ast::StmtKind::Return:
       if (s.a) {
         check_expr(*s.a, scope);
         infer_shape(*s.a, shapes);
+        infer_type(*s.a, types);
       }
+      check_return(s.a.get(), s.span, types, shapes);
       return;
     case ast::StmtKind::If: {
       if (s.a) check_expr(*s.a, scope);
-      walk_stmt_block(s.body, scope, shapes);
+      walk_stmt_block(s.body, scope, shapes, types);
       for (const auto& ei : s.elifs) {
         if (ei.cond) check_expr(*ei.cond, scope);
-        walk_stmt_block(ei.body, scope, shapes);
+        walk_stmt_block(ei.body, scope, shapes, types);
       }
-      if (s.else_body) walk_stmt_block(*s.else_body, scope, shapes);
+      if (s.else_body) walk_stmt_block(*s.else_body, scope, shapes, types);
       return;
     }
     case ast::StmtKind::ForEach: {
       if (s.a) check_expr(*s.a, scope);
       Scope inner = scope;
       if (!s.name.empty()) inner.insert(s.name);
-      walk_stmt_block(s.body, std::move(inner), shapes);
+      walk_stmt_block(s.body, std::move(inner), shapes, types);
       return;
     }
     case ast::StmtKind::While:
       if (s.a) check_expr(*s.a, scope);
-      walk_stmt_block(s.body, scope, shapes);
+      walk_stmt_block(s.body, scope, shapes, types);
       return;
     case ast::StmtKind::Try: {
-      walk_stmt_block(s.body, scope, shapes);
+      walk_stmt_block(s.body, scope, shapes, types);
       if (s.catch_body) {
         Scope inner = scope;
         if (!s.name.empty()) inner.insert(s.name);
-        walk_stmt_block(*s.catch_body, std::move(inner), shapes);
+        walk_stmt_block(*s.catch_body, std::move(inner), shapes, types);
       }
       return;
     }
   }
 }
 
-void SemanticChecker::walk_stmt_block(const ast::Block& block, Scope scope, ShapeEnv shapes) {
+void SemanticChecker::walk_stmt_block(const ast::Block& block, Scope scope, ShapeEnv shapes,
+                                      TypeEnv types) {
   for (const auto& raw : block.items) {
     if (!raw) continue;
     const Item* it = raw.get();
     if (it->kind == ItemKind::ListEntry) {
       if (it->block) {
-        walk_stmt_block(*it->block, scope, shapes);
+        walk_stmt_block(*it->block, scope, shapes, types);
         continue;
       }
       it = it->child.get();
       if (!it) continue;
     }
     if (it->kind == ItemKind::Stmt && it->stmt) {
-      walk_stmt(*it->stmt, scope, shapes);
+      walk_stmt(*it->stmt, scope, shapes, types);
     } else if (it->kind == ItemKind::Field) {
       if (it->key == "verificar") continue;  // rule keys are column names, not vars
       if (it->value) check_expr(*it->value, scope);
-      if (it->block) walk_stmt_block(*it->block, scope, shapes);
+      if (it->block) walk_stmt_block(*it->block, scope, shapes, types);
     }
   }
 }
 
-void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes) {
+void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes,
+                                      TypeEnv types) {
   collect_entrada_names(block, scope);
   // Anotacoes `entrada: tensor[...]` (inline ou em bloco) semeiam as formas
-  // conhecidas dos dados de entrada da entidade.
+  // e os tipos conhecidos dos dados de entrada da entidade.
   if (const Item* ent = find_field(block, "entrada")) {
     if (auto dims = tensor_annotation_dims(ent->value.get())) {
       shapes["entrada"] = *dims;
-    } else if (ent->block) {
+    }
+    if (auto t = annotation_cache_.find(ent->value.get()); t != annotation_cache_.end()) {
+      types["entrada"] = t->second.kind;
+    }
+    if (ent->block) {
       for (const auto& sub : ent->block->items) {
         if (sub && sub->kind == ItemKind::Field) {
           if (auto d = tensor_annotation_dims(sub->value.get())) shapes[sub->key] = *d;
+          if (auto t = annotation_cache_.find(sub->value.get()); t != annotation_cache_.end()) {
+            types[sub->key] = t->second.kind;
+          }
         }
       }
     }
@@ -924,9 +1365,9 @@ void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, Shap
     if (it->kind == ItemKind::ListEntry && it->child) it = it->child.get();
     if (!it || it->kind != ItemKind::Field || !it->block) continue;
     if (it->key == "passos" || it->key == "executar") {
-      walk_stmt_block(*it->block, scope, shapes);
+      walk_stmt_block(*it->block, scope, shapes, types);
     } else if (it->key != "verificar" && it->key != "camadas") {
-      scan_for_bodies(*it->block, scope, shapes);
+      scan_for_bodies(*it->block, scope, shapes, types);
     }
   }
 }
@@ -937,14 +1378,27 @@ void SemanticChecker::check_bodies() {
     if (item->key == "funcao") {
       Scope scope;
       ShapeEnv shapes;
+      TypeEnv types;
       for (const auto& p : item->params) {
         scope.insert(p.name);
-        // Anotacao `p: tensor[...]` semeia a forma conhecida do parametro.
+        // Anotacao `p: tensor[...]` semeia a forma e o tipo do parametro.
         if (auto dims = tensor_annotation_dims(p.value.get())) shapes[p.name] = *dims;
+        if (auto t = annotation_cache_.find(p.value.get()); t != annotation_cache_.end()) {
+          types[p.name] = t->second.kind;
+        }
       }
-      walk_stmt_block(*item->block, std::move(scope), std::move(shapes));
+      // Tipo de retorno anotado (`-> texto` etc.), para checar `retornar`.
+      const sema::Type* ret = nullptr;
+      if (item->value) {
+        if (auto t = annotation_cache_.find(item->value.get()); t != annotation_cache_.end()) {
+          ret = &t->second;
+        }
+      }
+      current_ret_ = ret;
+      walk_stmt_block(*item->block, std::move(scope), std::move(shapes), std::move(types));
+      current_ret_ = nullptr;
     } else if (is_entity_keyword(item->key)) {
-      scan_for_bodies(*item->block, {}, {});
+      scan_for_bodies(*item->block, {}, {}, {});
     }
   }
 }

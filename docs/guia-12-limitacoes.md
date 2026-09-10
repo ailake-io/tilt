@@ -26,8 +26,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   solver: formas através de chamadas de `funcao` ou condicionais, dimensões
   `_`/não literais, broadcast parcial e `conv2d` com formas dinâmicas —
   nesses casos a validação de dimensão continua acontecendo em runtime.
-- Não há inferência completa de tipos: anotações são validadas como
-  contratos, mas os tipos não são propagados entre expressões.
+- Não há inferência completa de tipos: o que `checar` cobre hoje (`T011`) é
+  o subconjunto evidente — operadores aritméticos/comparação com ambos os
+  lados de tipo conhecido (rejeita `lista + 1`, `"a" - 1`, `"a" < 1`, mas
+  aceita `texto + numero` e `"a" < "b"`, que o runtime suporta), builtins com
+  aridade e 1º/2º argumento tipados (ex.: `tamanho 42`, `ler_csv 123`),
+  métodos/campos de receiver conhecido (ex.: `"abc".matmul`, `t.filtrar` em
+  tensor, `5.maiusculas`) e retorno de `funcao` anotada (`-> texto` com
+  `retornar 42` — `inteiro` amplia para `decimal`, união de literais aceita
+  texto). Fora daí o tipo vira "desconhecido" e segue sem verificação:
+  tipos através de chamadas de `funcao`, campos dinâmicos de mapas/tabelas,
+  `verificar`/`ao_falhar`, agregações em colunas e broadcast parcial.
 
 ## Dados
 

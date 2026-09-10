@@ -1,0 +1,17 @@
+erro[T011]: comparacao '<' mistura 'texto' e 'inteiro'
+  --> input.tilt:4:11
+   |
+ 4 |     - a = "abc" < 5
+   |           ^^^^^
+   |
+   = para igualdade entre tipos diferentes use '=='
+
+erro[T011]: comparacao '<' nao se aplica a 'lista'
+  --> input.tilt:5:11
+   |
+ 5 |     - b = xs < xs
+   |           ^^
+   |
+   = compare numeros ou textos (strings comparam lexicograficamente)
+
+2 erro(s) em input.tilt

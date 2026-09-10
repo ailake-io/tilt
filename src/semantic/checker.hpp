@@ -18,10 +18,11 @@ namespace tilt {
 // First semantic pass: builds the global symbol table and runs the checks
 // that do not need full type inference — duplicate declarations, unknown type
 // names, malformed tensor annotations, hard-coded secrets, invalid devices,
-// agent tool references, statement-level name resolution (T030) and the
-// shape solver (T012): cadeia densa/linear nos `modelo`s e propagacao de
-// formas literais (conv2d, norma_lote, softmax, reformar, transposta,
-// matmul) nos corpos de `funcao`/`pipeline`/`servico`.
+// agent tool references, statement-level name resolution (T030), the
+// shape solver (T012: cadeia densa/linear nos `modelo`s e propagacao de
+// formas literais conv2d/norma_lote/reformar/transposta/matmul) e a
+// inferencia de tipos conservadora (T011: operadores, builtins, metodos e
+// retorno de `funcao`) nos corpos de `funcao`/`pipeline`/`servico`.
 class SemanticChecker {
  public:
   SemanticChecker(const ast::Program& program, DiagnosticEngine& diag);
@@ -44,10 +45,11 @@ class SemanticChecker {
   using Scope = std::unordered_set<std::string>;
   using TensorShape = std::vector<std::int64_t>;
   using ShapeEnv = std::unordered_map<std::string, TensorShape>;
+  using TypeEnv = std::unordered_map<std::string, sema::TypeKind>;
 
-  void scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes);
-  void walk_stmt_block(const ast::Block& block, Scope scope, ShapeEnv shapes);
-  void walk_stmt(const ast::Stmt& stmt, Scope& scope, ShapeEnv& shapes);
+  void scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes, TypeEnv types);
+  void walk_stmt_block(const ast::Block& block, Scope scope, ShapeEnv shapes, TypeEnv types);
+  void walk_stmt(const ast::Stmt& stmt, Scope& scope, ShapeEnv& shapes, TypeEnv& types);
   void check_expr(const ast::Expr& expr, const Scope& scope);
 
   // Shape solver: infere a forma de uma expressao tensora a partir de
@@ -59,6 +61,19 @@ class SemanticChecker {
   std::optional<TensorShape> check_conv2d(const ast::Expr& call, const ShapeEnv& shapes);
   std::optional<TensorShape> check_reshape(Span span, std::optional<TensorShape> in,
                                            const TensorShape& to);
+
+  // Type inference (T011): infere o tipo de uma expressao a partir de
+  // literais, builtins, metodos e anotacoes conhecidas em `types`, validando
+  // operadores, chamadas de builtins e metodos quando o tipo esta evidente.
+  // Desconhecido = sem verificacao (sem falsos positivos).
+  sema::TypeKind infer_type(const ast::Expr& expr, const TypeEnv& types);
+  void check_return(const ast::Expr* value, Span span, const TypeEnv& types,
+                    const ShapeEnv& shapes);
+
+  // Anotacoes de tipo ja resolvidas na passada 2 (params/retorno de
+  // `funcao`, campos de `entrada:`/`saida:`), por expressao de tipo.
+  std::unordered_map<const ast::Expr*, sema::Type> annotation_cache_;
+  const sema::Type* current_ret_ = nullptr;  // retorno esperado (dentro de `funcao`)
 
   void define(const std::string& name, std::string kind, sema::Type type, Span span);
   const Symbol* lookup(std::string_view name) const;

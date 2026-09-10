@@ -12,8 +12,7 @@ indice base_conhecimento:
 pipeline indexar_docs:
   passos:
     - docs = ler_parquet "dados/artigos.parquet"
-    - pedacos = docs.dividir_texto "conteudo", tamanho: 800, sobreposicao: 100
-    - base_conhecimento.inserir pedacos
+    - base_conhecimento.inserir docs
 
 fluxo responder:
   entrada:

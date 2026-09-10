@@ -1,0 +1,5 @@
+pipeline p:
+  passos:
+    - xs = [1, 2, 3]
+    - a = "abc" < 5
+    - b = xs < xs

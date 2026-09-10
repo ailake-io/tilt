@@ -1,0 +1,33 @@
+erro[T011]: tamanho espera lista, tabela, texto ou mapa; encontrou 'inteiro'
+  --> input.tilt:3:19
+   |
+ 3 |     - n = tamanho 42
+   |                   ^^
+   |
+   = numeros nao tem tamanho; para digitos, converta para texto antes
+
+erro[T011]: 'ler_csv' espera um primeiro argumento (texto), encontrou 'inteiro'
+  --> input.tilt:4:24
+   |
+ 4 |     - tabela = ler_csv 123
+   |                        ^^^
+   |
+   = uso: ler_csv "dados.csv"
+
+erro[T011]: 'escrever_csv' espera um primeiro argumento (tabela ou lista), encontrou 'texto'
+  --> input.tilt:5:20
+   |
+ 5 |     - escrever_csv "nao e tabela", "saida.csv"
+   |                    ^^^^^^^^^^^^^^
+   |
+   = uso: escrever_csv tabela, "saida.csv"
+
+erro[T011]: 'dividir' espera pelo menos 2 argumento(s) posicionais
+  --> input.tilt:6:16
+   |
+ 6 |     - partes = dividir "so-um"
+   |                ^^^^^^^
+   |
+   = uso: dividir texto, ","
+
+4 erro(s) em input.tilt

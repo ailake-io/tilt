@@ -1,0 +1,4 @@
+funcao rotulo n: inteiro -> texto:
+  se n > 0:
+    retornar "positivo"
+  retornar n

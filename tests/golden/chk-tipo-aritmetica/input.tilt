@@ -1,0 +1,5 @@
+pipeline p:
+  passos:
+    - xs = [1, 2, 3]
+    - y = xs + 1
+    - s = "total: " - 2

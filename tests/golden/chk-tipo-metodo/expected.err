@@ -1,0 +1,25 @@
+erro[T011]: 'texto' nao tem o metodo 'matmul'
+  --> input.tilt:4:11
+   |
+ 4 |     - m = s.matmul s
+   |           ^
+   |
+   = metodos de texto: maiusculas, minusculas
+
+erro[T011]: 'tensor' nao tem o metodo 'filtrar'
+  --> input.tilt:6:11
+   |
+ 6 |     - f = t.filtrar verdadeiro
+   |           ^
+   |
+   = metodos de tensor: matmul, mais, conv2d, norma_lote, reformar, softmax, soma, media, argmax, item
+
+erro[T011]: 'inteiro' nao tem o campo 'maiusculas'
+  --> input.tilt:8:19
+   |
+ 8 |     - maiuscula = n.maiusculas
+   |                   ^
+   |
+   = tipos numericos e logicos nao tem campos
+
+3 erro(s) em input.tilt

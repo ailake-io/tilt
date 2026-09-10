@@ -1,0 +1,21 @@
+funcao metade x: decimal -> decimal:
+  retornar x / 2.0
+
+funcao contar_ocorrencias itens: lista[inteiro] -> inteiro:
+  retornar tamanho itens
+
+pipeline principal:
+  passos:
+    - nome = "ana"
+    - saudacao = "oi " + nome
+    - n = 5
+    - dobro = n * 2
+    - ordem = "abc" < "abd"
+    - xs = [1, 2, 3]
+    - total = tamanho xs
+    - t = tensor [[1.0, 2.0], [3.0, 4.0]]
+    - dobro_t = t * 2.0
+    - m = t.matmul(t)
+    - forma = m.forma
+    - neg = -n
+    - imprimir saudacao, dobro, ordem, total, forma, neg

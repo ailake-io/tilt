@@ -1,0 +1,17 @@
+erro[T011]: operacao '+' nao se aplica a 'lista': aritmetica espera numeros, texto (so com '+') ou tensor
+  --> input.tilt:4:11
+   |
+ 4 |     - y = xs + 1
+   |           ^^
+   |
+   = se queria concatenar, use '+' entre textos; para juntar listas, construa uma nova lista com os elementos
+
+erro[T011]: texto so concatena com '+'; '-' nao se aplica a 'texto'
+  --> input.tilt:5:11
+   |
+ 5 |     - s = "total: " - 2
+   |           ^^^^^^^^^
+   |
+   = converta para numero antes (ex.: valor vindo de ler_csv ja e numerico)
+
+2 erro(s) em input.tilt

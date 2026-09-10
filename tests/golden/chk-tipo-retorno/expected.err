@@ -1,0 +1,9 @@
+erro[T011]: a funcao declara retorno 'texto' mas retorna 'inteiro'
+  --> input.tilt:4:3
+   |
+ 4 |   retornar n
+   |   ^^^^^^^^
+   |
+   = ajuste o valor retornado ou o tipo da assinatura '-> ...'
+
+1 erro(s) em input.tilt
