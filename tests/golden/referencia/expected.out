@@ -40,6 +40,7 @@ BUILTINS
   mongo_agregar
   ler_s3 escrever_s3 listar_s3 apagar_s3
   ler <fonte> carregador
+  executar_sql "<url>" "<sql>"   (postgres:// ou sqlite://; INSERT/UPDATE/DDL)
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)
   modelo X.executar <tensor>   |   <indice>.inserir / .buscar
   checar_tilt "<arquivo>"  -> { ok, erros: [{codigo,linha,coluna,mensagem,notas}] }

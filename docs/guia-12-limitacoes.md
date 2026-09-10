@@ -118,9 +118,11 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   simples (conteúdo de `<Key>`, entidades básicas); HTTP depende do binário
   `curl` e das credenciais via env (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`).
   Funciona com S3-compatível (MinIO etc.) via `S3_ENDPOINT`.
-- Bancos relacionais: somente consultas SELECT (sem INSERT/UPDATE via SQL,
-  sem prepared statements); Postgres carrega `libpq.so.5` e SQLite
-  `libsqlite3.so.0` via `dlopen` — precisam estar instalados no sistema.
+- Bancos relacionais: `fonte tipo: sqlite/postgres` é somente leitura
+  (consultas SELECT); gravação via `executar_sql` (INSERT/UPDATE/DELETE/DDL,
+  um comando por chamada, sem prepared statements nem transações explícitas);
+  Postgres carrega `libpq.so.5` e SQLite `libsqlite3.so.0` via `dlopen` —
+  precisam estar instalados no sistema.
 - Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, um comando por conexão,
   timeout fixo de 5s.
   AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT

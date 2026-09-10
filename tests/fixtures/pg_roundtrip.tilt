@@ -1,0 +1,22 @@
+# Roundtrip Postgres além de SELECT: pg_test.sh sobe um cluster temporário
+# (initdb + trust auth) e exporta PG_URL apontando para ele. Este fixture
+# cria a tabela, insere e atualiza linhas via executar_sql, confere o
+# SELECT de volta pela fonte/ler e captura o erro de constraint do Postgres.
+fonte clientes:
+  tipo: postgres
+  url: env "PG_URL"
+  consulta: "select id, nome, saldo from clientes order by id"
+
+pipeline pg:
+  passos:
+    - url = env "PG_URL"
+    - executar_sql url, "create table clientes (id serial primary key, nome text not null, saldo numeric)"
+    - executar_sql url, "insert into clientes (nome, saldo) values ('ana', 10.5), ('bruno', 20)"
+    - executar_sql url, "update clientes set saldo = 99.9 where nome = 'bruno'"
+    - tentar:
+        executar_sql url, "insert into clientes (nome) values (null)"
+    capturar e:
+      imprimir "erro-constraint:", e
+    - linhas = ler clientes
+    - para cada c em linhas:
+        imprimir "linha:", c.id, c.nome, c.saldo

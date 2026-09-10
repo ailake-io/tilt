@@ -3459,6 +3459,28 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     fail(call.span, "ler: esperava uma 'fonte' declarada", DiagCode::ConnectorNotImplemented);
   }
+  if (name == "executar_sql") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "executar_sql espera (url, sql), ex.: executar_sql "
+           "\"postgres://localhost:5432/app\", \"insert into t (nome) values ('ana')\"");
+    }
+    const std::string& url = a[0].s;
+    try {
+      if (url.rfind("postgres://", 0) == 0 || url.rfind("postgresql://", 0) == 0) {
+        rt::postgres_exec(url, a[1].s);
+      } else if (url.rfind("sqlite://", 0) == 0) {
+        rt::sqlite_exec(url.substr(9), a[1].s);
+      } else {
+        fail(call.span,
+             "executar_sql: url '" + url + "' invalida (use postgres:// ou sqlite://)");
+      }
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
   // Opcoes {senha:, banco:, tls:} comuns a ler_redis/escrever_redis; senha e
   // banco vencem a URL, tls liga TLS (rediss:// tambem liga).
   auto redis_opts = [&](const std::vector<Value>& a, std::size_t idx) -> rt::RedisOpts {

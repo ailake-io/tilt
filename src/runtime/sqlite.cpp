@@ -16,6 +16,7 @@ constexpr int kSqliteOk = 0;
 constexpr int kSqliteRow = 100;
 constexpr int kSqliteDone = 101;
 constexpr int kSqliteOpenReadwrite = 0x00000002;
+constexpr int kSqliteOpenCreate = 0x00000004;
 constexpr int kSqliteInteger = 1;
 constexpr int kSqliteFloat = 2;
 constexpr int kSqliteText = 3;
@@ -172,6 +173,39 @@ Value sqlite_query(const std::string& db_path, const std::string& sql) {
   db.finalize(stmt);
   db.close(conn);
   return Value::tabela(std::move(rows));
+}
+
+void sqlite_exec(const std::string& db_path, const std::string& sql) {
+  const SqliteApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("sqlite3.dll nao encontrada; instale o SQLite para Windows");
+#else
+    die("libsqlite3.so.0 nao encontrada; instale o pacote libsqlite3");
+#endif
+  }
+
+  void* conn = nullptr;
+  const int flags = kSqliteOpenReadwrite | kSqliteOpenCreate;
+  if (db.open_v2(db_path.c_str(), &conn, flags, nullptr) != kSqliteOk) {
+    die("nao foi possivel abrir o banco '" + db_path + "'");
+  }
+
+  void* stmt = nullptr;
+  const int rc = db.prepare_v2(conn, sql.c_str(), static_cast<int>(sql.size()) + 1, &stmt, nullptr);
+  if (rc != kSqliteOk || stmt == nullptr) {
+    const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
+    db.close(conn);
+    die("falha ao preparar comando: " + msg);
+  }
+
+  const int step_rc = db.step(stmt);
+  const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
+  db.finalize(stmt);
+  db.close(conn);
+  if (step_rc != kSqliteDone && step_rc != kSqliteRow) {
+    die("falha ao executar comando: " + msg);
+  }
 }
 
 }  // namespace tilt::rt

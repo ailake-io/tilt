@@ -348,6 +348,13 @@ metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
 e devolvem `tabela`. Zero dependências de link: as bibliotecas são carregadas
 em tempo de execução com `dlopen` (erro claro se ausentes).
 
+Para comandos sem resultado — `INSERT`, `UPDATE`, `DELETE`, DDL — use o
+builtin `executar_sql url, sql`, que aceita URL `postgres://` (ou
+`postgresql://`) e `sqlite://` (SQLite: o SQL roda direto no arquivo; o banco
+é criado quando não existe). Retorna `nulo`; em caso de erro (ex.: violação de
+constraint) lança a mensagem do servidor, capturável com `tentar`/`capturar`.
+Um comando por chamada.
+
 ```tilt
 fonte clientes:
   tipo: postgres
@@ -361,6 +368,8 @@ fonte metricas:
 
 pipeline etl:
   passos:
+    - executar_sql "postgres://localhost:5432/app",
+        "insert into clientes (nome, idade) values ('ana', 30)"
     - novos = ler clientes
     - local = ler metricas
 ```
@@ -369,7 +378,7 @@ pipeline etl:
 |---|---|
 | `caminho:` | SQLite: arquivo `.db` (deve existir) |
 | `url:` | Postgres: connection string libpq |
-| `consulta:` | SQL `SELECT` (INSERT/UPDATE/DDL → erro claro) |
+| `consulta:` | SQL `SELECT` (INSERT/UPDATE/DDL → erro claro; use `executar_sql`) |
 
 Tipos: inteiro→`inteiro`, real/numeric→`decimal`, bool→`logico`,
 texto→`texto`, NULL→`nulo`, BLOB SQLite→texto hex `0x...`.

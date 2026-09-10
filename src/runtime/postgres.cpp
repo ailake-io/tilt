@@ -189,11 +189,11 @@ void postgres_exec(const std::string& url, const std::string& sql) {
     die("falha ao executar comando: " + msg);
   }
   const int status = pq.result_status(res);
-  const char* err = pq.error_message(conn);
+  const std::string err = pq.error_message(conn) ? pq.error_message(conn) : "";
   pq.clear(res);
   pq.finish(conn);
   if (status != kPgCommandOk && status != kPgTuplesOk) {
-    die(std::string("comando rejeitado pelo servidor: ") + (err && *err ? err : "erro desconhecido"));
+    die("comando rejeitado pelo servidor: " + (err.empty() ? "erro desconhecido" : err));
   }
 }
 
