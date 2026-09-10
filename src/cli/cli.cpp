@@ -386,7 +386,7 @@ BUILTINS
   ler_csv escrever_csv ler_json escrever_json ler_parquet escrever_parquet
   ler_delta escrever_delta anexar_delta
   ler_iceberg escrever_iceberg anexar_iceberg
-  ler_redis escrever_redis
+  ler_redis escrever_redis redis_executar redis_lote
   ler_kafka escrever_kafka
   mongo_inserir mongo_buscar mongo_atualizar mongo_deletar mongo_criar_indice
   mongo_agregar

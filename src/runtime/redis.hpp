@@ -1,14 +1,16 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "runtime/value.hpp"
 
 namespace tilt::rt {
 
 // Cliente Redis nativo via protocolo RESP (sockets POSIX, sem dependencias).
-// Limitacoes da 1a passada: um comando por conexao (abre, envia, le
-// resposta, fecha). Timeout de 5s por operacao.
+// Timeout de 5s por operacao. `ler_redis`/`escrever_redis` usam uma conexao
+// por comando; `redis_executar` idem; `redis_lote` envia varios comandos em
+// pipeline numa unica conexao.
 //
 // `url` tem o formato "redis://host:porta" (padrao localhost:6379), com
 // extensoes opcionais: userinfo ":senha@" para AUTH ("redis://:senha@host"),
@@ -34,5 +36,24 @@ Value redis_get(const std::string& url, const std::string& chave,
 // valor; mapa/lista serializados com JSON compacto inline.
 void redis_set(const std::string& url, const std::string& chave, const Value& valor,
                const RedisOpts& opts = {});
+
+// Converte um argumento de comando para a string enviada ao Redis:
+// texto cru; logico/inteiro/decimal como em redis_set. Demais tipos ->
+// excecao "redis: tipo '<t>' nao suportado em argumento de comando redis".
+std::string redis_arg_para_texto(const Value& v);
+
+// Executa um comando RESP arbitrario (`comando` = [nome, arg1, ...]) e
+// converte a resposta: simple string/bulk -> texto; integer -> inteiro;
+// array -> lista recursiva (itens nil -> nulo); nil -> nulo; error ->
+// excecao "redis: <msg>". `comando` nao pode ser vazio nem ter strings vazias.
+Value redis_executar(const std::string& url, const std::vector<std::string>& comando,
+                     const RedisOpts& opts = {});
+
+// Pipeline: envia todos os comandos numa unica conexao (sem ler entre eles)
+// e so entao le as N respostas na ordem, devolvendo a lista de valores (mesma
+// conversao de redis_executar). Limite de seguranca: 10000 comandos.
+Value redis_lote(const std::string& url,
+                 const std::vector<std::vector<std::string>>& comandos,
+                 const RedisOpts& opts = {});
 
 }  // namespace tilt::rt

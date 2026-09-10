@@ -400,6 +400,15 @@ pipeline cache:
   erro claro.
 - `escrever_redis url, chave, valor`: SET; texto/numérico gravado como
   string, `mapa`/`lista` serializados como JSON compacto.
+- `redis_executar url, comando, [args...]`: envia um comando RESP arbitrário
+  e devolve a resposta como valor tilt — simple string/bulk → `texto`,
+  integer → `inteiro`, array → `lista` recursiva, nil → `nulo`, resposta de
+  erro (`-ERR`) → exceção capturável (`redis: ...`). Args aceitam texto,
+  lógico e numérico.
+- `redis_lote url, [[comando, args...], ...]`: **pipeline** — envia todos os
+  comandos numa única conexão (sem ler entre eles) e só então lê as N
+  respostas na ordem, devolvendo a lista de valores. Limite de segurança de
+  10 mil comandos.
 - AUTH e seleção de banco: a URL aceita userinfo para a senha e path
   numérico para o db — `redis://:senha@host:6379/2` (AUTH `senha` + SELECT
   2). Também dá para passar como opções, que **vencem** a URL:
@@ -413,8 +422,9 @@ pipeline cache:
   o hostname é conferido. Para certificado auto-assinado (ex.: em testes),
   defina `TILT_TLS_SKIP_VERIFY=1` para desligar a verificação. Sem
   client-cert/SASL nesta fase. O mesmo mecanismo cobre MongoDB e Kafka
-  (ver abaixo).
-- limitações: um comando por conexão.
+  (ver abaixo). Vale também para `redis_executar`/`redis_lote` (via URL).
+- limitações: `ler_redis`/`escrever_redis`/`redis_executar` abrem uma
+  conexão por chamada; só `redis_lote` reaproveita a conexão (pipeline).
 
 ## S3 (AWS SigV4 próprio)
 

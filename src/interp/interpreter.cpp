@@ -3530,6 +3530,54 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "redis_executar") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "redis_executar espera (url, comando, [args...]), ex.: redis_executar "
+           "url, \"GET\", \"chave\"");
+    }
+    std::vector<std::string> cmd;
+    cmd.reserve(a.size() - 1);
+    cmd.push_back(a[1].s);
+    for (std::size_t i = 2; i < a.size(); ++i) {
+      cmd.push_back(rt::redis_arg_para_texto(a[i]));
+    }
+    try {
+      return rt::redis_executar(a[0].s, cmd);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "redis_lote") {
+    auto a = args();
+    if (a.size() != 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "redis_lote espera (url, [[comando, args...], ...]), ex.: redis_lote "
+           "url, [[\"INCR\", \"contador\"], [\"GET\", \"chave\"]]");
+    }
+    if (a[1].kind != ValueKind::Lista || !a[1].list) {
+      fail(call.span, "redis: o lote deve ser uma lista de listas [[comando, args...], ...]");
+    }
+    std::vector<std::vector<std::string>> cmds;
+    cmds.reserve(a[1].list->size());
+    for (const Value& item : *a[1].list) {
+      if (item.kind != ValueKind::Lista || !item.list || item.list->empty()) {
+        fail(call.span,
+             "redis: cada comando do lote deve ser uma lista nao vazia "
+             "[comando, args...]");
+      }
+      std::vector<std::string> cmd;
+      cmd.reserve(item.list->size());
+      for (const Value& e : *item.list) cmd.push_back(rt::redis_arg_para_texto(e));
+      cmds.push_back(std::move(cmd));
+    }
+    try {
+      return rt::redis_lote(a[0].s, cmds);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "ler_kafka") {
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) {

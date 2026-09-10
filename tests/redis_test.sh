@@ -1,11 +1,14 @@
 #!/usr/bin/env sh
 # Integration test for the Redis connector (`ler_redis`/`escrever_redis` with
-# AUTH + SELECT): spins up a mock Redis server in python3 (pure socketserver,
-# speaking RESP over TCP: AUTH with password "segredo", SELECT with per-db
-# dict isolation, GET/SET) and runs `tilt executar` on
-# fixtures/redis_roundtrip.tilt, checking the printed values (roundtrip on
+# AUTH + SELECT; `redis_executar`/`redis_lote`): spins up a mock Redis server
+# in python3 (pure socketserver, speaking RESP over TCP: AUTH with password
+# "segredo", SELECT with per-db dict isolation, GET/SET/INCR/DEL/RPUSH/LRANGE/
+# KEYS) and runs `tilt executar` on fixtures/redis_roundtrip.tilt and
+# fixtures/redis_exec_lote.tilt, checking the printed values (roundtrip on
 # db 1, empty read of the same key on db 0, captured AUTH failure with wrong
-# password) and the mock's request log (AUTH/SELECT/GET/SET counts per db).
+# password; executar com nil/integer/array/erro, lote numa unica conexao com
+# respostas na ordem) and the mock's request log (AUTH/SELECT/command counts
+# per db, total de conexoes abertas).
 set -eu
 
 BIN="$1"
@@ -30,7 +33,8 @@ log_path = sys.argv[3]
 
 log = open(log_path, "a", encoding="utf-8")
 
-store = {}  # db -> {chave: valor}
+store = {}   # db -> {chave: valor}
+listas = {}  # (db, chave) -> [valor, ...]
 SENHA = "segredo"
 
 
@@ -79,6 +83,8 @@ class RedisMock(socketserver.BaseRequestHandler):
     def handle(self):
         conn = self.request
         reader = RespReader(conn)
+        log.write("CONN\n")
+        log.flush()
         db = 0
         while True:
             args = reader.read_command()
@@ -114,6 +120,54 @@ class RedisMock(socketserver.BaseRequestHandler):
                 log.write("SET %d %s\n" % (db, args[1]))
                 log.flush()
                 conn.sendall(b"+OK\r\n")
+            elif cmd == "INCR":
+                chave = args[1]
+                log.write("INCR %d %s\n" % (db, chave))
+                log.flush()
+                cur = store.get(db, {}).get(chave)
+                n = (int(cur) if cur is not None and cur.lstrip("-").isdigit() else 0) + 1
+                store.setdefault(db, {})[chave] = str(n)
+                conn.sendall(b":%d\r\n" % n)
+            elif cmd == "DEL":
+                n = 0
+                for chave in args[1:]:
+                    if chave in store.get(db, {}):
+                        del store[db][chave]
+                        n += 1
+                log.write("DEL %d %d\n" % (db, n))
+                log.flush()
+                conn.sendall(b":%d\r\n" % n)
+            elif cmd == "RPUSH":
+                chave = args[1]
+                lst = listas.setdefault((db, chave), [])
+                lst.extend(args[2:])
+                log.write("RPUSH %d %s\n" % (db, chave))
+                log.flush()
+                conn.sendall(b":%d\r\n" % len(lst))
+            elif cmd == "LRANGE":
+                chave = args[1]
+                ini, fim = int(args[2]), int(args[3])
+                lst = listas.get((db, chave), [])
+                if fim < 0:
+                    fim = len(lst) + fim
+                vals = lst[max(ini, 0):fim + 1]
+                log.write("LRANGE %d %s\n" % (db, chave))
+                log.flush()
+                out = b"*%d\r\n" % len(vals)
+                for v in vals:
+                    b = v.encode()
+                    out += b"$%d\r\n" % len(b) + b + b"\r\n"
+                conn.sendall(out)
+            elif cmd == "KEYS":
+                chaves = sorted(k for k in store.get(db, {})
+                                if args[1] == "*" or args[1] in k)
+                log.write("KEYS %d\n" % db)
+                log.flush()
+                out = b"*%d\r\n" % len(chaves)
+                for k in chaves:
+                    b = k.encode()
+                    out += b"$%d\r\n" % len(b) + b + b"\r\n"
+                conn.sendall(out)
             else:
                 conn.sendall(b"-ERR unknown command\r\n")
 
@@ -152,6 +206,15 @@ out=$(
     "$BIN" executar "${2:-${0%/*}/fixtures/redis_roundtrip.tilt}"
 )
 
+# congela o log da 1a fase: a 2a fase (db 0) tambem grava SET/GET no db 0
+cp "$tmp/log" "$tmp/log1"
+
+# --- redis_executar / redis_lote (mesmo mock, db 0 da URL) ------------------------
+out2=$(
+  env REDIS_URL="redis://:segredo@127.0.0.1:$PORTA/0" \
+    "$BIN" executar "${0%/*}/fixtures/redis_exec_lote.tilt"
+)
+
 kill "$mock_pid" 2>/dev/null || true
 mock_pid=""
 
@@ -172,8 +235,8 @@ echo "$out" | grep -q "inesperado" && { echo "db 0 deveria estar vazio: $out"; f
 # (d) log do mock: AUTH/SELECT por conexao e isolamento por db
 check_log() {
   esperado="$1"; shift
-  n=$(grep -c "^$esperado\$" "$tmp/log" || true)
-  [ "$n" = "$1" ] || { echo "esperado $1 x '$esperado', obtido $n"; cat "$tmp/log"; fail=1; }
+  n=$(grep -c "^$esperado\$" "$tmp/log1" || true)
+  [ "$n" = "$1" ] || { echo "esperado $1 x '$esperado', obtido $n"; cat "$tmp/log1"; fail=1; }
 }
 check_log "AUTH ok" 3
 check_log "AUTH falha" 1
@@ -183,7 +246,43 @@ check_log "SET 1 chave-x" 1
 check_log "GET 1 chave-x" 1
 check_log "GET 0 chave-x" 1
 # SET no db 1 nunca deve aparecer no db 0
-grep -q "^SET 0 " "$tmp/log" && { echo "SET no db 0 inesperado"; cat "$tmp/log"; fail=1; }
+grep -q "^SET 0 " "$tmp/log1" && { echo "SET no db 0 inesperado"; cat "$tmp/log1"; fail=1; }
+
+# (e) redis_executar / redis_lote: saida completa, na ordem
+esperado2=$(cat <<'EOF'
+== pipeline redis_exec ==
+nil: nulo
+set: OK
+get: valor-exec
+incr1: 1
+incr2: 2
+keys: [contador, k-exec]
+erro: redis: ERR unknown command
+lote: [1, 2, [a, b], 3, 1]
+pos-del: nulo
+vazio: redis: comando redis nao aceita argumento vazio
+tipo: redis: o lote deve ser uma lista de listas [[comando, args...], ...]
+lote-vazio: redis: lote de comandos nao pode ser vazio
+EOF
+)
+[ "$out2" = "$esperado2" ] || { echo "saida de redis_exec_lote diferente:"; echo "$out2"; fail=1; }
+
+# (f) log do mock: comandos do db 0 e contagem de conexoes
+check_log() {
+  esperado="$1"; shift
+  n=$(grep -c "^$esperado\$" "$tmp/log" || true)
+  [ "$n" = "$1" ] || { echo "esperado $1 x '$esperado', obtido $n"; cat "$tmp/log"; fail=1; }
+}
+check_log "GET 0 chave-inexistente" 1
+check_log "SET 0 k-exec" 1
+check_log "GET 0 k-exec" 2  # GET do roundtrip + GET pos-del
+check_log "INCR 0 contador" 3  # 2 x executar + 1 no lote
+check_log "KEYS 0" 1
+check_log "RPUSH 0 fila" 2
+check_log "LRANGE 0 fila" 1
+check_log "DEL 0 1" 1
+# conexoes: 4 (roundtrip) + 9 (executar/lote: 7 executar + 1 lote + 1 pos-del)
+check_log "CONN" 13
 
 [ "$fail" = 0 ] && echo "redis_test ok"
 exit "$fail"

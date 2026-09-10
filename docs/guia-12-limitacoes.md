@@ -123,10 +123,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   um comando por chamada, sem prepared statements nem transações explícitas);
   Postgres carrega `libpq.so.5` e SQLite `libsqlite3.so.0` via `dlopen` —
   precisam estar instalados no sistema.
-- Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, um comando por conexão,
-  timeout fixo de 5s.
+- Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, timeout fixo de 5s.
   AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT
-  via path numérico (`redis://host:6379/2`) ou opção `banco:`.
+  via path numérico (`redis://host:6379/2`) ou opção `banco:`. Sem
+  pub/sub, streams, scripts Lua nem conexões persistentes/reconnect —
+  `redis_executar` cobre comandos avulsos e `redis_lote` roda um pipeline
+  de até 10 mil comandos numa única conexão; `ler_redis`/`escrever_redis`/
+  `redis_executar` abrem uma conexão por chamada.
 - TLS (redis/mongo/kafka): camada mínima em `src/runtime/tls.*` — OpenSSL
   carregado em runtime via `dlopen` (`libssl.so.3`, fallback `libssl.so`, e
   libcrypto correspondente), zero dependência de link. Verificação de

@@ -1,0 +1,48 @@
+# redis_executar / redis_lote contra o mock RESP do redis_test.sh (REDIS_URL
+# aponta p/ ele, no formato "redis://:segredo@host:porta/0" — userinfo =
+# senha, path = db). Cada redis_executar abre uma conexao; o lote inteiro
+# roda numa unica conexao (ver contagem de CONN no teste).
+pipeline redis_exec:
+  passos:
+    - url = env "REDIS_URL"
+    # redis_executar: GET inexistente -> nil -> nulo
+    - nada = redis_executar url, "GET", "chave-inexistente"
+    - imprimir "nil:", nada
+    # SET/GET roundtrip
+    - ok = redis_executar url, "SET", "k-exec", "valor-exec"
+    - imprimir "set:", ok
+    - de_volta = redis_executar url, "GET", "k-exec"
+    - imprimir "get:", de_volta
+    # integer: INCR duas vezes
+    - um = redis_executar url, "INCR", "contador"
+    - imprimir "incr1:", um
+    - dois = redis_executar url, "INCR", "contador"
+    - imprimir "incr2:", dois
+    # array: KEYS depois dos SETs/INCRs acima
+    - chaves = redis_executar url, "KEYS", "*"
+    - imprimir "keys:", chaves
+    # resposta de erro (-ERR) e capturavel em tilt
+    - tentar:
+        redis_executar url, "COMANDO_INVALIDO"
+    capturar erro:
+      imprimir "erro:", erro
+    # lote: 5 comandos numa unica conexao; respostas na ordem
+    - lote = redis_lote url, [["RPUSH", "fila", "a"], ["RPUSH", "fila", "b"],
+        ["LRANGE", "fila", 0, -1], ["INCR", "contador"], ["DEL", "k-exec"]]
+    - imprimir "lote:", lote
+    # fora do lote: GET depois do DEL devolve nil -> nulo
+    - depois = redis_executar url, "GET", "k-exec"
+    - imprimir "pos-del:", depois
+    # validacoes de entrada (erros claros, capturaveis)
+    - tentar:
+        redis_executar url, ""
+    capturar erro2:
+      imprimir "vazio:", erro2
+    - tentar:
+        redis_lote url, "nao-e-lista"
+    capturar erro3:
+      imprimir "tipo:", erro3
+    - tentar:
+        redis_lote url, []
+    capturar erro4:
+      imprimir "lote-vazio:", erro4

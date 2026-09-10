@@ -121,6 +121,8 @@ class Conn {
 
   Conn(const Conn&) = delete;
   Conn& operator=(const Conn&) = delete;
+  Conn(Conn&&) = default;
+  Conn& operator=(Conn&&) = default;
 
   void send_all(const std::string& data) {
     std::size_t off = 0;
@@ -254,18 +256,51 @@ void handshake(Conn& conn, const RedisOpts& opts) {
   }
 }
 
-// Abre a conexao, faz o handshake opcional, envia o comando e devolve a
-// resposta; '-ERR...' vira excecao. `opts` ja e o resultado de merge_opts.
-Resp command(const UrlParts& parts, const RedisOpts& opts,
-             const std::vector<std::string>& args) {
+// Abre a conexao (TLS conforme `opts.tls`) e faz o handshake opcional
+// (AUTH/SELECT). `parts`/`opts` ja sao o resultado de parse_url/merge_opts.
+Conn abrir_conexao(const UrlParts& parts, const RedisOpts& opts) {
   UrlParts eff = parts;
   eff.tls = opts.tls;
   Conn conn(eff);
   handshake(conn, opts);
+  return conn;
+}
+
+// Envia um comando e devolve a resposta; '-ERR...' vira excecao.
+Resp enviar_comando(Conn& conn, const std::vector<std::string>& args) {
   conn.send_all(encode_cmd(args));
   Resp r = read_resp(conn);
   if (r.type == '-') die(r.str);
   return r;
+}
+
+// Abre a conexao, faz o handshake opcional, envia o comando e devolve a
+// resposta; '-ERR...' vira excecao. `opts` ja e o resultado de merge_opts.
+Resp command(const UrlParts& parts, const RedisOpts& opts,
+             const std::vector<std::string>& args) {
+  Conn conn = abrir_conexao(parts, opts);
+  return enviar_comando(conn, args);
+}
+
+// Converte uma resposta RESP em valor tilt, recursivo para arrays.
+// ('-' nunca chega aqui: vira excecao antes, com "redis: <msg>".)
+Value resp_para_valor(const Resp& r) {
+  switch (r.type) {
+    case '+':
+    case '$':
+      return r.nil ? Value::nulo() : Value::texto(r.str);
+    case ':':
+      return Value::inteiro(r.num);
+    case '*': {
+      if (r.nil) return Value::nulo();
+      ValueList itens;
+      itens.reserve(r.items.size());
+      for (const Resp& e : r.items) itens.push_back(resp_para_valor(e));
+      return Value::lista(std::move(itens));
+    }
+    default:
+      die("tipo RESP inesperado na resposta: " + std::string(1, r.type));
+  }
 }
 
 std::string json_escape(const std::string& s) {
@@ -323,7 +358,8 @@ std::string json_compact(const Value& v) {
   }
 }
 
-// Converte um valor tilt para a string gravada no Redis.
+// Converte um valor tilt para a string gravada no Redis / usada como
+// argumento de comando. Ver redis_arg_para_texto na header.
 std::string value_to_string(const Value& v) {
   switch (v.kind) {
     case ValueKind::Texto: return v.s;
@@ -338,7 +374,8 @@ std::string value_to_string(const Value& v) {
     case ValueKind::Lista:
       return json_compact(v);
     default:
-      die("tipo '" + std::string(v.type_name()) + "' nao suportado em redis_set");
+      die("tipo '" + std::string(v.type_name()) +
+          "' nao suportado em argumento de comando redis");
   }
 }
 
@@ -366,6 +403,57 @@ void redis_set(const std::string& url, const std::string& chave, const Value& va
   const UrlParts parts = parse_url(url);
   Resp r = command(parts, merge_opts(parts, opts), {"SET", chave, value_to_string(valor)});
   if (r.type != '+') die("resposta inesperada para SET (tipo '" + std::string(1, r.type) + "')");
+}
+
+std::string redis_arg_para_texto(const Value& v) { return value_to_string(v); }
+
+namespace {
+
+// Rejeita comando malformado (vazio ou com string vazia), com erro claro.
+void validar_comando(const std::vector<std::string>& cmd) {
+  if (cmd.empty()) die("comando nao pode ser vazio");
+  for (const std::string& a : cmd) {
+    if (a.empty()) die("comando redis nao aceita argumento vazio");
+  }
+}
+
+constexpr std::size_t kMaxLote = 10000;
+
+}  // namespace
+
+Value redis_executar(const std::string& url, const std::vector<std::string>& comando,
+                     const RedisOpts& opts) {
+  validar_comando(comando);
+  const UrlParts parts = parse_url(url);
+  Conn conn = abrir_conexao(parts, merge_opts(parts, opts));
+  return resp_para_valor(enviar_comando(conn, comando));
+}
+
+Value redis_lote(const std::string& url,
+                 const std::vector<std::vector<std::string>>& comandos,
+                 const RedisOpts& opts) {
+  if (comandos.empty()) die("lote de comandos nao pode ser vazio");
+  if (comandos.size() > kMaxLote) {
+    die("lote excede o limite de " + std::to_string(kMaxLote) + " comandos");
+  }
+  for (const std::vector<std::string>& cmd : comandos) validar_comando(cmd);
+
+  const UrlParts parts = parse_url(url);
+  Conn conn = abrir_conexao(parts, merge_opts(parts, opts));
+
+  // Envia tudo de uma vez (pipeline): nenhuma leitura entre os comandos.
+  std::string payload;
+  for (const std::vector<std::string>& cmd : comandos) payload += encode_cmd(cmd);
+  conn.send_all(payload);
+
+  ValueList resultados;
+  resultados.reserve(comandos.size());
+  for (std::size_t i = 0; i < comandos.size(); ++i) {
+    Resp r = read_resp(conn);
+    if (r.type == '-') die(r.str);
+    resultados.push_back(resp_para_valor(r));
+  }
+  return Value::lista(std::move(resultados));
 }
 
 }  // namespace tilt::rt
