@@ -1,0 +1,22 @@
+# Extras S3 contra o mock SigV4 do s3_test.sh: copiar, cabecalho (HEAD),
+# multipart de um "arquivo grande" (2 partes) e abort limpando as partes.
+pipeline extras:
+  passos:
+    - escrever_s3 "s3://bucket/origem.txt", "conteudo-original"
+    - copiar_s3 "s3://bucket/origem.txt", "s3://bucket/copia.txt"
+    - copia = ler_s3 "s3://bucket/copia.txt"
+    - imprimir copia
+    - meta = cabecalho_s3 "s3://bucket/origem.txt"
+    - imprimir meta["content-length"]
+    - imprimir meta["content-type"]
+    - imprimir meta.etag
+    - uid = s3_iniciar_upload "s3://bucket/grande.bin"
+    - e1 = s3_enviar_parte "s3://bucket/grande.bin", uid, 1, "parte-A-"
+    - e2 = s3_enviar_parte "s3://bucket/grande.bin", uid, 2, "parte-B"
+    - etagf = s3_concluir_upload "s3://bucket/grande.bin", uid, [[1, e1], [2, e2]]
+    - grande = ler_s3 "s3://bucket/grande.bin"
+    - imprimir grande
+    - imprimir etagf
+    - uid2 = s3_iniciar_upload "s3://bucket/abortado.bin"
+    - s3_enviar_parte "s3://bucket/abortado.bin", uid2, 1, "temporario"
+    - s3_abortar_upload "s3://bucket/abortado.bin", uid2

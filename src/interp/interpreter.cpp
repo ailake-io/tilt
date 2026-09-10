@@ -3949,6 +3949,112 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "copiar_s3") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto ||
+        a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "copiar_s3 espera (url_origem, url_destino), ex.: copiar_s3 "
+           "\"s3://bucket/a\", \"s3://outro-bucket/b\"");
+    }
+    try {
+      rt::s3_copiar(a[0].s, a[1].s);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "cabecalho_s3") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "cabecalho_s3 espera (url), ex.: cabecalho_s3 \"s3://bucket/chave\"");
+    }
+    try {
+      Value m = Value::mapa();
+      for (const auto& [k, v] : rt::s3_cabecalho(a[0].s)) {
+        if (k == "content-length") {
+          m.map->set(k, Value::inteiro(std::stoll(v)));
+        } else {
+          m.map->set(k, Value::texto(v));
+        }
+      }
+      return m;
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "s3_iniciar_upload") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "s3_iniciar_upload espera (url), ex.: s3_iniciar_upload "
+           "\"s3://bucket/chave\"");
+    }
+    try {
+      return Value::texto(rt::s3_multipart_iniciar(a[0].s));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "s3_enviar_parte") {
+    auto a = args();
+    if (a.size() < 4 || a[0].kind != ValueKind::Texto ||
+        a[1].kind != ValueKind::Texto || !a[2].is_number()) {
+      fail(call.span,
+           "s3_enviar_parte espera (url, upload_id, numero, dados), ex.: "
+           "s3_enviar_parte \"s3://bucket/chave\", uid, 1, dados");
+    }
+    try {
+      const std::string dados =
+          a[3].kind == ValueKind::Texto ? a[3].s : rt::json_dump(a[3]);
+      return Value::texto(rt::s3_multipart_parte(
+          a[0].s, a[1].s, static_cast<int>(a[2].as_number()), dados));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "s3_concluir_upload") {
+    auto a = args();
+    if (a.size() < 3 || a[0].kind != ValueKind::Texto ||
+        a[1].kind != ValueKind::Texto || a[2].kind != ValueKind::Lista) {
+      fail(call.span,
+           "s3_concluir_upload espera (url, upload_id, [[numero, etag], ...]), "
+           "ex.: s3_concluir_upload \"s3://bucket/chave\", uid, [[1, e1], [2, "
+           "e2]]");
+    }
+    std::vector<std::pair<int, std::string>> partes;
+    for (const Value& item : *a[2].list) {
+      if (item.kind != ValueKind::Lista || item.list->size() != 2 ||
+          !(*item.list)[0].is_number() ||
+          (*item.list)[1].kind != ValueKind::Texto) {
+        fail(call.span,
+             "s3_concluir_upload: cada parte deve ser [numero, etag]");
+      }
+      partes.emplace_back(static_cast<int>((*item.list)[0].as_number()),
+                          (*item.list)[1].s);
+    }
+    try {
+      return Value::texto(rt::s3_multipart_concluir(a[0].s, a[1].s, partes));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "s3_abortar_upload") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto ||
+        a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "s3_abortar_upload espera (url, upload_id), ex.: s3_abortar_upload "
+           "\"s3://bucket/chave\", uid");
+    }
+    try {
+      rt::s3_multipart_abortar(a[0].s, a[1].s);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
   if (word_in(name, {"escrever"}) || (name.rfind("ler_", 0) == 0) ||
       (name.rfind("escrever_", 0) == 0)) {
     fail(call.span, "'" + name + "': conector/formato nao implementado (M5.2)",

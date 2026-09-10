@@ -1,0 +1,6 @@
+# Deve falhar: s3_concluir_upload com parte duplicada ([1, ...], [1, ...]).
+pipeline erro_dup:
+  passos:
+    - uid = s3_iniciar_upload "s3://bucket/erro2.bin"
+    - e1 = s3_enviar_parte "s3://bucket/erro2.bin", uid, 1, "a"
+    - s3_concluir_upload "s3://bucket/erro2.bin", uid, [[1, e1], [1, e1]]

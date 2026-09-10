@@ -438,6 +438,9 @@ pipeline arquivos:
     - escrever_s3 "s3://meu-bucket/relatorios/vendas.txt", "ola s3"
     - conteudo = ler_s3 "s3://meu-bucket/relatorios/vendas.txt"
     - imprimir conteudo
+    - copiar_s3 "s3://meu-bucket/relatorios/vendas.txt", "s3://outro-bucket/vendas-copia.txt"
+    - meta = cabecalho_s3 "s3://meu-bucket/relatorios/vendas.txt"
+    - imprimir meta["content-length"]
     - apagar_s3 "s3://meu-bucket/relatorios/vendas.txt"
 ```
 
@@ -452,6 +455,22 @@ pipeline arquivos:
   as chaves ordenadas. Sem chaves no prefixo → lista vazia.
 - `apagar_s3 "s3://bucket/chave"`: DELETE da chave; `204`/`200` ok, `404`
   levanta erro claro (`s3: objeto nao encontrado: <chave>`).
+- `copiar_s3 "s3://bucket/a", "s3://outro-bucket/c"`: CopyObject — `PUT` no
+  destino com o header `x-amz-copy-source` assinado; o bucket (e a chave) da
+  origem podem diferir do destino.
+- `cabecalho_s3 "s3://bucket/chave"`: HeadObject (`HEAD`, sem payload) →
+  `mapa` com `content-length` (inteiro), `content-type`, `etag`,
+  `last-modified` e os metadados `x-amz-meta-*` do objeto; `404` levanta
+  erro claro (`s3: objeto nao encontrado: <chave>`).
+- multipart upload, para objetos grandes:
+  `uid = s3_iniciar_upload "s3://bucket/chave"` devolve o `uploadId`
+  (`POST ?uploads`); `etag = s3_enviar_parte url, uid, 1, dados` envia uma
+  parte numerada de `1` a `10000` (`PUT ?partNumber=N&uploadId=...`) e
+  devolve o ETag da parte; `etag_final = s3_concluir_upload url, uid,
+  [[1, e1], [2, e2]]` fecha o upload com o XML de CompleteMultipartUpload —
+  a lista de partes deve ser não vazia, em ordem crescente e sem
+  duplicatas; `s3_abortar_upload url, uid` descarta as partes enviadas
+  (`DELETE ?uploadId=...`). Payload inteiro em memória.
 - credenciais por variáveis de ambiente: `AWS_ACCESS_KEY_ID` e
   `AWS_SECRET_ACCESS_KEY` (obrigatórias, string vazia conta como ausente),
   `AWS_SESSION_TOKEN` (opcional), `AWS_REGION` (default `us-east-1`).

@@ -114,12 +114,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   revogação imediata de um fetch em andamento, sem SASL (TLS via
   `{tls: verdadeiro}`), produce v1/fetch v1 apenas, um broker líder por
   chamada e payload inteiro em memória.
-- S3 (`ler_s3`/`escrever_s3`/`listar_s3`/`apagar_s3`): GET/PUT/LIST/DELETE
-  com query string assinada (ListObjectsV2) — sem multipart/copy/presigned
-  URLs e payload inteiro em memória; o parse do XML de listagem é por string
-  simples (conteúdo de `<Key>`, entidades básicas); HTTP depende do binário
-  `curl` e das credenciais via env (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`).
-  Funciona com S3-compatível (MinIO etc.) via `S3_ENDPOINT`.
+- S3 (`ler_s3`/`escrever_s3`/`listar_s3`/`apagar_s3`/`copiar_s3`/
+  `cabecalho_s3`/`s3_iniciar_upload`/`s3_enviar_parte`/`s3_concluir_upload`/
+  `s3_abortar_upload`): REST com query string assinada (ListObjectsV2,
+  multipart) — sem presigned URLs, sem versionamento (`versionId`) e payload
+  inteiro em memória (multipart incluído, sem streaming de parte em disco);
+  o parse dos XMLs de resposta (listagem, multipart) é por string simples
+  (conteúdo de `<Key>`/`<UploadId>`/`<ETag>`, entidades básicas); HTTP depende
+  do binário `curl` e das credenciais via env (`AWS_ACCESS_KEY_ID`/
+  `AWS_SECRET_ACCESS_KEY`). Funciona com S3-compatível (MinIO etc.) via
+  `S3_ENDPOINT`.
 - Bancos relacionais: `fonte tipo: sqlite/postgres` é somente leitura
   (consultas SELECT); gravação via `executar_sql` (INSERT/UPDATE/DELETE/DDL,
   um comando por chamada, sem prepared statements nem transações explícitas);

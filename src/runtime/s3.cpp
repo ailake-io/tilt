@@ -183,7 +183,8 @@ std::string hex_lower(const std::array<std::uint8_t, 32>& bytes) {
 
 Assinatura assinar(const Credenciais& c, const std::string& method,
                    const std::string& canonical_uri, const std::string& query,
-                   const std::string& host, const std::string& payload_hash) {
+                   const std::string& host, const std::string& payload_hash,
+                   const std::vector<std::pair<std::string, std::string>>& extras) {
   const std::time_t agora = std::time(nullptr);
   const std::tm tm_utc = tilt_gmtime(agora);
   char data_buf[9];
@@ -195,13 +196,23 @@ Assinatura assinar(const Credenciais& c, const std::string& method,
 
   const std::string scope = date_stamp + "/" + c.region + "/s3/aws4_request";
 
-  std::string canonical_headers = "host:" + host + "\n" +
-                                  "x-amz-content-sha256:" + payload_hash + "\n" +
-                                  "x-amz-date:" + amz_date + "\n";
-  std::string signed_headers = "host;x-amz-content-sha256;x-amz-date";
-  if (!c.token.empty()) {
-    canonical_headers += "x-amz-security-token:" + c.token + "\n";
-    signed_headers += ";x-amz-security-token";
+  // Headers assinados em ordem lexicografica: host, x-amz-content-sha256,
+  // x-amz-date, extras (ex.: x-amz-copy-source) e x-amz-security-token.
+  std::vector<std::pair<std::string, std::string>> canon = {
+      {"host", host},
+      {"x-amz-content-sha256", payload_hash},
+      {"x-amz-date", amz_date},
+  };
+  canon.insert(canon.end(), extras.begin(), extras.end());
+  if (!c.token.empty()) canon.emplace_back("x-amz-security-token", c.token);
+  std::sort(canon.begin(), canon.end());
+
+  std::string canonical_headers;
+  std::string signed_headers;
+  for (std::size_t i = 0; i < canon.size(); ++i) {
+    canonical_headers += canon[i].first + ":" + canon[i].second + "\n";
+    if (i) signed_headers += ";";
+    signed_headers += canon[i].first;
   }
 
   const std::string canonical_request = method + "\n" + canonical_uri + "\n" +
@@ -225,21 +236,30 @@ Assinatura assinar(const Credenciais& c, const std::string& method,
   return a;
 }
 
-// Executa o curl: corpo da resposta vai para `out_file`, status vem no stdout
-// (`-w '%{http_code}'`). Com falhar=true (default), HTTP >= 400 (ou falha de
-// transporte) -> die com o corpo da resposta truncado em ~200 chars. Retorna
-// o status HTTP.
+// Executa o curl: corpo da resposta vai para `out_file`, headers da resposta
+// para `hdr_file` (formato `-D`: "Nome: valor" por linha), status vem no
+// stdout (`-w '%{http_code}'`). HEAD sai como `curl -I` (sem corpo de
+// resposta e sem payload de requisicao). Com falhar=true (default), HTTP >=
+// 400 (ou falha de transporte) -> die com o corpo da resposta truncado em
+// ~200 chars. Retorna o status HTTP.
 int http(const std::string& method, const std::string& url,
          const std::vector<std::pair<std::string, std::string>>& headers,
-         const std::string& body, const std::string& out_file, bool falhar) {
+         const std::string& body, const std::string& out_file,
+         const std::string& hdr_file, bool falhar) {
   std::string body_file;
   std::string cmd = "curl -s ";
   if (falhar) cmd += "--fail-with-body ";
-  cmd += "-o " + shell_quote(out_file) + " -w '%{http_code}' -X " + method;
+  cmd += "-o " + shell_quote(out_file) + " -D " + shell_quote(hdr_file) +
+         " -w '%{http_code}' ";
+  if (method == "HEAD") {
+    cmd += "-I";
+  } else {
+    cmd += "-X " + method;
+  }
   for (const auto& [nome, valor] : headers) {
     cmd += " -H " + shell_quote(nome + ": " + valor);
   }
-  if (method == "PUT") {
+  if (method == "PUT" || method == "POST") {
     std::string body_path;
     const int fd = tilt_tempfile("s3_body", body_path);
     if (fd < 0) die("nao foi possivel criar arquivo temporario");
@@ -289,10 +309,15 @@ int http(const std::string& method, const std::string& url,
 // Nucleo comum: monta URI + query canonical, assina SigV4 e executa o HTTP.
 // Retorna (status, corpo). Com falhar=false nao die em HTTP >= 400 (o caller
 // inspeciona o status, ex.: DELETE 404 -> "objeto nao encontrado").
+// `extra_headers` entra assinada (nome em caixa baixa) e e enviada como
+// "X-Amz-..." (ex.: x-amz-copy-source); `resp_headers`, quando dado, recebe os
+// headers da resposta em caixa baixa (ex.: etag do UploadPart).
 std::pair<int, std::string> s3_request(
     const std::string& method, const std::string& bucket, const std::string& key,
     const std::vector<std::pair<std::string, std::string>>& query_map,
-    const std::string& body, bool falhar = true) {
+    const std::string& body, bool falhar = true,
+    const std::vector<std::pair<std::string, std::string>>& extra_headers = {},
+    std::vector<std::pair<std::string, std::string>>* resp_headers = nullptr) {
   const Credenciais c = credenciais();
   const std::string host = endpoint_host(c.endpoint);
   const std::string canonical_uri =
@@ -302,7 +327,8 @@ std::pair<int, std::string> s3_request(
   if (!query.empty()) url += "?" + query;
   const std::string payload_hash = sha256_hex(body);
 
-  const Assinatura a = assinar(c, method, canonical_uri, query, host, payload_hash);
+  const Assinatura a =
+      assinar(c, method, canonical_uri, query, host, payload_hash, extra_headers);
   std::vector<std::pair<std::string, std::string>> headers = {
       {"Host", host},
       {"X-Amz-Content-Sha256", payload_hash},
@@ -310,13 +336,43 @@ std::pair<int, std::string> s3_request(
       {"Authorization", a.authorization},
   };
   if (!c.token.empty()) headers.emplace_back("X-Amz-Security-Token", c.token);
-  if (method == "PUT") headers.emplace_back("Content-Type", "application/octet-stream");
+  for (const auto& [nome, valor] : extra_headers) {
+    std::string titulo = nome;
+    titulo[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(titulo[0])));
+    headers.emplace_back(titulo, valor);
+  }
+  if (method == "PUT" || method == "POST") {
+    headers.emplace_back("Content-Type", "application/octet-stream");
+  }
 
   std::string out_file;
   const int fd = tilt_tempfile("s3_resp", out_file);
   if (fd < 0) die("nao foi possivel criar arquivo temporario");
   tilt_close_file(fd);
-  const int status = http(method, url, headers, body, out_file, falhar);
+  std::string hdr_file;
+  const int fdh = tilt_tempfile("s3_hdr", hdr_file);
+  if (fdh < 0) die("nao foi possivel criar arquivo temporario");
+  tilt_close_file(fdh);
+  const int status = http(method, url, headers, body, out_file, hdr_file, falhar);
+
+  if (resp_headers) {
+    std::ifstream hin(hdr_file);
+    std::string linha;
+    while (std::getline(hin, linha)) {
+      if (!linha.empty() && linha.back() == '\r') linha.pop_back();
+      const std::size_t dois_pontos = linha.find(':');
+      if (dois_pontos == std::string::npos) continue;  // status line / vazia
+      std::string nome = linha.substr(0, dois_pontos);
+      std::transform(nome.begin(), nome.end(), nome.begin(),
+                     [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+      std::string valor = linha.substr(dois_pontos + 1);
+      while (!valor.empty() && (valor.front() == ' ' || valor.front() == '\t')) {
+        valor.erase(valor.begin());
+      }
+      resp_headers->emplace_back(std::move(nome), std::move(valor));
+    }
+  }
+  std::remove(hdr_file.c_str());
 
   std::ifstream in(out_file, std::ios::binary);
   std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -403,6 +459,115 @@ void s3_delete(const std::string& url) {
   if (status == 404) die("objeto nao encontrado: " + o.chave);
   if (status != 204 && status != 200) {
     die("delete falhou com HTTP " + std::to_string(status));
+  }
+}
+
+void s3_copiar(const std::string& url_origem, const std::string& url_destino) {
+  const Objeto origem = parse_url(url_origem);
+  if (origem.chave.empty()) die("esperado 's3://bucket/chave' na origem");
+  const Objeto destino = parse_url(url_destino);
+  if (destino.chave.empty()) die("esperado 's3://bucket/chave' no destino");
+  // x-amz-copy-source: "/bucket/chave" com a chave URI-encoded na integra.
+  const std::string fonte =
+      "/" + origem.bucket + "/" + uri_encode(origem.chave);
+  s3_request("PUT", destino.bucket, destino.chave, {}, "", true,
+             {{"x-amz-copy-source", fonte}});
+}
+
+std::vector<std::pair<std::string, std::string>> s3_cabecalho(
+    const std::string& url) {
+  const Objeto o = parse_url(url);
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  std::vector<std::pair<std::string, std::string>> headers;
+  // HEAD: falhar=false porque o tratamento de status e proprio (404 claro) e
+  // nao ha corpo de erro para anexar a mensagem.
+  const int status =
+      s3_request("HEAD", o.bucket, o.chave, {}, "", false, {}, &headers).first;
+  if (status == 404) die("objeto nao encontrado: " + o.chave);
+  if (status != 200) die("head falhou com HTTP " + std::to_string(status));
+  std::vector<std::pair<std::string, std::string>> meta;
+  for (const auto& [nome, valor] : headers) {
+    if (nome == "content-length" || nome == "content-type" || nome == "etag" ||
+        nome == "last-modified" || nome.rfind("x-amz-meta-", 0) == 0) {
+      meta.emplace_back(nome, valor);
+    }
+  }
+  return meta;
+}
+
+std::string s3_multipart_iniciar(const std::string& url) {
+  const Objeto o = parse_url(url);
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  // Query "uploads" sem valor: POST ?uploads.
+  const std::string xml =
+      s3_request("POST", o.bucket, o.chave, {{"uploads", ""}}, "").second;
+  const std::size_t b = xml.find("<UploadId>");
+  const std::size_t e = xml.find("</UploadId>");
+  if (b == std::string::npos || e == std::string::npos || e < b) {
+    die("resposta sem <UploadId>: " + xml.substr(0, 200));
+  }
+  return xml.substr(b + 10, e - b - 10);
+}
+
+std::string s3_multipart_parte(const std::string& url,
+                               const std::string& upload_id, int numero,
+                               const std::string& dados) {
+  const Objeto o = parse_url(url);
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  if (numero < 1 || numero > 10000) {
+    die("numero da parte deve estar entre 1 e 10000 (recebido " +
+        std::to_string(numero) + ")");
+  }
+  std::vector<std::pair<std::string, std::string>> headers;
+  s3_request("PUT", o.bucket, o.chave,
+             {{"partNumber", std::to_string(numero)}, {"uploadId", upload_id}},
+             dados, true, {}, &headers);
+  for (const auto& [nome, valor] : headers) {
+    if (nome == "etag") return valor;
+  }
+  die("resposta sem ETag da parte");
+}
+
+std::string s3_multipart_concluir(
+    const std::string& url, const std::string& upload_id,
+    const std::vector<std::pair<int, std::string>>& partes) {
+  const Objeto o = parse_url(url);
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  if (partes.empty()) die("lista de partes nao pode ser vazia");
+  std::string xml = "<CompleteMultipartUpload>";
+  int anterior = 0;
+  for (const auto& [numero, etag] : partes) {
+    if (numero < 1 || numero > 10000) {
+      die("numero da parte deve estar entre 1 e 10000 (recebido " +
+          std::to_string(numero) + ")");
+    }
+    if (numero <= anterior) {
+      die("partes devem estar em ordem crescente, sem duplicatas (recebida " +
+          std::to_string(numero) + " apos " + std::to_string(anterior) + ")");
+    }
+    anterior = numero;
+    xml += "<Part><PartNumber>" + std::to_string(numero) +
+           "</PartNumber><ETag>" + etag + "</ETag></Part>";
+  }
+  xml += "</CompleteMultipartUpload>";
+  const std::string corpo =
+      s3_request("POST", o.bucket, o.chave, {{"uploadId", upload_id}}, xml).second;
+  const std::size_t b = corpo.find("<ETag>");
+  const std::size_t e = corpo.find("</ETag>");
+  if (b == std::string::npos || e == std::string::npos || e < b) {
+    die("resposta sem <ETag>: " + corpo.substr(0, 200));
+  }
+  return corpo.substr(b + 6, e - b - 6);
+}
+
+void s3_multipart_abortar(const std::string& url, const std::string& upload_id) {
+  const Objeto o = parse_url(url);
+  if (o.chave.empty()) die("esperado 's3://bucket/chave'");
+  const int status = s3_request("DELETE", o.bucket, o.chave,
+                                {{"uploadId", upload_id}}, "", false)
+                         .first;
+  if (status != 204 && status != 200) {
+    die("abort falhou com HTTP " + std::to_string(status));
   }
 }
 

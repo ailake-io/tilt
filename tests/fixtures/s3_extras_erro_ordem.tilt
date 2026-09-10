@@ -1,0 +1,6 @@
+# Deve falhar: s3_concluir_upload com partes fora de ordem (2 antes de 1).
+pipeline erro_ordem:
+  passos:
+    - uid = s3_iniciar_upload "s3://bucket/erro.bin"
+    - e1 = s3_enviar_parte "s3://bucket/erro.bin", uid, 1, "a"
+    - s3_concluir_upload "s3://bucket/erro.bin", uid, [[2, e1], [1, e1]]
