@@ -1,10 +1,10 @@
-erro[T011]: operacao '+' nao se aplica a 'lista': aritmetica espera numeros, texto (so com '+') ou tensor
+erro[T011]: operacao '+' nao se aplica a 'lista': aritmetica espera numeros, texto (so com '+'), lista (so com '+') ou tensor
   --> input.tilt:4:11
    |
  4 |     - y = xs + 1
    |           ^^
    |
-   = se queria concatenar, use '+' entre textos; para juntar listas, construa uma nova lista com os elementos
+   = se queria concatenar, use '+' entre textos ou entre listas
 
 erro[T011]: texto so concatena com '+'; '-' nao se aplica a 'texto'
   --> input.tilt:5:11

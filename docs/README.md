@@ -8,8 +8,8 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 |---|---|---|
 | 01 | [Sintaxe](guia-01-sintaxe.md) | indentação, comentários, literais, `seja`/`constante`, `funcao`, `se`/`para cada`/`enquanto`/`tentar`, operadores, coleções, `importar` |
 | 02 | [Tipos](guia-02-tipos.md) | `tipo`, escalares, `lista`/`mapa`/`opcional`, `tensor`, `tabela`, `fluxo`, união de literais, valores padrão |
-| 03 | [Engenharia de dados](guia-03-dados.md) | `fonte`, `pipeline`, `passos`, métodos de tabela, `verificar`, `ao_falhar`, `agenda`, CSV/JSON |
-| 04 | [ML e Deep Learning](guia-04-ml-dl.md) | tensores e ops, `modelo`/`camadas`, `modelo X.executar`, `treino`, `carregador`, otimizadores, `dispositivo`/GPU |
+| 03 | [Engenharia de dados](guia-03-dados.md) | `fonte`, `pipeline`, `passos`, métodos de tabela, `verificar`, `ao_falhar`, `agenda`, CSV/JSON, stdlib `io` |
+| 04 | [ML e Deep Learning](guia-04-ml-dl.md) | tensores e ops, `modelo`/`camadas`, `modelo X.executar`, `treino`, `carregador`, otimizadores, `dispositivo`/GPU, stdlib `nn` |
 | 05 | [LLMs e RAG](guia-05-llm-rag.md) | `llm`, `perguntar`, `formato: <tipo>`, `incorporar`, `dividir_texto`, `indice`, `.inserir`/`.buscar` |
 | 06 | [Agentes](guia-06-agentes.md) | `ferramenta`, `agente`, `.responder`, `rastro`, `memoria`, `equipe`, `estrategia` |
 | 07 | [Serviços HTTP](guia-07-http.md) | `servico`, `rota`, `entrada`, `responder`, `tilt servir`, validação, códigos de status |

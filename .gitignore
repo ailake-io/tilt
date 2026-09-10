@@ -7,6 +7,7 @@ tests/golden/*/.actual.*
 *.tar.gz.sha256
 CPack*.cmake
 tests/golden/run-pesos-salva/saida.json
+tests/golden/run-stdlib/dados.json
 tests/golden/run-parquet/saida.parquet
 tests/golden/run-parquet-nulos/saida_nulos.parquet
 tests/golden/run-fonte-parquet/entrada.parquet

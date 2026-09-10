@@ -1,0 +1,15 @@
+# stdlib_basico.tilt — importa os modulos da biblioteca padrao e exercita
+# uma funcao de cada um. Roda offline: rede e um stub ate o runtime ganhar
+# um cliente HTTP generico.
+importar io
+importar nn
+importar rede
+
+funcao principal:
+  imprimir io.juntar_caminhos("dados", "clientes.csv")
+  w = tensor [[1.0, 0.0], [0.0, 1.0]]
+  b = tensor [10.0, 20.0]
+  x = tensor [[1.0, 2.0]]
+  imprimir nn.linear(x, w, b).dados
+  r = rede.get_json("http://127.0.0.1:1/status")
+  imprimir r.ok, r.erro

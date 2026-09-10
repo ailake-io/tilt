@@ -124,6 +124,23 @@ Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
 | `ler <fonte>` | lê a `fonte` declarada |
 | `carregador "d.csv", alvo: "col"` | → `{ x: tensor[N,F], y: lista, atributos: lista }` |
 
+### stdlib: `io`
+
+Sobre esses builtins, a stdlib instalada com o tilt (`importar io`, resolução
+no guia 01) adiciona helpers que falham como valor em vez de abortar o
+pipeline:
+
+| Função | Efeito |
+|---|---|
+| `io.juntar_caminhos(base, nome)` | junta com `/` → texto |
+| `io.existe_arquivo(caminho)` | `logico` — verdadeiro se o arquivo abre para leitura como CSV/texto |
+| `io.ler_json_seguro(caminho)` | valor JSON, ou `nulo` se faltar/inválido (útil para config opcional) |
+| `io.salvar_json(caminho, valor)` | grava JSON, ordem `(caminho, valor)`; → `logico` |
+
+Fora do escopo atual (sem builtin no runtime): ler arquivo bruto como texto,
+tamanho em bytes e listar/remover arquivos. O módulo `rede` existe como stub
+documentado — ver guia 12.
+
 ## Parquet nativo
 
 `ler_parquet`/`escrever_parquet` e `fonte tipo: parquet` usam o reader/writer

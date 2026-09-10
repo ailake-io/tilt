@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "common/source.hpp"
@@ -40,6 +41,10 @@ class Interpreter {
   // `tilt executar --agendar`: acknowledge `agenda:` cron on pipelines.
   void set_schedule_mode(bool on) { schedule_mode_ = on; }
 
+  // Diretorio do arquivo principal (entrada do CLI); modulos `importar x`
+  // sao resolvidos primeiro como `<dir>/x.tilt` e depois na stdlib.
+  void set_entry_dir(std::string dir) { entry_dir_ = std::move(dir); }
+
   // Returns 0 on success, 1 if a runtime error was reported.
   int run();
 
@@ -60,10 +65,24 @@ class Interpreter {
  private:
   struct Env {
     std::unordered_map<std::string, rt::Value> vars;
+    // Tabela de funcoes do modulo dono deste escopo (scope de Module), para
+    // chamadas entre funcoes do mesmo modulo sem prefixo. nullptr fora de
+    // modulo.
+    const std::unordered_map<std::string, const ast::Item*>* funcs = nullptr;
     Env* parent = nullptr;
 
     rt::Value* lookup(const std::string& name);
     void set(const std::string& name, rt::Value value);
+  };
+
+  // Modulo carregado via `importar nome` / `de nome importar f`. Mantem o
+  // Program do arquivo vivo (os itens apontam para ele) e o escopo com as
+  // variaveis de topo do modulo (parent = root_), visivel as suas funcoes.
+  struct Module {
+    std::string path;
+    std::shared_ptr<ast::Program> program;
+    std::unordered_map<std::string, const ast::Item*> funcs;  // 'funcao' exportadas
+    Env scope;
   };
 
   struct ReturnSignal {
@@ -80,6 +99,12 @@ class Interpreter {
                          DiagCode code = DiagCode::RuntimeError);
 
   void register_decls();
+  // Carrega o modulo `name` procurando `<from_dir>/name.tilt` e depois os
+  // diretorios da stdlib (TILT_STDLIB_PATH, stdlib/ ao lado do binario,
+  // <exe>/../share/tilt/stdlib). Falha com a lista de caminhos tentados.
+  std::shared_ptr<Module> load_module(const std::string& name, const std::string& from_dir,
+                                      Span span);
+  std::vector<std::string> stdlib_dirs() const;
   // `now < 0` le o relogio atual (fake via TILT_AGORA ou real); o loop de
   // agenda passa o tempo fake avancado explicitamente.
   void run_pipeline(const ast::Item& pipeline, std::time_t now = -1);
@@ -99,7 +124,8 @@ class Interpreter {
   rt::Value eval_builtin(const std::string& name, const ast::Expr& call, Env& env);
   rt::Value eval_method(const std::string& method, rt::Value receiver, const ast::Expr& call,
                         Env& env);
-  rt::Value call_function(const ast::Item& fn, std::vector<rt::Value> args, Span span);
+  rt::Value call_function(const ast::Item& fn, std::vector<rt::Value> args, Span span,
+                          Env* module_scope = nullptr);
 
   std::vector<rt::Value> eval_args(const ast::Expr& call, Env& env);
   rt::ValueMap eval_kwargs(const ast::Expr& call, Env& env);
@@ -149,6 +175,13 @@ class Interpreter {
 
   Env root_;
   std::unordered_map<std::string, const ast::Item*> functions_;
+  // Escopo do modulo de origem de cada funcao trazida por `de m importar f`
+  // (nullptr = funcao declarada no programa principal).
+  std::unordered_map<const ast::Item*, std::shared_ptr<Module>> func_module_;
+  std::unordered_map<std::string, std::shared_ptr<Module>> modules_;  // por nome
+  std::unordered_map<std::string, std::shared_ptr<Module>> modules_by_path_;
+  std::unordered_set<std::string> loading_modules_;  // guarda de ciclo (caminhos)
+  std::string entry_dir_;                          // dir do arquivo principal
   std::unordered_map<std::string, const ast::Item*> entities_;
   std::vector<const ast::Item*> pipelines_;
   std::unordered_map<std::string, std::vector<Layer>> model_cache_;

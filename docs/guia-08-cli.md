@@ -67,5 +67,6 @@ Despejam a árvore sintática (S-expression) e o fluxo de tokens. Debug.
 | `TILT_LLM` | executar, servir | `mock` = offline determinístico; vazio = `curl` real |
 | `TILT_GPU` | executar | `off` (padrão) · `auto` · `fake` |
 | `TILT_VM_DEBUG` | executar | `1` despeja o bytecode das funções |
+| `TILT_STDLIB_PATH` | executar, servir | diretórios com módulos `importar` (sep. `:`), consultados antes de `../share/tilt/stdlib` |
 | `CC` | compilar | compilador C do link final |
 | `NO_COLOR` | todos | diagnósticos sem cor |

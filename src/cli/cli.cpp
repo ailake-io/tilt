@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -289,6 +290,7 @@ int cmd_executar(const std::vector<std::string_view>& args) {
   }
 
   Interpreter interp(program, diag, std::cout);
+  interp.set_entry_dir(std::filesystem::path(std::string(path)).parent_path().string());
   interp.set_schedule_mode(schedule);
   int rc = schedule ? interp.run_scheduled() : (vm ? interp.run_vm() : interp.run());
   if (diag.has_errors()) {
@@ -533,6 +535,7 @@ int cmd_servir(const std::vector<std::string_view>& args) {
   }
 
   Interpreter interp(program, diag, std::cout);
+  interp.set_entry_dir(std::filesystem::path(std::string(path)).parent_path().string());
   const int rc = interp.serve(port, max_requests, threads);
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());

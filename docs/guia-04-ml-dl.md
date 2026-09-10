@@ -32,6 +32,7 @@ viés `[N]` no último eixo) e entre tensor e escalar.
 | `.softmax` | softmax no último eixo |
 | `.conv2d(nucleo, passo: N)` | convolução 2D NCHW, padding válido (ver abaixo) |
 | `.norma_lote(gama, beta, media, variancia, eps: e, em_treino: b)` | batch norm por canal (ver abaixo) |
+| `.norma_camada()` | layer norm no último eixo (sem affine) |
 | `.soma` `.media` | redução total → `decimal` |
 | `.argmax` | índice do maior no último eixo |
 | `.item` | escalar de um tensor de 1 elemento |
@@ -179,3 +180,33 @@ Pós-treino os pesos ficam no `modelo` — chamadas seguintes de
 
 Quando um backend de GPU ativa, imprime uma vez `[gpu] <info>`. O caminho CUDA
 foi validado apenas em hardware.
+
+## stdlib: `nn` e `io`
+
+Além de `modelo`/`treino` (que têm otimizadores e backward), a stdlib
+instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolvida automaticamente
+por `importar`) traz camadas compostas em tilt puro — legíveis, testáveis e
+copiáveis para o projeto:
+
+```tilt
+importar nn
+
+funcao principal:
+  q = tensor [[1.0, 0.0], [0.0, 1.0]]
+  imprimir nn.atencao_causal(q, q, q, 1.0).dados
+```
+
+| Função | Efeito |
+|---|---|
+| `nn.linear(x, w, b)` | `x @ w + b` (viés na última dimensão) |
+| `nn.atencao(q, k, v, escala)` | `softmax((q @ kᵀ) * escala) @ v` |
+| `nn.atencao_causal(q, k, v, escala)` | idem, com máscara triangular |
+| `nn.feedforward(x, w1, b1, w2, b2)` | MLP com `gelu` |
+| `nn.bloco_atencao(x, w_q, w_k, w_v, w_o)` | bloco pré-norm com residual |
+| `nn.norma_camada(x)` | layer norm na última dimensão |
+
+`escala` é `1 / raiz(d_k)` — a linguagem ainda não tem `sqrt`, então quem
+chama passa a escala (use `1.0` para ignorar). É forward-only: para treinar,
+use `modelo`/`treino`. O módulo `io` (guia 03) cobre caminhos, existência e
+JSON seguro; `rede` é um stub documentado (guia 12) até o runtime ganhar um
+cliente HTTP genérico.

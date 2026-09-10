@@ -176,7 +176,11 @@ ItemPtr Parser::parse_funcao_decl() {
     if (at(TokenKind::Identifier)) {
       Arg p;
       p.name = std::string(advance().lexeme);
-      if (accept(TokenKind::Colon)) p.value = parse_postfix();
+      // ':' seguido de NEWLINE e o ':' que abre o corpo, nao um tipo vazio.
+      if (at(TokenKind::Colon) && peek(1).kind != TokenKind::Newline) {
+        advance();
+        p.value = parse_postfix();
+      }
       it->params.push_back(std::move(p));
       continue;
     }

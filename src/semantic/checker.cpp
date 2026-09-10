@@ -86,7 +86,10 @@ void SemanticChecker::define(const std::string& name, std::string kind, Type typ
     // `treino X` intentionally shares its name with `modelo X`.
     const bool treino_pair = (kind == "treino" && it->second.kind == "modelo") ||
                              (kind == "modelo" && it->second.kind == "treino");
-    if (!treino_pair) {
+    // `importar io` + `de io importar f` no mesmo arquivo carregam o mesmo
+    // modulo duas vezes; o simbolo modulo e idempotente.
+    const bool modulo_pair = kind == "modulo" && it->second.kind == "modulo";
+    if (!treino_pair && !modulo_pair) {
       report(DiagCode::DuplicateDeclaration, span, "'" + name + "' ja foi declarado",
              {"declaracao anterior na linha " + std::to_string(it->second.span.line)});
     }
@@ -108,10 +111,28 @@ void SemanticChecker::collect() {
     const std::string kw = item->key;
     const std::string name = decl_name(*item);
 
-    if (kw == "importar" || kw == "de") {
+    if (kw == "importar") {
       for (const auto& h : item->header) {
         if (h && h->kind == ExprKind::Name && h->text != "importar") {
           define(h->text, "modulo", Type::scalar(TypeKind::Unknown), item->span);
+        }
+      }
+      continue;
+    }
+    if (kw == "de") {
+      // `de <modulo> importar <nome>...`: o primeiro nome e o modulo; os
+      // demais passam a ser tratados como funcoes (o runtime resolve e
+      // valida as exportacoes ao carregar o arquivo).
+      bool first = true;
+      for (const auto& h : item->header) {
+        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+        if (first) {
+          define(h->text, "modulo", Type::scalar(TypeKind::Unknown), item->span);
+          first = false;
+        } else {
+          Type ft;
+          ft.kind = TypeKind::Funcao;
+          define(h->text, "funcao", std::move(ft), item->span);
         }
       }
       continue;
@@ -651,9 +672,9 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
 
 // Metodos que o runtime despacha por tipo de receiver (eval_method).
 bool is_tensor_method(std::string_view m) {
-  return word_in(m, {"matmul", "mais", "conv2d", "norma_lote", "reformar", "softmax", "relu",
-                     "gelu", "silu", "sigmoide", "tanh", "soma", "media", "argmax", "item",
-                     "forma", "dados", "transposta", "tamanho"});
+  return word_in(m, {"matmul", "mais", "conv2d", "norma_lote", "norma_camada", "reformar",
+                     "softmax", "relu", "gelu", "silu", "sigmoide", "tanh", "soma", "media",
+                     "argmax", "item", "forma", "dados", "transposta", "tamanho"});
 }
 bool is_table_method(std::string_view m) {
   return word_in(m, {"filtrar", "derivar", "mapear", "agrupar_por", "selecionar", "ordenar_por",
@@ -947,12 +968,14 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
             return TypeKind::Unknown;
           }
         } else {  // aritmetica
-          if (a_bad || b_bad) {
+          // '+' entre listas concatena (espelha apply_binop); os demais
+          // operadores continuam invalidos para lista/mapa/tabela.
+          const bool concat = op == "+" && a == TypeKind::Lista && b == TypeKind::Lista;
+          if ((a_bad || b_bad) && !concat) {
             report(DiagCode::TypeMismatch, e.span,
                    "operacao '" + op + "' nao se aplica a '" +
-                       type_kind_name(a_bad ? a : b) + "': aritmetica espera numeros, texto (so com '+') ou tensor",
-                   {"se queria concatenar, use '+' entre textos; para juntar listas, "
-                    "construa uma nova lista com os elementos"});
+                       type_kind_name(a_bad ? a : b) + "': aritmetica espera numeros, texto (so com '+'), lista (so com '+') ou tensor",
+                   {"se queria concatenar, use '+' entre textos ou entre listas"});
             return TypeKind::Unknown;
           }
           if ((a == TypeKind::Texto || b == TypeKind::Texto) && op != "+") {
@@ -977,6 +1000,7 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
       if (cmp) return TypeKind::Logico;
       // tipo resultante da aritmetica (espelhando apply_binop)
       if (a == TypeKind::Texto || b == TypeKind::Texto) return TypeKind::Texto;
+      if (a == TypeKind::Lista || b == TypeKind::Lista) return TypeKind::Lista;
       if (a == TypeKind::Tensor || b == TypeKind::Tensor) return TypeKind::Tensor;
       if (a == TypeKind::Inteiro && b == TypeKind::Inteiro && op != "/") return TypeKind::Inteiro;
       return is_number_kind(a) && is_number_kind(b) ? TypeKind::Decimal : TypeKind::Unknown;
@@ -1029,7 +1053,8 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
         if (base == TypeKind::Tabela || base == TypeKind::Lista) {
           if (is_table_method(m) && m != "tamanho") return TypeKind::Tabela;
         } else if (base == TypeKind::Tensor) {
-          if (word_in(m, {"matmul", "mais", "conv2d", "norma_lote", "reformar", "softmax"}) ||
+          if (word_in(m, {"matmul", "mais", "conv2d", "norma_lote", "norma_camada", "reformar",
+                          "softmax"}) ||
               word_in(m, {"relu", "gelu", "silu", "sigmoide", "tanh", "transposta"})) {
             return TypeKind::Tensor;
           }
@@ -1060,7 +1085,8 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
         }
         if (base == TypeKind::Tensor && !is_tensor_method(m) && !is_entity_method(m)) {
           report(DiagCode::TypeMismatch, e.span, "'tensor' nao tem o metodo '" + m + "'",
-                 {"metodos de tensor: matmul, mais, conv2d, norma_lote, reformar, softmax, soma, media, argmax, item"});
+                 {"metodos de tensor: matmul, mais, conv2d, norma_lote, norma_camada, reformar, "
+                  "softmax, soma, media, argmax, item"});
           return TypeKind::Unknown;
         }
         if (base == TypeKind::Texto && !is_texto_method(m) && !is_entity_method(m)) {

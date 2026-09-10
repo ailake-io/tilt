@@ -85,6 +85,13 @@ target_link_libraries(tilt PRIVATE tilt_core)
 set_target_properties(tilt PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# stdlib ao lado do binario no build tree: o interpretador resolve modulos em
+# <exe>/../share/tilt/stdlib, mesmo layout da instalacao (install/CPack).
+add_custom_command(TARGET tilt POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          ${CMAKE_CURRENT_SOURCE_DIR}/stdlib
+          ${CMAKE_BINARY_DIR}/share/tilt/stdlib)
+
 option(TILT_STATIC_LIBSTDCXX "Link libstdc++/libgcc statically (portable Linux binary)" ON)
 if(TILT_STATIC_LIBSTDCXX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_link_options(tilt PRIVATE -static-libgcc -static-libstdc++)
@@ -98,6 +105,7 @@ add_subdirectory(tests)
 include(GNUInstallDirs)
 install(TARGETS tilt RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY exemplos/ DESTINATION ${CMAKE_INSTALL_DATADIR}/tilt/exemplos)
+install(DIRECTORY stdlib/ DESTINATION ${CMAKE_INSTALL_DATADIR}/tilt/stdlib)
 install(FILES README.md LICENSE CLAUDE.md DESTINATION ${CMAKE_INSTALL_DATADIR}/tilt)
 install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DATADIR}/tilt/docs)
 

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <ctime>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <initializer_list>
@@ -18,6 +19,12 @@
 #include <thread>
 #include <unordered_set>
 #include <utility>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
@@ -76,6 +83,40 @@ std::string decl_name(const Item& it) {
     return it.header[0]->text;
   }
   return {};
+}
+
+// Diretorio do executavel (para localizar a stdlib ao lado dele).
+std::string exe_dir() {
+#if defined(_WIN32)
+  char buf[MAX_PATH] = {0};
+  const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return {};
+#else
+  char buf[4096] = {0};
+  const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0) return {};
+  buf[n] = '\0';
+#endif
+  return std::filesystem::path(buf).parent_path().string();
+}
+
+// Separa uma lista de diretorios em TILT_STDLIB_PATH (':' no POSIX, ';' no
+// Windows). Entradas vazias sao ignoradas.
+std::vector<std::string> split_path_list(const char* env_value) {
+  std::vector<std::string> out;
+  if (!env_value) return out;
+  const char sep =
+#if defined(_WIN32)
+      ';';
+#else
+      ':';
+#endif
+  std::string cur;
+  std::istringstream ss(env_value);
+  while (std::getline(ss, cur, sep)) {
+    if (!cur.empty()) out.push_back(cur);
+  }
+  return out;
 }
 
 const Item* find_field(const ast::Block& block, std::string_view key) {
@@ -165,6 +206,43 @@ void Interpreter::register_decls() {
       if (!name.empty()) root_.vars[name] = item->value ? eval(*item->value, root_) : Value::nulo();
     } else if (kw == "funcao") {
       if (!name.empty()) functions_[name] = item.get();
+    } else if (kw == "importar") {
+      for (const auto& h : item->header) {
+        if (h && h->kind == ExprKind::Name && h->text != "importar") {
+          load_module(h->text, entry_dir_.empty() ? "." : entry_dir_, item->span);
+        }
+      }
+    } else if (kw == "de") {
+      // `de <modulo> importar <nome>...`: primeiro nome e o modulo, os
+      // demais (exceto a palavra 'importar') entram no escopo principal.
+      std::string module_name;
+      std::vector<std::string> imported;
+      for (const auto& h : item->header) {
+        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+        if (module_name.empty()) {
+          module_name = h->text;
+        } else {
+          imported.push_back(h->text);
+        }
+      }
+      if (module_name.empty()) continue;
+      const std::string from = entry_dir_.empty() ? "." : entry_dir_;
+      std::shared_ptr<Module> mod = load_module(module_name, from, item->span);
+      for (const std::string& n : imported) {
+        if (auto f = mod->funcs.find(n); f != mod->funcs.end()) {
+          functions_[n] = f->second;
+          func_module_[f->second] = mod;
+        } else if (auto v = mod->scope.vars.find(n); v != mod->scope.vars.end()) {
+          root_.vars[n] = v->second;
+        } else {
+          std::string exports;
+          for (const auto& kv : mod->funcs) exports += (exports.empty() ? "" : ", ") + kv.first;
+          for (const auto& kv : mod->scope.vars) exports += (exports.empty() ? "" : ", ") + kv.first;
+          fail(item->span, "modulo '" + module_name + "' nao exporta '" + n + "'" +
+                               (exports.empty() ? " (modulo vazio)"
+                                                : " (exporta: " + exports + ")"));
+        }
+      }
     } else if (kw == "pipeline") {
       pipelines_.push_back(item.get());
     } else if (kw == "treino") {
@@ -173,6 +251,126 @@ void Interpreter::register_decls() {
       entities_[name] = item.get();
     }
   }
+}
+
+// ------------------------------------------------------------------ modules
+//
+// `importar io` carrega `io.tilt` procurando: (1) ao lado do arquivo que
+// esta importando; (2) cada diretorio em TILT_STDLIB_PATH; (3) `stdlib/` ao
+// lado do binario; (4) `<exe>/../share/tilt/stdlib` (layout de instalacao).
+// O erro lista todos os caminhos tentados.
+
+std::vector<std::string> Interpreter::stdlib_dirs() const {
+  std::vector<std::string> dirs = split_path_list(std::getenv("TILT_STDLIB_PATH"));
+  const std::string exe = exe_dir();
+  if (!exe.empty()) {
+    dirs.push_back((std::filesystem::path(exe) / "stdlib").string());
+    dirs.push_back((std::filesystem::path(exe) / ".." / "share" / "tilt" / "stdlib").string());
+  }
+  return dirs;
+}
+
+std::shared_ptr<Interpreter::Module> Interpreter::load_module(const std::string& name,
+                                                              const std::string& from_dir,
+                                                              Span span) {
+  if (auto it = modules_.find(name); it != modules_.end()) return it->second;
+
+  std::vector<std::string> tried;
+  std::string path;
+  auto probe = [&](const std::string& dir) {
+    const std::filesystem::path p =
+        dir.empty() ? std::filesystem::path(name + ".tilt")
+                    : std::filesystem::path(dir) / (name + ".tilt");
+    tried.push_back(p.string());
+    std::error_code ec;
+    if (path.empty() && std::filesystem::is_regular_file(p, ec) && !ec) path = p.string();
+  };
+  probe(from_dir);
+  for (const std::string& dir : stdlib_dirs()) probe(dir);
+  if (path.empty()) {
+    std::string where;
+    for (const std::string& t : tried) where += (where.empty() ? "" : ", ") + std::string("'") + t + "'";
+    fail(span, "modulo '" + name + "' nao encontrado; procurei em " + where);
+  }
+
+  if (auto cached = modules_by_path_.find(path); cached != modules_by_path_.end()) {
+    modules_[name] = cached->second;
+    return cached->second;
+  }
+  if (loading_modules_.count(path)) {
+    fail(span, "ciclo de importacao envolvendo o modulo '" + name + "' (" + path + ")");
+  }
+  loading_modules_.insert(path);
+
+  SourceFile src = SourceFile::load(path);  // existe: is_regular_file acima
+  DiagnosticEngine md(&src);
+  Lexer lexer(src, md);
+  const std::vector<Token> tokens = lexer.tokenize();
+  Parser parser(tokens, md);
+  ast::Program program = parser.parse_program();
+  check_program(program, md);
+  if (md.has_errors()) {
+    loading_modules_.erase(path);
+    const Diagnostic& first = md.all().front();
+    fail(span, "modulo '" + name + "' (" + path + ":" + std::to_string(first.span.line) +
+                   ") tem erros: " + first.message);
+  }
+
+  auto mod = std::make_shared<Module>();
+  mod->path = path;
+  mod->program = std::make_shared<ast::Program>(std::move(program));
+  mod->scope.parent = &root_;
+  const std::string mod_dir = std::filesystem::path(path).parent_path().string();
+
+  // Registra o conteudo: 'funcao' vira exportacao (e fica visivel para as
+  // irmas via scope.funcs), 'seja'/'constante' entram no escopo do modulo,
+  // 'importar'/'de ... importar' aninhados resolvem primeiro (as funcoes do
+  // modulo podem usa-los).
+  for (const auto& item : mod->program->items) {
+    if (!item || item->kind != ItemKind::Decl) continue;
+    const std::string iname = decl_name(*item);
+    if (item->key == "funcao") {
+      if (!iname.empty()) mod->funcs[iname] = item.get();
+    } else if (item->key == "seja" || item->key == "constante") {
+      if (!iname.empty()) {
+        mod->scope.vars[iname] = item->value ? eval(*item->value, mod->scope) : Value::nulo();
+      }
+    } else if (item->key == "importar") {
+      for (const auto& h : item->header) {
+        if (h && h->kind == ExprKind::Name && h->text != "importar") {
+          load_module(h->text, mod_dir, item->span);
+        }
+      }
+    } else if (item->key == "de") {
+      std::string module_name;
+      std::vector<std::string> imported;
+      for (const auto& h : item->header) {
+        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+        if (module_name.empty()) {
+          module_name = h->text;
+        } else {
+          imported.push_back(h->text);
+        }
+      }
+      if (module_name.empty()) continue;
+      std::shared_ptr<Module> dep = load_module(module_name, mod_dir, item->span);
+      for (const std::string& n : imported) {
+        if (auto f = dep->funcs.find(n); f != dep->funcs.end()) {
+          mod->funcs[n] = f->second;  // chamavel sem prefixo dentro do modulo
+        } else if (auto v = dep->scope.vars.find(n); v != dep->scope.vars.end()) {
+          mod->scope.vars[n] = v->second;
+        } else {
+          fail(item->span, "modulo '" + module_name + "' nao exporta '" + n + "'");
+        }
+      }
+    }
+  }
+  mod->scope.funcs = &mod->funcs;
+
+  loading_modules_.erase(path);
+  modules_by_path_[path] = mod;
+  modules_[name] = mod;
+  return mod;
 }
 
 namespace {
@@ -446,7 +644,11 @@ int Interpreter::run_vm() {
             return Value::nulo();
           }
           *handled = true;
-          return call_function(*f->second, std::move(a), Span{});
+          Env* scope = nullptr;
+          if (auto fm = func_module_.find(f->second); fm != func_module_.end()) {
+            scope = &fm->second->scope;
+          }
+          return call_function(*f->second, std::move(a), Span{}, scope);
         });
         try {
           machine.run(*chunk, {});
@@ -2716,6 +2918,9 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
       return Value::nulo();
     case ExprKind::Name: {
       if (Value* v = env.lookup(expr.text)) return *v;
+      if (auto mit = modules_.find(expr.text); mit != modules_.end()) {
+        fail(expr.span, "'" + expr.text + "' e um modulo; chame " + expr.text + ".<funcao>(...)");
+      }
       if (auto it = entities_.find(expr.text); it != entities_.end()) return Value::texto(expr.text);
       fail(expr.span, "nome '" + expr.text + "' nao definido");
     }
@@ -2949,14 +3154,42 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
   const Expr& callee = *expr.lhs;
 
   if (callee.kind == ExprKind::Member) {
+    // Chamada de funcao de modulo: `io.ler_json_seguro(...)`.
+    if (callee.lhs && callee.lhs->kind == ExprKind::Name) {
+      if (auto mit = modules_.find(callee.lhs->text); mit != modules_.end()) {
+        auto fit = mit->second->funcs.find(callee.text);
+        if (fit == mit->second->funcs.end()) {
+          std::string exports;
+          for (const auto& kv : mit->second->funcs) {
+            exports += (exports.empty() ? "" : ", ") + kv.first;
+          }
+          fail(expr.span, "modulo '" + mit->first + "' nao tem a funcao '" + callee.text + "'" +
+                              (exports.empty() ? "" : " (funcoes: " + exports + ")"));
+        }
+        return call_function(*fit->second, eval_args(expr, env), expr.span, &mit->second->scope);
+      }
+    }
     Value receiver = eval(*callee.lhs, env);
     return eval_method(callee.text, std::move(receiver), expr, env);
   }
 
   if (callee.kind == ExprKind::Name) {
     const std::string& name = callee.text;
+    // Funcao de modulo visivel no escopo (irma ou `de ... importar` aninhado):
+    // anda na cadeia de envs procurando uma tabela de funcoes de modulo.
+    for (Env* e = &env; e; e = e->parent) {
+      if (e->funcs) {
+        if (auto fit = e->funcs->find(name); fit != e->funcs->end()) {
+          return call_function(*fit->second, eval_args(expr, env), expr.span, e);
+        }
+      }
+    }
     if (auto it = functions_.find(name); it != functions_.end()) {
-      return call_function(*it->second, eval_args(expr, env), expr.span);
+      Env* scope = nullptr;
+      if (auto fm = func_module_.find(it->second); fm != func_module_.end()) {
+        scope = &fm->second->scope;
+      }
+      return call_function(*it->second, eval_args(expr, env), expr.span, scope);
     }
     return eval_builtin(name, expr, env);
   }
@@ -2964,7 +3197,11 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
   fail(expr.span, "chamada invalida");
 }
 
-Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span) {
+Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span,
+                                 Env* module_scope) {
+  // Funcoes de modulo rodam pela arvore: o subconjunto da VM resolve chamadas
+  // por nome apenas contra 'functions_', sem a tabela do modulo (scope.funcs).
+  if (module_scope == nullptr) {
   // Try the bytecode VM for functions in its pure subset; fall back otherwise.
   // A compilacao e lazy e cacheada: o mutex so cobre o mapa; o Chunk em si
   // e imutavel durante a execucao e pode ser rodado por varias threads.
@@ -3001,7 +3238,11 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
         return Value::nulo();
       }
       *handled = true;
-      return call_function(*f->second, std::move(a), Span{});
+      Env* scope = nullptr;
+      if (auto fm = func_module_.find(f->second); fm != func_module_.end()) {
+        scope = &fm->second->scope;
+      }
+      return call_function(*f->second, std::move(a), Span{}, scope);
     });
     try {
       return machine.run(*chunk, std::move(args));
@@ -3009,9 +3250,10 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
       fail(fn.span, std::string("VM: ") + e.what());
     }
   }
+  }
 
   Env env;
-  env.parent = &root_;
+  env.parent = module_scope ? module_scope : &root_;
   for (std::size_t k = 0; k < fn.params.size(); ++k) {
     env.vars[fn.params[k].name] = k < args.size() ? args[k] : Value::nulo();
   }
@@ -4338,6 +4580,9 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         }
         return Value::tensor_de(
             rt::norma_lote(t, *a[0].tensor, *a[1].tensor, media, var, eps, em_treino));
+      }
+      if (method == "norma_camada") {
+        return Value::tensor_de(rt::layer_norm_last(t));
       }
       if (method == "reformar") {
         auto a = eval_args(call, env);

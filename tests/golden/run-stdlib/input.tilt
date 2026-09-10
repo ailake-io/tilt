@@ -1,0 +1,26 @@
+importar io
+importar rede
+importar nn
+
+funcao principal:
+  # io: caminhos, existencia e leitura segura de JSON
+  escrever_json {nome: "tilt", versao: 1}, "dados.json"
+  imprimir io.juntar_caminhos("var", "dados.json")
+  imprimir io.existe_arquivo("dados.json"), io.existe_arquivo("ausente.json")
+  cfg = io.ler_json_seguro("dados.json")
+  imprimir cfg.nome, cfg.versao
+  imprimir io.ler_json_seguro("ausente.json")
+
+  # rede: stub sem chamada de rede — erro estruturado ate o runtime ganhar
+  # um cliente HTTP generico
+  r = rede.get_json("http://127.0.0.1:1/status")
+  imprimir r.ok
+
+  # nn: linear, atencao causal e norma de camada sobre tensors pequenos
+  w = tensor [[1.0, 0.0], [0.0, 1.0]]
+  b = tensor [10.0, 20.0]
+  x = tensor [[1.0, 2.0]]
+  imprimir nn.linear(x, w, b).dados
+  q = tensor [[1.0, 0.0], [0.0, 1.0]]
+  imprimir nn.atencao_causal(q, q, q, 1.0).dados
+  imprimir nn.norma_camada(x).dados

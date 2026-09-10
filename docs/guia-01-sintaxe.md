@@ -137,5 +137,12 @@ importar rede
 de agentes importar memoria_vetorial
 ```
 
-> A resolução de módulos ainda não carrega uma stdlib; `importar` registra o
-> nome mas não executa nada.
+> `importar io` carrega o arquivo `io.tilt` e expõe as `funcao` dele como
+> `io.ler_json_seguro(...)`; `de io importar ler_json_seguro` traz o nome para
+> o escopo principal. A busca é, nesta ordem: (1) `io.tilt` ao lado do
+> arquivo que importa; (2) cada diretório de `TILT_STDLIB_PATH` (separados
+> por `:`); (3) `stdlib/` ao lado do binário; (4)
+> `<binário>/../share/tilt/stdlib` (layout da instalação). Erro claro (`T901`)
+> lista onde foi procurado. A stdlib instalada com o tilt traz `io`
+> (arquivos/caminhos), `rede` (stub de HTTP) e `nn` (camadas sobre tensor) —
+> ver guia 04 e guia 12.

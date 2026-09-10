@@ -1,0 +1,40 @@
+# io.tilt — helpers de arquivo e caminho sobre os builtins de dados da tilt.
+#
+# Coberto:
+#   juntar_caminhos(base, nome)  -> texto   junta com '/'
+#   existe_arquivo(caminho)      -> logico   verdadeiro se da para ler como CSV
+#   ler_json_seguro(caminho)     -> valor    valor JSON, ou nulo se falhar
+#   salvar_json(caminho, valor)  -> logico   verdadeiro se gravou
+#
+# De fora (sem builtin no runtime): ler arquivo bruto como texto, tamanho em
+# bytes (stat), listar diretorio e remover arquivo.
+
+funcao juntar_caminhos base: texto, nome: texto -> texto:
+  retornar base + "/" + nome
+
+# Nao ha builtin de "existe?" nem leitura de texto bruto; ler_csv falha quando
+# o arquivo nao abre, entao tentar/capturar cobre o caso. Aceita qualquer
+# arquivo de texto (ate invalido como CSV: vira tabela de 1 coluna).
+funcao existe_arquivo caminho: texto -> logico:
+  tentar:
+    ler_csv caminho
+    retornar verdadeiro
+  capturar e:
+    retornar falso
+
+# ler_json falha (aborta o pipeline) quando o arquivo falta ou e invalido;
+# aqui o erro vira nulo, util para valores opcionais de configuracao.
+funcao ler_json_seguro caminho: texto:
+  tentar:
+    retornar ler_json caminho
+  capturar e:
+    retornar nulo
+
+# Envolve escrever_json (que espera valor, caminho) com a ordem mais comum
+# em portugues (caminho primeiro) e erro como valor em vez de abortar.
+funcao salvar_json caminho: texto, valor -> logico:
+  tentar:
+    escrever_json valor, caminho
+    retornar verdadeiro
+  capturar e:
+    retornar falso

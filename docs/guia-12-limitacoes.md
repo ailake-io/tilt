@@ -240,6 +240,28 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   diferencial). Fora do subconjunto (builtins como `ler_csv`, interpolação,
   membros, `agenda:`/`ao_falhar:`) rejeita com mensagem clara.
 
+## Stdlib
+
+A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
+"Importar" no guia 01) cobre em 1ª passada:
+
+- **`io`** — `juntar_caminhos`, `existe_arquivo`, `ler_json_seguro`,
+  `salvar_json`, todos sobre os builtins de dados existentes. De fora:
+  leitura de arquivo bruto como texto, tamanho em bytes (`stat`), listar e
+  remover arquivos — não há builtin para isso no runtime.
+- **`rede`** — stub documentado: `get_json`/`post_json` existem com a
+  assinatura planejada, não tocam a rede e devolvem `{ok: falso, erro: ...}`.
+  O runtime ainda não expõe um cliente HTTP genérico (o `curl` interno serve
+  só aos conectores s3/llm/qdrant/iceberg). Para HTTP de saída hoje, use
+  `llm`/`perguntar` ou um `servico` como cliente via `servir`.
+- **`nn`** — `linear`, `atencao`, `atencao_causal`, `feedforward`,
+  `bloco_atencao`, `norma_camada`, compostos sobre os ops de tensor
+  (`.matmul`, `.softmax`, `.norma_camada()` etc.). Limites: forward-only
+  (treino continua em `modelo`/`treino`), sem `sqrt` na linguagem — a escala
+  da atenção (`1/raiz(d_k)`) é parâmetro — e sem máscaras de atenção
+  arbitrárias (a causal é montada como listas aninhadas, o que exigiu `'+'`
+  concatenando listas).
+
 ## Plataforma
 
 - `tilt compilar` gera x86-64; em ARM o teste `native` é pulado.

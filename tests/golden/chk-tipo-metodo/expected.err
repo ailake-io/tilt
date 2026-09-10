@@ -12,7 +12,7 @@ erro[T011]: 'tensor' nao tem o metodo 'filtrar'
  6 |     - f = t.filtrar verdadeiro
    |           ^
    |
-   = metodos de tensor: matmul, mais, conv2d, norma_lote, reformar, softmax, soma, media, argmax, item
+   = metodos de tensor: matmul, mais, conv2d, norma_lote, norma_camada, reformar, softmax, soma, media, argmax, item
 
 erro[T011]: 'inteiro' nao tem o campo 'maiusculas'
   --> input.tilt:8:19

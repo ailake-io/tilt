@@ -204,6 +204,11 @@ Value apply_binop(const std::string& op, const Value& a, const Value& b, bool* o
     }
     return Value::logico(false);
   }
+  if (op == "+" && a.kind == ValueKind::Lista && b.kind == ValueKind::Lista && a.list && b.list) {
+    ValueList out = *a.list;
+    out.insert(out.end(), b.list->begin(), b.list->end());
+    return Value::lista(std::move(out));
+  }
   if (op == "+" && (a.kind == ValueKind::Texto || b.kind == ValueKind::Texto)) {
     return Value::texto(to_display(a) + to_display(b));
   }

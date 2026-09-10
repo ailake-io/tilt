@@ -1,0 +1,51 @@
+# nn.tilt — camadas de rede neural compostas sobre os ops de tensor do
+# runtime (matmul, softmax, norma_camada, ativacoes). Tudo puro tilt:
+# da para ler, testar e copiar para o proprio projeto.
+#
+# Coberto:
+#   linear(x, w, b)                          y = x @ w + b (b na ultima dimensao)
+#   atencao(q, k, v, escala)                 softmax((q @ k^T) * escala) @ v
+#   atencao_causal(q, k, v, escala)          igual, com mascara triangular
+#   feedforward(x, w1, b1, w2, b2)           MLP com gelu
+#   bloco_atencao(x, w_q, w_k, w_v, w_o)     bloco pre-norm com residual
+#   norma_camada(x)                          layer norm na ultima dimensao
+#
+# `escala` e' 1 / raiz(d_k); a linguagem ainda nao tem sqrt, entao quem
+# chama passa a escala (use 1.0 para ignorar). Sem backprop: para treinar,
+# use declaracoes `modelo`/`treino`, que tem otimizadores proprios.
+
+funcao linear x, w, b:
+  retornar x.matmul(w).mais(b)
+
+funcao atencao q, k, v, escala:
+  pontuacoes = q.matmul(k.transposta) * escala
+  retornar pontuacoes.softmax.matmul(v)
+
+# A mascara triangular inferior (-1e6 acima da diagonal) e' montada como
+# listas aninhadas e convertida com tensor(lista). Depende de '+' concatenar
+# listas (garantido pelo runtime atual).
+funcao atencao_causal q, k, v, escala:
+  n = q.forma[0]
+  linhas = []
+  para cada i em intervalo(n):
+    linha = []
+    para cada j em intervalo(n):
+      se j <= i:
+        linha = linha + [0.0]
+      senao:
+        linha = linha + [-1000000.0]
+    linhas = linhas + [linha]
+  mascara = tensor(linhas)
+  pontuacoes = q.matmul(k.transposta) * escala + mascara
+  retornar pontuacoes.softmax.matmul(v)
+
+funcao feedforward x, w1, b1, w2, b2:
+  retornar linear(x, w1, b1).gelu.matmul(w2).mais(b2)
+
+funcao bloco_atencao x, w_q, w_k, w_v, w_o:
+  y = norma_camada(x)
+  a = atencao_causal(y.matmul(w_q), y.matmul(w_k), y.matmul(w_v), 1.0)
+  retornar x.mais(a.matmul(w_o))
+
+funcao norma_camada x:
+  retornar x.norma_camada()
