@@ -1,0 +1,9 @@
+# Consumidor do cenario de rebalanceamento (kafka_test.sh): dois processos
+# tilt rodam este pipeline concorrentemente no grupo "g2"; o mock broker (topico
+# "vendas" com 2 particoes) deve dividir as particoes entre eles (roundrobin),
+# entao cada processo so le as mensagens da sua particao.
+pipeline kafka_grupo2:
+  passos:
+    - msgs = ler_kafka "vendas", {grupo: "g2", max: 10}
+    - imprimir msgs
+    - imprimir tamanho msgs

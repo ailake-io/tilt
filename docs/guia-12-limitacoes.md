@@ -106,11 +106,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   uma conexão (com handshake `isMaster`) por chamada e payload inteiro em
   memória; banco por `MONGO_URL` (path) ou opção `banco:`.
 - Kafka (`ler_kafka`/`escrever_kafka`/`fonte tipo: kafka`): wire protocol
-  0.9-era — consumer groups com 1 membro por grupo por vez (o assignment
-  "range" pega todas as partições, mas sem rebalanceamento real: dois
-  consumidores no mesmo grupo não dividem as partições de forma coordenada),
-  sem SASL (TLS via `{tls: verdadeiro}` nas opções), produce v1/fetch v1
-  apenas, um broker líder por
+  0.9-era — consumer groups com rebalanceamento `"roundrobin"` real (o líder
+  calcula o assignment e o SyncGroup o distribui; heartbeat a cada 3s em
+  thread; rejoin com retomada do offset commitado em
+  RebalanceInProgress/IllegalGeneration), porém a detecção de entrada/saída de
+  membros só é revalidada no próximo heartbeat ou na próxima chamada — sem
+  revogação imediata de um fetch em andamento, sem SASL (TLS via
+  `{tls: verdadeiro}`), produce v1/fetch v1 apenas, um broker líder por
   chamada e payload inteiro em memória.
 - S3 (`ler_s3`/`escrever_s3`/`listar_s3`/`apagar_s3`): GET/PUT/LIST/DELETE
   com query string assinada (ListObjectsV2) — sem multipart/copy/presigned

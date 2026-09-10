@@ -490,14 +490,19 @@ pipeline eventos:
   de `texto` na ordem do log. `desde: "inicio"` (default) lê do earliest;
   `"fim"` lê do high watermark (só mensagens novas). `max` limita a
   quantidade (default 100).
-- `ler_kafka topico, {grupo:, max:}`: consumer group com coordenação
-  completa — o cliente resolve o coordenador (find_coordinator), entra no
-  grupo (join_group com member_id vazio + sync_group com o assignor
-  `"range"`), lê o offset commitado (offset_fetch), consome a partir dele
-  (earliest se nunca commitado) e commita o offset seguinte ao último lido
-  (offset_commit, metadata `"tilt"`) antes do leave_group. Com 1 membro no
-  grupo, o assignment pega **todas** as partições do tópico, consumidas
-  sequencialmente. Uma segunda chamada com o mesmo grupo só vê o que ainda
+- `ler_kafka topico, {grupo:, max:}`: consumer group com coordenação completa
+  e rebalanceamento — o cliente resolve o coordenador (find_coordinator),
+  entra no grupo (join_group com o assignor `"roundrobin"`), o **líder**
+  calcula o assignment das partições a partir da lista de membros e o
+  distribui (sync_group), um heartbeat periódico (a cada 3s, em thread) mantém
+  a membresia, e o consumo lê o offset commitado (offset_fetch) a partir dele
+  (earliest se nunca commitado), commitando o offset seguinte ao último lido
+  **por partição** (offset_commit, metadata `"tilt"`) antes do leave_group
+  limpo. Dois ou mais consumidores no mesmo grupo dividem as partições do
+  tópico entre si; se um rebalance ocorrer durante o consumo
+  (RebalanceInProgress/IllegalGeneration no fetch, heartbeat ou commit), o
+  cliente re-entra no grupo (novo Join/Sync) e retoma do offset commitado, sem
+  duplicar mensagens. Uma segunda chamada com o mesmo grupo só vê o que ainda
   não foi commitado — checkpoint natural entre execuções.
 - `fonte tipo: kafka`: `topico:` é obrigatório; `grupo:` (checkpoint por
   commit de offset), `desde: "inicio"|"fim"`, `broker:` e `max:` são
@@ -519,9 +524,11 @@ pipeline agregacao:
     - imprimir tamanho linhas, "pedidos no minuto"
 ```
 
-- limitações: 1 membro por grupo por vez (sem rebalanceamento real entre
-  consumidores), protocolo 0.9-era apenas, sem SASL, um broker líder por
-  chamada.
+- limitações: protocolo 0.9-era apenas (assignor único `"roundrobin"`,
+  sem `consumer.intervals` negociados), sem SASL, um broker líder por
+  chamada. A detecção de entrada/saída de membros no meio do consumo só é
+  revalidada no próximo heartbeat (a cada 3s) ou na próxima chamada — não há
+  push imediato de revogação para um fetch já em andamento.
 
 ## MongoDB (BSON + OP_MSG nativos)
 

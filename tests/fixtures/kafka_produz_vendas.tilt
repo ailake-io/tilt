@@ -1,0 +1,8 @@
+# Produz 4 mensagens no topico "vendas" (2 particoes) para o cenario de
+# rebalanceamento com 2 consumidores no mesmo grupo (kafka_test.sh).
+pipeline kafka_produz_vendas:
+  passos:
+    - escrever_kafka "vendas", "v-1a", {particao: 0}
+    - escrever_kafka "vendas", "v-1b", {particao: 0}
+    - escrever_kafka "vendas", "v-2a", {particao: 1}
+    - escrever_kafka "vendas", "v-2b", {particao: 1}

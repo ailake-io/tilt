@@ -1,12 +1,19 @@
 #include "runtime/kafka.hpp"
 
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -271,6 +278,19 @@ std::string roundtrip(Conn& conn, std::int16_t api_key, std::int16_t api_version
   }
 }
 
+// Sinaliza que o coordenador pediu rebalanceamento (ou a geracao/membrasia
+// ficou invalida) e o consumidor deve re-entrar no grupo.
+struct RebalanceException final : std::exception {
+  const char* what() const noexcept override { return "kafka: rebalanceamento do grupo"; }
+};
+
+// Erros de grupo que exigem rejoin (IllegalGeneration, UnknownMemberId,
+// RebalanceInProgress) viram RebalanceException; os demais seguem fatais.
+[[noreturn]] void die_grupo(const std::string& contexto, std::int16_t code) {
+  if (code == 21 || code == 25 || code == 27) throw RebalanceException{};
+  die_code(contexto, code);
+}
+
 // ----------------------------------------------------------------- metadata
 
 struct BrokerInfo {
@@ -410,7 +430,7 @@ std::vector<std::pair<std::int64_t, std::string>> fetch_msgs(Conn& conn, const s
       r.i64();  // high_watermark
       std::string message_set = r.bytes();
       if (nome == topico && part == particao) {
-        if (erro != 0) die_code("fetch no topico '" + topico + "'", erro);
+        if (erro != 0) die_grupo("fetch no topico '" + topico + "'", erro);
         std::vector<std::pair<std::int64_t, std::string>> out;
         Reader ms{message_set};
         while (max > 0 && static_cast<std::int64_t>(out.size()) < max &&
@@ -520,14 +540,16 @@ std::string member_metadata(const std::string& topico) {
   return m;
 }
 
-// MemberAssignment v0 -> lista de (topico, [particoes]).
+// MemberAssignment v0 -> lista de (topico, [particoes]). Bytes vazios (membro
+// ocioso sem particoes atribuidas) devolvem lista vazia.
 std::vector<std::pair<std::string, std::vector<std::int32_t>>> parse_assignment(
     const std::string& bytes) {
+  std::vector<std::pair<std::string, std::vector<std::int32_t>>> out;
+  if (bytes.empty()) return out;
   Reader a{bytes};
   a.i16();  // version
   const std::int32_t nt = a.i32();
   if (nt < 0) die("assignment do sync group malformado");
-  std::vector<std::pair<std::string, std::vector<std::int32_t>>> out;
   for (std::int32_t t = 0; t < nt; ++t) {
     const std::string topico = a.str();
     const std::int32_t np = a.i32();
@@ -537,6 +559,44 @@ std::vector<std::pair<std::string, std::vector<std::int32_t>>> parse_assignment(
     out.emplace_back(topico, std::move(parts));
   }
   a.bytes();  // user_data
+  return out;
+}
+
+// MemberAssignment v0 para um membro: version 0, 1 topico, particoes, user
+// data NULL.
+std::string encode_assignment(const std::string& topico, const std::vector<std::int32_t>& parts) {
+  std::string a;
+  put_i16(a, 0);
+  put_i32(a, 1);
+  put_str(a, topico);
+  put_i32(a, static_cast<std::int32_t>(parts.size()));
+  for (const std::int32_t p : parts) put_i32(a, p);
+  put_i32(a, -1);
+  return a;
+}
+
+// Assignment "roundrobin" calculado pelo lider: membros ordenados por id;
+// particoes de cada topico (ordenados) distribuidas uma a vez por membro.
+// Com 1 membro o resultado equivale ao "range" antigo (todas as particoes).
+std::map<std::string, std::vector<std::int32_t>> compute_assignment_roundrobin(
+    const std::vector<std::pair<std::string, std::vector<std::string>>>& members,
+    std::size_t num_particoes) {
+  std::map<std::string, std::vector<std::int32_t>> out;
+  std::vector<std::string> ids;
+  ids.reserve(members.size());
+  for (const auto& [id, _] : members) ids.push_back(id);
+  std::sort(ids.begin(), ids.end());
+  if (ids.empty() || num_particoes == 0) return out;
+  std::set<std::string> topicos;
+  for (const auto& [_, ts] : members) topicos.insert(ts.begin(), ts.end());
+  std::size_t i = 0;
+  for (const std::string& t : topicos) {
+    (void)t;  // o roundrobin so inscreve 1 topico por membro; indice global
+    for (std::int32_t p = 0; static_cast<std::size_t>(p) < num_particoes; ++p) {
+      out[ids[i % ids.size()]].push_back(p);
+      ++i;
+    }
+  }
   return out;
 }
 
@@ -557,10 +617,15 @@ BrokerAddr find_coordinator(Conn& conn, const std::string& grupo) {
 struct JoinInfo {
   std::int32_t generation = 0;
   std::string member_id;
+  std::string leader_id;
+  std::string protocolo;
+  // Membros do grupo com seus topicos (so o lider recebe a lista completa).
+  std::vector<std::pair<std::string, std::vector<std::string>>> members;
 };
 
 // JoinGroup (api 11, v0): entra no grupo com member_id vazio e o protocolo
-// "range"; devolve a geracao e o member_id atribuidos pelo coordenador.
+// "roundrobin"; devolve geracao, member_id, lider e a lista de membros (com os
+// topicos de cada um) quando a resposta a traz.
 JoinInfo join_group(Conn& conn, const std::string& grupo, const std::string& topico) {
   std::string payload;
   put_str(payload, grupo);
@@ -568,40 +633,84 @@ JoinInfo join_group(Conn& conn, const std::string& grupo, const std::string& top
   put_str(payload, "");     // member_id vazio: primeiro join
   put_str(payload, "consumer");
   put_i32(payload, 1);  // [protocols]
-  put_str(payload, "range");
+  put_str(payload, "roundrobin");
   put_bytes(payload, member_metadata(topico));
 
   const std::string resp = roundtrip(conn, 11, 0, 11, payload);
   Reader r{resp};
   const std::int16_t erro = r.i16();
-  if (erro != 0) die_code("join_group do grupo '" + grupo + "'", erro);
+  if (erro != 0) die_grupo("join_group do grupo '" + grupo + "'", erro);
   JoinInfo j;
   j.generation = r.i32();
-  r.str();  // group_protocol escolhido
-  r.str();  // leader_id
+  j.protocolo = r.str();  // group_protocol escolhido
+  j.leader_id = r.str();  // leader_id
   j.member_id = r.str();
   const std::int32_t nm = r.i32();  // [members]
   if (nm < 0) die("resposta de join group malformada");
   for (std::int32_t i = 0; i < nm; ++i) {
-    r.str();    // member_id
-    r.bytes();  // metadata
+    const std::string mid = r.str();
+    const std::string meta = r.bytes();
+    Reader m{meta};
+    m.i16();  // version
+    const std::int32_t nt = m.i32();
+    if (nt < 0) die("metadata de membro do join group malformada");
+    std::vector<std::string> ts;
+    for (std::int32_t t = 0; t < nt; ++t) ts.push_back(m.str());
+    j.members.emplace_back(mid, std::move(ts));
   }
   if (j.member_id.empty()) die("coordenador nao atribuiu member_id no join");
+  if (j.leader_id.empty()) j.leader_id = j.member_id;
   return j;
 }
 
-// Heartbeat (api 12, v0): 1 batida apos o join (sessao nao expira na janela
-// de um fetch curto).
-void heartbeat(Conn& conn, const std::string& grupo, std::int32_t generation,
-               const std::string& member_id) {
+// Heartbeat (api 12, v0): devolve o error_code bruto para o chamador decidir.
+std::int16_t heartbeat_code(Conn& conn, const std::string& grupo, std::int32_t generation,
+                            const std::string& member_id) {
   std::string payload;
   put_str(payload, grupo);
   put_i32(payload, generation);
   put_str(payload, member_id);
   const std::string resp = roundtrip(conn, 12, 0, 12, payload);
   Reader r{resp};
-  const std::int16_t erro = r.i16();
-  if (erro != 0) die_code("heartbeat do grupo '" + grupo + "'", erro);
+  return r.i16();
+}
+
+// Batida inicial do fluxo principal: erro de grupo vira RebalanceException.
+void heartbeat(Conn& conn, const std::string& grupo, std::int32_t generation,
+               const std::string& member_id) {
+  const std::int16_t erro = heartbeat_code(conn, grupo, generation, member_id);
+  if (erro != 0) die_grupo("heartbeat do grupo '" + grupo + "'", erro);
+}
+
+constexpr auto kHeartbeatIntervalo = std::chrono::seconds(3);
+
+// Loop de heartbeat em thread propria: mantem a membrasia enquanto o consumo
+// principal roda (conexao propria com o coordenador). Qualquer erro de grupo
+// (RebalanceInProgress, IllegalGeneration etc.) ou de transporte liga
+// `rebalance` para o loop principal re-entrar no grupo; `parar` encerra limpo
+// (destruidor do Conn fecha o socket no fim da thread).
+void heartbeat_loop(const BrokerAddr coord, std::string grupo, const std::int32_t generation,
+                    std::string member_id, const bool tls, const std::atomic<bool>& parar,
+                    std::atomic<bool>& rebalance) {
+  try {
+    Conn conn(coord.host, coord.port, tls);
+    auto proximo = std::chrono::steady_clock::now() + kHeartbeatIntervalo;
+    while (!parar.load()) {
+      const auto agora = std::chrono::steady_clock::now();
+      if (agora < proximo) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        continue;
+      }
+      const std::int16_t erro = heartbeat_code(conn, grupo, generation, member_id);
+      if (erro != 0) {
+        rebalance.store(true);
+        return;
+      }
+      proximo = agora + kHeartbeatIntervalo;
+    }
+  } catch (...) {
+    if (!parar.load()) rebalance.store(true);
+  }
 }
 
 // LeaveGroup (api 13, v0): melhor esforco no fim da sessao.
@@ -612,7 +721,7 @@ void leave_group(Conn& conn, const std::string& grupo, const std::string& member
   const std::string resp = roundtrip(conn, 13, 0, 13, payload);
   Reader r{resp};
   const std::int16_t erro = r.i16();
-  if (erro != 0) die_code("leave_group do grupo '" + grupo + "'", erro);
+  if (erro != 0) die_grupo("leave_group do grupo '" + grupo + "'", erro);
 }
 
 // Garante LeaveGroup mesmo quando fetch/commit lanca excecao.
@@ -629,41 +738,44 @@ struct GroupSession {
   }
 };
 
-// SyncGroup (api 14, v0) com group_assignment vazio: a resposta traz o
-// MemberAssignment deste membro.
+// SyncGroup (api 14, v0): o lider envia o group_assignment (member_id ->
+// MemberAssignment); os demais membros enviam array vazio e recebem o seu.
 std::vector<std::pair<std::string, std::vector<std::int32_t>>> sync_group(
-    Conn& conn, const std::string& grupo, std::int32_t generation, const std::string& member_id) {
+    Conn& conn, const std::string& grupo, std::int32_t generation, const std::string& member_id,
+    const std::map<std::string, std::string>& grupo_assignment) {
   std::string payload;
   put_str(payload, grupo);
   put_i32(payload, generation);
   put_str(payload, member_id);
-  put_i32(payload, 0);  // group_assignment vazio
+  put_i32(payload, static_cast<std::int32_t>(grupo_assignment.size()));
+  for (const auto& [m, a] : grupo_assignment) {
+    put_str(payload, m);
+    put_bytes(payload, a);
+  }
   const std::string resp = roundtrip(conn, 14, 0, 14, payload);
   Reader r{resp};
   const std::int16_t erro = r.i16();
-  if (erro != 0) die_code("sync_group do grupo '" + grupo + "'", erro);
+  if (erro != 0) die_grupo("sync_group do grupo '" + grupo + "'", erro);
   return parse_assignment(r.bytes());
 }
 
-// OffsetFetch (api 9, v0): offsets commitados por particao (-1 se nenhum).
+// OffsetFetch (api 9, v0): offsets commitados das particoes (-1 se nenhum).
 std::vector<std::pair<std::int32_t, std::int64_t>> offset_fetch(
-    Conn& conn, const std::string& grupo,
-    const std::vector<std::pair<std::string, std::vector<std::int32_t>>>& assignment) {
+    Conn& conn, const std::string& grupo, const std::string& topico,
+    const std::vector<std::int32_t>& parts) {
   std::string payload;
   put_str(payload, grupo);
-  put_i32(payload, static_cast<std::int32_t>(assignment.size()));
-  for (const auto& [topico, parts] : assignment) {
-    put_str(payload, topico);
-    put_i32(payload, static_cast<std::int32_t>(parts.size()));
-    for (const std::int32_t p : parts) put_i32(payload, p);
-  }
+  put_i32(payload, 1);
+  put_str(payload, topico);
+  put_i32(payload, static_cast<std::int32_t>(parts.size()));
+  for (const std::int32_t p : parts) put_i32(payload, p);
   const std::string resp = roundtrip(conn, 9, 0, 9, payload);
   Reader r{resp};
   const std::int32_t nt = r.i32();
   if (nt < 0) die("resposta de offset fetch malformada");
   std::vector<std::pair<std::int32_t, std::int64_t>> out;
   for (std::int32_t t = 0; t < nt; ++t) {
-    const std::string topico = r.str();
+    r.str();  // topico
     const std::int32_t np = r.i32();
     if (np < 0) die("resposta de offset fetch malformada");
     for (std::int32_t p = 0; p < np; ++p) {
@@ -671,10 +783,9 @@ std::vector<std::pair<std::int32_t, std::int64_t>> offset_fetch(
       const std::int64_t offset = r.i64();
       r.str();                       // metadata
       const std::int16_t erro = r.i16();
-      if (erro != 0) die_code("offset_fetch do grupo '" + grupo + "'", erro);
+      if (erro != 0) die_grupo("offset_fetch do grupo '" + grupo + "'", erro);
       out.emplace_back(part, offset);
     }
-    (void)topico;
   }
   return out;
 }
@@ -708,12 +819,88 @@ void offset_commit(Conn& conn, const std::string& grupo, std::int32_t generation
     for (std::int32_t p = 0; p < np; ++p) {
       r.i32();
       const std::int16_t erro = r.i16();
-      if (erro != 0) die_code("offset_commit do grupo '" + grupo + "'", erro);
+      if (erro != 0) die_grupo("offset_commit do grupo '" + grupo + "'", erro);
     }
   }
 }
 
 }  // namespace
+
+// Uma geracao do grupo: join -> heartbeat inicial -> sync (assignment) ->
+// offset_fetch -> fetch + commit por particao -> parada do heartbeat. O
+// LeaveGroup sai no destrutor do GroupSession ao final do escopo. Erros de
+// rebalance (RebalanceInProgress/IllegalGeneration/UnknownMemberId vindos do
+// fetch, heartbeat, sync ou commit) escapam como RebalanceException para o
+// caller re-entrar no grupo; como cada particao lida ja teve offset commitado,
+// a retomada apos o rejoin nao duplica mensagens.
+void consumir_uma_geracao(const BrokerAddr& coord, const BrokerAddr& bootstrap,
+                          const std::string& grupo, const std::string& topico,
+                          const int max_msgs, const bool tls,
+                          std::vector<std::pair<int, std::string>>& out) {
+  Conn conn(coord.host, coord.port, tls);
+  const JoinInfo join = join_group(conn, grupo, topico);
+  GroupSession sess{conn, grupo, join.member_id};
+  heartbeat(conn, grupo, join.generation, join.member_id);
+
+  // Lider calcula o assignment "roundrobin" das particoes do topico e o
+  // distribui no SyncGroup; demais membros enviam array vazio.
+  std::map<std::string, std::string> grupo_assignment;
+  std::vector<std::pair<std::string, std::vector<std::string>>> members = join.members;
+  if (members.empty()) members.emplace_back(join.member_id, std::vector<std::string>{topico});
+  if (join.member_id == join.leader_id) {
+    const Metadata md = metadata(topico, bootstrap, tls);
+    const auto plano = compute_assignment_roundrobin(members, md.partitions.size());
+    for (const auto& [m, parts] : plano) grupo_assignment[m] = encode_assignment(topico, parts);
+  }
+  const auto assignment = sync_group(conn, grupo, join.generation, join.member_id, grupo_assignment);
+
+  std::vector<std::int32_t> minhas;
+  for (const auto& [t, parts] : assignment) {
+    if (t != topico) continue;  // assignment de outro topico: ignora
+    minhas.insert(minhas.end(), parts.begin(), parts.end());
+  }
+  std::sort(minhas.begin(), minhas.end());
+
+  std::atomic<bool> parar{false};
+  std::atomic<bool> rebalance{false};
+  std::thread hb(heartbeat_loop, coord, grupo, join.generation, join.member_id, tls,
+                 std::cref(parar), std::ref(rebalance));
+  try {
+    if (!minhas.empty()) {
+      const auto offsets = offset_fetch(conn, grupo, topico, minhas);
+      const Metadata md = metadata(topico, bootstrap, tls);
+      for (const std::int32_t part : minhas) {
+        if (rebalance.load()) throw RebalanceException{};
+        std::int64_t inicio = 0;
+        for (const auto& [p, off] : offsets) {
+          if (p == part && off >= 0) inicio = off;
+        }
+        const std::int64_t restante =
+            static_cast<std::int64_t>(max_msgs) - static_cast<std::int64_t>(out.size());
+        std::vector<std::pair<int, std::string>> lidas;
+        std::int64_t proximo = inicio;
+        if (restante > 0) {
+          const BrokerAddr lider = lider_addr_md(topico, part, md);
+          Conn fc(lider.host, lider.port, tls);
+          for (const auto& [off, valor] : fetch_msgs(fc, topico, part, inicio, restante)) {
+            lidas.emplace_back(static_cast<int>(part), valor);
+            proximo = off + 1;
+          }
+        }
+        // Commit por particao logo apos a leitura: retomada correta se um
+        // rebalance interromper o loop antes das demais particoes.
+        offset_commit(conn, grupo, join.generation, join.member_id, topico, {{part, proximo}});
+        out.insert(out.end(), lidas.begin(), lidas.end());
+      }
+    }
+  } catch (...) {
+    parar.store(true);
+    hb.join();
+    throw;
+  }
+  parar.store(true);
+  hb.join();
+}
 
 std::vector<std::pair<int, std::string>> kafka_consume_group(const std::string& broker,
                                                              const std::string& grupo,
@@ -724,61 +911,29 @@ std::vector<std::pair<int, std::string>> kafka_consume_group(const std::string& 
 
   const BrokerAddr bootstrap = broker.empty() ? bootstrap_addr() : parse_addr(broker);
 
-  // 1. FindCoordinator no bootstrap.
+  // FindCoordinator no bootstrap.
   BrokerAddr coord;
   {
     Conn conn(bootstrap.host, bootstrap.port, tls);
     coord = find_coordinator(conn, grupo);
   }
 
-  // Coordenador: join -> heartbeat -> sync -> offsets -> (fetch/commit) ->
-  // leave ao sair do escopo.
-  Conn conn(coord.host, coord.port, tls);
-  const JoinInfo join = join_group(conn, grupo, topico);
-  GroupSession sess{conn, grupo, join.member_id};
-  heartbeat(conn, grupo, join.generation, join.member_id);
-
-  const auto assignment = sync_group(conn, grupo, join.generation, join.member_id);
-  if (assignment.empty()) {
-    die("grupo '" + grupo + "' nao atribuiu particoes deste membro no sync");
-  }
-
-  // 4. Offsets commitados por particao.
-  const auto offsets = offset_fetch(conn, grupo, assignment);
-
-  // 5. Fetch: cada particao atribuida a partir do offset commitado (ou do
-  // earliest, quando -1), sequencialmente, ate `max_msgs`.
-  const Metadata md = metadata(topico, bootstrap, tls);
+  constexpr int kMaxRejoins = 3;
   std::vector<std::pair<int, std::string>> out;
-  std::vector<std::pair<std::int32_t, std::int64_t>> commits;
-  for (const auto& [t, parts] : assignment) {
-    if (t != topico) continue;  // assignment de outro topico: ignora
-    for (const std::int32_t part : parts) {
-      std::int64_t inicio = 0;
-      for (const auto& [p, off] : offsets) {
-        if (p == part && off >= 0) inicio = off;
+  for (int tentativa = 0;; ++tentativa) {
+    try {
+      consumir_uma_geracao(coord, bootstrap, grupo, topico, max_msgs, tls, out);
+      return out;
+    } catch (const RebalanceException&) {
+      if (tentativa >= kMaxRejoins) {
+        die("rebalanceamento repetido no grupo '" + grupo + "': abortado apos " +
+            std::to_string(kMaxRejoins) + " reentradas");
       }
-      const std::int64_t restante = static_cast<std::int64_t>(max_msgs) -
-                                    static_cast<std::int64_t>(out.size());
-      if (restante <= 0) {
-        commits.emplace_back(part, inicio);
-        continue;
-      }
-      const BrokerAddr lider = lider_addr_md(topico, part, md);
-      Conn fc(lider.host, lider.port, tls);
-      const auto msgs = fetch_msgs(fc, topico, part, inicio, restante);
-      std::int64_t proximo = inicio;
-      for (const auto& [off, valor] : msgs) {
-        out.emplace_back(static_cast<int>(part), valor);
-        proximo = off + 1;
-      }
-      commits.emplace_back(part, proximo);
+      // Rejoin na proxima iteracao: o assignment muda e o consumo retoma do
+      // offset commitado (a deteccao de entrada/saida de membros entre dois
+      // heartbeats fica para a batida seguinte — ver guia-12).
     }
   }
-
-  // 6. Commit do offset seguinte ao ultimo lido em todas as particoes.
-  offset_commit(conn, grupo, join.generation, join.member_id, topico, commits);
-  return out;
 }
 
 }  // namespace tilt::rt
