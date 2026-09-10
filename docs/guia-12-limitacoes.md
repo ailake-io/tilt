@@ -63,7 +63,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   location `file://` apenas (o tilt grava os arquivos localmente e commita as
   locations) e single-writer como no Hadoop; sobrescrita de tabela existente
   mantém o partition spec (divergência → erro claro). Sem as env vars o modo
-  Hadoop continua, byte a byte. Demais limites: codec Avro "null" apenas, a
+  Hadoop continua, byte a byte. Demais limites: a
   leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
   escritores sem garantia além dele) e single-writer (sem locks nem optimistic
   concurrency);

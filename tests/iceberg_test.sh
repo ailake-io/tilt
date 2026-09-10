@@ -11,6 +11,11 @@
 # + residual predicate) and pyiceberg (when installed) validates the spec/manifest
 # with multiple partition fields, the rehydrated partition columns with their
 # types, and the pruning equivalence with a row_filter scan.
+# Third phase (Avro OCF codecs): for each ICEBERG_AVRO_CODEC (null/deflate/
+# snappy, default deflate) the tilt writes a table, reads it back in the same
+# process and in a separate process with a different env (reading follows the
+# file header, not the env); the OCF verifier decodes the compressed blocks
+# itself and pyiceberg (when installed) reads the manifests/manifest lists.
 set -eu
 
 BIN="$1"
@@ -42,13 +47,15 @@ echo "$out" | grep -q "ana 40 carla" || { echo "saida inesperada: $out"; exit 1;
 TAB="$tmp/tabela_iceberg"
 [ -d "$TAB/metadata" ] || { echo "diretorio metadata ausente"; exit 1; }
 
-python3 - "$TAB" <<'PYEOF'
+# decoder OCF (codecs null/deflate/snappy) reutilizado nas fases 1 e 3
+cat > "$tmp/avro_ocf.py" <<'PYEOF'
+import binascii
 import glob
 import json
 import os
+import struct
 import sys
-
-tab = sys.argv[1]
+import zlib
 
 
 class Erro(Exception):
@@ -167,28 +174,119 @@ def ocf(path):
             k = d.string().decode("utf-8")
             meta[k] = d.string()
     sync = d.raw(16)
-    if meta.get("avro.codec", b"null") != b"null":
-        raise Erro("codec avro nao suportado: " + meta["avro.codec"].decode())
     if "avro.schema" not in meta:
         raise Erro("avro.schema ausente no header")
+    codec = meta.get("avro.codec", b"null").decode("utf-8")
+    if codec not in ("null", "deflate", "snappy"):
+        raise Erro("codec avro nao suportado: " + codec)
     schema = json.loads(meta["avro.schema"])
     out = []
     while d.p < len(b):
         count = d.long()
         size = d.long()
-        blk = Dec(d.raw(size))
+        blk = descomprime(codec, d.raw(size), path)
+        dec = Dec(blk)
         for _ in range(count):
-            out.append(decode(blk, schema))
+            out.append(decode(dec, schema))
         if d.raw(16) != sync:
             raise Erro("sync marker invalido em " + path)
-        if blk.p != size:
+        if dec.p != len(blk):
             raise Erro("registro maior que o bloco em " + path)
     return schema, out
 
 
+def snappy_decompress_puro(data):
+    """Bloco snappy generico (varint de tamanho + tags literal/copy)."""
+    p = 0
+
+    def varint():
+        nonlocal p
+        v = s = 0
+        while True:
+            if p >= len(data):
+                raise Erro("varint snappy truncado")
+            x = data[p]
+            p += 1
+            v |= (x & 0x7F) << s
+            if not (x & 0x80):
+                return v
+            s += 7
+
+    tam = varint()
+    out = bytearray()
+    while len(out) < tam:
+        if p >= len(data):
+            raise Erro("bloco snappy truncado")
+        tag = data[p]
+        p += 1
+        tipo = tag & 0x03
+        if tipo == 0:  # literal
+            ln = tag >> 2
+            if ln >= 60:
+                extra = ln - 59
+                if p + extra > len(data):
+                    raise Erro("literal snappy truncado")
+                ln = int.from_bytes(data[p:p + extra], "little")
+                p += extra
+            ln += 1
+            if p + ln > len(data) or len(out) + ln > tam:
+                raise Erro("literal snappy fora dos limites")
+            out += data[p:p + ln]
+            p += ln
+        else:  # copy-1/2/4 com possivel sobreposicao
+            if tipo == 1:
+                if p >= len(data):
+                    raise Erro("copy-1 truncado")
+                ln = 4 + ((tag >> 2) & 0x07)
+                off = ((tag >> 5) << 8) | data[p]
+                p += 1
+            elif tipo == 2:
+                if p + 2 > len(data):
+                    raise Erro("copy-2 truncado")
+                ln = 1 + (tag >> 2)
+                off = int.from_bytes(data[p:p + 2], "little")
+                p += 2
+            else:
+                if p + 4 > len(data):
+                    raise Erro("copy-4 truncado")
+                ln = 1 + (tag >> 2)
+                off = int.from_bytes(data[p:p + 4], "little")
+                p += 4
+            if off == 0 or off > len(out):
+                raise Erro("copy snappy com offset invalido")
+            for _ in range(ln):
+                if len(out) >= tam:
+                    raise Erro("copy snappy excede o tamanho declarado")
+                out.append(out[-off])
+    if p != len(data):
+        raise Erro("bytes sobrando no bloco snappy")
+    return bytes(out)
+
+
+def descomprime(codec, blk, path):
+    """Decompressao do bloco conforme o codec do header."""
+    if codec == "null":
+        return blk
+    if codec == "deflate":  # deflate RAW (RFC1951)
+        return zlib.decompress(blk, -15)
+    if codec == "snappy":  # stream snappy + trailer CRC32 big-endian
+        payload, trailer = blk[:-4], blk[-4:]
+        out = snappy_decompress_puro(payload)
+        crc = struct.unpack(">I", trailer)[0]
+        if binascii.crc32(out) & 0xFFFFFFFF != crc:
+            raise Erro("CRC32 do bloco snappy diverge em " + path)
+        return out
+    raise Erro("codec avro nao suportado: " + codec)
+
+
 def sem_file(p):
     return p[7:] if p.startswith("file://") else p
+PYEOF
 
+PYTHONPATH="$tmp" python3 - "$TAB" <<'PYEOF'
+from avro_ocf import *  # noqa: F401,F403 (decoder OCF + helpers da fase 1)
+
+tab = sys.argv[1]
 
 # (a) metadata: format-version 2, 2 snapshots, append com parent na cadeia ----
 mds = sorted(glob.glob(os.path.join(tab, "metadata", "v*.metadata.json")))
@@ -348,5 +446,99 @@ print("pyiceberg: spec composto, reidratacao e pruning validados (%d linhas)" % 
 PYEOF
 
 [ "$fail_part" = 0 ] || exit 1
+
+# --- 3. codecs dos blocos OCF (ICEBERG_AVRO_CODEC) ------------------------------
+# Para cada codec: o tilt grava (env) e le de volta no mesmo processo; depois
+# le num processo separado com env diferente — a leitura segue o header do
+# arquivo, nao a env. O pyiceberg (quando instalado, com suporte snappy para
+# o caso snappy) valida manifests e manifest lists comprimidos.
+fail_codec=0
+for codec in null deflate snappy; do
+  dir="tab_codec_$codec"
+  rm -rf "$dir"
+  cat > "$tmp/codec_$codec.tilt" <<EOF
+pipeline principal:
+  passos:
+    - t = [ { nome: "ana", idade: 40, nota: 9.5 }, { nome: "bob", idade: 30, nota: 8.0 } ]
+    - escrever_iceberg t, "$dir"
+    - de_volta = ler_iceberg "$dir"
+    - imprimir "linhas:", tamanho de_volta
+EOF
+  out_c=$(env ICEBERG_AVRO_CODEC=$codec "$BIN" executar "$tmp/codec_$codec.tilt")
+  echo "$out_c"
+  echo "$out_c" | grep -qF "linhas: 2" || {
+    echo "codec $codec: roundtrip falhou: $out_c"; fail_codec=1;
+  }
+  # releitura em processo separado, com outra env (o codec vem do header)
+  cat > "$tmp/codec_ler_$codec.tilt" <<EOF
+pipeline principal:
+  passos:
+    - de_volta = ler_iceberg "$dir"
+    - imprimir "releitura:", tamanho de_volta
+EOF
+  out_l=$(env ICEBERG_AVRO_CODEC=null "$BIN" executar "$tmp/codec_ler_$codec.tilt")
+  echo "$out_l"
+  echo "$out_l" | grep -qF "releitura: 2" || {
+    echo "codec $codec: releitura com env diferente falhou: $out_l"; fail_codec=1;
+  }
+  # o verificador OCF (modulo da fase 1) tambem decodifica os blocos desta tabela
+  PYTHONPATH="$tmp" python3 - "$tmp/$dir" <<'PYEOF' || fail_codec=1
+from avro_ocf import *  # noqa: F401,F403 (decoder OCF + helpers)
+
+tab = sys.argv[1]
+mds = sorted(glob.glob(tab + "/metadata/v*.metadata.json"))
+if len(mds) != 1:
+    raise SystemExit("esperado 1 metadata em %s, obtidos %d" % (tab, len(mds)))
+md = json.load(open(mds[-1]))
+snap = md["snapshots"][-1]
+ml = sem_file(snap["manifest-list"])
+schema, mlist = ocf(ml)
+if len(mlist) != 1:
+    raise SystemExit("manifest list: esperado 1 registro")
+mp = sem_file(mlist[0]["manifest_path"])
+_, entries = ocf(mp)
+if len(entries) != 1 or entries[0]["status"] != 1:
+    raise SystemExit("manifest: esperada 1 entrada ADDED")
+dpath = sem_file(entries[0]["data_file"]["file_path"])
+if not os.path.exists(dpath):
+    raise SystemExit("data file ausente: " + dpath)
+print("ocf: blocos decodificados (%s)" % os.path.basename(tab))
+PYEOF
+  # pyiceberg le a tabela (skip controlado se ausente / sem snappy)
+  python3 - "$tmp/$dir" "$codec" <<'PYEOF' || fail_codec=1
+import importlib.util
+import sys
+
+
+class Erro(Exception):
+    pass
+
+
+try:
+    from pyiceberg.table import StaticTable
+except ImportError:
+    print("pyiceberg ausente; validacao do codec %s pulada" % sys.argv[2])
+    sys.exit(0)
+
+codec = sys.argv[2]
+if codec == "snappy" and importlib.util.find_spec("snappy") is None:
+    print("pyiceberg sem suporte snappy; validacao do codec snappy pulada")
+    sys.exit(0)
+
+import glob
+import os
+
+metas = sorted(glob.glob(os.path.join(sys.argv[1], "metadata", "v*.metadata.json")))
+if not metas:
+    raise Erro("metadata ausente em " + sys.argv[1])
+tabela = StaticTable.from_metadata(metas[-1])
+n = tabela.scan().to_arrow().num_rows
+if n != 2:
+    raise Erro("codec %s: pyiceberg leu %d linhas (esperado 2)" % (codec, n))
+print("pyiceberg: codec %s ok (2 linhas)" % codec)
+PYEOF
+done
+
+[ "$fail_codec" = 0 ] || exit 1
 
 echo "iceberg_test ok"

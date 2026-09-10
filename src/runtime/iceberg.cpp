@@ -21,6 +21,7 @@
 
 #include "runtime/json.hpp"
 #include "runtime/parquet.hpp"
+#include "runtime/snappy_codec.hpp"
 
 namespace tilt::rt {
 
@@ -108,7 +109,11 @@ std::string json_escape(const std::string& s) {
 
 // ---------------------------------------------------------------------------
 // Avro OCF (Object Container File) — writer e reader de 1a passada.
-// Codec "null" apenas; tipos: null/boolean/int/long/float/double/string/bytes
+// Codecs de bloco: "null", "deflate" (deflate RAW, RFC1951, via zlib dlopen)
+// e "snappy" (bloco snappy de literais + trailer CRC32, spec Avro); a escrita
+// usa "deflate" por default e aceita override via env ICEBERG_AVRO_CODEC
+// (null|deflate|snappy) — a leitura aceita os tres independente da env.
+// Tipos: null/boolean/int/long/float/double/string/bytes
 // /record/array/map (map com chaves string) e uniao ["null", T] com null
 // sempre na posicao 0. O schema vem como JSON no header (avro.schema) e e
 // decodificado com o json_parse do projeto.
@@ -413,20 +418,221 @@ Value avro_decode(AvroDecoder& dec, const Value& schema) {
   throw std::runtime_error("iceberg: avro: tipo nao suportado '" + ty + "'");
 }
 
+// ---------------------------------------------------------------------------
+// Codecs dos blocos OCF — zlib via dlopen (mesmo padrao do parquet.cpp) +
+// bloco snappy de literais (snappy_codec.hpp).
+// ---------------------------------------------------------------------------
+
+// zlib carregada via dlopen — mesmo padrao de sqlite.cpp/postgres.cpp.
+struct ZStream {
+  const std::uint8_t* next_in;
+  unsigned int avail_in;
+  unsigned long total_in;
+  std::uint8_t* next_out;
+  unsigned int avail_out;
+  unsigned long total_out;
+  const char* msg;
+  void* state;
+  void* (*zalloc)(void*, unsigned int, unsigned int);
+  void (*zfree)(void*, void*);
+  void* opaque;
+  int data_type;
+  unsigned long adler;
+  unsigned long reserved;
+};
+
+struct ZlibApi {
+  void* lib = nullptr;
+  const char* (*version)() = nullptr;
+  int (*inflate_init2)(ZStream*, int, const char*, int) = nullptr;
+  int (*inflate)(ZStream*, int) = nullptr;
+  int (*inflate_end)(ZStream*) = nullptr;
+  int (*deflate_init2)(ZStream*, int, int, int, int, int, const char*, int) = nullptr;
+  int (*deflate)(ZStream*, int) = nullptr;
+  int (*deflate_end)(ZStream*) = nullptr;
+  unsigned long (*crc32)(unsigned long, const unsigned char*, unsigned int) = nullptr;
+};
+
+template <typename F>
+bool bind_zsym(void* lib, F& fn, const char* name) {
+  fn = reinterpret_cast<F>(tilt_dlsym(lib, name));
+  return fn != nullptr;
+}
+
+const ZlibApi& zlib() {
+  static const ZlibApi instance = [] {
+    ZlibApi a;
+#if defined(_WIN32)
+    a.lib = tilt_dlopen("zlib1.dll");
+    if (!a.lib) a.lib = tilt_dlopen("zlib.dll");
+#else
+    a.lib = tilt_dlopen("libz.so.1");
+    if (!a.lib) a.lib = tilt_dlopen("libz.so");
+    if (!a.lib) a.lib = tilt_dlopen("libz.1.dylib");
+    if (!a.lib) a.lib = tilt_dlopen("libz.dylib");
+#endif
+    if (!a.lib) return a;
+    const bool ok = bind_zsym(a.lib, a.version, "zlibVersion") &&
+                    bind_zsym(a.lib, a.inflate_init2, "inflateInit2_") &&
+                    bind_zsym(a.lib, a.inflate, "inflate") &&
+                    bind_zsym(a.lib, a.inflate_end, "inflateEnd") &&
+                    bind_zsym(a.lib, a.deflate_init2, "deflateInit2_") &&
+                    bind_zsym(a.lib, a.deflate, "deflate") &&
+                    bind_zsym(a.lib, a.deflate_end, "deflateEnd") &&
+                    bind_zsym(a.lib, a.crc32, "crc32");
+    if (!ok) {
+      tilt_dlclose(a.lib);
+      a = ZlibApi{};
+    }
+    return a;
+  }();
+  return instance;
+}
+
+constexpr int kZNoFlush = 0;
+constexpr int kZFinish = 4;
+constexpr int kZStreamEnd = 1;
+constexpr int kZDefaultCompression = -1;
+constexpr int kZDeflated = 8;
+constexpr int kWindowBitsRaw = -15;  // deflate "cru" (RFC1951, sem header zlib/gzip)
+
+std::string zlib_ausente_avro() {
+  return "codec avro requer zlib (libz.so.1 no Linux, zlib1.dll no Windows), "
+         "que nao foi encontrada; instale o pacote zlib";
+}
+
+// Descomprime um bloco deflate RAW (RFC1951), codec "deflate" do Avro.
+std::string avro_inflate(const std::string& in, const std::string& ctx) {
+  const ZlibApi& z = zlib();
+  if (!z.lib) die(zlib_ausente_avro());
+  ZStream s{};
+  s.next_in = reinterpret_cast<const std::uint8_t*>(in.data());
+  s.avail_in = static_cast<unsigned int>(in.size());
+  if (z.inflate_init2(&s, kWindowBitsRaw, z.version(), static_cast<int>(sizeof(ZStream))) != 0) {
+    die("falha ao inicializar a zlib (inflateInit2)");
+  }
+  std::string out;
+  int ret;
+  do {
+    const std::size_t base = out.size();
+    out.resize(base + 65536);
+    s.next_out = reinterpret_cast<std::uint8_t*>(out.data() + base);
+    s.avail_out = 65536;
+    ret = z.inflate(&s, kZNoFlush);
+  } while (ret == 0);
+  z.inflate_end(&s);
+  if (ret != kZStreamEnd) {
+    die("falha ao descomprimir bloco avro em '" + ctx + "' (zlib retornou " +
+        std::to_string(ret) + ")");
+  }
+  out.resize(s.total_out);
+  return out;
+}
+
+// Comprime num bloco deflate RAW (RFC1951), codec "deflate" do Avro.
+std::string avro_deflate(const std::string& in, const std::string& ctx) {
+  const ZlibApi& z = zlib();
+  if (!z.lib) die(zlib_ausente_avro());
+  ZStream s{};
+  if (z.deflate_init2(&s, kZDefaultCompression, kZDeflated, kWindowBitsRaw, 8, 0, z.version(),
+                      static_cast<int>(sizeof(ZStream))) != 0) {
+    die("falha ao inicializar a zlib (deflateInit2)");
+  }
+  s.next_in = reinterpret_cast<const std::uint8_t*>(in.data());
+  s.avail_in = static_cast<unsigned int>(in.size());
+  std::string out;
+  int ret;
+  do {
+    const std::size_t base = out.size();
+    out.resize(base + 65536);
+    s.next_out = reinterpret_cast<std::uint8_t*>(out.data() + base);
+    s.avail_out = 65536;
+    ret = z.deflate(&s, kZFinish);
+  } while (ret == 0);
+  z.deflate_end(&s);
+  if (ret != kZStreamEnd) {
+    die("falha ao comprimir bloco avro em '" + ctx + "' (zlib retornou " + std::to_string(ret) +
+        ")");
+  }
+  out.resize(s.total_out);
+  return out;
+}
+
+// CRC32 (IEEE, como no trailer snappy do Avro) via zlib dlopen.
+std::uint32_t avro_crc32(const std::string& in) {
+  const ZlibApi& z = zlib();
+  if (!z.lib) die(zlib_ausente_avro());
+  return static_cast<std::uint32_t>(
+      z.crc32(0, reinterpret_cast<const unsigned char*>(in.data()),
+              static_cast<unsigned int>(in.size())));
+}
+
+// Bloco snappy do Avro: stream snappy valida + trailer de 4 bytes big-endian
+// com o CRC32 dos dados NAO comprimidos (especificacao do codec snappy).
+std::string avro_snappy_compress(const std::string& in) {
+  std::string out = snappy_compress_literals(in);
+  const std::uint32_t crc = avro_crc32(in);
+  out += static_cast<char>((crc >> 24) & 0xFF);
+  out += static_cast<char>((crc >> 16) & 0xFF);
+  out += static_cast<char>((crc >> 8) & 0xFF);
+  out += static_cast<char>(crc & 0xFF);
+  return out;
+}
+
+std::string avro_snappy_decompress(const std::string& in, const std::string& ctx) {
+  if (in.size() < 4) die("bloco snappy sem trailer de CRC32 em '" + ctx + "'");
+  const std::string payload = in.substr(0, in.size() - 4);
+  const std::uint32_t esperado =
+      (static_cast<std::uint32_t>(static_cast<std::uint8_t>(in[in.size() - 4])) << 24) |
+      (static_cast<std::uint32_t>(static_cast<std::uint8_t>(in[in.size() - 3])) << 16) |
+      (static_cast<std::uint32_t>(static_cast<std::uint8_t>(in[in.size() - 2])) << 8) |
+      static_cast<std::uint32_t>(static_cast<std::uint8_t>(in[in.size() - 1]));
+  std::string out;
+  try {
+    out = snappy_decompress(payload);
+  } catch (const std::exception& e) {
+    die("bloco snappy invalido em '" + ctx + "': " + e.what());
+  }
+  if (avro_crc32(out) != esperado) {
+    die("CRC32 do bloco snappy diverge em '" + ctx + "'");
+  }
+  return out;
+}
+
+// Codec dos blocos OCF (manifests e manifest lists) na escrita: "deflate"
+// (default), "null" ou "snappy", override via env ICEBERG_AVRO_CODEC. Valor
+// invalido -> erro claro. A leitura aceita os tres, independente da env.
+std::string avro_ocf_codec() {
+  const char* env = std::getenv("ICEBERG_AVRO_CODEC");
+  const std::string codec = env && *env ? env : "deflate";
+  if (codec != "null" && codec != "deflate" && codec != "snappy") {
+    die("ICEBERG_AVRO_CODEC invalido '" + codec + "' (esperado: null, deflate ou snappy)");
+  }
+  return codec;
+}
+
 // OCF writer: um unico bloco com todos os registros, sync fixo.
 std::string ocf_write(const Value& schema, const std::string& schema_json,
                       const std::vector<Value>& records,
                       const std::vector<std::pair<std::string, std::string>>& extra_meta) {
   static const char kSync[] = "\x77\xB6\xD2\xD1\x6E\xA6\x86\x79"
                               "\x98\x72\x8A\x66\x88\xA8\x44\x56";
-  std::string body;
-  for (const Value& r : records) avro_encode(body, schema, r);
+  const std::string codec = avro_ocf_codec();
+  std::string block;
+  for (const Value& r : records) avro_encode(block, schema, r);
+  if (!records.empty()) {
+    if (codec == "deflate") {
+      block = avro_deflate(block, "manifest");
+    } else if (codec == "snappy") {
+      block = avro_snappy_compress(block);
+    }
+  }
 
   std::string out = "Obj\x01";
   // metadata map<string, bytes>: um bloco so
   std::vector<std::pair<std::string, std::string>> meta;
   meta.emplace_back("avro.schema", schema_json);
-  meta.emplace_back("avro.codec", "null");
+  meta.emplace_back("avro.codec", codec);
   meta.insert(meta.end(), extra_meta.begin(), extra_meta.end());
   put_long(out, static_cast<std::int64_t>(meta.size()));
   for (const auto& kv : meta) {
@@ -439,8 +645,8 @@ std::string ocf_write(const Value& schema, const std::string& schema_json,
   out.append(kSync, 16);
   if (!records.empty()) {
     put_long(out, static_cast<std::int64_t>(records.size()));
-    put_long(out, static_cast<std::int64_t>(body.size()));
-    out += body;
+    put_long(out, static_cast<std::int64_t>(block.size()));
+    out += block;
     out.append(kSync, 16);
   }
   return out;
@@ -473,7 +679,9 @@ std::pair<Value, std::vector<Value>> ocf_read(const std::string& path) {
     }
   }
   if (schema_json.empty()) die("'" + path + "' sem avro.schema no header");
-  if (codec != "null") die("codec avro '" + codec + "' nao suportado (somente null)");
+  if (codec != "null" && codec != "deflate" && codec != "snappy") {
+    die("codec avro '" + codec + "' nao suportado (suportados: null, deflate e snappy)");
+  }
 
   char sync[16];
   dec.bytes(sync, 16);
@@ -495,7 +703,17 @@ std::pair<Value, std::vector<Value>> ocf_read(const std::string& path) {
     std::string raw;
     raw.reserve(static_cast<std::size_t>(size));
     for (std::int64_t k = 0; k < size; ++k) raw += static_cast<char>(dec.u8());
-    AvroDecoder bdec(raw, path + " (bloco)");
+    // descompressao do bloco conforme o codec do header (independente da
+    // env ICEBERG_AVRO_CODEC, que so vale para a escrita)
+    std::string body;
+    if (codec == "deflate") {
+      body = avro_inflate(raw, path);
+    } else if (codec == "snappy") {
+      body = avro_snappy_decompress(raw, path);
+    } else {
+      body = std::move(raw);
+    }
+    AvroDecoder bdec(body, path + " (bloco)");
     for (std::int64_t k = 0; k < count; ++k) records.push_back(avro_decode(bdec, schema));
     if (!bdec.done()) die("registros avro maiores que o bloco em '" + path + "'");
     char tail[16];

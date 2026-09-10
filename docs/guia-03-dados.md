@@ -219,7 +219,10 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
 `escrever_iceberg`/`anexar_iceberg`/`ler_iceberg` implementam o subconjunto de
 1ª passada do Iceberg com catálogo tipo Hadoop (diretório local), Avro OCF
 próprio (writer e reader, zero dependências) para manifest list + manifest e
-Parquet nativo para os data files:
+Parquet nativo para os data files. Os blocos OCF são gravados com codec
+**deflate** (deflate RAW via zlib) por default; `ICEBERG_AVRO_CODEC`
+(`null`/`deflate`/`snappy`) sobrescreve o codec de escrita — a leitura aceita
+os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
 
 ```tilt
 - escrever_iceberg vendas, "tabela_iceberg"                    # cria/sobrescreve (metadata v0)
@@ -283,9 +286,9 @@ Parquet nativo para os data files:
   ids da spec v2 nos schemas Avro, `field.id` nos parquet e coluna de
   partição reidratada pelo reader de verdade;
 - limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
-  local, sem JDBC), só transform identity, codec Avro "null"
-  apenas, lê o que o tilt escreve (sem garantia de tabelas de outros
-  escritores) e single-writer (sem locks nem optimistic concurrency).
+  local, sem JDBC), só transform identity, lê o que o tilt escreve (sem
+  garantia de tabelas de outros escritores) e single-writer (sem locks nem
+  optimistic concurrency).
 
 ### Iceberg REST catalog (opt-in, fase 29)
 
