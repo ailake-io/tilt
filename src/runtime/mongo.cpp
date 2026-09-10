@@ -439,6 +439,35 @@ std::int64_t inteiro_de(const Value& resp, const std::string& campo, const std::
   return static_cast<std::int64_t>(v->as_number());
 }
 
+// Campo inteiro opcional (ex.: cursor.id); ausente ou nao numerico vira o
+// valor padrao.
+std::int64_t inteiro_opcional(const ValueMap& mapa, const std::string& campo, std::int64_t padrao) {
+  const Value* v = mapa.find(campo);
+  if (!v || !v->is_number()) return padrao;
+  return static_cast<std::int64_t>(v->as_number());
+}
+
+// Cursor de uma resposta de find/getMore: extrai o id e o batch (firstBatch
+// na resposta do find, nextBatch nas de getMore). Falha com erro claro se a
+// estrutura nao veio.
+struct PartesCursor {
+  std::int64_t id;
+  const Value* batch;  // aponta para dentro de `resp`
+};
+
+PartesCursor cursor_de(const Value& resp, const std::string& campo_batch, const std::string& ctx) {
+  if (!resp.map) die(ctx + ": resposta sem documento");
+  const Value* cursor = resp.map->find("cursor");
+  if (!cursor || cursor->kind != ValueKind::Mapa || !cursor->map) {
+    die(ctx + ": resposta sem 'cursor'");
+  }
+  const Value* batch = cursor->map->find(campo_batch);
+  if (!batch || batch->kind != ValueKind::Lista || !batch->list) {
+    die(ctx + ": resposta sem 'cursor." + campo_batch + "'");
+  }
+  return {inteiro_opcional(*cursor->map, "id", 0), batch};
+}
+
 // Sessao OP_MSG: connecta, faz o handshake isMaster e executa comandos.
 class Sessao {
  public:
@@ -579,9 +608,23 @@ void mongo_inserir(const std::string& colecao, const Value& doc, const std::stri
 }
 
 Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t max,
-                   const std::string& banco) {
+                   const std::string& banco, const Value& somente, std::int64_t lote) {
   if (filtro.kind != ValueKind::Mapa || !filtro.map) die("buscar espera um mapa como filtro");
   if (max < 0) die("max deve ser >= 0");
+  if (lote < 0) die("lote deve ser >= 0");
+
+  // Projeção whitelist: somente: ["campo", ...] vira {campo: 1, ...} no
+  // comando find (o _id continua vindo do servidor, como no mongo de verdade).
+  Value proj;
+  if (somente.kind == ValueKind::Lista && somente.list && !somente.list->empty()) {
+    proj = Value::mapa();
+    for (const Value& c : *somente.list) {
+      if (c.kind != ValueKind::Texto || c.s.empty()) {
+        die("buscar: 'somente' deve ser uma lista de textos nao vazios");
+      }
+      proj.map->set(c.s, Value::inteiro(1));
+    }
+  }
 
   const MongoUrl url = parse_url();
   const std::string db = banco_efetivo(url, banco);
@@ -591,36 +634,56 @@ Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t
   cmd.map->set("find", Value::texto(colecao));
   cmd.map->set("$db", Value::texto(db));
   cmd.map->set("filter", filtro);
+  if (proj.map) cmd.map->set("projection", proj);
   cmd.map->set("limit", Value::inteiro(max));
-  cmd.map->set("batchSize", Value::inteiro(max));
+  cmd.map->set("batchSize", Value::inteiro(lote > 0 ? lote : max));
 
   const Value resp = sessao.comando(cmd);
   if (!ok_de(resp)) die("find em '" + colecao + "': " + errmsg_de(resp));
-  if (!resp.map) die("resposta de find sem documento");
 
-  const Value* cursor = resp.map->find("cursor");
-  if (!cursor || cursor->kind != ValueKind::Mapa || !cursor->map) {
-    die("resposta de find sem 'cursor'");
+  const PartesCursor c0 = cursor_de(resp, "firstBatch", "find");
+  Value resultado = Value::lista();
+  for (const Value& doc : *c0.batch->list) resultado.list->push_back(doc);
+
+  // Cursor aberto (cursor.id != 0): itera getMore acumulando nextBatch ate o
+  // servidor fechar o cursor (id == 0). Limite de seguranca contra cursores
+  // que nunca terminam.
+  constexpr int kMaxGetMore = 10000;
+  std::int64_t id = c0.id;
+  int rodadas = 0;
+  while (id != 0) {
+    if (++rodadas > kMaxGetMore) {
+      die("find em '" + colecao + "': cursor nao terminou apos " + std::to_string(kMaxGetMore) +
+          " getMore");
+    }
+    Value gm = Value::mapa();
+    gm.map->set("getMore", Value::inteiro(id));
+    gm.map->set("$db", Value::texto(db));
+    gm.map->set("collection", Value::texto(colecao));
+    if (lote > 0) gm.map->set("batchSize", Value::inteiro(lote));
+    const Value r2 = sessao.comando(gm);
+    if (!ok_de(r2)) die("getMore em '" + colecao + "': " + errmsg_de(r2));
+    const PartesCursor c2 = cursor_de(r2, "nextBatch", "getMore");
+    for (const Value& doc : *c2.batch->list) resultado.list->push_back(doc);
+    id = c2.id;
   }
-  const Value* batch = cursor->map->find("firstBatch");
-  if (!batch || batch->kind != ValueKind::Lista || !batch->list) {
-    die("resposta de find sem 'cursor.firstBatch'");
-  }
-  return *batch;
+  return resultado;
 }
 
 std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
                              const Value& mudancas, bool multi, const std::string& banco) {
   if (filtro.kind != ValueKind::Mapa || !filtro.map) die("atualizar espera um mapa como filtro");
-  if (mudancas.kind != ValueKind::Mapa || !mudancas.map) {
-    die("atualizar espera um mapa de mudancas, ex.: {$set: {valor: 999}}");
+  if (mudancas.kind != ValueKind::Mapa || !mudancas.map || mudancas.map->items.empty()) {
+    die("atualizar espera um mapa de mudancas, ex.: {$set: {valor: 999}, $inc: {acessos: 1}}");
   }
-  for (const auto& [op, _v] : mudancas.map->items) {
-    if (op != "$set") die("atualizar: operador '" + op + "' nao suportado (fase atual: so $set)");
-  }
-  const Value* set = mudancas.map->find("$set");
-  if (!set || set->kind != ValueKind::Mapa || !set->map) {
-    die("atualizar: '$set' deve ser um mapa {campo: valor}");
+  for (const auto& [op, v] : mudancas.map->items) {
+    if (op != "$set" && op != "$inc") {
+      die("atualizar: operador '" + op +
+          "' nao suportado (fase atual: $set e $inc podem ser combinados)");
+    }
+    if (v.kind != ValueKind::Mapa || !v.map) {
+      die("atualizar: '" + op + "' deve ser um mapa {campo: valor}");
+    }
   }
 
   const MongoUrl url = parse_url();

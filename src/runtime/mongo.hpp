@@ -30,15 +30,20 @@ void mongo_inserir(const std::string& colecao, const Value& doc, const std::stri
 // Busca na colecao devolvendo lista de mapas (max 100 por padrao). `filtro`
 // deve ser mapa de igualdade exata campo a campo (top-level, combinado por
 // E) — filtros vazios retornam tudo. Comando {find, $db, filter, limit,
-// batchSize}; a resposta vem em {cursor: {firstBatch: [...]}}. ObjectId do
-// servidor vira texto hex de 24 chars.
+// batchSize, projection?}; se o cursor do servidor vier com id != 0, itera
+// getMore ({getMore, $db, collection, batchSize?}) acumulando nextBatch ate
+// o cursor fechar (limite de 10000 getMore por seguranca). `somente` (lista
+// de textos nao vazios) vira projection whitelist {campo: 1, ...}; `lote`
+// (> 0) e o batchSize solicitado ao servidor. ObjectId do servidor vira
+// texto hex de 24 chars.
 Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t max,
-                   const std::string& banco);
+                   const std::string& banco, const Value& somente, std::int64_t lote);
 
 // Atualiza documentos que casam com `filtro` (mesma igualdade top-level de
-// buscar) aplicando `mudancas`. 1a passada: so o operador `$set` (mapa
-// {$set: {campo: valor, ...}}); outro operador -> erro claro. `multi` falso
-// (default) atualiza so o primeiro que casa; verdadeiro atualiza todos.
+// buscar) aplicando `mudancas`. Operadores suportados: `$set` e `$inc` (mapa
+// {campo: valor, ...} cada um), podendo ser combinados no mesmo update;
+// outro operador -> erro claro. `multi` falso (default) atualiza so o
+// primeiro que casa; verdadeiro atualiza todos.
 // Comando {update, $db, updates: [{q, u, multi}]}; ok:0 vira excecao com o
 // errmsg. Devolve nModified como inteiro.
 std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,

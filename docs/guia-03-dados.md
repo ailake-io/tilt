@@ -521,8 +521,10 @@ pipeline pedidos:
     - mongo_inserir "pedidos", {cliente: "ana", valor: 200}
     - achados = mongo_buscar "pedidos", {filtro: {cliente: "ana"}}
     - imprimir tamanho achados, achados[0].valor
-    - mods = mongo_atualizar "pedidos", {cliente: "ana"}, {$set: {valor: 999}}
+    - mods = mongo_atualizar "pedidos", {cliente: "ana"}, {$set: {valor: 999}, $inc: {acessos: 1}}
     - imprimir mods                              # nModified (inteiro)
+    - resumo = mongo_buscar "pedidos", {somente: ["cliente", "valor"]}
+    - imprimir resumo                            # só os campos pedidos
     - deletados = mongo_deletar "pedidos", {cliente: "bob"}
     - imprimir deletados                         # n deletados (inteiro)
     - nome = mongo_criar_indice "pedidos", {campos: ["cliente"]}
@@ -536,13 +538,21 @@ pipeline pedidos:
   `decimal`→double, `inteiro`→int64, `texto`→string, `logico`→bool,
   `nulo`→null, `mapa`→document, `lista`→array; `tensor`/`tabela` → erro
   claro. ObjectId vindo do servidor vira `texto` hex de 24 chars.
-- `mongo_buscar colecao, {filtro:, max:, banco:}`: devolve `lista` de
-  `mapas` (ordem do servidor). `filtro` é um `mapa` de **igualdade exata
-  campo a campo** (top-level, combinado por E); omitido, retorna tudo.
-  `max` limita a quantidade (default 100).
+- `mongo_buscar colecao, {filtro:, max:, somente:, lote:, banco:}`: devolve
+  `lista` de `mapas` (ordem do servidor). `filtro` é um `mapa` de
+  **igualdade exata campo a campo** (top-level, combinado por E); omitido,
+  retorna tudo. `max` limita a quantidade total (default 100). `somente`
+  (lista de textos) é uma **projeção whitelist**: só os campos listados
+  voltam (`{campo: 1, ...}` no comando find; o `_id` continua vindo, como
+  no `mongo` de verdade). `lote` (inteiro > 0) é o `batchSize` pedido ao
+  servidor: se o cursor vier aberto (`cursor.id != 0`), o conector itera
+  `getMore` automaticamente acumulando `nextBatch` até o cursor fechar
+  (limite de segurança de 10000 getMore por busca).
 - `mongo_atualizar colecao, filtro, mudancas, {banco:, multi:}`: devolve
-  `nModified` (inteiro). `mudancas` é um mapa de operadores — 1ª passada só
-  `$set: {campo: valor, ...}` (outro operador → erro claro). `filtro` é o
+  `nModified` (inteiro). `mudancas` é um mapa de operadores: `$set:
+  {campo: valor, ...}` e `$inc: {campo: delta, ...}` são suportados e
+  podem ser **combinados no mesmo update** (`{$set: {...}, $inc: {...}}`);
+  outro operador → erro claro. `filtro` é o
   mesmo de `mongo_buscar`. `multi` (lógico, default `falso`): `falso`
   atualiza só o primeiro documento que casa; `verdadeiro`, todos.
 - `mongo_deletar colecao, filtro, {banco:}`: remove **todos** os documentos
@@ -567,8 +577,9 @@ pipeline pedidos:
 - banco efetivo: opção `banco:` > path do `MONGO_URL`; sem nenhum dos dois,
   os builtins falham com erro acionável **antes** de tocar a rede.
 - limitações da 1ª passada: sem `getMore` no `mongo_agregar` (só
-  `firstBatch`), sem `$unset`/`$inc`/demais operadores de update (só `$set`),
-  sem índices de texto/TTL, filtro de `mongo_buscar` só por igualdade
+  `firstBatch`), sem `$unset`/demais operadores de update (`$set` e `$inc`
+  rodam), projeção só whitelist (sem exclusões tipo `{campo: 0}`/`_id:
+  falso`), sem índices de texto/TTL, filtro de `mongo_buscar` só por igualdade
   top-level, `mongo_deletar` sempre remove todos que casam (sem `limit 1`),
   sem auth/TLS, sem `OP_COMPRESSED`; respostas com document sequences
   (section kind 1) são aceitas, mas `batchSize`/`max` de 100 cabem na section

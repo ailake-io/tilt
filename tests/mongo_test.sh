@@ -1,12 +1,15 @@
 #!/usr/bin/env sh
-# Integration test for the MongoDB connector (`mongo_inserir`/`mongo_buscar`/
-# `mongo_atualizar`/`mongo_deletar`/`mongo_criar_indice`): spins up a mock
-# mongod in python3 (pure socketserver, implementing the same subset of the
-# wire protocol: OP_MSG opcode 2013 with section kind 0, BSON com os mesmos
-# tipos do cliente) and runs `tilt executar` em dois fixtures: o roundtrip
-# (2 inserts na mesma colecao + 2 finds) e o CRUD (3 inserts, update $set,
-# delete, createIndexes), checando as saidas impressas mais o log de
-# requisicoes do mock (INSERT/FIND/UPDATE/DELETE/CREATEINDEXES).
+# (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
+# `mongo_criar_indice`): spins up a mock mongod in python3 (pure
+# socketserver, implementing the same subset of the wire protocol: OP_MSG
+# opcode 2013 with section kind 0, BSON com os mesmos tipos do cliente —
+# incluindo projection no find, cursores paginados via getMore/nextBatch e
+# $set/$inc no update) and runs `tilt executar` em tres fixtures: o
+# roundtrip (2 inserts na mesma colecao + 2 finds), o CRUD (3 inserts, update
+# $set, delete, createIndexes) e as opcoes (update $set+$inc com multi, busca
+# com projecao `somente:`, find paginado com `lote:` + getMore), checando as
+# saidas impressas mais o log de requisicoes do mock (INSERT/FIND/GETMORE/
+# UPDATE/DELETE/CREATEINDEXES).
 set -eu
 
 BIN="$1"
@@ -38,6 +41,9 @@ log = open(log_path, "a", encoding="utf-8")
 store = {}
 # indexes[(db, colecao, name)] = indice tagged (createIndexes e so registrado)
 indexes = {}
+# cursores[cid] = [doc, ...] restantes de um find paginado (batchSize/lote)
+cursores = {}
+prox_cursor_id = [1000]
 req_id = 0
 
 
@@ -187,6 +193,28 @@ def como_doc(tagged_doc):
     return dict(tagged_doc)
 
 
+def aplicar_proj(doc, proj):
+    # projection whitelist: mantem campos com valor truthy (+ _id, salvo se
+    # "_id" vier com valor falsy na projecao — comportamento do mongo real)
+    campos = {k for k, v in proj.items() if v[1]}
+    mantem_id = proj.get("_id", ("i64", 1))[1]
+    out = {}
+    for k, v in doc.items():
+        if k == "_id":
+            if mantem_id:
+                out[k] = v
+        elif k in campos:
+            out[k] = v
+    return out
+
+
+def somar(a, b):
+    # soma de valores tagged: double vence; senao int64
+    if a[0] == "double" or b[0] == "double":
+        return ("double", float(a[1]) + float(b[1]))
+    return ("i64", int(a[1]) + int(b[1]))
+
+
 class Mongod(socketserver.BaseRequestHandler):
     def handle(self):
         conn = self.request
@@ -234,11 +262,51 @@ class Mongod(socketserver.BaseRequestHandler):
             limite = cmd.get("limit", ("i64", 0))[1]
             if limite > 0:
                 achados = achados[:limite]
-            log.write("FIND %s.%s n=%d\n" % (db, colecao, len(achados)))
+            proj = cmd.get("projection", ("doc", {}))[1]
+            extra = (" proj=" + ",".join(sorted(proj.keys()))) if proj else ""
+            if proj:
+                achados = [("doc", aplicar_proj(d, proj)) for _t, d in achados]
+            lote = cmd.get("batchSize", ("i64", 0))[1]
+            if lote > 0 and len(achados) > lote:
+                cid = prox_cursor_id[0]
+                prox_cursor_id[0] += 1
+                cursores[cid] = [d for _t, d in achados[lote:]]
+                log.write("FIND %s.%s n=%d cursor=%d%s\n" % (db, colecao, lote, cid, extra))
+                log.flush()
+                return op_msg_response(req_id, {
+                    "ok": ("double", 1.0),
+                    "cursor": ("doc", {"firstBatch": ("arr", achados[:lote]),
+                                       "id": ("i64", cid)}),
+                })
+            log.write("FIND %s.%s n=%d%s\n" % (db, colecao, len(achados), extra))
             log.flush()
             return op_msg_response(req_id, {
                 "ok": ("double", 1.0),
                 "cursor": ("doc", {"firstBatch": ("arr", achados), "id": ("i64", 0)}),
+            })
+        if "getMore" in cmd:
+            _tag, cid = cmd["getMore"]
+            _tag, db = cmd["$db"]
+            _tag, colecao = cmd["collection"]
+            restantes = cursores.get(cid)
+            if restantes is None:
+                return op_msg_response(req_id, {"ok": ("double", 0.0),
+                                                "errmsg": ("str", "cursor desconhecido: %d" % cid)})
+            lote = cmd.get("batchSize", ("i64", 0))[1]
+            n = lote if lote > 0 else len(restantes)
+            chunk = restantes[:n]
+            if len(restantes) > n:
+                cursores[cid] = restantes[n:]
+                novo_id = cid
+            else:
+                del cursores[cid]
+                novo_id = 0
+            log.write("GETMORE %s.%s n=%d\n" % (db, colecao, len(chunk)))
+            log.flush()
+            return op_msg_response(req_id, {
+                "ok": ("double", 1.0),
+                "cursor": ("doc", {"id": ("i64", novo_id),
+                                   "nextBatch": ("arr", [("doc", d) for d in chunk])}),
             })
         if "update" in cmd:
             _tag, colecao = cmd["update"]
@@ -246,20 +314,26 @@ class Mongod(socketserver.BaseRequestHandler):
             fila = store.setdefault((db, colecao), [])
             n = 0
             n_modified = 0
+            inc_campos = []
             for _tag, upd in cmd["updates"][1].values():
                 filtro = upd.get("q", ("doc", {}))[1]
                 _tag, u = upd["u"]
                 multi = upd.get("multi", ("bool", False))[1]
                 set_ops = u.get("$set", ("doc", {}))[1]
+                inc_ops = u.get("$inc", ("doc", {}))[1]
+                inc_campos.extend(inc_ops.keys())
                 for doc in fila:
                     if all(doc.get(k) == v for k, v in filtro.items()):
                         n += 1
                         for k, v in set_ops.items():
                             doc[k] = v
+                        for k, v in inc_ops.items():
+                            doc[k] = somar(doc.get(k, ("i64", 0)), v)
                         n_modified += 1
                         if not multi:
                             break
-            log.write("UPDATE %s.%s n=%d nModified=%d\n" % (db, colecao, n, n_modified))
+            extra = (" inc=" + ",".join(inc_campos)) if inc_campos else ""
+            log.write("UPDATE %s.%s n=%d nModified=%d%s\n" % (db, colecao, n, n_modified, extra))
             log.flush()
             return op_msg_response(req_id, {"ok": ("double", 1.0),
                                             "n": ("i32", n),
@@ -339,6 +413,16 @@ out2=$(
     "$BIN" executar "${0%/*}/fixtures/mongo_crud.tilt"
 )
 
+cp "$tmp/log" "$tmp/log_crud"
+
+# --- opcoes ($set+$inc, projecao 'somente:', cursor paginado com 'lote:') -----
+out3=$(
+  env MONGO_URL="mongodb://127.0.0.1:$PORTA/lojaopt" \
+    "$BIN" executar "${0%/*}/fixtures/mongo_opcoes.tilt"
+)
+
+cp "$tmp/log" "$tmp/log_opcoes"
+
 kill "$mock_pid" 2>/dev/null || true
 mock_pid=""
 
@@ -360,20 +444,39 @@ echo "$out2" | grep -q "^1$" || { echo "saida crud sem nModified 1: $out2"; fail
 echo "$out2" | grep -q "^999$" || { echo "saida crud sem valor 999: $out2"; fail=1; }
 echo "$out2" | grep -q "^cliente_1$" || { echo "saida crud sem name cliente_1: $out2"; fail=1; }
 
-inserts2=$(grep -c "^INSERT " "$tmp/log" || true)
-finds2=$(grep -c "^FIND " "$tmp/log" || true)
-updates=$(grep -c "^UPDATE " "$tmp/log" || true)
-deletes=$(grep -c "^DELETE " "$tmp/log" || true)
-idxs=$(grep -c "^CREATEINDEXES " "$tmp/log" || true)
-[ "$inserts2" = "5" ] || { echo "esperado 5 INSERT no total, obtido $inserts2"; cat "$tmp/log"; fail=1; }
-[ "$finds2" = "4" ] || { echo "esperado 4 FIND no total, obtido $finds2"; cat "$tmp/log"; fail=1; }
-[ "$updates" = "1" ] || { echo "esperado 1 UPDATE, obtido $updates"; cat "$tmp/log"; fail=1; }
-[ "$deletes" = "1" ] || { echo "esperado 1 DELETE, obtido $deletes"; cat "$tmp/log"; fail=1; }
-[ "$idxs" = "1" ] || { echo "esperado 1 CREATEINDEXES, obtido $idxs"; cat "$tmp/log"; fail=1; }
-grep -q "^UPDATE lojadb.pedidos n=1 nModified=1" "$tmp/log" || { echo "log sem UPDATE lojadb.pedidos n=1 nModified=1"; cat "$tmp/log"; fail=1; }
-grep -q "^DELETE lojadb.pedidos n=1" "$tmp/log" || { echo "log sem DELETE lojadb.pedidos n=1"; cat "$tmp/log"; fail=1; }
-grep -q "^CREATEINDEXES lojadb.pedidos cliente_1" "$tmp/log" || { echo "log sem CREATEINDEXES lojadb.pedidos cliente_1"; cat "$tmp/log"; fail=1; }
-grep -q "^FIND lojadb.pedidos n=2" "$tmp/log" || { echo "log sem FIND lojadb.pedidos n=2"; cat "$tmp/log"; fail=1; }
+inserts2=$(grep -c "^INSERT " "$tmp/log_crud" || true)
+finds2=$(grep -c "^FIND " "$tmp/log_crud" || true)
+updates=$(grep -c "^UPDATE " "$tmp/log_crud" || true)
+deletes=$(grep -c "^DELETE " "$tmp/log_crud" || true)
+idxs=$(grep -c "^CREATEINDEXES " "$tmp/log_crud" || true)
+[ "$inserts2" = "5" ] || { echo "esperado 5 INSERT no total, obtido $inserts2"; cat "$tmp/log_crud"; fail=1; }
+[ "$finds2" = "4" ] || { echo "esperado 4 FIND no total, obtido $finds2"; cat "$tmp/log_crud"; fail=1; }
+[ "$updates" = "1" ] || { echo "esperado 1 UPDATE, obtido $updates"; cat "$tmp/log_crud"; fail=1; }
+[ "$deletes" = "1" ] || { echo "esperado 1 DELETE, obtido $deletes"; cat "$tmp/log_crud"; fail=1; }
+[ "$idxs" = "1" ] || { echo "esperado 1 CREATEINDEXES, obtido $idxs"; cat "$tmp/log_crud"; fail=1; }
+grep -q "^UPDATE lojadb.pedidos n=1 nModified=1" "$tmp/log_crud" || { echo "log sem UPDATE lojadb.pedidos n=1 nModified=1"; cat "$tmp/log_crud"; fail=1; }
+grep -q "^DELETE lojadb.pedidos n=1" "$tmp/log_crud" || { echo "log sem DELETE lojadb.pedidos n=1"; cat "$tmp/log_crud"; fail=1; }
+grep -q "^CREATEINDEXES lojadb.pedidos cliente_1" "$tmp/log_crud" || { echo "log sem CREATEINDEXES lojadb.pedidos cliente_1"; cat "$tmp/log_crud"; fail=1; }
+grep -q "^FIND lojadb.pedidos n=2" "$tmp/log_crud" || { echo "log sem FIND lojadb.pedidos n=2"; cat "$tmp/log_crud"; fail=1; }
+
+# --- opcoes: saida (nModified=2, tamanho 2, valor 999, acessos 11, total 3) ---
+echo "$out3" | grep -q "^2$" || { echo "saida opcoes sem nModified 2: $out3"; fail=1; }
+echo "$out3" | grep -q "^999$" || { echo "saida opcoes sem valor 999: $out3"; fail=1; }
+echo "$out3" | grep -q "^11$" || { echo "saida opcoes sem acessos 11: $out3"; fail=1; }
+echo "$out3" | grep -q "^3$" || { echo "saida opcoes sem total 3: $out3"; fail=1; }
+
+inserts3=$(grep -c "^INSERT " "$tmp/log_opcoes" || true)
+finds3=$(grep -c "^FIND " "$tmp/log_opcoes" || true)
+getmores=$(grep -c "^GETMORE " "$tmp/log_opcoes" || true)
+updates3=$(grep -c "^UPDATE " "$tmp/log_opcoes" || true)
+[ "$inserts3" = "8" ] || { echo "esperado 8 INSERT no total, obtido $inserts3"; cat "$tmp/log_opcoes"; fail=1; }
+[ "$finds3" = "7" ] || { echo "esperado 7 FIND no total, obtido $finds3"; cat "$tmp/log_opcoes"; fail=1; }
+[ "$getmores" = "1" ] || { echo "esperado 1 GETMORE, obtido $getmores"; cat "$tmp/log_opcoes"; fail=1; }
+[ "$updates3" = "2" ] || { echo "esperado 2 UPDATE no total, obtido $updates3"; cat "$tmp/log_opcoes"; fail=1; }
+grep -q "^UPDATE lojaopt.pedidos n=2 nModified=2 inc=acessos" "$tmp/log_opcoes" || { echo "log sem UPDATE lojaopt.pedidos n=2 nModified=2 inc=acessos"; cat "$tmp/log_opcoes"; fail=1; }
+grep -q "^FIND lojaopt.pedidos n=2 proj=valor" "$tmp/log_opcoes" || { echo "log sem FIND lojaopt.pedidos com proj=valor"; cat "$tmp/log_opcoes"; fail=1; }
+grep -q "^FIND lojaopt.pedidos n=2 cursor=" "$tmp/log_opcoes" || { echo "log sem FIND lojaopt.pedidos paginado (cursor)"; cat "$tmp/log_opcoes"; fail=1; }
+grep -q "^GETMORE lojaopt.pedidos n=1" "$tmp/log_opcoes" || { echo "log sem GETMORE lojaopt.pedidos n=1"; cat "$tmp/log_opcoes"; fail=1; }
 
 [ "$fail" = 0 ] && echo "mongo_test ok"
 exit "$fail"

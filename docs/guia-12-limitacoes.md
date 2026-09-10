@@ -96,15 +96,15 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
   básico completo — restam: `mongo_agregar` lê só o `firstBatch` do cursor
   (sem `getMore`; use `$limit`/`$skip` para caber no primeiro batch) e não
-  valida as etapas (erro de pipeline vira erro claro do servidor), sem
-  `$unset`/`$inc`/demais operadores de update (só `$set`), sem índices de
-  texto/TTL, filtro de `mongo_buscar` só por igualdade exata top-level
-  (combinado por E), `mongo_deletar` remove sempre todos que casam (sem
-  `limit 1`), find sem projeção (retorna o documento inteiro), TLS via
-  esquema `mongodb+srv://` (sem lookup DNS SRV), sem `OP_COMPRESSED`; document
-  sequences (section kind 1) são puladas na leitura; uma conexão (com
-  handshake `isMaster`) por chamada e payload inteiro em memória; banco por
-  `MONGO_URL` (path) ou opção `banco:`.
+  valida as etapas (erro de pipeline vira erro claro do servidor), update só
+  com `$set`/`$inc` (sem `$unset` e demais operadores), projeção de
+  `mongo_buscar` só whitelist (`somente:`; sem exclusões tipo `{campo: 0}`),
+  sem índices de texto/TTL, filtro de `mongo_buscar` só por igualdade exata
+  top-level (combinado por E), `mongo_deletar` remove sempre todos que casam
+  (sem `limit 1`), TLS via esquema `mongodb+srv://` (sem lookup DNS SRV), sem
+  `OP_COMPRESSED`; document sequences (section kind 1) são puladas na leitura;
+  uma conexão (com handshake `isMaster`) por chamada e payload inteiro em
+  memória; banco por `MONGO_URL` (path) ou opção `banco:`.
 - Kafka (`ler_kafka`/`escrever_kafka`/`fonte tipo: kafka`): wire protocol
   0.9-era — consumer groups com 1 membro por grupo por vez (o assignment
   "range" pega todas as partições, mas sem rebalanceamento real: dois

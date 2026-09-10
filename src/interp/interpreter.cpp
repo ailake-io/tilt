@@ -3630,15 +3630,17 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) {
       fail(call.span,
-           "mongo_buscar espera (colecao, {filtro:, max:, banco:}), ex.: mongo_buscar \"pedidos\", "
-           "{ filtro: { cliente: \"ana\" } }");
+           "mongo_buscar espera (colecao, {filtro:, max:, somente:, lote:, banco:}), ex.: "
+           "mongo_buscar \"pedidos\", { filtro: { cliente: \"ana\" } }");
     }
     Value filtro = Value::mapa();
     std::int64_t max = 100;
+    std::int64_t lote = 0;
+    Value somente = Value::lista();
     std::string banco;
     if (a.size() >= 2) {
       if (a[1].kind != ValueKind::Mapa || !a[1].map) {
-        fail(call.span, "mongo_buscar: opcoes devem ser um mapa {filtro:, max:, banco:}");
+        fail(call.span, "mongo_buscar: opcoes devem ser um mapa {filtro:, max:, somente:, lote:, banco:}");
       }
       if (const Value* fv = a[1].map->find("filtro")) {
         if (fv->kind != ValueKind::Mapa || !fv->map) {
@@ -3652,6 +3654,23 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         }
         max = mv->i;
       }
+      if (const Value* sv = a[1].map->find("somente")) {
+        if (sv->kind != ValueKind::Lista || !sv->list || sv->list->empty()) {
+          fail(call.span, "mongo_buscar: 'somente' deve ser uma lista de textos nao vazia");
+        }
+        for (const Value& c : *sv->list) {
+          if (c.kind != ValueKind::Texto || c.s.empty()) {
+            fail(call.span, "mongo_buscar: 'somente' deve ser uma lista de textos nao vazios");
+          }
+        }
+        somente = *sv;
+      }
+      if (const Value* lv = a[1].map->find("lote")) {
+        if (lv->kind != ValueKind::Inteiro || lv->i <= 0) {
+          fail(call.span, "mongo_buscar: 'lote' deve ser inteiro > 0");
+        }
+        lote = lv->i;
+      }
       if (const Value* bv = a[1].map->find("banco")) {
         if (bv->kind != ValueKind::Texto) {
           fail(call.span, "mongo_buscar: 'banco' deve ser texto");
@@ -3660,7 +3679,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       }
     }
     try {
-      return rt::mongo_buscar(a[0].s, filtro, max, banco);
+      return rt::mongo_buscar(a[0].s, filtro, max, banco, somente, lote);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -3670,13 +3689,13 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     if (a.size() < 3 || a[0].kind != ValueKind::Texto) {
       fail(call.span,
            "mongo_atualizar espera (colecao, filtro, mudancas, {banco:, multi:}), ex.: "
-           "mongo_atualizar \"pedidos\", {cliente: \"ana\"}, {$set: {valor: 999}}");
+           "mongo_atualizar \"pedidos\", {cliente: \"ana\"}, {$set: {valor: 999}, $inc: {acessos: 1}}");
     }
     if (a[1].kind != ValueKind::Mapa || !a[1].map) {
       fail(call.span, "mongo_atualizar: 'filtro' deve ser um mapa de igualdade");
     }
     if (a[2].kind != ValueKind::Mapa || !a[2].map) {
-      fail(call.span, "mongo_atualizar: 'mudancas' deve ser um mapa {$set: {...}}");
+      fail(call.span, "mongo_atualizar: 'mudancas' deve ser um mapa {$set: {...}, $inc: {...}}");
     }
     std::string banco;
     bool multi = false;

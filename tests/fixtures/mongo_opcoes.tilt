@@ -1,0 +1,19 @@
+# Opcoes do conector MongoDB contra o mock mongod do mongo_test.sh (terceira
+# rodada, banco "lojaopt"): update combinando $set + $inc com multi, busca
+# com projecao ('somente:') e leitura de cursor paginado ('lote:' forca o
+# mock a abrir cursor.id != 0 e responder via getMore/nextBatch). Confere
+# nModified=2, o valor $set/$inc, os campos projetados e o total lido (3).
+pipeline mongo_opcoes:
+  passos:
+    - mongo_inserir "pedidos", {cliente: "ana", valor: 200, acessos: 1}
+    - mongo_inserir "pedidos", {cliente: "ana", valor: 300, acessos: 2}
+    - mongo_inserir "pedidos", {cliente: "bob", valor: 150, acessos: 5}
+    - mods = mongo_atualizar "pedidos", {cliente: "ana"}, {"$set": {valor: 999}, "$inc": {acessos: 10}}, {multi: verdadeiro}
+    - imprimir mods
+    - achados = mongo_buscar "pedidos", {filtro: {cliente: "ana"}, somente: ["valor"]}
+    - imprimir tamanho achados
+    - imprimir achados[0].valor
+    - incrementados = mongo_buscar "pedidos", {filtro: {acessos: 11}}
+    - imprimir incrementados[0].acessos
+    - todos = mongo_buscar "pedidos", {lote: 2}
+    - imprimir tamanho todos
