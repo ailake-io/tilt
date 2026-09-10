@@ -177,26 +177,30 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   arquivos ativos, projetando cada arquivo no schema corrente por nome
   (coluna ausente no arquivo → nulo);
 - **partições hive-style**: `escrever_delta tabela, "dir", particionar_por: "col"`
-  grava os parquet em `<dir>/<col>=<valor>/part-NNNNN.parquet`, **sem** a coluna
-  de partição nos dados (padrão Delta — o valor vive no diretório e no
+  (ou **partição composta** `particionar_por: ["estado", "ano"]`) grava os
+  parquet em `<dir>/<c1>=<v1>/<c2>=<v2>/part-NNNNN.parquet`, **sem** as colunas
+  de partição nos dados (padrão Delta — os valores vivem no diretório e no
   `partitionValues` de cada `add`; o `metaData` registra `partitionColumns` e o
-  `schemaString` continua listando a coluna). Valor nulo na coluna de partição
-  ou texto com `/` → erro claro (fase 25: sem `__HIVE_DEFAULT_PARTITION__` nem
+  `schemaString` continua listando as colunas). Valor nulo em coluna de partição
+  ou texto com `/` → erro claro (sem `__HIVE_DEFAULT_PARTITION__` nem
   escaping). `anexar_delta` herda a partição da tabela existente (chamar sem a
-  opção ou com o mesmo valor); `particionar_por` explícito e divergente, ou
-  opção em tabela não particionada → erro claro. Na leitura a coluna é
-  reidratada a partir de `partitionValues`, convertida para o tipo declarado no
-  schema (falha de conversão mantém texto). Tabelas particionadas por
-  ferramentas externas (ex.: pyarrow/delta-rs) também são lidas. Não há filtro
-  por diretório de partição — a leitura lê todos os arquivos ativos e reidrata
-  (predicados de igualdade em `onde` ficam para fase futura);
+  opção ou com o mesmo valor, na mesma ordem); `particionar_por` explícito e
+  divergente, ou opção em tabela não particionada → erro claro. Na leitura as
+  colunas são reidratadas a partir de `partitionValues`, convertidas para o tipo
+  declarado no schema (falha de conversão mantém texto). Tabelas particionadas
+  por ferramentas externas (ex.: pyarrow/delta-rs) também são lidas;
+- **pruning de partições**: `ler_delta "dir", onde: { estado: "sp", ano: 2024 }`
+  compara predicados de igualdade contra as colunas de partição e **pula os
+  arquivos que não podem conter linhas** (lê só os diretórios selecionados do
+  log). Predicados em colunas comuns (não particionadas) viram filtro de linha
+  aplicado após a leitura — o resultado é o mesmo, sem o custo de ler arquivo
+  algum fora da partição. Sem match, retorna tabela vazia;
 - interoperável com delta-rs: `DeltaTable(dir).to_pyarrow_table()` lê tabelas
   escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
   sem dictionary e com colunas obrigatórias;
 - limitações: `escrever_delta` sobrescreve a tabela (recria a versão 0);
   `anexar_delta` pressupõe um único escritor (sem locks nem optimistic
-  concurrency), uma única coluna de partição, sem checkpoints, sem transações
-  concorrentes.
+  concurrency), sem checkpoints, sem transações concorrentes.
 
 ## Iceberg (catálogo Hadoop)
 

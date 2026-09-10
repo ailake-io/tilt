@@ -36,17 +36,19 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
   single-writer — sem locks/optimistic concurrency). Partições hive-style
-  existem para **uma coluna**
-  (`particionar_por:`, layout `<col>=<valor>/part-NNNNN.parquet`, coluna
-  reidrata na leitura), mas: valor nulo em coluna de partição e valores com
-  `/` não são suportados (erro claro, sem `__HIVE_DEFAULT_PARTITION__` nem
-  escaping), a leitura não filtra por diretório de partição (lê tudo e
-  reidrata) e não há checkpoints; a leitura herda o subconjunto do Parquet
-  acima. **Evolução de schema (fase 27)**: o append aceita colunas a mais —
-  toda coluna antiga presente (ordem livre), coluna nova entra nullable no
-  fim do `schemaString` com `metaData` novo no commit; arquivos antigos ficam
-  sem a coluna e a leitura projeta nulo (union-by-name). Remover coluna ou
-  mudar o tipo de uma existente → erro claro.
+  suportam **uma ou mais colunas** (`particionar_por: "col"` ou
+  `particionar_por: ["c1", "c2"]`, layout `<c1>=<v1>/<c2>=<valor>/part-NNNNN.parquet`,
+  colunas reidratadas na leitura) e há **pruning** de partições em
+  `ler_delta ... onde: {...}` (igualdade; predicados em coluna de partição pulam
+  arquivos inteiros pelo log, o resto filtra linhas). Ainda assim: valor nulo
+  em coluna de partição e valores com `/` não são suportados (erro claro, sem
+  `__HIVE_DEFAULT_PARTITION__` nem escaping) e não há checkpoints; a leitura
+  herda o subconjunto do Parquet acima. **Evolução de schema (fase 27)**: o
+  append aceita colunas a mais — toda coluna antiga presente (ordem livre),
+  coluna nova entra nullable no fim do `schemaString` com `metaData` novo no
+  commit; arquivos antigos ficam sem a coluna e a leitura projeta nulo
+  (union-by-name). Remover coluna ou mudar o tipo de uma existente → erro
+  claro.
 - Iceberg é de 1ª passada: o catálogo default é **Hadoop** (diretório local).
   Há um **REST catalog opt-in** (fase 29: `ICEBERG_CATALOG=rest` +
   `ICEBERG_URI`) falando o subconjunto `loadTable`/`createTable`/`transactions`

@@ -8,8 +8,8 @@ sp sorocaba 50
 ba salvador 60
 rj rio 70
 6073
-delta: valor da coluna de particao 'estado' contem '/' (fase 25: caracteres especiais nao suportados)
-delta: valor nulo em coluna de particao 'estado' (fase 25: particao com nulo nao e suportada)
+delta: valor da coluna de particao 'estado' contem '/' (caracteres especiais nao suportados)
+delta: valor nulo em coluna de particao 'estado' (particao com nulo nao e suportada)
 delta: escrever_delta: coluna de particao 'regiao' nao existe na tabela (colunas: [estado, cidade, valor])
 delta: anexar_delta: tabela em 'avulsos' nao e particionada — recrie-a com escrever_delta tabela, "avulsos", particionar_por: "estado"
-delta: anexar_delta: tabela em 'vendas' ja e particionada por 'estado' (recebido particionar_por: 'cidade')
+delta: anexar_delta: tabela em 'vendas' ja e particionada por [estado] (recebido particionar_por: [cidade])

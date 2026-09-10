@@ -103,6 +103,9 @@ class Interpreter {
 
   std::vector<rt::Value> eval_args(const ast::Expr& call, Env& env);
   rt::ValueMap eval_kwargs(const ast::Expr& call, Env& env);
+  // `particionar_por:` como texto ou lista de textos (particao composta).
+  std::vector<std::string> parse_particionar_por(const rt::ValueMap& kw, const char* builtin,
+                                                 const Span& span);
   std::string interpolate(const std::string& text, Env& env);
 
   rt::Value read_csv_file(const std::string& path, Span span);

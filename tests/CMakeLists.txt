@@ -67,6 +67,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_roundtrip.tilt)
 
 add_test(
+  NAME delta
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/delta_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/delta_particionado.tilt)
+
+add_test(
   NAME iceberg_rest
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/iceberg_rest_test.sh
           $<TARGET_FILE:tilt>

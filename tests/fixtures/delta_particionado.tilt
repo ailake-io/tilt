@@ -1,0 +1,16 @@
+pipeline principal:
+  passos:
+    - vendas = [
+        { estado: "sp", ano: 2024, cidade: "santos", valor: 10 },
+        { estado: "sp", ano: 2025, cidade: "campinas", valor: 30 },
+        { estado: "rj", ano: 2024, cidade: "niteroi", valor: 20 },
+        { estado: "rj", ano: 2025, cidade: "rio", valor: 70 },
+        { estado: "sp", ano: 2024, cidade: "sorocaba", valor: 50 }
+      ]
+    - escrever_delta vendas, "vendas_delta", particionar_por: ["estado", "ano"]
+    - tudo = ler_delta "vendas_delta"
+    - imprimir "total:", tamanho tudo
+    - sp2024 = ler_delta "vendas_delta", onde: { estado: "sp", ano: 2024 }
+    - imprimir "sp2024:", tamanho sp2024
+    - so_niteroi = ler_delta "vendas_delta", onde: { cidade: "niteroi" }
+    - imprimir "residual:", tamanho so_niteroi

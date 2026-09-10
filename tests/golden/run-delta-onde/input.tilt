@@ -1,0 +1,42 @@
+funcao tentar_anexar t -> texto:
+  tentar:
+    anexar_delta t, "multi", particionar_por: ["ano", "estado"]
+    retornar "sem erro"
+  capturar erro:
+    retornar erro
+
+pipeline principal:
+  passos:
+    - vendas = [
+        { estado: "sp", ano: 2024, cidade: "santos", valor: 10 },
+        { estado: "sp", ano: 2025, cidade: "campinas", valor: 30 },
+        { estado: "rj", ano: 2024, cidade: "niteroi", valor: 20 },
+        { estado: "rj", ano: 2025, cidade: "rio", valor: 70 },
+        { estado: "sp", ano: 2024, cidade: "sorocaba", valor: 50 }
+      ]
+    - escrever_delta vendas, "multi", particionar_por: ["estado", "ano"]
+    - tudo = ler_delta "multi"
+    - imprimir "total: ", tamanho tudo
+    # pruning por uma coluna de particao
+    - so_sp = ler_delta "multi", onde: { estado: "sp" }
+    - imprimir "sp: ", tamanho so_sp
+    # pruning por duas colunas de particao
+    - sp_2024 = ler_delta "multi", onde: { estado: "sp", ano: 2024 }
+    - imprimir "sp/2024: ", tamanho sp_2024
+    - para cada linha em sp_2024:
+        - imprimir linha.cidade
+    # pruning de particao + filtro residual em coluna comum
+    - so_sorocaba = ler_delta "multi", onde: { estado: "sp", cidade: "sorocaba" }
+    - imprimir "sorocaba: ", tamanho so_sorocaba
+    # sem match em particao: tabela vazia
+    - vazio = ler_delta "multi", onde: { estado: "mg" }
+    - imprimir "mg: ", tamanho vazio
+    # append herda a particao composta
+    - novas = [
+        { estado: "ba", ano: 2024, cidade: "salvador", valor: 60 }
+      ]
+    - anexar_delta novas, "multi"
+    - com_ba = ler_delta "multi", onde: { estado: "ba", ano: 2024 }
+    - imprimir "ba/2024: ", tamanho com_ba
+    # append com particionar_por divergente (ordem importa) -> erro
+    - imprimir tentar_anexar novas
