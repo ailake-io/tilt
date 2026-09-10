@@ -34,6 +34,21 @@ void mkdir_if_missing(const std::string& path) {
   }
 }
 
+// Cria o caminho inteiro (pais inclusos), componente a componente. Usado
+// para diretorios de particao aninhados (<c1>=<v1>/<c2>=<v2>).
+void mkdir_p(const std::string& path) {
+  std::string cur;
+  cur.reserve(path.size());
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    cur += path[i];
+    if (path[i] != '/' && i + 1 != path.size()) continue;
+    if (cur.empty() || cur == "/") continue;
+    if (tilt_mkdir(cur) != 0 && errno != EEXIST) {
+      die("nao foi possivel criar o diretorio '" + path + "'");
+    }
+  }
+}
+
 std::int64_t file_size(const std::string& path) {
   return tilt_file_size(path);
 }
@@ -562,19 +577,14 @@ struct Column {
   bool required = true;      // false = nullable (colunas novas por evolucao)
 };
 
-// Campo de um partition spec (fase 26: somente transform "identity" e uma
-// unica coluna). `avro_ty` e o tipo do campo no record `partition` do
-// manifest — o tipo da coluna no schema iceberg.
+// Campo de um partition spec (somente transform "identity"). `avro_ty` e o
+// tipo do campo no record `partition` do manifest — o tipo da coluna no
+// schema iceberg.
 struct PartitionField {
   std::string name;
   std::int64_t field_id = 1000;
   std::int64_t source_id = 0;
   std::string avro_ty = "string";
-};
-
-// Spec efetivo de uma escrita/anexo; vazio = tabela sem particao.
-struct PartitionSpec {
-  PartitionField field;
 };
 
 std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
@@ -637,21 +647,48 @@ std::string join_names(const std::vector<Column>& cols) {
   return out;
 }
 
-// Monta o spec a partir da tabela escrita: localiza a coluna, deduz o tipo
-// pelo iceberg type do schema e o source-id pelo id da coluna (posicao + 1).
-PartitionSpec make_spec(const std::vector<Column>& cols, const std::string& col, const char* ctx) {
+std::string join_part_cols(const std::vector<std::string>& cols) {
+  std::string out = "[";
   for (std::size_t k = 0; k < cols.size(); ++k) {
-    if (cols[k].name == col) {
-      PartitionSpec spec;
-      spec.field.name = col;
-      spec.field.field_id = 1000;
-      spec.field.source_id = static_cast<std::int64_t>(k + 1);
-      spec.field.avro_ty = cols[k].type;
-      return spec;
+    if (k) out += ", ";
+    out += cols[k];
+  }
+  out += ']';
+  return out;
+}
+
+// Monta o spec a partir da tabela escrita: localiza cada coluna (erro claro
+// em repetida ou inexistente), deduz o tipo pelo iceberg type do schema e o
+// source-id pelo id da coluna (posicao + 1). Field-ids 1000, 1001, ... na
+// ordem das colunas.
+std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
+                                      const std::vector<std::string>& part_cols,
+                                      const char* ctx) {
+  std::vector<PartitionField> spec;
+  for (std::size_t i = 0; i < part_cols.size(); ++i) {
+    const std::string& col = part_cols[i];
+    if (std::count(part_cols.begin(), part_cols.end(), col) > 1) {
+      die(std::string(ctx) + ": coluna de particao '" + col + "' repetida");
+    }
+    bool achou = false;
+    for (std::size_t k = 0; k < cols.size(); ++k) {
+      if (cols[k].name == col) {
+        PartitionField pf;
+        pf.name = col;
+        pf.field_id = 1000 + static_cast<std::int64_t>(i);
+        pf.source_id = static_cast<std::int64_t>(k + 1);
+        pf.avro_ty = cols[k].type;
+        spec.push_back(std::move(pf));
+        achou = true;
+        break;
+      }
+    }
+    if (!achou) {
+      die(std::string(ctx) + ": coluna de particao '" + col +
+          "' nao existe na tabela (colunas: " + join_names(cols) + ")");
     }
   }
-  die(std::string(ctx) + ": coluna de particao '" + col +
-      "' nao existe na tabela (colunas: " + join_names(cols) + ")");
+  return spec;
 }
 
 // Valor de particao como string (path hive-style no data file). Erro claro
@@ -679,42 +716,50 @@ std::string partition_value_string(const Value& v, const std::string& col) {
   }
 }
 
-// Linha sem a coluna de particao: o parquet nao armazena a coluna de
-// particao (standard Iceberg — o valor vive no path e no record `partition`
-// do manifest).
-Value strip_partition_column(const Value& row, const std::string& col) {
+// Linha sem as colunas de particao: o parquet nao armazena as colunas de
+// particao (standard Iceberg — os valores vivem no path e no record
+// `partition` do manifest).
+Value strip_partition_columns(const Value& row, const std::vector<PartitionField>& spec) {
   Value m = Value::mapa();
   for (const auto& kv : row.map->items) {
-    if (kv.first != col) m.map->set(kv.first, kv.second);
+    bool eh_particao = false;
+    for (const PartitionField& pf : spec) {
+      if (kv.first == pf.name) eh_particao = true;
+    }
+    if (!eh_particao) m.map->set(kv.first, kv.second);
   }
   return m;
 }
 
 struct PartitionGroup {
-  std::string valor;  // valor da coluna de particao como string
-  Value valor_tipado;
-  Value rows;  // tabela sem a coluna de particao
+  std::string key;      // caminho relativo hive-style: "c1=v1/c2=v2"
+  Value part_map;       // valores tipados por coluna (para o record `partition`)
+  Value rows;           // tabela sem as colunas de particao
 };
 
-// Agrupa as linhas pelo valor da coluna de particao, na ordem de 1a
-// aparicao dos valores (define a ordem das entradas do manifest).
-std::vector<PartitionGroup> partition_rows(const Value& tabela, const std::string& col) {
+// Agrupa as linhas pela combinacao dos valores das colunas de particao, na
+// ordem de 1a aparicao das chaves (define a ordem das entradas do manifest).
+std::vector<PartitionGroup> partition_rows(const Value& tabela,
+                                           const std::vector<PartitionField>& spec) {
   std::vector<PartitionGroup> grupos;
   for (const Value& row : *tabela.list) {
     if (row.kind != ValueKind::Mapa || !row.map) die("linhas devem ser mapas { campo: valor }");
-    const Value* cell = row.map->find(col);
-    const Value& v = cell ? *cell : Value::nulo();
-    const std::string valor = partition_value_string(v, col);
-    auto it = std::find_if(grupos.begin(), grupos.end(),
-                           [&](const PartitionGroup& g) { return g.valor == valor; });
-    if (it == grupos.end()) {
-      PartitionGroup g;
-      g.valor = valor;
-      g.valor_tipado = v;
-      g.rows = Value::tabela();
-      it = grupos.insert(grupos.end(), std::move(g));
+    PartitionGroup candidato;
+    candidato.part_map = Value::mapa();
+    for (const PartitionField& pf : spec) {
+      const Value* cell = row.map->find(pf.name);
+      const Value& v = cell ? *cell : Value::nulo();
+      const std::string valor = partition_value_string(v, pf.name);
+      candidato.key += (candidato.key.empty() ? "" : "/") + pf.name + "=" + valor;
+      candidato.part_map.map->set(pf.name, v);
     }
-    it->rows.list->push_back(strip_partition_column(row, col));
+    auto it = std::find_if(grupos.begin(), grupos.end(),
+                           [&](const PartitionGroup& g) { return g.key == candidato.key; });
+    if (it == grupos.end()) {
+      candidato.rows = Value::tabela();
+      it = grupos.insert(grupos.end(), std::move(candidato));
+    }
+    it->rows.list->push_back(strip_partition_columns(row, spec));
   }
   return grupos;
 }
@@ -825,8 +870,8 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     if (ver.id == out.current_schema_id) out.schema_cols = ver.fields;
   }
 
-  // partition spec corrente (default-spec-id): so "identity" de uma coluna
-  // e suportado (fase 26). Aceita "partition-specs" (formato atual) e cai
+  // partition spec corrente (default-spec-id): so "identity" e suportado,
+  // com uma ou mais colunas. Aceita "partition-specs" (formato atual) e cai
   // no legado "partition-spec" (lista de nomes) quando so ele existe.
   std::int64_t default_spec = 0;
   if (const Value* ds = map_find(md, "default-spec-id"); ds && ds->kind == ValueKind::Inteiro) {
@@ -971,7 +1016,7 @@ std::string manifest_entry_schema_json(const std::vector<PartitionField>& spec) 
 
 Value make_manifest_entry(int status, std::int64_t snapshot_id, const std::string& file_path,
                           std::int64_t record_count, std::int64_t file_size,
-                          const std::vector<PartitionField>& spec, const Value& part_value) {
+                          const std::vector<PartitionField>& spec, const Value& part_map) {
   Value e = Value::mapa();
   e.map->set("status", Value::inteiro(status));
   e.map->set("snapshot_id", Value::inteiro(snapshot_id));
@@ -982,9 +1027,10 @@ Value make_manifest_entry(int status, std::int64_t snapshot_id, const std::strin
   df.map->set("file_path", Value::texto(file_path));
   df.map->set("file_format", Value::texto("PARQUET"));
   Value part = Value::mapa();
-  if (!spec.empty()) {
+  for (const PartitionField& pf : spec) {
     // valor no tipo da coluna (string/long/double/boolean) ou null
-    part.map->set(spec.front().name, part_value);
+    const Value* v = part_map.map ? part_map.map->find(pf.name) : nullptr;
+    part.map->set(pf.name, v ? *v : Value::nulo());
   }
   df.map->set("partition", std::move(part));
   df.map->set("record_count", Value::inteiro(record_count));
@@ -998,7 +1044,7 @@ struct FileInfo {
   std::string path;  // com file://
   std::int64_t records = 0;
   std::int64_t size = 0;
-  Value part_value;  // valor do campo de particao (tipado); Nulo se sem particao
+  Value part_map;  // valores de particao (tipados) por coluna; vazio = sem particao
 };
 
 std::string write_manifest(const std::string& meta_dir,
@@ -1020,7 +1066,7 @@ std::string write_manifest(const std::string& meta_dir,
     }
     records.push_back(make_manifest_entry(status, snapshot_id, path, info ? info->records : 0,
                                           info ? info->size : 0, spec,
-                                          info ? info->part_value : Value::nulo()));
+                                          info ? info->part_map : Value::mapa()));
   }
   const std::string name = new_uuid() + "-m0.avro";
   const std::string path = meta_dir + "/" + name;
@@ -1263,14 +1309,14 @@ std::string strip_scheme(const std::string& path) {
 
 // Grava os data files de uma escrita/anexo. Sem spec, um unico arquivo
 // <dir>/data/<uuid>.parquet com a tabela inteira (comportamento original);
-// com spec, um arquivo por valor de particao em
-// <dir>/data/<col>=<valor>/00000-0-<uuid>.parquet (naming iceberg:
-// <partition-path>/<file>.parquet), sem a coluna de particao no parquet.
+// com spec, um arquivo por combinacao de valores em
+// <dir>/data/<c1>=<v1>/<c2>=<v2>/00000-0-<uuid>.parquet (naming iceberg:
+// <partition-path>/<file>.parquet), sem as colunas de particao no parquet.
 // `ids_by_name` (append): field-ids do schema iceberg corrente por nome —
 // colunas novas de uma evolucao de schema levam o id novo no parquet;
 // sem ele, os ids seguem a posicao na 1a linha (escrita original).
 std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabela,
-                                       const PartitionSpec* spec,
+                                       const std::vector<PartitionField>* spec,
                                        const std::vector<Column>* ids_by_name) {
   std::vector<FileInfo> out;
   std::vector<PartitionGroup> grupos;
@@ -1297,7 +1343,7 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
     die("coluna '" + name + "' fora do schema (evolucao de schema inconsistente)");
   };
   if (spec != nullptr) {
-    grupos = partition_rows(tabela, spec->field.name);
+    grupos = partition_rows(tabela, *spec);
   } else {
     PartitionGroup g;
     g.rows = tabela;
@@ -1310,8 +1356,8 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
       // nomenclatura historica (uuid) preservada para tabelas sem particao
       nome = new_uuid() + ".parquet";
     } else {
-      subdir += "/" + spec->field.name + "=" + g.valor;
-      mkdir_if_missing(subdir);
+      subdir += "/" + g.key;
+      mkdir_p(subdir);
       nome = "00000-0-" + new_uuid() + ".parquet";
     }
     const std::string path = subdir + "/" + nome;
@@ -1329,7 +1375,7 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
     info.path = "file://" + path;
     info.records = static_cast<std::int64_t>(g.rows.list->size());
     info.size = size;
-    info.part_value = spec == nullptr ? Value::nulo() : g.valor_tipado;
+    if (spec != nullptr) info.part_map = g.part_map;
     out.push_back(std::move(info));
   }
   return out;
@@ -1445,22 +1491,19 @@ struct WriteCore {
 
 // `schema_id` e o id sob o qual o schema desta escrita e registrado (0 na
 // criacao; max+1 quando se sobrescreve uma tabela REST existente).
-WriteCore write_core(const std::string& dir, const Value& tabela, const std::string& part_col,
-                     std::int64_t schema_id) {
+WriteCore write_core(const std::string& dir, const Value& tabela,
+                     const std::vector<std::string>& part_cols, std::int64_t schema_id) {
   WriteCore wc;
   wc.cols = table_columns(tabela, "escrever_iceberg");
-  // ids 1..N na ordem do schema; a coluna fonte da particao fica optional
+  // ids 1..N na ordem do schema; as colunas fonte da particao ficam optional
   // no metadata (padrao Spark — readers reais so reidratam campo optional)
   for (std::size_t k = 0; k < wc.cols.size(); ++k) {
     wc.cols[k].id = static_cast<std::int64_t>(k + 1);
-    wc.cols[k].required = wc.cols[k].name != part_col;
+    wc.cols[k].required = std::find(part_cols.begin(), part_cols.end(), wc.cols[k].name) ==
+                          part_cols.end();
   }
-  PartitionSpec spec;
-  const PartitionSpec* pspec = nullptr;
-  if (!part_col.empty()) {
-    spec = make_spec(wc.cols, part_col, "escrever_iceberg");
-    pspec = &spec;
-  }
+  const std::vector<PartitionField> spec = make_spec(wc.cols, part_cols, "escrever_iceberg");
+  const std::vector<PartitionField>* pspec = spec.empty() ? nullptr : &spec;
   mkdir_if_missing(dir);
   const std::string meta_dir = dir + "/metadata";
   mkdir_if_missing(meta_dir);
@@ -1471,7 +1514,7 @@ WriteCore write_core(const std::string& dir, const Value& tabela, const std::str
   std::vector<std::pair<int, std::string>> changes;
   for (const FileInfo& f : datas) changes.emplace_back(1, f.path);
 
-  wc.spec_fields = pspec ? std::vector<PartitionField>{spec.field} : std::vector<PartitionField>{};
+  wc.spec_fields = spec;
 
   const std::int64_t snapshot_id = new_snapshot_id();
   const std::int64_t ts = now_ms();
@@ -1509,31 +1552,33 @@ struct AppendCore {
 };
 
 AppendCore append_core(const std::string& dir, const TableMeta& meta, const Value& tabela,
-                       const std::string& part_col_req) {
+                       const std::vector<std::string>& part_cols_req) {
   AppendCore ac;
   // Validacao de schema por nome com merge para evolucao (fase 27): colunas
   // novas entram optional no fim com id novo; remocao/tipo divergente -> erro.
   const MergedSchema merged = merge_append_schema(meta, tabela);
   ac.cols = merged.cols;
 
-  // Particao: herda o spec da tabela existente; erro se explicita e diverge.
-  PartitionSpec spec;
-  const PartitionSpec* pspec = nullptr;
+  // Particao: herda o spec da tabela existente; erro se explicita e diverge
+  // (a ordem das colunas importa).
+  const std::vector<PartitionField>* pspec = nullptr;
   std::vector<PartitionField> spec_fields;
   if (!meta.spec.empty()) {
-    spec.field = meta.spec.front();
-    pspec = &spec;
-    spec_fields.push_back(spec.field);
-    if (!part_col_req.empty() && part_col_req != spec.field.name) {
-      die("anexar_iceberg: tabela em '" + dir + "' ja e particionada por '" + spec.field.name +
-          "' (recebido particionar_por: '" + part_col_req + "')");
+    pspec = &meta.spec;
+    spec_fields = meta.spec;
+    std::vector<std::string> nomes;
+    for (const PartitionField& pf : meta.spec) nomes.push_back(pf.name);
+    if (!part_cols_req.empty() && part_cols_req != nomes) {
+      die("anexar_iceberg: tabela em '" + dir + "' ja e particionada por " +
+          join_part_cols(nomes) + " (recebido particionar_por: " +
+          join_part_cols(part_cols_req) + ")");
     }
-    // a coluna de particao precisa existir na tabela anexada (schema ja foi
-    // validado acima, entao so falta o valor em si — validado ao agrupar)
-  } else if (!part_col_req.empty()) {
+    // as colunas de particao precisam existir na tabela anexada (schema ja
+    // foi validado acima, entao so falta o valor em si — validado ao agrupar)
+  } else if (!part_cols_req.empty()) {
     die("anexar_iceberg: tabela em '" + dir +
         "' nao e particionada — recrie-a com escrever_iceberg tabela, \"" + dir +
-        "\", particionar_por: \"" + part_col_req + "\"");
+        "\", particionar_por: \"" + part_cols_req.front() + "\"");
   }
 
   mkdir_if_missing(dir + "/data");
@@ -1555,8 +1600,7 @@ AppendCore append_core(const std::string& dir, const TableMeta& meta, const Valu
     info.path = e.path;
     info.records = e.records;
     info.size = e.size;
-    const Value* pv = e.partition.map ? e.partition.map->find(spec.field.name) : nullptr;
-    info.part_value = pv ? *pv : Value::nulo();
+    info.part_map = e.partition;
     infos.push_back(std::move(info));
     existing_rows += e.records;
   }
@@ -1610,11 +1654,93 @@ AppendCore append_core(const std::string& dir, const TableMeta& meta, const Valu
   return ac;
 }
 
-Value read_core(const TableMeta& meta) {
-  const std::vector<ActiveEntry> active = resolve_active_files(meta);
-  if (active.empty()) die("tabela em '" + meta.location + "' esta vazia (nenhum data file ativo)");
+// Igualdade entre o valor de uma celula e um predicado de `onde`.
+// Inteiro/decimal comparam numericamente entre si; o resto exige o mesmo tipo.
+bool pred_eq(const Value& cell, const Value& pred) {
+  const bool cell_num = cell.kind == ValueKind::Inteiro || cell.kind == ValueKind::Decimal;
+  const bool pred_num = pred.kind == ValueKind::Inteiro || pred.kind == ValueKind::Decimal;
+  if (cell_num && pred_num) return cell.as_number() == pred.as_number();
+  if (cell.kind != pred.kind) return false;
+  switch (pred.kind) {
+    case ValueKind::Nulo: return true;
+    case ValueKind::Logico: return cell.b == pred.b;
+    case ValueKind::Texto: return cell.s == pred.s;
+    default: return false;
+  }
+}
 
-  // Tabela particionada: reidrata a coluna de particao a partir do record
+// Predicados de `onde` separados em: (a) pruning — colunas do partition
+// spec da tabela, comparam contra o record `partition` dos manifests e pulam
+// data file inteiro; (b) residual — filtra linhas apos a reidratacao.
+struct OndeFilter {
+  std::vector<std::pair<std::string, Value>> prune;
+  std::vector<std::pair<std::string, Value>> residual;
+};
+
+OndeFilter split_onde(const Value* onde, const std::vector<PartitionField>& spec) {
+  OndeFilter f;
+  if (onde && onde->kind == ValueKind::Mapa && onde->map) {
+    for (const auto& kv : onde->map->items) {
+      bool eh_particao = false;
+      for (const PartitionField& pf : spec) {
+        if (pf.name == kv.first) eh_particao = true;
+      }
+      if (eh_particao) {
+        f.prune.push_back(kv);
+      } else {
+        f.residual.push_back(kv);
+      }
+    }
+  }
+  return f;
+}
+
+// Data file passa no pruning se bater com TODOS os predicados de particao
+// (valor ausente/nulo no record `partition` nunca bate igualdade).
+bool passa_pruning(const ActiveEntry& e, const std::vector<std::pair<std::string, Value>>& prune,
+                   const std::vector<PartitionField>& spec) {
+  for (const auto& [col, pred] : prune) {
+    const Value* pv = e.partition.map ? e.partition.map->find(col) : nullptr;
+    if (!pv || pv->kind == ValueKind::Nulo) return false;
+    // texto divergente e convertido pelo tipo declarado no spec (tabelas de
+    // outros escritores podem serializar o valor de particao como string)
+    std::string ty = "string";
+    for (const PartitionField& pf : spec) {
+      if (pf.name == col) ty = pf.avro_ty;
+    }
+    if (!pred_eq(partition_rehydrate(*pv, ty), pred)) return false;
+  }
+  return true;
+}
+
+Value read_core(const TableMeta& meta, const Value* onde) {
+  const OndeFilter filtro = split_onde(onde, meta.spec);
+  std::vector<ActiveEntry> active = resolve_active_files(meta);
+  // Pruning: data file so entra se bater com todos os predicados de particao.
+  if (!filtro.prune.empty()) {
+    active.erase(std::remove_if(active.begin(), active.end(),
+                                [&](const ActiveEntry& e) {
+                                  return !passa_pruning(e, filtro.prune, meta.spec);
+                                }),
+                 active.end());
+  }
+  if (active.empty()) {
+    // sem match no pruning -> tabela vazia (sem predicados de particao,
+    // continua sendo erro: nao ha data file ativo nenhum)
+    if (!filtro.prune.empty()) return Value::tabela();
+    die("tabela em '" + meta.location + "' esta vazia (nenhum data file ativo)");
+  }
+
+  // Filtro residual aplicado sobre a linha final (reidratada ou legado).
+  auto passa_residual = [&](const Value& row) {
+    for (const auto& [col, val] : filtro.residual) {
+      const Value* cell = row.map ? row.map->find(col) : nullptr;
+      if (!pred_eq(cell ? *cell : Value::nulo(), val)) return false;
+    }
+    return true;
+  };
+
+  // Tabela particionada: reidrata as colunas de particao a partir do record
   // `partition` dos manifests, na ordem do schema do metadata.
   if (!meta.spec.empty() && !meta.schema_cols.empty()) {
     Value out = Value::tabela();
@@ -1647,7 +1773,7 @@ Value read_core(const TableMeta& meta) {
                 "' fora do metadata)");
           }
         }
-        out.list->push_back(std::move(m));
+        if (passa_residual(m)) out.list->push_back(std::move(m));
       }
     }
     return out;
@@ -1686,7 +1812,7 @@ Value read_core(const TableMeta& meta) {
                 "' fora do metadata)");
           }
         }
-        out.list->push_back(std::move(m));
+        if (passa_residual(m)) out.list->push_back(std::move(m));
       }
     }
     return out;
@@ -1717,7 +1843,7 @@ Value read_core(const TableMeta& meta) {
           }
         }
       }
-      out.list->push_back(std::move(row));
+      if (passa_residual(row)) out.list->push_back(std::move(row));
     }
   }
   return out;
@@ -2024,7 +2150,7 @@ std::string upd_remove_snapshots(const std::vector<Snapshot>& snaps) {
 }
 
 void iceberg_write_rest(const RestCfg& rc, const std::string& dir, const Value& tabela,
-                        const std::string& part_col) {
+                        const std::vector<std::string>& part_cols) {
   const std::string location = abs_path(dir);
   const std::string tabela_nome = table_name(location);
   const std::string location_uri = "file://" + location;
@@ -2048,7 +2174,7 @@ void iceberg_write_rest(const RestCfg& rc, const std::string& dir, const Value& 
     if (std::remove(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
   }
 
-  const WriteCore wc = write_core(location, tabela, part_col, schema_id);
+  const WriteCore wc = write_core(location, tabela, part_cols, schema_id);
   commit_metadata(location, nova ? 0 : meta_antiga.version + 1, wc.json);
 
   if (nova) {
@@ -2063,8 +2189,9 @@ void iceberg_write_rest(const RestCfg& rc, const std::string& dir, const Value& 
 
   // Sobrescrita de tabela existente: o subconjunto mantem o partition spec
   // (divergencia exigiria add-partition-spec — fora do subconjunto da fase 29).
-  const std::string antigo = meta_antiga.spec.empty() ? "" : meta_antiga.spec.front().name;
-  const std::string novo = wc.spec_fields.empty() ? "" : wc.spec_fields.front().name;
+  std::vector<std::string> antigo, novo;
+  for (const PartitionField& pf : meta_antiga.spec) antigo.push_back(pf.name);
+  for (const PartitionField& pf : wc.spec_fields) novo.push_back(pf.name);
   if (antigo != novo) {
     die("escrever_iceberg via REST em tabela existente: particionamento divergente nao "
         "suportado (fase 29: o subconjunto mantem o partition spec da tabela; "
@@ -2087,7 +2214,7 @@ void iceberg_write_rest(const RestCfg& rc, const std::string& dir, const Value& 
 }
 
 void iceberg_append_rest(const RestCfg& rc, const std::string& dir, const Value& tabela,
-                         const std::string& part_col_req) {
+                         const std::vector<std::string>& part_cols_req) {
   const std::string location = abs_path(dir);
   const std::string tabela_nome = table_name(location);
 
@@ -2100,7 +2227,7 @@ void iceberg_append_rest(const RestCfg& rc, const std::string& dir, const Value&
   TableMeta meta;
   parse_metadata(fetch_metadata_path(map_find(resp, "metadata-location")->s), meta);
 
-  const AppendCore ac = append_core(location, meta, tabela, part_col_req);
+  const AppendCore ac = append_core(location, meta, tabela, part_cols_req);
   commit_metadata(location, ac.version, ac.json);
 
   std::vector<std::string> upds;
@@ -2114,7 +2241,7 @@ void iceberg_append_rest(const RestCfg& rc, const std::string& dir, const Value&
               "[" + join_updates(upds) + "]");
 }
 
-Value iceberg_read_rest(const RestCfg& rc, const std::string& dir) {
+Value iceberg_read_rest(const RestCfg& rc, const std::string& dir, const Value* onde) {
   const std::string location = abs_path(dir);
   const std::string tabela_nome = table_name(location);
 
@@ -2125,18 +2252,19 @@ Value iceberg_read_rest(const RestCfg& rc, const std::string& dir) {
   }
   TableMeta meta;
   parse_metadata(fetch_metadata_path(map_find(resp, "metadata-location")->s), meta);
-  return read_core(meta);
+  return read_core(meta, onde);
 }
 
 }  // namespace
 
-void iceberg_write(const std::string& dir, const Value& tabela, const std::string& part_col) {
+void iceberg_write(const std::string& dir, const Value& tabela,
+                   const std::vector<std::string>& part_cols) {
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
-    iceberg_write_rest(rc, dir, tabela, part_col);
+    iceberg_write_rest(rc, dir, tabela, part_cols);
     return;
   }
-  const WriteCore wc = write_core(dir, tabela, part_col, /*schema_id=*/0);
+  const WriteCore wc = write_core(dir, tabela, part_cols, /*schema_id=*/0);
   // sobrescreve: remove metadata anterior (data avro/parquet orfao fica para
   // tras, como no delta — a leitura so enxerga o que o metadata referencia).
   for (const std::string& old : list_metadata_files(dir + "/metadata")) {
@@ -2145,10 +2273,11 @@ void iceberg_write(const std::string& dir, const Value& tabela, const std::strin
   commit_metadata(dir, 0, wc.json);
 }
 
-void iceberg_append(const std::string& dir, const Value& tabela, const std::string& part_col_req) {
+void iceberg_append(const std::string& dir, const Value& tabela,
+                    const std::vector<std::string>& part_cols_req) {
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
-    iceberg_append_rest(rc, dir, tabela, part_col_req);
+    iceberg_append_rest(rc, dir, tabela, part_cols_req);
     return;
   }
   if (!tilt_is_directory(dir)) {
@@ -2161,16 +2290,16 @@ void iceberg_append(const std::string& dir, const Value& tabela, const std::stri
 
   TableMeta meta;
   latest_metadata_path(dir, meta);
-  const AppendCore ac = append_core(dir, meta, tabela, part_col_req);
+  const AppendCore ac = append_core(dir, meta, tabela, part_cols_req);
   commit_metadata(dir, ac.version, ac.json);
 }
 
-Value iceberg_read(const std::string& dir) {
+Value iceberg_read(const std::string& dir, const Value* onde) {
   const RestCfg rc = rest_cfg();
-  if (rc.ativo) return iceberg_read_rest(rc, dir);
+  if (rc.ativo) return iceberg_read_rest(rc, dir, onde);
   TableMeta meta;
   latest_metadata_path(dir, meta);
-  return read_core(meta);
+  return read_core(meta, onde);
 }
 
 }  // namespace tilt::rt

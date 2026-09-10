@@ -6,13 +6,23 @@
 # files (manifest list + manifest) to check the final snapshot references the
 # appended data file as ADDED (status 1) and the previous one as EXISTING
 # (status 0), both with the right record_count.
+# Second phase (partitioning composite + pruning): the tilt writes a table
+# partitioned by [estado, ano], reads it back with `onde:` (partition pruning
+# + residual predicate) and pyiceberg (when installed) validates the spec/manifest
+# with multiple partition fields, the rehydrated partition columns with their
+# types, and the pruning equivalence with a row_filter scan.
 set -eu
 
 BIN="$1"
 FIXTURE="${2:-${0%/*}/fixtures/iceberg_roundtrip.tilt}"
+FIX_PART="${3:-${0%/*}/fixtures/iceberg_particionado.tilt}"
 case "$FIXTURE" in
   /*) ;;
   *) FIXTURE="$(pwd)/$FIXTURE" ;;
+esac
+case "$FIX_PART" in
+  /*) ;;
+  *) FIX_PART="$(pwd)/$FIX_PART" ;;
 esac
 
 command -v python3 >/dev/null 2>&1 || {
@@ -258,5 +268,85 @@ if sem_file(entries0[0]["data_file"]["file_path"]) == dpath:
 
 print("iceberg verifier ok")
 PYEOF
+
+# --- 2. particao composta + pruning ---------------------------------------------
+out_part=$("$BIN" executar "$FIX_PART")
+echo "$out_part"
+
+fail_part=0
+confere_part() {
+  echo "$out_part" | grep -qF "$1" || { echo "saida (particionado) sem '$1'"; fail_part=1; }
+}
+confere_part "total: 5"
+confere_part "sp2024: 2"
+confere_part "residual: 1"
+
+TAB_PART="$tmp/vendas_iceberg"
+[ -d "$TAB_PART/metadata" ] || { echo "diretorio metadata ausente (particionado)"; fail_part=1; }
+
+# pyiceberg valida o spec/manifest com varios campos de particao, a
+# reidratacao das colunas de particao com os tipos do schema e a equivalencia
+# do pruning com um scan row_filter (pulado com mensagem se ausente, como no
+# iceberg_rest_test).
+python3 - "$TAB_PART" <<'PYEOF'
+import glob
+import sys
+
+
+class Erro(Exception):
+    pass
+
+
+try:
+    from pyiceberg.expressions import EqualTo
+    from pyiceberg.table import StaticTable
+except ImportError:
+    print("pyiceberg ausente; validacao de particao composta pulada")
+    sys.exit(0)
+
+tab = sys.argv[1]
+metas = sorted(glob.glob(tab + "/metadata/v*.metadata.json"))
+if not metas:
+    raise Erro("metadata v<N>.metadata.json ausente em " + tab)
+tabela = StaticTable.from_metadata(metas[-1])
+
+# partition spec composto: 2 campos identity com field-ids 1000/1001
+spec = tabela.metadata.spec()
+fields = list(spec.fields)
+if len(fields) != 2:
+    raise Erro("esperados 2 campos no partition spec, obtidos %d" % len(fields))
+if [f.field_id for f in fields] != [1000, 1001]:
+    raise Erro("field-ids do spec divergem: %r" % [f.field_id for f in fields])
+if [f.name for f in fields] != ["estado", "ano"]:
+    raise Erro("nomes do spec divergem: %r" % [f.name for f in fields])
+
+# leitura completa: 5 linhas, colunas de particao reidratadas com tipo
+plan = tabela.scan().to_arrow()
+if plan.num_rows != 5:
+    raise Erro("esperadas 5 linhas, lidas %d" % plan.num_rows)
+tipos = {f.name: str(f.type) for f in plan.schema}
+if tipos.get("estado") != "large_string":
+    raise Erro("coluna 'estado' reidratada com tipo divergente: %r" % tipos.get("estado"))
+if tipos.get("ano") not in ("int64", "long"):
+    raise Erro("coluna 'ano' reidratada com tipo divergente: %r" % tipos.get("ano"))
+estado = plan.column("estado").to_pylist()
+ano = plan.column("ano").to_pylist()
+if sorted(estado) != ["rj", "rj", "sp", "sp", "sp"]:
+    raise Erro("valores de 'estado' divergem: %r" % estado)
+if sorted(ano) != [2024, 2024, 2024, 2025, 2025]:
+    raise Erro("valores de 'ano' divergem: %r" % ano)
+
+# equivalencia com o pruning do tilt: estado=sp AND ano=2024 -> 2 linhas
+sel = tabela.scan(row_filter=EqualTo("estado", "sp") & EqualTo("ano", 2024)).to_arrow()
+if sel.num_rows != 2:
+    raise Erro("pruning: esperadas 2 linhas (sp/2024), lidas %d" % sel.num_rows)
+# pruning por uma coluna so: estado=rj -> 2 linhas
+sel_rj = tabela.scan(row_filter=EqualTo("estado", "rj")).to_arrow()
+if sel_rj.num_rows != 2:
+    raise Erro("pruning: esperadas 2 linhas (rj), lidas %d" % sel_rj.num_rows)
+print("pyiceberg: spec composto, reidratacao e pruning validados (%d linhas)" % plan.num_rows)
+PYEOF
+
+[ "$fail_part" = 0 ] || exit 1
 
 echo "iceberg_test ok"

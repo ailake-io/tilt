@@ -1,0 +1,10 @@
+== pipeline principal ==
+total:  5
+sp:  3
+sp/2024:  2
+santos
+sorocaba
+sorocaba:  1
+mg:  0
+ba/2024:  1
+iceberg: anexar_iceberg: tabela em 'multi' ja e particionada por [estado, ano] (recebido particionar_por: [ano, estado])

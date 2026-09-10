@@ -3295,9 +3295,15 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
   if (name == "ler_iceberg") {
     auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
     if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_iceberg espera um diretorio");
+    const Value* onde = kw.find("onde");
+    if (onde && onde->kind != ValueKind::Mapa) {
+      fail(call.span, "ler_iceberg: 'onde' deve ser um mapa de colunas e valores "
+                      "(ex.: onde: { estado: \"SP\" })");
+    }
     try {
-      Value t = rt::iceberg_read(a[0].s);
+      Value t = rt::iceberg_read(a[0].s, onde);
       t.kind = ValueKind::Tabela;
       return t;
     } catch (const std::exception& e) {
@@ -3310,15 +3316,9 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "escrever_iceberg espera (tabela, diretorio)");
     }
-    std::string part_col;
-    if (const Value* p = kw.find("particionar_por")) {
-      if (p->kind != ValueKind::Texto) {
-        fail(call.span, "escrever_iceberg: 'particionar_por' deve ser texto (ex.: particionar_por: \"estado\")");
-      }
-      part_col = p->s;
-    }
+    std::vector<std::string> part_cols = parse_particionar_por(kw, "escrever_iceberg", call.span);
     try {
-      rt::iceberg_write(a[1].s, a[0], part_col);
+      rt::iceberg_write(a[1].s, a[0], part_cols);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -3330,15 +3330,9 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "anexar_iceberg espera (tabela, diretorio)");
     }
-    std::string part_col;
-    if (const Value* p = kw.find("particionar_por")) {
-      if (p->kind != ValueKind::Texto) {
-        fail(call.span, "anexar_iceberg: 'particionar_por' deve ser texto (ex.: particionar_por: \"estado\")");
-      }
-      part_col = p->s;
-    }
+    std::vector<std::string> part_cols = parse_particionar_por(kw, "anexar_iceberg", call.span);
     try {
-      rt::iceberg_append(a[1].s, a[0], part_col);
+      rt::iceberg_append(a[1].s, a[0], part_cols);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

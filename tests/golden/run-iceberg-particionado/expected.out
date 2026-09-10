@@ -12,4 +12,4 @@ iceberg: valor da coluna de particao 'estado' contem '/' (fase 26: caracteres es
 iceberg: valor nulo em coluna de particao 'estado' (fase 26: particao com nulo nao e suportada)
 iceberg: escrever_iceberg: coluna de particao 'regiao' nao existe na tabela (colunas: [estado, cidade, valor])
 iceberg: anexar_iceberg: tabela em 'avulsos' nao e particionada — recrie-a com escrever_iceberg tabela, "avulsos", particionar_por: "estado"
-iceberg: anexar_iceberg: tabela em 'vendas' ja e particionada por 'estado' (recebido particionar_por: 'cidade')
+iceberg: anexar_iceberg: tabela em 'vendas' ja e particionada por [estado] (recebido particionar_por: [cidade])

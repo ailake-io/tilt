@@ -71,15 +71,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   do append gravados com esses field-ids; leitura projeta nulo nas linhas dos
   arquivos antigos (union-by-name por field-id/nome — validado com pyiceberg).
   Remover coluna ou mudar o tipo de uma existente → erro claro.
-  Partições existem para **uma coluna** e só com transform `identity`
-  (`particionar_por:`, layout `<col>=<valor>/00000-0-<uuid>.parquet` sem a
-  coluna no parquet, record `partition` no manifest e coluna reidratada na
-  leitura com conversão de tipo), mas: valor nulo em coluna de partição e
-  valores com `/` não são suportados (erro claro, sem escaping), a leitura não
-  filtra por partição (lê tudo e reidrata), não há partitions summary nos
-  manifests e data sequence numbers são sempre 0. A estrutura escrita
-  (metadata, manifest list, manifest e parquet com field-ids) carrega no
-  **pyiceberg**.
+  Partições suportam **uma ou mais colunas** (composta: `particionar_por:
+  ["c1", "c2"]`, field-ids 1000, 1001, ...) e só com transform `identity`
+  (layout `<c1>=<v1>/<c2>=<valor>/00000-0-<uuid>.parquet` sem as colunas no
+  parquet, record `partition` no manifest e colunas reidratadas na leitura com
+  conversão de tipo), com **pruning** em `ler_iceberg ... onde: {...}`
+  (igualdade; predicados em coluna de partição pulam data files inteiros pelos
+  manifests, o resto filtra linhas). Mas: valor nulo em coluna de partição,
+  valores com `/` e coluna repetida não são suportados (erro claro, sem
+  escaping), não há partitions summary nos manifests e data sequence numbers
+  são sempre 0. A estrutura escrita (metadata, manifest list, manifest e
+  parquet com field-ids) carrega no **pyiceberg**.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, Redis, Kafka,
   MongoDB, Qdrant, pgvector e S3 rodam.

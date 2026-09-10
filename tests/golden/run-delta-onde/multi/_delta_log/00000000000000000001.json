@@ -1,2 +1,2 @@
-{"commitInfo":{"timestamp":1789050273185,"operation":"APPEND"}}
-{"add":{"path":"estado=ba/ano=2024/part-00000.parquet","partitionValues":{"estado":"ba","ano":"2024"},"size":253,"modificationTime":1789050273186,"dataChange":true}}
+{"commitInfo":{"timestamp":1789054295172,"operation":"APPEND"}}
+{"add":{"path":"estado=ba/ano=2024/part-00000.parquet","partitionValues":{"estado":"ba","ano":"2024"},"size":253,"modificationTime":1789054295172,"dataChange":true}}
