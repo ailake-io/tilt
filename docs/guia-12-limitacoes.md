@@ -16,10 +16,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   escopo global mais variáveis implícitas (`linha`, `entrada`, `epoca`,
   `metricas`, `passo`, `resultado`) e campos de `entrada:`. Nomes fora
   disso são reportados.
-- O solver de formas (`T012`) cobre a cadeia `densa`/`linear` — propaga a
-  dimensão corrente a partir da anotação `entrada: tensor[...]` e rejeita
-  `linear: [a, b]` com `a` incompatível. `conv2d`, `norma_lote` e
-  `norma_camada` ficam fora do solver.
+- O solver de formas (`T012`) cobre a cadeia `densa`/`linear` nos `modelo`s
+  (propaga a última dimensão a partir da anotação `entrada: tensor[...]` e
+  rejeita `linear: [a, b]` com `a` incompatível) e, nos corpos de
+  `funcao`/`pipeline`/`servico`, operações de tensor com formas literais ou
+  anotadas: `conv2d` (rank 4, canais, núcleo vs. entrada, `passo:`),
+  `norma_lote` (rank >= 2), `softmax`/ativações/`norma_camada` (preservadas),
+  `reformar` (n. de elementos), `transposta` (2D) e `matmul` 2D. Fora do
+  solver: formas através de chamadas de `funcao` ou condicionais, dimensões
+  `_`/não literais, broadcast parcial e `conv2d` com formas dinâmicas —
+  nesses casos a validação de dimensão continua acontecendo em runtime.
 - Não há inferência completa de tipos: anotações são validadas como
   contratos, mas os tipos não são propagados entre expressões.
 

@@ -1,0 +1,4 @@
+pipeline p:
+  passos:
+    - x = uns [1, 3, 8, 8]
+    - y = x.reformar([1, 100])

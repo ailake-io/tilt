@@ -1,0 +1,24 @@
+modelo ConvNet:
+  entrada: tensor[f32, 1, 3, 32, 32]
+  camadas:
+    - linear: [32, 10]
+    - softmax
+
+funcao extrair x: tensor[f32, 1, 3, 32, 32] -> tensor[f32, 1, 16, 14, 14]:
+  k1 = uns [8, 3, 3, 3]
+  y1 = x.conv2d k1
+  nb = y1.norma_lote uns [8], zeros [8], em_treino: verdadeiro
+  a = nb.relu
+  k2 = zeros [16, 8, 3, 3]
+  y2 = a.conv2d k2, passo: 2
+  retornar y2
+
+pipeline principal:
+  passos:
+    - x = uns [1, 3, 32, 32]
+    - nucleo = uns [8, 3, 3, 3]
+    - ativ = x.conv2d nucleo
+    - achatado = ativ.reformar([1, 7200])
+    - probs = achatado.softmax
+    - m = probs.transposta
+    - imprimir probs.forma, m.forma

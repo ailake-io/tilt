@@ -431,6 +431,92 @@ const Item* find_field(const ast::Block& block, std::string_view key) {
   return nullptr;
 }
 
+// ---------------------------------------------------------------- shape solver
+//
+// Subconjunto deliberadamente pequeno: so propaga formas 100% conhecidas
+// (dimensoes literais ou anotadas). Qualquer dimensao duvidosa torna a forma
+// desconhecida — falso negativo aceito em vez de falso positivo.
+
+using TensorShape = std::vector<std::int64_t>;  // mesmo tipo de SemanticChecker::TensorShape
+
+std::optional<TensorShape> nested_list_dims(const std::vector<ast::ExprPtr>& elems) {
+  if (elems.empty() || !elems.front()) return std::nullopt;
+  if (elems.front()->kind == ExprKind::ListLit) {
+    auto inner = nested_list_dims(elems.front()->elems);
+    if (!inner) return std::nullopt;
+    for (const auto& el : elems) {
+      if (!el || el->kind != ExprKind::ListLit) return std::nullopt;
+      auto d = nested_list_dims(el->elems);
+      if (!d || *d != *inner) return std::nullopt;  // lista aninhada irregular
+    }
+    TensorShape out;
+    out.push_back(static_cast<std::int64_t>(elems.size()));
+    out.insert(out.end(), inner->begin(), inner->end());
+    return out;
+  }
+  for (const auto& el : elems) {
+    if (!el || (el->kind != ExprKind::IntLit && el->kind != ExprKind::DecimalLit)) {
+      return std::nullopt;
+    }
+  }
+  return TensorShape{static_cast<std::int64_t>(elems.size())};
+}
+
+// `tensor [1, 2]` / `tensor [[1, 2], [3, 4]]` (Index com lhs Name "tensor").
+std::optional<TensorShape> tensor_literal_dims(const Expr& e) {
+  if (e.kind != ExprKind::Index || !e.lhs || e.lhs->kind != ExprKind::Name ||
+      e.lhs->text != "tensor") {
+    return std::nullopt;
+  }
+  return nested_list_dims(e.elems);
+}
+
+// Dimensoes inteiras de uma anotacao `tensor[f32, 1, 3, 32, 32]` (dtype
+// opcional). `std::nullopt` se a anotacao nao for essa forma ou tiver
+// dimensoes nao literais ('_' incluido).
+std::optional<TensorShape> tensor_annotation_dims(const Expr* e) {
+  if (!e || e->kind != ExprKind::Index || !e->lhs || e->lhs->kind != ExprKind::Name ||
+      e->lhs->text != "tensor" || e->elems.empty()) {
+    return std::nullopt;
+  }
+  std::size_t start = 0;
+  if (e->elems[0] && e->elems[0]->kind == ExprKind::Name) start = 1;  // dtype
+  TensorShape dims;
+  for (std::size_t i = start; i < e->elems.size(); ++i) {
+    const Expr* d = e->elems[i].get();
+    if (!d || d->kind != ExprKind::IntLit) return std::nullopt;
+    dims.push_back(std::stoll(d->text));
+  }
+  return dims.empty() ? std::nullopt : std::optional<TensorShape>(dims);
+}
+
+std::int64_t num_elements(const TensorShape& s) {
+  std::int64_t n = 1;
+  for (const std::int64_t d : s) {
+    if (d <= 0) return -1;
+    n *= d;
+  }
+  return n;
+}
+
+std::string shape_str(const TensorShape& s) {
+  std::string out = "[";
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    if (i) out += ", ";
+    out += std::to_string(s[i]);
+  }
+  return out + "]";
+}
+
+bool is_scalar_lit(const Expr& e) { return e.kind == ExprKind::IntLit || e.kind == ExprKind::DecimalLit; }
+
+const Expr* first_positional_arg(const Expr& call) {
+  for (const auto& a : call.args) {
+    if (a.name.empty() && a.value) return a.value.get();
+  }
+  return nullptr;
+}
+
 void collect_entrada_names(const ast::Block& block, std::unordered_set<std::string>& scope) {
   for (const auto& it : block.items) {
     const Item* f = it.get();
@@ -476,6 +562,176 @@ void collect_assigned_names(const ast::Block& block, std::unordered_set<std::str
 }
 
 }  // namespace
+
+std::optional<SemanticChecker::TensorShape> SemanticChecker::check_reshape(
+    Span span, std::optional<TensorShape> in, const TensorShape& to) {
+  if (in) {
+    const std::int64_t a = num_elements(*in), b = num_elements(to);
+    if (a >= 0 && b >= 0 && a != b) {
+      report(DiagCode::TensorShapeMismatch, span,
+             "reformar: numero de elementos difere (entrada tem " + std::to_string(a) +
+                 ", destino tem " + std::to_string(b) + ")",
+             {"ajuste as dimensoes para totalizar " + std::to_string(a) + " elementos"});
+    }
+    return to;
+  }
+  return std::nullopt;
+}
+
+std::optional<SemanticChecker::TensorShape> SemanticChecker::check_conv2d(const Expr& call,
+                                                                          const ShapeEnv& shapes) {
+  auto in = call.lhs && call.lhs->lhs ? infer_shape(*call.lhs->lhs, shapes) : std::nullopt;
+  const Expr* nucleo = first_positional_arg(call);
+  auto k = nucleo ? infer_shape(*nucleo, shapes) : std::nullopt;
+  std::int64_t passo = 1;
+  for (const auto& a : call.args) {
+    if (a.name == "passo" && a.value && a.value->kind == ExprKind::IntLit) {
+      passo = std::stoll(a.value->text);
+    }
+  }
+  if (!in) return std::nullopt;
+  const Span in_span = call.lhs->lhs->span;
+  if (in->size() != 4) {
+    report(DiagCode::TensorShapeMismatch, in_span,
+           "conv2d espera uma entrada [N, C_in, H, W], mas a entrada tem forma " + shape_str(*in),
+           {"use um tensor 4D, ex.: uns [1, 3, 32, 32]"});
+    return std::nullopt;
+  }
+  if (passo < 1) {
+    report(DiagCode::TensorShapeMismatch, call.span, "conv2d: passo deve ser >= 1",
+           {"ajuste `passo:` para um inteiro >= 1"});
+    return std::nullopt;
+  }
+  if (!k) return std::nullopt;
+  const Span k_span = nucleo->span;
+  if (k->size() != 4) {
+    report(DiagCode::TensorShapeMismatch, k_span,
+           "conv2d espera um nucleo [C_out, C_in, KH, KW], mas o nucleo tem forma " + shape_str(*k),
+           {"use um nucleo 4D, ex.: uns [8, 3, 3, 3]"});
+    return std::nullopt;
+  }
+  const std::int64_t cin = (*in)[1], h = (*in)[2], w = (*in)[3];
+  if ((*k)[1] != cin) {
+    report(DiagCode::TensorShapeMismatch, k_span,
+           "conv2d: nucleo tem " + std::to_string((*k)[1]) +
+               " canais de entrada, mas a entrada tem " + std::to_string(cin),
+           {"ajuste o eixo C_in do nucleo para " + std::to_string(cin) + " (ex.: uns [" +
+                std::to_string((*k)[0]) + ", " + std::to_string(cin) + ", " +
+                std::to_string((*k)[2]) + ", " + std::to_string((*k)[3]) + "])"});
+    return std::nullopt;
+  }
+  const std::int64_t kh = (*k)[2], kw = (*k)[3];
+  if (kh > h || kw > w) {
+    report(DiagCode::TensorShapeMismatch, k_span,
+           "conv2d: nucleo " + std::to_string(kh) + "x" + std::to_string(kw) +
+               " maior que a entrada " + std::to_string(h) + "x" + std::to_string(w),
+           {"reduza o nucleo ou aumente a entrada (padding ainda nao suportado)"});
+    return std::nullopt;
+  }
+  return TensorShape{(*in)[0], (*k)[0], (h - kh) / passo + 1, (w - kw) / passo + 1};
+}
+
+std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const Expr& e,
+                                                                         const ShapeEnv& shapes) {
+  switch (e.kind) {
+    case ExprKind::Name: {
+      auto it = shapes.find(e.text);
+      if (it != shapes.end()) return it->second;
+      return std::nullopt;
+    }
+    case ExprKind::Index: {
+      const std::string base = (e.lhs && e.lhs->kind == ExprKind::Name) ? e.lhs->text : "";
+      if (base == "tensor") return tensor_literal_dims(e);
+      if (word_in(base, {"uns", "zeros", "aleatorio"})) {
+        TensorShape s;
+        for (const auto& el : e.elems) {
+          if (!el || el->kind != ExprKind::IntLit) return std::nullopt;
+          s.push_back(std::stoll(el->text));
+        }
+        return s;
+      }
+      // (`x.reformar [d, ...]` em forma de indice nao despacha no runtime —
+      // so a forma de chamada `x.reformar([d, ...])` entra no solver.)
+      return std::nullopt;
+    }
+    case ExprKind::Member: {
+      // Propriedades elementwise (preservam a forma) e transposta 2D.
+      if (!e.lhs) return std::nullopt;
+      if (word_in(e.text, {"softmax", "relu", "gelu", "silu", "sigmoide", "tanh", "norma_camada"})) {
+        return infer_shape(*e.lhs, shapes);
+      }
+      if (e.text == "transposta") {
+        auto in = infer_shape(*e.lhs, shapes);
+        if (in && in->size() != 2) {
+          report(DiagCode::TensorShapeMismatch, e.span,
+                 "transposta espera um tensor 2D, mas a entrada tem forma " + shape_str(*in),
+                 {"use .reformar([d, d]) para ajustar a forma antes, se necessario"});
+          return std::nullopt;
+        }
+        if (in) return TensorShape{(*in)[1], (*in)[0]};
+      }
+      return std::nullopt;
+    }
+    case ExprKind::Call: {
+      if (!e.lhs || e.lhs->kind != ExprKind::Member || !e.lhs->lhs) return std::nullopt;
+      const std::string& m = e.lhs->text;
+      if (m == "conv2d") return check_conv2d(e, shapes);
+      if (m == "norma_lote") {
+        auto in = infer_shape(*e.lhs->lhs, shapes);
+        if (in && in->size() < 2) {
+          report(DiagCode::TensorShapeMismatch, e.span,
+                 "norma_lote espera um tensor [N, C, ...], mas a entrada tem forma " +
+                     shape_str(*in),
+                 {"adicione os eixos de lote/canal (ex.: reforme para [1, C, ...] com .reformar([1, C, ...]))"});
+        }
+        return in;  // forma preservada
+      }
+      if (m == "matmul") {
+        auto a = infer_shape(*e.lhs->lhs, shapes);
+        const Expr* arg = first_positional_arg(e);
+        auto b = arg ? infer_shape(*arg, shapes) : std::nullopt;
+        if (a && b && a->size() == 2 && b->size() == 2) {
+          if ((*a)[1] != (*b)[0]) {
+            report(DiagCode::TensorShapeMismatch, e.span,
+                   "matmul: dimensao interna incompativel (" + shape_str(*a) + " x " +
+                       shape_str(*b) + ")",
+                   {"ajuste para que o ultimo eixo de um coincida com o primeiro do outro"});
+            return std::nullopt;
+          }
+          return TensorShape{(*a)[0], (*b)[1]};
+        }
+        return std::nullopt;
+      }
+      if (m == "reformar") {
+        // `x.reformar([d, ...])` (forma de chamada).
+        const Expr* arg = first_positional_arg(e);
+        if (!arg || arg->kind != ExprKind::ListLit) return std::nullopt;
+        auto in = infer_shape(*e.lhs->lhs, shapes);
+        TensorShape to;
+        for (const auto& el : arg->elems) {
+          if (!el || el->kind != ExprKind::IntLit) return std::nullopt;
+          to.push_back(std::stoll(el->text));
+        }
+        return check_reshape(e.span, std::move(in), to);
+      }
+      return std::nullopt;
+    }
+    case ExprKind::Binary: {
+      // Operacoes elementwise: forma preservada entre tensor e escalar, ou
+      // entre tensores de mesma forma. Broadcast parcial fica fora do
+      // subconjunto (forma desconhecida).
+      if (!word_in(e.text, {"+", "-", "*", "/"})) return std::nullopt;
+      auto a = e.lhs ? infer_shape(*e.lhs, shapes) : std::nullopt;
+      auto b = e.rhs ? infer_shape(*e.rhs, shapes) : std::nullopt;
+      if (a && b) return *a == *b ? a : std::nullopt;
+      if (a && e.rhs && is_scalar_lit(*e.rhs)) return a;
+      if (b && e.lhs && is_scalar_lit(*e.lhs)) return b;
+      return std::nullopt;
+    }
+    default:
+      return std::nullopt;
+  }
+}
 
 void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
   switch (e.kind) {
@@ -551,10 +807,20 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
   }
 }
 
-void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope) {
+void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes) {
   switch (s.kind) {
     case ast::StmtKind::Assign:
-      if (s.b) check_expr(*s.b, scope);
+      if (s.b) {
+        check_expr(*s.b, scope);
+        // Registra (ou invalida) a forma conhecida do nome atribuido.
+        if (s.a && s.a->kind == ExprKind::Name) {
+          if (auto sh = infer_shape(*s.b, shapes)) {
+            shapes[s.a->text] = *sh;
+          } else {
+            shapes.erase(s.a->text);
+          }
+        }
+      }
       if (s.a && s.a->kind == ExprKind::Name) {
         scope.insert(s.a->text);
       } else if (s.a) {
@@ -562,68 +828,87 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope) {
       }
       return;
     case ast::StmtKind::Expr:
-      if (s.a) check_expr(*s.a, scope);
+      if (s.a) {
+        check_expr(*s.a, scope);
+        infer_shape(*s.a, shapes);  // valida dimensoes mesmo sem atribuicao
+      }
       return;
     case ast::StmtKind::Return:
-      if (s.a) check_expr(*s.a, scope);
+      if (s.a) {
+        check_expr(*s.a, scope);
+        infer_shape(*s.a, shapes);
+      }
       return;
     case ast::StmtKind::If: {
       if (s.a) check_expr(*s.a, scope);
-      walk_stmt_block(s.body, scope);
+      walk_stmt_block(s.body, scope, shapes);
       for (const auto& ei : s.elifs) {
         if (ei.cond) check_expr(*ei.cond, scope);
-        walk_stmt_block(ei.body, scope);
+        walk_stmt_block(ei.body, scope, shapes);
       }
-      if (s.else_body) walk_stmt_block(*s.else_body, scope);
+      if (s.else_body) walk_stmt_block(*s.else_body, scope, shapes);
       return;
     }
     case ast::StmtKind::ForEach: {
       if (s.a) check_expr(*s.a, scope);
       Scope inner = scope;
       if (!s.name.empty()) inner.insert(s.name);
-      walk_stmt_block(s.body, std::move(inner));
+      walk_stmt_block(s.body, std::move(inner), shapes);
       return;
     }
     case ast::StmtKind::While:
       if (s.a) check_expr(*s.a, scope);
-      walk_stmt_block(s.body, scope);
+      walk_stmt_block(s.body, scope, shapes);
       return;
     case ast::StmtKind::Try: {
-      walk_stmt_block(s.body, scope);
+      walk_stmt_block(s.body, scope, shapes);
       if (s.catch_body) {
         Scope inner = scope;
         if (!s.name.empty()) inner.insert(s.name);
-        walk_stmt_block(*s.catch_body, std::move(inner));
+        walk_stmt_block(*s.catch_body, std::move(inner), shapes);
       }
       return;
     }
   }
 }
 
-void SemanticChecker::walk_stmt_block(const ast::Block& block, Scope scope) {
+void SemanticChecker::walk_stmt_block(const ast::Block& block, Scope scope, ShapeEnv shapes) {
   for (const auto& raw : block.items) {
     if (!raw) continue;
     const Item* it = raw.get();
     if (it->kind == ItemKind::ListEntry) {
       if (it->block) {
-        walk_stmt_block(*it->block, scope);
+        walk_stmt_block(*it->block, scope, shapes);
         continue;
       }
       it = it->child.get();
       if (!it) continue;
     }
     if (it->kind == ItemKind::Stmt && it->stmt) {
-      walk_stmt(*it->stmt, scope);
+      walk_stmt(*it->stmt, scope, shapes);
     } else if (it->kind == ItemKind::Field) {
       if (it->key == "verificar") continue;  // rule keys are column names, not vars
       if (it->value) check_expr(*it->value, scope);
-      if (it->block) walk_stmt_block(*it->block, scope);
+      if (it->block) walk_stmt_block(*it->block, scope, shapes);
     }
   }
 }
 
-void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope) {
+void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes) {
   collect_entrada_names(block, scope);
+  // Anotacoes `entrada: tensor[...]` (inline ou em bloco) semeiam as formas
+  // conhecidas dos dados de entrada da entidade.
+  if (const Item* ent = find_field(block, "entrada")) {
+    if (auto dims = tensor_annotation_dims(ent->value.get())) {
+      shapes["entrada"] = *dims;
+    } else if (ent->block) {
+      for (const auto& sub : ent->block->items) {
+        if (sub && sub->kind == ItemKind::Field) {
+          if (auto d = tensor_annotation_dims(sub->value.get())) shapes[sub->key] = *d;
+        }
+      }
+    }
+  }
   // Atribuicoes feitas em blocos `meio:` do `servico` valem para todas as
   // rotas (o meio executa no mesmo Env da rota antes dos `passos:`).
   for (const auto& raw : block.items) {
@@ -639,9 +924,9 @@ void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope) {
     if (it->kind == ItemKind::ListEntry && it->child) it = it->child.get();
     if (!it || it->kind != ItemKind::Field || !it->block) continue;
     if (it->key == "passos" || it->key == "executar") {
-      walk_stmt_block(*it->block, scope);
+      walk_stmt_block(*it->block, scope, shapes);
     } else if (it->key != "verificar" && it->key != "camadas") {
-      scan_for_bodies(*it->block, scope);
+      scan_for_bodies(*it->block, scope, shapes);
     }
   }
 }
@@ -651,10 +936,15 @@ void SemanticChecker::check_bodies() {
     if (!item || item->kind != ItemKind::Decl || !item->block) continue;
     if (item->key == "funcao") {
       Scope scope;
-      for (const auto& p : item->params) scope.insert(p.name);
-      walk_stmt_block(*item->block, std::move(scope));
+      ShapeEnv shapes;
+      for (const auto& p : item->params) {
+        scope.insert(p.name);
+        // Anotacao `p: tensor[...]` semeia a forma conhecida do parametro.
+        if (auto dims = tensor_annotation_dims(p.value.get())) shapes[p.name] = *dims;
+      }
+      walk_stmt_block(*item->block, std::move(scope), std::move(shapes));
     } else if (is_entity_keyword(item->key)) {
-      scan_for_bodies(*item->block, {});
+      scan_for_bodies(*item->block, {}, {});
     }
   }
 }
@@ -666,11 +956,10 @@ void SemanticChecker::check_model_shapes() {
     if (!item || item->kind != ItemKind::Decl || item->key != "modelo" || !item->block) continue;
 
     std::int64_t cur = -1;  // running feature dimension; -1 = unknown
-    if (const Item* ent = find_field(*item->block, "entrada");
-        ent && ent->value && ent->value->kind == ExprKind::Index && ent->value->lhs &&
-        ent->value->lhs->text == "tensor" && !ent->value->elems.empty()) {
-      const Expr* last = ent->value->elems.back().get();
-      if (last && last->kind == ExprKind::IntLit) cur = std::stoll(last->text);
+    if (const Item* ent = find_field(*item->block, "entrada")) {
+      // A cadeia densa/linear opera sobre a ultima dimensao (espelha o
+      // runtime, que usa shape.back() como dimensao de entrada).
+      if (auto dims = tensor_annotation_dims(ent->value.get())) cur = dims->back();
     }
 
     const Item* camadas = find_field(*item->block, "camadas");

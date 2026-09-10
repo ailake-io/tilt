@@ -1,7 +1,7 @@
 {
   "format-version": 2,
   "location": "multi",
-  "last-updated-ms": 1789073425037,
+  "last-updated-ms": 1789074862532,
   "last-column-id": 4,
   "schemas": [
     {
@@ -16,17 +16,25 @@
     { "spec-id": 0, "fields": [{ "field-id": 1000, "source-id": 1, "transform": "identity", "name": "estado" }, { "field-id": 1001, "source-id": 2, "transform": "identity", "name": "ano" }] }
   ],
   "default-spec-id": 0,
-  "current-snapshot-id": 8878700043504903512,
+  "current-snapshot-id": 5499703419479398513,
   "snapshots": [
     {
-      "snapshot-id": 8878700043504903512,
-      "timestamp-ms": 1789073425037,
+      "snapshot-id": 685847334607473911,
+      "timestamp-ms": 1789074862528,
       "summary": { "operation": "overwrite" },
-      "manifest-list": "file://multi/metadata/snap-8878700043504903512-0-986eddc8-b42a-4f18-aad1-f57d90a7f74d.avro"
+      "manifest-list": "file://multi/metadata/snap-685847334607473911-0-0b093f64-d80d-4e21-aede-5001e71b3227.avro"
+    },
+    {
+      "snapshot-id": 5499703419479398513,
+      "timestamp-ms": 1789074862532,
+      "summary": { "operation": "append" },
+      "parent-snapshot-id": 685847334607473911,
+      "manifest-list": "file://multi/metadata/snap-5499703419479398513-0-d9fc2f1f-5188-4270-8f27-a712e18cfdbd.avro"
     }
   ],
   "snapshot-log": [
-    { "timestamp-ms": 1789073425037, "snapshot-id": 8878700043504903512 }
+    { "timestamp-ms": 1789074862528, "snapshot-id": 685847334607473911 },
+    { "timestamp-ms": 1789074862532, "snapshot-id": 5499703419479398513 }
   ],
   "metadata-log": []
 }

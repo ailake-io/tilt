@@ -27,7 +27,7 @@ viés `[N]` no último eixo) e entre tensor e escalar.
 | `.matmul(outro)` | produto matricial 1D/2D |
 | `.mais(outro)` | soma (alias de `+`) |
 | `.transposta` | transposta 2D |
-| `.reformar [d, d]` | reshape (mesmo número de elementos) |
+| `.reformar([d, d])` | reshape (mesmo número de elementos) |
 | `.relu` `.gelu` `.silu` `.sigmoide` `.tanh` | ativação elementwise |
 | `.softmax` | softmax no último eixo |
 | `.conv2d(nucleo, passo: N)` | convolução 2D NCHW, padding válido (ver abaixo) |
@@ -42,6 +42,28 @@ viés `[N]` no último eixo) e entre tensor e escalar.
 - m = tensor [[1, 2], [3, 4]]
 - imprimir m.matmul(m).forma
 ```
+
+### Shape solver (`tilt checar`)
+
+Com formas inteiramente literais ou anotadas, `checar` propaga e valida
+dimensões antes de executar (`T012`). Formas entram por literais
+(`tensor [...]`, `uns`/`zeros`/`aleatorio [..]`) e por anotações
+(`entrada: tensor[...]`, parâmetros de `funcao` como `x: tensor[...]`) e
+propagam por atribuição. O que é verificado:
+
+| Operação | Verificação em `checar` |
+|---|---|
+| `.conv2d(nucleo, passo: N)` | entrada 4D `[N, C_in, H, W]`, núcleo 4D `[C_out, C_in, KH, KW]`, `C_in` coincidente, núcleo não maior que a entrada, `passo >= 1` — saída `[N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]` |
+| `.norma_lote(...)` | rank >= 2 (`[N, C, ...]`) — forma preservada |
+| `.softmax`, ativações, `norma_camada` | forma preservada |
+| `.reformar([d, d])` | mesmo número de elementos |
+| `.transposta` | tensor 2D |
+| `.matmul(outro)` | dimensão interna compatível (2D) |
+
+O que o solver **não** deriva vira "forma desconhecida" e segue sem
+verificação (o erro, se houver, continua vindo em runtime): formas através
+de chamadas de `funcao`, condicionais, dimensões `_`/não literais, broadcast
+parcial (viés `[N]` no último eixo) e pesos vindos de arquivo.
 
 ### Convolução 2D e batch norm
 

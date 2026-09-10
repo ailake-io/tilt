@@ -1,0 +1,9 @@
+erro[T012]: conv2d: nucleo tem 4 canais de entrada, mas a entrada tem 3
+  --> input.tilt:5:20
+   |
+ 5 |     - y = x.conv2d k
+   |                    ^
+   |
+   = ajuste o eixo C_in do nucleo para 3 (ex.: uns [8, 3, 3, 3])
+
+1 erro(s) em input.tilt

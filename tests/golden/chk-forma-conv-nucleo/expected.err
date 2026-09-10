@@ -1,0 +1,9 @@
+erro[T012]: conv2d: nucleo 9x9 maior que a entrada 8x8
+  --> input.tilt:5:20
+   |
+ 5 |     - y = x.conv2d k
+   |                    ^
+   |
+   = reduza o nucleo ou aumente a entrada (padding ainda nao suportado)
+
+1 erro(s) em input.tilt

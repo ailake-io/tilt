@@ -1,0 +1,9 @@
+erro[T012]: reformar: numero de elementos difere (entrada tem 192, destino tem 100)
+  --> input.tilt:4:11
+   |
+ 4 |     - y = x.reformar([1, 100])
+   |           ^
+   |
+   = ajuste as dimensoes para totalizar 192 elementos
+
+1 erro(s) em input.tilt

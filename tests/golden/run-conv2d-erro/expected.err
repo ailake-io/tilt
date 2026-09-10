@@ -1,7 +1,7 @@
 erro[T901]: tensor: conv2d: nucleo 3x3 maior que a entrada 2x2
-  --> input.tilt:5:11
+  --> input.tilt:8:11
    |
- 5 |     - y = x.conv2d k
+ 8 |     - y = x.conv2d k
    |           ^
    |
 
