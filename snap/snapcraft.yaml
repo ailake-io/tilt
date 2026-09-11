@@ -21,3 +21,11 @@ parts:
       - -DCMAKE_BUILD_TYPE=Release
       - -DTILT_WERROR=ON
     build-snaps: [cmake]
+    # adopt-info exige que a part publique a versao (da tag, ex.: v0.1.0-rc1)
+    override-pull: |
+      craftctl default
+      ver="${GITHUB_REF_NAME#v}"
+      if [ -z "$ver" ] && command -v git >/dev/null 2>&1; then
+        ver="$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//')"
+      fi
+      craftctl set version="${ver:-0.1.0}"

@@ -27,8 +27,16 @@ jobs:
       - name: build
         run: cmake --build --preset release
 
+      - name: deps (macOS)
+        if: runner.os == 'macOS'
+        # libpq e openssl sao keg-only no homebrew: o dlopen resolve via
+        # DYLD_LIBRARY_PATH no step de teste.
+        run: brew install libpq openssl@3
+
       - name: test
         run: ctest --preset release --output-on-failure
+        env:
+          DYLD_LIBRARY_PATH: /opt/homebrew/lib:/opt/homebrew/opt/libpq/lib:/usr/local/lib:/usr/local/opt/libpq/lib
 
       # o gerador RPM do CPack precisa do rpmbuild (nao vem no runner ubuntu).
       - name: deps de empacotamento (Linux)
@@ -251,8 +259,14 @@ jobs:
           echo "msi_url=https://github.com/ailake-io/tilt/releases/download/${TAG}/tilt-${ver}-win64.msi" >> "$GITHUB_OUTPUT"
 
       - name: baixa o .msi e calcula SHA256
+        # o asset pode demorar a ficar visivel na URL de download apos o
+        # upload (consistencia eventual): retenta por ate ~5 min.
         run: |
-          curl -fSL -o tilt.msi "${{ steps.meta.outputs.msi_url }}"
+          for i in $(seq 1 30); do
+            if curl -fSL -o tilt.msi "${{ steps.meta.outputs.msi_url }}"; then break; fi
+            [ "$i" = 30 ] && exit 1
+            sleep 10
+          done
           sha256sum tilt.msi | cut -d' ' -f1 > tilt.msi.sha256
           echo "sha256=$(cat tilt.msi.sha256)" >> "$GITHUB_OUTPUT"
 
