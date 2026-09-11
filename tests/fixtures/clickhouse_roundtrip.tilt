@@ -1,0 +1,30 @@
+# Roundtrip ClickHouse: clickhouse_test.sh sobe um clickhouse server
+# temporario (binario unico local) e exporta CLICKHOUSE_URL apontando para
+# ele. Este fixture cria a tabela (MergeTree) via executar_sql "clickhouse://...",
+# insere linhas, confere o SELECT de volta pela fonte/ler (Int64 -> inteiro,
+# Float64 -> decimal, Nullable(String) -> nulo/texto, Date -> texto) e captura
+# os erros do servidor (SQL invalido e tabela inexistente). O ClickHouse nao
+# tem UPDATE transacional tradicional (somente ALTER ... UPDATE assincrono),
+# entao o roundtrip e INSERT + SELECT.
+fonte eventos:
+  tipo: clickhouse
+  url: env "CLICKHOUSE_URL"
+  consulta: "select id, nome, saldo, obs, dia from eventos order by id"
+
+pipeline clickhouse:
+  passos:
+    - url = env "CLICKHOUSE_URL"
+    - executar_sql url, "drop table if exists eventos"
+    - executar_sql url, "create table eventos (id Int64, nome String, saldo Float64, obs Nullable(String), dia Date) engine = MergeTree() order by id"
+    - executar_sql url, "insert into eventos (id, nome, saldo, obs, dia) values (1, 'ana', 10.5, null, '2024-03-01'), (2, 'bruno', 99.9, 'ok', '2024-03-02')"
+    - tentar:
+        executar_sql url, "selec de onde"
+    capturar e:
+      imprimir "erro-sql:", e
+    - tentar:
+        executar_sql url, "select * from tabela_inexistente"
+    capturar e:
+      imprimir "erro-tabela:", e
+    - linhas = ler eventos
+    - para cada c em linhas:
+        imprimir "linha:", c.id, c.nome, c.saldo, c.obs, c.dia

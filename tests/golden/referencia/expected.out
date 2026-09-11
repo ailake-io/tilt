@@ -5,7 +5,7 @@ DECLARACOES DE TOPO
   funcao f p: T -> R:   funcao; corpo com `retornar`
   seja x = <expr>       variavel de topo;  constante NOME = <expr>
   importar mod          / de mod importar nome
-  fonte X:              tipo: csv|json|postgres|duckdb|mysql|kafka|s3 ; caminho:/url: (env "VAR")
+  fonte X:              tipo: csv|json|postgres|duckdb|mysql|clickhouse|kafka|s3 ; caminho:/url: (env "VAR")
   pipeline X:           passos: (lista `-`); agenda: "<cron>"; ao_falhar: repetir N
   verificar (passo):    regras nao_nulo:/unico:/intervalo:  ; ao_violar: abortar|avisar
   modelo X:             camadas: (densa:/linear:[e,s]/ativacao:/softmax/abandono:)
@@ -42,7 +42,7 @@ BUILTINS
   s3_iniciar_upload s3_enviar_parte s3_concluir_upload s3_abortar_upload
   http_get_json http_post_json  (HTTP generico JSON; ver guia 03)
   ler <fonte> carregador
-  executar_sql "<url>" "<sql>"   (postgres://, sqlite://, duckdb:// ou mysql://; INSERT/UPDATE/DDL)
+  executar_sql "<url>" "<sql>"   (postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://; INSERT/DDL)
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)
   modelo X.executar <tensor>   |   <indice>.inserir / .buscar
   checar_tilt "<arquivo>"  -> { ok, erros: [{codigo,linha,coluna,mensagem,notas}] }

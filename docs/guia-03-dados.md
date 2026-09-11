@@ -4,7 +4,7 @@
 
 ```tilt
 fonte produtos:
-  tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | mysql | kafka
+  tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | mysql | clickhouse | kafka
   caminho: "dados/produtos.json"   # ou arquivo: / url:  ; aceita  env "VAR"
 ```
 
@@ -388,20 +388,22 @@ single-writer (sem locks no catálogo) e 1ª passada: sem namespaces além de
 completo coberto por `tests/iceberg_rest_test.sh` (mock HTTP + validação do
 metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
 
-## Bancos relacionais (SQLite, Postgres, DuckDB e MySQL/MariaDB)
+## Bancos relacionais (SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse)
 
-`fonte tipo: sqlite`, `fonte tipo: postgres`, `fonte tipo: duckdb` e
-`fonte tipo: mysql` executam **consultas SELECT** e devolvem `tabela`. Zero
-dependências de link: as bibliotecas são carregadas em tempo de execução com
-`dlopen` (erro claro se ausentes).
+`fonte tipo: sqlite`, `fonte tipo: postgres`, `fonte tipo: duckdb`,
+`fonte tipo: mysql` e `fonte tipo: clickhouse` executam **consultas SELECT**
+e devolvem `tabela`. Zero dependências de link: SQLite/Postgres/DuckDB/MySQL
+carregam as bibliotecas em tempo de execução com `dlopen` (erro claro se
+ausentes); o ClickHouse fala HTTP nativo pelo cliente genérico do runtime
+(subprocesso `curl`, mesmo padrão do s3/qdrant/iceberg REST).
 
 Para comandos sem resultado — `INSERT`, `UPDATE`, `DELETE`, DDL — use o
 builtin `executar_sql url, sql`, que aceita URL `postgres://` (ou
-`postgresql://`), `sqlite://`, `duckdb://` e `mysql://` (ou `mariadb://`)
-(SQLite/DuckDB: o SQL roda direto no arquivo; o banco é criado quando não
-existe). Retorna `nulo`; em caso de erro (ex.: violação de constraint) lança
-a mensagem do servidor, capturável com `tentar`/`capturar`. Um comando por
-chamada.
+`postgresql://`), `sqlite://`, `duckdb://`, `mysql://` (ou `mariadb://`) e
+`clickhouse://` (SQLite/DuckDB: o SQL roda direto no arquivo; o banco é criado
+quando não existe). Retorna `nulo`; em caso de erro (ex.: violação de
+constraint) lança a mensagem do servidor, capturável com `tentar`/`capturar`.
+Um comando por chamada.
 
 ```tilt
 fonte clientes:
@@ -424,6 +426,11 @@ fonte pedidos:
   url: "mysql://app:senha@localhost:3306/loja"   # mariadb:// tambem vale
   consulta: "select id, total from pedidos where status = 'pago'"
 
+fonte eventos:
+  tipo: clickhouse
+  url: "clickhouse://default@localhost:8123/meubanco"
+  consulta: "select dia, count() as total from eventos group by dia order by dia"
+
 pipeline etl:
   passos:
     - executar_sql "postgres://localhost:5432/app",
@@ -432,16 +439,19 @@ pipeline etl:
         "create table vendas (regiao varchar, venda double)"
     - executar_sql "mysql://app:senha@localhost:3306/loja",
         "update pedidos set status = 'enviado' where id = 42"
+    - executar_sql "clickhouse://default@localhost:8123/meubanco",
+        "insert into eventos (dia) values ('2024-03-01')"
     - novos = ler clientes
     - local = ler metricas
     - por_regiao = ler analitico
     - pagos = ler pedidos
+    - por_dia = ler eventos
 ```
 
 | Campo | Efeito |
 |---|---|
 | `caminho:` | SQLite/DuckDB: arquivo do banco (deve existir; DuckDB aceita `:memory:`) |
-| `url:` | Postgres: connection string libpq; MySQL/MariaDB: `mysql://usuario:senha@host:porta/banco` (porta default 3306; userinfo opcional) |
+| `url:` | Postgres: connection string libpq; MySQL/MariaDB: `mysql://usuario:senha@host:porta/banco` (porta default 3306; userinfo opcional); ClickHouse: `clickhouse://[usuario[:senha]@]host[:porta][/banco]` (HTTP; porta default 8123; sem userinfo usa `CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD` do ambiente; usuário default `default`) |
 | `consulta:` | SQL `SELECT` (INSERT/UPDATE/DDL → erro claro; use `executar_sql`) |
 
 Tipos: inteiro→`inteiro`, real/numeric→`decimal`, bool→`logico` (no DuckDB,
@@ -453,6 +463,26 @@ texto e é convertido), demais tipos (VARCHAR, TEXT, DATE, DATETIME, JSON,
 ENUM...)→`texto`. O conector MySQL carrega `libmariadb.so.3` ou
 `libmysqlclient.so*` via `dlopen` (MariaDB e MySQL usam a mesma C API);
 serve tanto contra MySQL quanto contra MariaDB.
+
+### ClickHouse (HTTP nativo)
+
+O ClickHouse não fala o protocolo wire dos relacionais acima: o conector usa o
+**HTTP nativo** dele (`POST /?query=...`) pelo cliente genérico do runtime —
+sem `dlopen`, só precisa do binário `curl`. A consulta da `fonte` é enviada em
+`FORMAT JSONEachRow`, anexado automaticamente quando o SQL não traz um
+`FORMAT` próprio; cada linha NDJSON vira um mapa da `tabela`. Tipos:
+Int*/UInt*→`inteiro`, Float*/Decimal→`decimal`, String/FixedString/
+Date/DateTime→`texto`, Nullable→`nulo` (JSON `null`, ou o marcador `ᴺᵁᴸᴸ`
+quando um FORMAT TSV/CSV próprio for pedido), demais tipos (Array, Tuple,
+Map...)→`texto` com a serialização JSON. Timeout de 60s (consultas
+analíticas). Erros do servidor (HTTP ≥ 400, ex.: `Syntax error`) chegam como
+exceção com o corpo do erro, capturável com `tentar`/`capturar`.
+
+Gravação é `executar_sql` (INSERT/DDL/`ALTER`); o corpo da resposta é
+ignorado. Não existe UPDATE transacional tradicional — mutações de linha são
+`ALTER TABLE ... UPDATE` assíncronas —, então o fluxo típico é INSERT +
+SELECT. Autenticação por userinfo da URL ou, sem ele, pelas env
+`CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD`.
 
 ## Redis (RESP nativo)
 
