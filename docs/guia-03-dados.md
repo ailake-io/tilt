@@ -4,7 +4,7 @@
 
 ```tilt
 fonte produtos:
-  tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | kafka
+  tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | mysql | kafka
   caminho: "dados/produtos.json"   # ou arquivo: / url:  ; aceita  env "VAR"
 ```
 
@@ -388,19 +388,20 @@ single-writer (sem locks no catálogo) e 1ª passada: sem namespaces além de
 completo coberto por `tests/iceberg_rest_test.sh` (mock HTTP + validação do
 metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
 
-## Bancos relacionais (SQLite, Postgres e DuckDB)
+## Bancos relacionais (SQLite, Postgres, DuckDB e MySQL/MariaDB)
 
-`fonte tipo: sqlite`, `fonte tipo: postgres` e `fonte tipo: duckdb` executam
-**consultas SELECT** e devolvem `tabela`. Zero dependências de link: as
-bibliotecas são carregadas em tempo de execução com `dlopen` (erro claro se
-ausentes).
+`fonte tipo: sqlite`, `fonte tipo: postgres`, `fonte tipo: duckdb` e
+`fonte tipo: mysql` executam **consultas SELECT** e devolvem `tabela`. Zero
+dependências de link: as bibliotecas são carregadas em tempo de execução com
+`dlopen` (erro claro se ausentes).
 
 Para comandos sem resultado — `INSERT`, `UPDATE`, `DELETE`, DDL — use o
 builtin `executar_sql url, sql`, que aceita URL `postgres://` (ou
-`postgresql://`), `sqlite://` e `duckdb://` (SQLite/DuckDB: o SQL roda direto
-no arquivo; o banco é criado quando não existe). Retorna `nulo`; em caso de
-erro (ex.: violação de constraint) lança a mensagem do servidor, capturável
-com `tentar`/`capturar`. Um comando por chamada.
+`postgresql://`), `sqlite://`, `duckdb://` e `mysql://` (ou `mariadb://`)
+(SQLite/DuckDB: o SQL roda direto no arquivo; o banco é criado quando não
+existe). Retorna `nulo`; em caso de erro (ex.: violação de constraint) lança
+a mensagem do servidor, capturável com `tentar`/`capturar`. Um comando por
+chamada.
 
 ```tilt
 fonte clientes:
@@ -418,26 +419,40 @@ fonte analitico:
   arquivo: "analise.duckdb"   # ou ":memory:" (banco em memoria)
   consulta: "select regiao, sum(venda) as total from vendas group by regiao"
 
+fonte pedidos:
+  tipo: mysql
+  url: "mysql://app:senha@localhost:3306/loja"   # mariadb:// tambem vale
+  consulta: "select id, total from pedidos where status = 'pago'"
+
 pipeline etl:
   passos:
     - executar_sql "postgres://localhost:5432/app",
         "insert into clientes (nome, idade) values ('ana', 30)"
     - executar_sql "duckdb://analise.duckdb",
         "create table vendas (regiao varchar, venda double)"
+    - executar_sql "mysql://app:senha@localhost:3306/loja",
+        "update pedidos set status = 'enviado' where id = 42"
     - novos = ler clientes
     - local = ler metricas
     - por_regiao = ler analitico
+    - pagos = ler pedidos
 ```
 
 | Campo | Efeito |
 |---|---|
 | `caminho:` | SQLite/DuckDB: arquivo do banco (deve existir; DuckDB aceita `:memory:`) |
-| `url:` | Postgres: connection string libpq |
+| `url:` | Postgres: connection string libpq; MySQL/MariaDB: `mysql://usuario:senha@host:porta/banco` (porta default 3306; userinfo opcional) |
 | `consulta:` | SQL `SELECT` (INSERT/UPDATE/DDL → erro claro; use `executar_sql`) |
 
 Tipos: inteiro→`inteiro`, real/numeric→`decimal`, bool→`logico` (no DuckDB,
 boolean→`inteiro` 0/1), texto→`texto`, NULL→`nulo`, BLOB SQLite→texto hex
-`0x...` (no DuckDB, demais tipos como DATE/TIMESTAMP/UUID→`texto`).
+`0x...` (no DuckDB, demais tipos como DATE/TIMESTAMP/UUID→`texto`). MySQL/
+MariaDB: TINYINT/SMALLINT/INT/MEDIUMINT/BIGINT/YEAR→`inteiro` (TINYINT(1)
+incluído — vira 0/1), DECIMAL/FLOAT/DOUBLE→`decimal` (DECIMAL chega como
+texto e é convertido), demais tipos (VARCHAR, TEXT, DATE, DATETIME, JSON,
+ENUM...)→`texto`. O conector MySQL carrega `libmariadb.so.3` ou
+`libmysqlclient.so*` via `dlopen` (MariaDB e MySQL usam a mesma C API);
+serve tanto contra MySQL quanto contra MariaDB.
 
 ## Redis (RESP nativo)
 

@@ -45,6 +45,7 @@
 #include "runtime/sqlite.hpp"
 #include "runtime/postgres.hpp"
 #include "runtime/duckdb.hpp"
+#include "runtime/mysql.hpp"
 #include "runtime/pgvector.hpp"
 #include "runtime/vectorstore.hpp"
 #include "semantic/checker.hpp"
@@ -1150,7 +1151,7 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
       fail(span, std::string(e.what()));
     }
   }
-  if (tipo == "sqlite" || tipo == "postgres" || tipo == "duckdb") {
+  if (tipo == "sqlite" || tipo == "postgres" || tipo == "duckdb" || tipo == "mysql") {
     const Item* c = find_field(*decl->block, "consulta");
     if (!c || !c->value || c->value->kind != ExprKind::TextLit) {
       fail(span, "fonte '" + name + "': falta 'consulta: \"select ...\"'");
@@ -1159,6 +1160,7 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
     try {
       Value t = tipo == "duckdb"   ? rt::duckdb_query(path, sql)
                 : tipo == "sqlite" ? rt::sqlite_query(path, sql)
+                : tipo == "mysql"  ? rt::mysql_query(path, sql)
                                    : rt::postgres_query(path, sql);
       t.kind = ValueKind::Tabela;
       return t;
@@ -3725,9 +3727,11 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         rt::sqlite_exec(url.substr(9), a[1].s);
       } else if (url.rfind("duckdb://", 0) == 0) {
         rt::duckdb_exec(url.substr(9), a[1].s);
+      } else if (url.rfind("mysql://", 0) == 0 || url.rfind("mariadb://", 0) == 0) {
+        rt::mysql_exec(url, a[1].s);
       } else {
         fail(call.span,
-             "executar_sql: url '" + url + "' invalida (use postgres://, sqlite:// ou duckdb://)");
+             "executar_sql: url '" + url + "' invalida (use postgres://, sqlite://, duckdb:// ou mysql://)");
       }
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));

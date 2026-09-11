@@ -65,6 +65,7 @@ add_library(tilt_core STATIC
   src/runtime/sqlite.cpp
   src/runtime/postgres.cpp
   src/runtime/duckdb.cpp
+  src/runtime/mysql.cpp
   src/runtime/pgvector.cpp
   src/vm/compiler.cpp
   src/vm/vm.cpp

@@ -105,8 +105,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   são sempre 0. A estrutura escrita (metadata, manifest list, manifest e
   parquet com field-ids) carrega no **pyiceberg**.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
-  vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, Redis,
-  Kafka, MongoDB, Qdrant, pgvector e S3 rodam.
+  vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
+  MariaDB, Redis, Kafka, MongoDB, Qdrant, pgvector e S3 rodam.
 - MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
   `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
   básico completo — restam: `mongo_agregar` lê só o `firstBatch` do cursor
@@ -139,11 +139,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   do binário `curl` e das credenciais via env (`AWS_ACCESS_KEY_ID`/
   `AWS_SECRET_ACCESS_KEY`). Funciona com S3-compatível (MinIO etc.) via
   `S3_ENDPOINT`.
-- Bancos relacionais: `fonte tipo: sqlite/postgres/duckdb` é somente leitura
-  (consultas SELECT); gravação via `executar_sql` (INSERT/UPDATE/DELETE/DDL,
-  um comando por chamada, sem prepared statements nem transações explícitas);
-  Postgres carrega `libpq.so.5`, SQLite `libsqlite3.so.0` e DuckDB
-  `libduckdb.so` via `dlopen` — precisam estar instalados no sistema.
+- Bancos relacionais: `fonte tipo: sqlite/postgres/duckdb/mysql` é somente
+  leitura (consultas SELECT); gravação via `executar_sql` (INSERT/UPDATE/DELETE/
+  DDL, um comando por chamada, sem prepared statements nem transações
+  explícitas); Postgres carrega `libpq.so.5`, SQLite `libsqlite3.so.0`,
+  DuckDB `libduckdb.so` e MySQL/MariaDB `libmariadb.so.3` ou
+  `libmysqlclient.so*` via `dlopen` — precisam estar instalados no sistema.
+  No MySQL/MariaDB: sem prepared statements (escaping é responsabilidade do
+  autor do SQL), sem TLS explícito (o canal seguro depende da lib cliente
+  carregada — contra servidores 8.0+ com `caching_sha2_password`, prefira
+  usuário `mysql_native_password` ou SSL fora do escopo), consulta por
+  conexão.
 - Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, timeout fixo de 5s.
   AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT
   via path numérico (`redis://host:6379/2`) ou opção `banco:`. Sem
@@ -281,8 +287,8 @@ A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
   (job `windows` em `.github/workflows/ci.yml`). A camada de compatibilidade
   vive em `src/runtime/compat.*`: sockets POSIX viram Winsock2
   (`WSAStartup` no CLI), `dlopen` vira `LoadLibrary` (nomes de DLL:
-  `libssl-3-x64.dll`, `sqlite3.dll`, `libpq.dll`, `duckdb.dll`, `zlib1.dll`,
-  `nvcuda.dll`),
+  `libssl-3-x64.dll`, `sqlite3.dll`, `libpq.dll`, `duckdb.dll`,
+  `libmariadb.dll`, `zlib1.dll`, `nvcuda.dll`),
   `epoll` do servidor HTTP vira um event loop com `select()` (sem o caminho
   paralelo de workers — `--threads N` é serial no Windows por enquanto),
   cores do terminal ficam desligadas. Limites atuais do port:

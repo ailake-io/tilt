@@ -107,6 +107,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/duckdb_roundtrip.tilt)
 
 add_test(
+  NAME mysql
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mysql_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/mysql_roundtrip.tilt)
+
+add_test(
   NAME janela_offset
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/janela_offset_test.sh
           $<TARGET_FILE:tilt>

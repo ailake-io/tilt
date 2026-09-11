@@ -1,0 +1,29 @@
+# Roundtrip MySQL/MariaDB alem de SELECT: mysql_test.sh sobe um servidor
+# temporario (mysqld/mariadbd local ou container mariadb via docker) e exporta
+# MYSQL_URL apontando para ele. Este fixture cria a tabela, insere e atualiza
+# linhas via executar_sql, confere o SELECT de volta pela fonte/ler (inteiro,
+# decimal, tinyint como inteiro, nulo) e captura os erros do servidor (PK
+# duplicada e SQL invalido).
+fonte clientes:
+  tipo: mysql
+  url: env "MYSQL_URL"
+  consulta: "select id, nome, saldo, ativo, obs from clientes order by id"
+
+pipeline mysql:
+  passos:
+    - url = env "MYSQL_URL"
+    - executar_sql url, "drop table if exists clientes"
+    - executar_sql url, "create table clientes (id int primary key, nome varchar(100) not null, saldo decimal(10,2), ativo tinyint, obs text)"
+    - executar_sql url, "insert into clientes (id, nome, saldo, ativo) values (1, 'ana', 10.5, 1), (2, 'bruno', 20, 0)"
+    - executar_sql url, "update clientes set saldo = 99.9, obs = 'ok' where nome = 'bruno'"
+    - tentar:
+        executar_sql url, "insert into clientes (id, nome) values (1, 'dup')"
+    capturar e:
+      imprimir "erro-constraint:", e
+    - tentar:
+        executar_sql url, "selec de onde"
+    capturar e:
+      imprimir "erro-sql:", e
+    - linhas = ler clientes
+    - para cada c em linhas:
+        imprimir "linha:", c.id, c.nome, c.saldo, c.ativo, c.obs
