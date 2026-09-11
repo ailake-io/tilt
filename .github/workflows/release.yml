@@ -127,6 +127,9 @@ jobs:
           sudo apt-get install -y snapd
           sudo snap install lxd
           sudo lxd init --auto
+          # runners GitHub tem política FORWARD DROP, que quebra o NAT do
+          # LXD (a instância baixa a base sem rede): abrir o forward.
+          sudo iptables -P FORWARD ACCEPT
           sudo snap install --classic snapcraft
 
       - name: build do snap
