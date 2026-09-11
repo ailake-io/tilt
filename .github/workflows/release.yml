@@ -113,26 +113,33 @@ jobs:
             build/release/tilt-*.zip.sha256
           generate_release_notes: true
 
-  # --- Snap (classic): build via snapcore/action-build (roda snapcraft com
-  # LXD no runner). Publicacao na Snap Store exige SNAPCRAFT_TOKEN.
+  # --- Snap (classic): build com snapcraft direto (logs visíveis, ao
+  # contrário da action que escondia o erro). Publicação na Snap Store exige
+  # SNAPCRAFT_TOKEN; falha no build vira skip com aviso, não derruba o release.
   snap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: snapcore/action-build@v1
+      - name: instalar LXD + snapcraft
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y snapd
+          sudo snap install lxd
+          sudo lxd init --auto
+          sudo snap install --classic snapcraft
+
+      - name: build do snap
         id: snapcraft
-        # nao derruba o release se o build do snap falhar (infra LXD etc.):
-        # avisa e o release segue sem o .snap ate ser corrigido.
-        continue-on-error: true
+        run: sudo snapcraft
+
+      - name: localiza o .snap
+        id: snapfile
+        run: echo "snap=$(ls ./*.snap 2>/dev/null | head -1)" >> "$GITHUB_OUTPUT"
 
       - name: resultado do build do snap
-        run: |
-          if [ -z "${{ steps.snapcraft.outputs.snap }}" ]; then
-            echo "::warning::build do snap falhou — release segue sem .snap (corrigir e re-rodar)"
-          else
-            echo "snap: ${{ steps.snapcraft.outputs.snap }}"
-          fi
+        if: steps.snapfile.outputs.snap == ''
+        run: echo "::warning::build do snap falhou — release segue sem .snap (ver logs do step de build)"
 
       - name: SNAPCRAFT_TOKEN configurado?
         id: token
@@ -143,18 +150,18 @@ jobs:
           else echo "set=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: publicar na Snap Store
-        if: steps.token.outputs.set == 'true' && steps.snapcraft.outputs.snap != ''
+        if: steps.token.outputs.set == 'true' && steps.snapfile.outputs.snap != ''
         uses: snapcore/action-publish@v1
         env:
           SNAPCRAFT_TOKEN: ${{ secrets.SNAPCRAFT_TOKEN }}
         with:
-          snap: ${{ steps.snapcraft.outputs.snap }}
+          snap: ${{ steps.snapfile.outputs.snap }}
           release: stable
 
       - uses: softprops/action-gh-release@v2
-        if: steps.snapcraft.outputs.snap != ''
+        if: steps.snapfile.outputs.snap != ''
         with:
-          files: ${{ steps.snapcraft.outputs.snap }}
+          files: ${{ steps.snapfile.outputs.snap }}
 
   # --- Flatpak: valida o manifesto e o metainfo com flatpak-builder
   # (empacotamento local: flatpak-builder --repo=repo packaging/flatpak/...).
