@@ -1,0 +1,27 @@
+# Roundtrip DuckDB além de SELECT: duckdb_test.sh exporta DUCKDB_DB (arquivo
+# temporario) e DUCKDB_URL ("duckdb://" + arquivo). Este fixture cria a
+# tabela, insere e atualiza linhas via executar_sql, confere o SELECT de
+# volta pela fonte/ler (com decimal, boolean como inteiro e nulo) e captura
+# os erros do DuckDB (PK duplicada e SQL invalido).
+fonte clientes:
+  tipo: duckdb
+  arquivo: env "DUCKDB_DB"
+  consulta: "select id, nome, saldo, ativo, obs from clientes order by id"
+
+pipeline duckdb:
+  passos:
+    - url = env "DUCKDB_URL"
+    - executar_sql url, "create table clientes (id integer primary key, nome varchar not null, saldo double, ativo boolean, obs varchar)"
+    - executar_sql url, "insert into clientes (id, nome, saldo, ativo) values (1, 'ana', 10.5, true), (2, 'bruno', 20, false)"
+    - executar_sql url, "update clientes set saldo = 99.9, obs = 'ok' where nome = 'bruno'"
+    - tentar:
+        executar_sql url, "insert into clientes (id, nome) values (1, 'dup')"
+    capturar e:
+      imprimir "erro-constraint:", e
+    - tentar:
+        executar_sql url, "selec de onde"
+    capturar e:
+      imprimir "erro-sql:", e
+    - linhas = ler clientes
+    - para cada c em linhas:
+        imprimir "linha:", c.id, c.nome, c.saldo, c.ativo, c.obs

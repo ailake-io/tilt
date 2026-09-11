@@ -1,4 +1,5 @@
 /build/
+/.cache/
 *.tiltc
 .env
 compile_commands.json

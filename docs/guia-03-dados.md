@@ -4,7 +4,7 @@
 
 ```tilt
 fonte produtos:
-  tipo: json          # csv | json | parquet | delta | sqlite | postgres | kafka
+  tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | kafka
   caminho: "dados/produtos.json"   # ou arquivo: / url:  ; aceita  env "VAR"
 ```
 
@@ -388,18 +388,19 @@ single-writer (sem locks no catálogo) e 1ª passada: sem namespaces além de
 completo coberto por `tests/iceberg_rest_test.sh` (mock HTTP + validação do
 metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
 
-## Bancos relacionais (SQLite e Postgres)
+## Bancos relacionais (SQLite, Postgres e DuckDB)
 
-`fonte tipo: sqlite` e `fonte tipo: postgres` executam **consultas SELECT**
-e devolvem `tabela`. Zero dependências de link: as bibliotecas são carregadas
-em tempo de execução com `dlopen` (erro claro se ausentes).
+`fonte tipo: sqlite`, `fonte tipo: postgres` e `fonte tipo: duckdb` executam
+**consultas SELECT** e devolvem `tabela`. Zero dependências de link: as
+bibliotecas são carregadas em tempo de execução com `dlopen` (erro claro se
+ausentes).
 
 Para comandos sem resultado — `INSERT`, `UPDATE`, `DELETE`, DDL — use o
 builtin `executar_sql url, sql`, que aceita URL `postgres://` (ou
-`postgresql://`) e `sqlite://` (SQLite: o SQL roda direto no arquivo; o banco
-é criado quando não existe). Retorna `nulo`; em caso de erro (ex.: violação de
-constraint) lança a mensagem do servidor, capturável com `tentar`/`capturar`.
-Um comando por chamada.
+`postgresql://`), `sqlite://` e `duckdb://` (SQLite/DuckDB: o SQL roda direto
+no arquivo; o banco é criado quando não existe). Retorna `nulo`; em caso de
+erro (ex.: violação de constraint) lança a mensagem do servidor, capturável
+com `tentar`/`capturar`. Um comando por chamada.
 
 ```tilt
 fonte clientes:
@@ -412,22 +413,31 @@ fonte metricas:
   caminho: "metricas.db"
   consulta: "select dia, valor from vendas order by dia"
 
+fonte analitico:
+  tipo: duckdb
+  arquivo: "analise.duckdb"   # ou ":memory:" (banco em memoria)
+  consulta: "select regiao, sum(venda) as total from vendas group by regiao"
+
 pipeline etl:
   passos:
     - executar_sql "postgres://localhost:5432/app",
         "insert into clientes (nome, idade) values ('ana', 30)"
+    - executar_sql "duckdb://analise.duckdb",
+        "create table vendas (regiao varchar, venda double)"
     - novos = ler clientes
     - local = ler metricas
+    - por_regiao = ler analitico
 ```
 
 | Campo | Efeito |
 |---|---|
-| `caminho:` | SQLite: arquivo `.db` (deve existir) |
+| `caminho:` | SQLite/DuckDB: arquivo do banco (deve existir; DuckDB aceita `:memory:`) |
 | `url:` | Postgres: connection string libpq |
 | `consulta:` | SQL `SELECT` (INSERT/UPDATE/DDL → erro claro; use `executar_sql`) |
 
-Tipos: inteiro→`inteiro`, real/numeric→`decimal`, bool→`logico`,
-texto→`texto`, NULL→`nulo`, BLOB SQLite→texto hex `0x...`.
+Tipos: inteiro→`inteiro`, real/numeric→`decimal`, bool→`logico` (no DuckDB,
+boolean→`inteiro` 0/1), texto→`texto`, NULL→`nulo`, BLOB SQLite→texto hex
+`0x...` (no DuckDB, demais tipos como DATE/TIMESTAMP/UUID→`texto`).
 
 ## Redis (RESP nativo)
 

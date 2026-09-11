@@ -101,6 +101,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_rest_sobrescrita.tilt)
 
 add_test(
+  NAME duckdb
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/duckdb_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/duckdb_roundtrip.tilt)
+
+add_test(
   NAME janela_offset
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/janela_offset_test.sh
           $<TARGET_FILE:tilt>
