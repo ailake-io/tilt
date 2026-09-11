@@ -801,6 +801,30 @@ pipeline rag:
 Nota: chame os métodos com parênteses quando o argumento é uma lista —
 `docs.inserir([...])` — para não confundir o parser.
 
+## Índice vetorial no Weaviate
+
+`indice` com `armazenamento: "weaviate://host:porta/classe"` delega
+`inserir`/`buscar` ao Weaviate via REST (curl, mesmo padrão do Qdrant). Os
+embeddings continuam vindo de `embeddings:` (`TILT_LLM=mock` offline nos
+testes). `inserir` cria a classe automaticamente na primeira chamada
+(`vectorizer: "none"`, propriedade `texto`) e faz upsert do objeto
+(`PUT /v1/objects/<classe>/<id>`); `buscar` usa GraphQL `nearVector`
+(distância de cosseno, `score = 1 - distance`) e devolve `{ id, score }`.
+Autenticação opcional via env `WEAVIATE_API_KEY`
+(`Authorization: Bearer <chave>`); sem a env, anônimo. Coberto por
+`tests/weaviate_test.sh` (mock REST em python3 + embeddings em modo `mock`).
+
+```tilt
+indice docs:
+  embeddings: "meu-modelo"
+  armazenamento: "weaviate://localhost:8080/Documentos"
+
+pipeline rag:
+  passos:
+    - docs.inserir([{ id: "a1", texto: "gato doméstico" }])
+    - achados = docs.buscar("gato", top_k: 3)
+```
+
 ## Métodos de tabela
 
 Operam sobre `tabela` e `lista` de mapas. `linha` é a variável implícita da linha atual.

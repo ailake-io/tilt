@@ -80,6 +80,7 @@ indice base:
   embeddings: "text-embedding-3-small"
   armazenamento: "memoria"          # ou qdrant://host:porta/colecao (REST via curl)
                                      # ou pgvector://colecao (Postgres + extensão pgvector)
+                                     # ou weaviate://host:porta/classe (REST via curl)
 
 pipeline indexar:
   passos:
@@ -108,5 +109,13 @@ pipeline indexar:
   extensão `vector` instalada no banco (o Tilt tenta
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez).
+- Com `armazenamento: "weaviate://host:porta/classe"`, delegam ao Weaviate
+  via REST (GraphQL `nearVector`, distância de cosseno; `score = 1 -
+  distance`). A classe é criada automaticamente na primeira escrita
+  (`vectorizer: "none"`, propriedade `texto`). Autenticação opcional: env
+  `WEAVIATE_API_KEY` vira o header `Authorization: Bearer <chave>`; sem a
+  env, a requisição é anônima. `buscar` devolve `{ id, score }` — o texto
+  fica na propriedade `texto` do objeto. O nome da classe deve ser de
+  GraphQL (`[A-Z][_a-zA-Z0-9]*`) e, no Weaviate real, o `id` deve ser UUID.
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).

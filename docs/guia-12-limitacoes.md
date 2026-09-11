@@ -107,7 +107,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
   MariaDB, ClickHouse, Elasticsearch/OpenSearch, Redis, Kafka, MongoDB, Qdrant,
-  pgvector e S3 rodam.
+  pgvector, Weaviate e S3 rodam.
 - Elasticsearch/OpenSearch (`es_buscar`/`es_executar`/`fonte tipo:
   elasticsearch|opensearch`): REST/JSON puro pelo cliente HTTP genérico
   (subprocesso `curl`). `es_buscar` cobre só `_search` (DSL em texto ou mapa)
@@ -186,6 +186,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
   id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
   `texto`, que fica no payload do ponto).
+- Weaviate: a classe é criada com `vectorizer: "none"` (o vetor vem pronto do
+  `embeddings:`) e o nome deve ser de GraphQL (`[A-Z][_a-zA-Z0-9]*`); a busca
+  é GraphQL `nearVector` (cosseno, `score = 1 - distance`) e devolve `id` e
+  `score` (sem o `texto`, que fica na propriedade `texto` do objeto); no
+  Weaviate real o `id` do objeto deve ser UUID; auth só por env
+  `WEAVIATE_API_KEY` (Bearer), sem usuário/senha nem TLS dedicado (HTTP puro).
 - pgvector: exige a extensão `vector` instalada no banco (o Tilt tenta
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
@@ -222,9 +228,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 - Sem `TILT_LLM`, a chamada real depende do `curl` no `PATH`.
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
-  `"qdrant://host:porta/colecao"` (REST via curl) e `"pgvector://colecao"`
+  `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
-  `buscar` devolve `{ id, score }`, sem o texto).
+  `buscar` devolve `{ id, score }`, sem o texto) e
+  `"weaviate://host:porta/classe"` (REST via curl, GraphQL `nearVector`;
+  `buscar` devolve `{ id, score }`, sem o texto; auth por env
+  `WEAVIATE_API_KEY`).
 - Os embeddings do modo `mock` são um bag-of-tokens hasheado (16 dimensões) —
   bons para testes determinísticos, não para relevância real.
 

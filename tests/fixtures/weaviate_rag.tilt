@@ -1,0 +1,33 @@
+# RAG sobre Weaviate: weaviate_test.sh sobe um mock REST em python3
+# (http.server) falando o subset do Weaviate — GET/POST /v1/schema (classe com
+# vectorizer "none" + propriedade "texto"), PUT /v1/objects/<classe>/<id> com
+# {texto, vector} e POST /v1/graphql (nearVector {vector} + limit ->
+# _additional {id, distance}; score = 1 - distance). Auth: env
+# WEAVIATE_API_KEY -> header Authorization: Bearer; sem a env, anonimo.
+# @PORTA@ e substituida pelo script de teste: o campo armazenamento so aceita
+# literal, entao nao da pra ler a porta de env("...") aqui.
+indice kb:
+  embeddings: "m"
+  armazenamento: "weaviate://127.0.0.1:@PORTA@/Documentos"
+
+indice espectro:
+  embeddings: "m"
+  armazenamento: "weaviate://127.0.0.1:@PORTA@/Espectro"
+
+pipeline rag:
+  passos:
+    - n = kb.inserir([
+        { id: "a1", texto: "gato domestico" },
+        { id: "b1", texto: "gato e cachorro" },
+        { id: "c1", texto: "engenharia de dados" },
+      ])
+    - imprimir "inseridos:", n
+    - achados = kb.buscar("gato", top_k: 2)
+    - para cada h em achados:
+        imprimir "achado:", h.id, h.score
+    - unico = kb.buscar("gato", top_k: 1)
+    - imprimir "top1:", unico[0].id
+    - tentar:
+        espectro.buscar("gato", top_k: 1)
+    capturar e:
+      imprimir "erro-graphql:", e

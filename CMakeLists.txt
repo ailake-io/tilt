@@ -69,6 +69,7 @@ add_library(tilt_core STATIC
   src/runtime/clickhouse.cpp
   src/runtime/elasticsearch.cpp
   src/runtime/pgvector.cpp
+  src/runtime/weaviate.cpp
   src/vm/compiler.cpp
   src/vm/vm.cpp
   src/codegen/codegen_x86_64.cpp

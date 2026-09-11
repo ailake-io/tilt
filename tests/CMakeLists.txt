@@ -136,6 +136,12 @@ add_test(
           $<TARGET_FILE:tilt>
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/redis_tls.tilt)
 
+add_test(
+  NAME weaviate
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/weaviate_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/weaviate_rag.tilt)
+
 find_program(PYTHON3 python3)
 if(PYTHON3)
   add_test(NAME lsp COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/lsp_test.py $<TARGET_FILE:tilt>)
