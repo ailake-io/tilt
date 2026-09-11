@@ -40,6 +40,7 @@ BUILTINS
   mongo_agregar
   ler_s3 escrever_s3 listar_s3 apagar_s3 copiar_s3 cabecalho_s3
   s3_iniciar_upload s3_enviar_parte s3_concluir_upload s3_abortar_upload
+  http_get_json http_post_json  (HTTP generico JSON; ver guia 03)
   ler <fonte> carregador
   executar_sql "<url>" "<sql>"   (postgres:// ou sqlite://; INSERT/UPDATE/DDL)
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)

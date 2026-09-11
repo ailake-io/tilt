@@ -24,6 +24,13 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/s3_roundtrip.tilt)
 
 add_test(
+  NAME http_client
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/http_client_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/http_generico.tilt
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/rede_roundtrip.tilt)
+
+add_test(
   NAME kafka
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/kafka_test.sh
           $<TARGET_FILE:tilt>

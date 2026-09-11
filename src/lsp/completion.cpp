@@ -38,7 +38,7 @@ const std::array<std::string_view, 20> kDeclKeywords = {
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 55> kBuiltins = {
+const std::array<std::string_view, 57> kBuiltins = {
     "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
     "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
     "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
@@ -52,7 +52,7 @@ const std::array<std::string_view, 55> kBuiltins = {
     "mongo_agregar",
     "ler_s3", "escrever_s3", "listar_s3", "apagar_s3",
     "copiar_s3", "cabecalho_s3", "s3_iniciar_upload", "s3_enviar_parte",
-    "s3_concluir_upload", "s3_abortar_upload"};
+    "s3_concluir_upload", "s3_abortar_upload", "http_get_json", "http_post_json"};
 
 const std::array<std::string_view, 11> kTableMethods = {
     "filtrar",  "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",
@@ -257,6 +257,11 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Conclui um upload multipart S3.", nullptr},
       {"s3_abortar_upload", "s3_abortar_upload(id, ...)", "id", "Aborta um upload multipart S3.",
        nullptr},
+      {"http_get_json", "http_get_json(url, cabecalhos?)", "url,cabecalhos",
+       "Faz um GET HTTP e retorna o JSON da resposta.", "http_get_json \"https://api/status\""},
+      {"http_post_json", "http_post_json(url, corpo, cabecalhos?)", "url,corpo,cabecalhos",
+       "Envia um valor como JSON (POST) e retorna o JSON da resposta.",
+       "http_post_json url, {nome: \"tilt\"}"},
   };
   return docs;
 }

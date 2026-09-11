@@ -54,7 +54,9 @@ Servidor Language Server por stdio (JSON-RPC, framing `Content-Length`):
 ## `tilt referencia`
 
 Referência compacta da linguagem (declarações, expressões, builtins, CLI,
-códigos `Tnnn`) — pensada para o contexto de um LLM.
+códigos `Tnnn`) — pensada para o contexto de um LLM. A lista de builtins
+inclui o HTTP genérico (`http_get_json`/`http_post_json`, JSON sobre `curl`;
+ver guia 03).
 
 ## `tilt ast <arquivo>` / `tilt tokens <arquivo>`
 

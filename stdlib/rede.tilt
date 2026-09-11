@@ -1,16 +1,17 @@
-# rede.tilt — cliente HTTP simples.
+# rede.tilt — cliente HTTP simples (JSON) sobre os builtins http_get_json /
+# http_post_json do runtime.
 #
-# O runtime ainda nao expoe um cliente HTTP generico (o curl interno so serve
-# aos conectores s3/llm/qdrant/iceberg), entao este modulo e um stub
-# documentado: as funcoes existem com a assinatura planejada, nao tocam a
-# rede e retornam um mapa de erro explicando o estado. Quando o builtin
-# http_get/http_post entrar, as implementacoes substituem o corpo sem mudar
-# a assinatura.
+# Coberto:
+#   get_json(url, cabecalhos?)         -> valor   GET; JSON da resposta parseado
+#   post_json(url, corpo, cabecalhos?) -> valor   envia corpo como JSON; parseia a resposta
 #
-# Coberto: nada (stub). De fora: qualquer chamada HTTP real.
+# `cabecalhos` e um mapa { "Nome": "valor" } (texto -> texto); omitido = sem
+# headers custom. Falhas de transporte, HTTP >= 400 e JSON invalido abortam
+# (T901) — envolva em tentar/capturar para tratar como valor. De fora: outros
+# verbos (PUT/PATCH/DELETE), corpo bruto (nao-JSON) e streaming.
 
-funcao get_json url: texto:
-  retornar {ok: falso, erro: "rede.get_json: cliente HTTP ainda nao disponivel no runtime (veja guia-12-limitacoes)"}
+funcao get_json url: texto, cabecalhos:
+  retornar http_get_json url, cabecalhos
 
-funcao post_json url: texto, corpo:
-  retornar {ok: falso, erro: "rede.post_json: cliente HTTP ainda nao disponivel no runtime (veja guia-12-limitacoes)"}
+funcao post_json url: texto, corpo, cabecalhos:
+  retornar http_post_json url, corpo, cabecalhos

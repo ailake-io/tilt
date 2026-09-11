@@ -30,6 +30,7 @@
 #include "parser/parser.hpp"
 #include "runtime/gpu_runtime.hpp"
 #include "runtime/http_server.hpp"
+#include "runtime/http_client.hpp"
 #include "runtime/json.hpp"
 #include "runtime/llm.hpp"
 #include "runtime/compat.hpp"
@@ -4123,6 +4124,42 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       return rt::mongo_agregar(a[0].s, a[1], banco);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "http_get_json" || name == "http_post_json") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    const bool eh_post = name == "http_post_json";
+    const std::size_t min = eh_post ? 2 : 1;
+    if (a.size() < min || a[0].kind != ValueKind::Texto) {
+      fail(call.span, name + " espera (url" + std::string(eh_post ? ", valor" : "") +
+                           ", [cabecalhos: {...}]), ex.: " + name +
+                           " \"https://api.exemplo.com/dados\"");
+    }
+    // cabecalhos: aceito nomeado (cabecalhos: {...}) ou como ultimo argumento
+    // posicional (mapa); ausente/nulo = sem headers custom.
+    const Value* cab = nullptr;
+    if (a.size() > min && a[min].kind != ValueKind::Nulo) cab = &a[min];
+    if (!cab) {
+      if (const Value* k = kw.find("cabecalhos"); k && k->kind != ValueKind::Nulo) cab = k;
+    }
+    std::vector<std::pair<std::string, std::string>> headers;
+    if (cab) {
+      if (cab->kind != ValueKind::Mapa || !cab->map) {
+        fail(call.span, name + ": 'cabecalhos' deve ser um mapa { \"Nome\": \"valor\" }");
+      }
+      for (const auto& [k, v] : cab->map->items) {
+        if (v.kind != ValueKind::Texto) {
+          fail(call.span, name + ": cabecalho '" + k + "' deve ter valor texto");
+        }
+        headers.emplace_back(k, v.s);
+      }
+    }
+    try {
+      if (eh_post) return rt::http_post_json(a[0].s, a[1], headers);
+      return rt::http_get_json(a[0].s, headers);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

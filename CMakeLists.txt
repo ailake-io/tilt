@@ -50,6 +50,7 @@ add_library(tilt_core STATIC
   src/runtime/llm.cpp
   src/runtime/vectorstore.cpp
   src/runtime/http_server.cpp
+  src/runtime/http_client.cpp
   src/runtime/gpu_runtime.cpp
   src/runtime/parquet.cpp
   src/runtime/delta.cpp

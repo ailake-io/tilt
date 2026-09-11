@@ -138,8 +138,37 @@ pipeline:
 | `io.salvar_json(caminho, valor)` | grava JSON, ordem `(caminho, valor)`; → `logico` |
 
 Fora do escopo atual (sem builtin no runtime): ler arquivo bruto como texto,
-tamanho em bytes e listar/remover arquivos. O módulo `rede` existe como stub
-documentado — ver guia 12.
+tamanho em bytes e listar/remover arquivos.
+
+### HTTP genérico (JSON)
+
+O runtime expõe um cliente HTTP mínimo sobre `curl` (mesmo subprocesso dos
+conectores — sem sockets próprios), com timeout padrão de 30s e erro claro em
+falha de transporte, HTTP >= 400 (corpo do erro truncado na mensagem) ou JSON
+inválido:
+
+| Builtin | Efeito |
+|---|---|
+| `http_get_json "url", [cabecalhos:]` | → valor parseado do JSON da resposta |
+| `http_post_json "url", valor, [cabecalhos:]` | envia `json_dump(valor)` com `Content-Type: application/json`; → valor parseado da resposta |
+
+A URL deve começar com `http://` ou `https://`; `cabecalhos` é um mapa
+`{ "Nome": "valor" }` de texto para texto (posicional ou nomeado). Erros
+abortam como `T901` — envolva em `tentar`/`capturar` para tratá-los como
+valor. Coberto pelo teste de integração `http_client`.
+
+### stdlib: `rede`
+
+Sobre esses builtins, a stdlib (`importar rede`) oferece as mesmas operações
+com nomes em português:
+
+| Função | Efeito |
+|---|---|
+| `rede.get_json(url, cabecalhos?)` | → valor JSON da resposta |
+| `rede.post_json(url, corpo, cabecalhos?)` | envia `corpo` como JSON; → valor JSON da resposta |
+
+De fora: outros verbos (PUT/PATCH/DELETE), corpo bruto (não-JSON) e
+streaming — ver guia 12.
 
 ## Parquet nativo
 

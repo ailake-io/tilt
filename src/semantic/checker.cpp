@@ -663,6 +663,11 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       {"mongo_deletar", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_criar_indice", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_agregar", 2, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      // http generico
+      {"http_get_json", 1, {TypeKind::Texto}, {}, TypeKind::Unknown,
+       "http_get_json \"https://api.exemplo.com/dados\""},
+      {"http_post_json", 2, {TypeKind::Texto}, {}, TypeKind::Unknown,
+       "http_post_json \"https://api.exemplo.com/dados\", {nome: \"tilt\"}"},
   };
   for (const auto& s : kSigs) {
     if (name == s.name) return &s;

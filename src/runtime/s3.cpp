@@ -3,18 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
-#include <cstdio>
 #include <cstdlib>
 #include <ctime>
-#include <fstream>
-#include <iterator>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "runtime/compat.hpp"
+#include "runtime/http_client.hpp"
 #include "runtime/sha256.hpp"
 
 namespace tilt::rt {
@@ -22,19 +19,6 @@ namespace tilt::rt {
 namespace {
 
 [[noreturn]] void die(const std::string& m) { throw std::runtime_error("s3: " + m); }
-
-std::string shell_quote(const std::string& s) {
-  std::string out = "'";
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\\''";
-    } else {
-      out += c;
-    }
-  }
-  out += "'";
-  return out;
-}
 
 struct Objeto {
   std::string bucket;
@@ -236,82 +220,15 @@ Assinatura assinar(const Credenciais& c, const std::string& method,
   return a;
 }
 
-// Executa o curl: corpo da resposta vai para `out_file`, headers da resposta
-// para `hdr_file` (formato `-D`: "Nome: valor" por linha), status vem no
-// stdout (`-w '%{http_code}'`). HEAD sai como `curl -I` (sem corpo de
-// resposta e sem payload de requisicao). Com falhar=true (default), HTTP >=
-// 400 (ou falha de transporte) -> die com o corpo da resposta truncado em
-// ~200 chars. Retorna o status HTTP.
-int http(const std::string& method, const std::string& url,
-         const std::vector<std::pair<std::string, std::string>>& headers,
-         const std::string& body, const std::string& out_file,
-         const std::string& hdr_file, bool falhar) {
-  std::string body_file;
-  std::string cmd = "curl -s ";
-  if (falhar) cmd += "--fail-with-body ";
-  cmd += "-o " + shell_quote(out_file) + " -D " + shell_quote(hdr_file) +
-         " -w '%{http_code}' ";
-  if (method == "HEAD") {
-    cmd += "-I";
-  } else {
-    cmd += "-X " + method;
-  }
-  for (const auto& [nome, valor] : headers) {
-    cmd += " -H " + shell_quote(nome + ": " + valor);
-  }
-  if (method == "PUT" || method == "POST") {
-    std::string body_path;
-    const int fd = tilt_tempfile("s3_body", body_path);
-    if (fd < 0) die("nao foi possivel criar arquivo temporario");
-    tilt_close_file(fd);
-    {
-      std::ofstream out(body_path, std::ios::trunc);
-      out << body;
-    }
-    body_file = body_path;
-    cmd += " --data @" + body_file;
-  }
-  cmd += " " + shell_quote(url);
-
-  std::string resp;
-  {
-    std::array<char, 4096> buf{};
-    FILE* pipe = tilt_popen(cmd.c_str(), "r");
-    if (!pipe) {
-      if (!body_file.empty()) std::remove(body_file.c_str());
-      die("nao foi possivel executar 'curl'");
-    }
-    std::size_t n;
-    while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) resp.append(buf.data(), n);
-    const int rc = tilt_pclose(pipe);
-    if (!body_file.empty()) std::remove(body_file.c_str());
-    if (rc != 0) {
-      std::ifstream in(out_file);
-      std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-      die("requisicao falhou (curl codigo " + std::to_string(rc) +
-          "): verifique endpoint/bucket/credenciais. Resposta: " + corpo.substr(0, 200));
-    }
-  }
-
-  int status = 0;
-  std::istringstream iss(resp);
-  iss >> status;
-  if (falhar && status >= 400) {
-    std::ifstream in(out_file);
-    std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    die("HTTP " + std::to_string(status) + ": " + corpo.substr(0, 200));
-  }
-  return status;
-}
-
 }  // namespace
 
-// Nucleo comum: monta URI + query canonical, assina SigV4 e executa o HTTP.
-// Retorna (status, corpo). Com falhar=false nao die em HTTP >= 400 (o caller
-// inspeciona o status, ex.: DELETE 404 -> "objeto nao encontrado").
-// `extra_headers` entra assinada (nome em caixa baixa) e e enviada como
-// "X-Amz-..." (ex.: x-amz-copy-source); `resp_headers`, quando dado, recebe os
-// headers da resposta em caixa baixa (ex.: etag do UploadPart).
+// Nucleo comum: monta URI + query canonical, assina SigV4 e executa o HTTP
+// via cliente generico do runtime (http_client). Retorna (status, corpo). Com
+// falhar=false nao die em HTTP >= 400 (o caller inspeciona o status, ex.:
+// DELETE 404 -> "objeto nao encontrado"). `extra_headers` entra assinada
+// (nome em caixa baixa) e e enviada como "X-Amz-..." (ex.: x-amz-copy-source);
+// `resp_headers`, quando dado, recebe os headers da resposta em caixa baixa
+// (ex.: etag do UploadPart).
 std::pair<int, std::string> s3_request(
     const std::string& method, const std::string& bucket, const std::string& key,
     const std::vector<std::pair<std::string, std::string>>& query_map,
@@ -345,39 +262,17 @@ std::pair<int, std::string> s3_request(
     headers.emplace_back("Content-Type", "application/octet-stream");
   }
 
-  std::string out_file;
-  const int fd = tilt_tempfile("s3_resp", out_file);
-  if (fd < 0) die("nao foi possivel criar arquivo temporario");
-  tilt_close_file(fd);
-  std::string hdr_file;
-  const int fdh = tilt_tempfile("s3_hdr", hdr_file);
-  if (fdh < 0) die("nao foi possivel criar arquivo temporario");
-  tilt_close_file(fdh);
-  const int status = http(method, url, headers, body, out_file, hdr_file, falhar);
-
-  if (resp_headers) {
-    std::ifstream hin(hdr_file);
-    std::string linha;
-    while (std::getline(hin, linha)) {
-      if (!linha.empty() && linha.back() == '\r') linha.pop_back();
-      const std::size_t dois_pontos = linha.find(':');
-      if (dois_pontos == std::string::npos) continue;  // status line / vazia
-      std::string nome = linha.substr(0, dois_pontos);
-      std::transform(nome.begin(), nome.end(), nome.begin(),
-                     [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-      std::string valor = linha.substr(dois_pontos + 1);
-      while (!valor.empty() && (valor.front() == ' ' || valor.front() == '\t')) {
-        valor.erase(valor.begin());
-      }
-      resp_headers->emplace_back(std::move(nome), std::move(valor));
-    }
+  // timeout 0 = sem --max-time (mesma linha de comando de antes da extracao
+  // do http_client); falhar espelha o antigo --fail-with-body opcional.
+  const HttpClientResponse r = http_request(method, url, headers, body, 0, falhar, resp_headers);
+  if (!r.error.empty()) {
+    die(r.error + ": verifique endpoint/bucket/credenciais. Resposta: " +
+        r.body.substr(0, 200));
   }
-  std::remove(hdr_file.c_str());
-
-  std::ifstream in(out_file, std::ios::binary);
-  std::string corpo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  std::remove(out_file.c_str());
-  return {status, corpo};
+  if (falhar && r.status >= 400) {
+    die("HTTP " + std::to_string(r.status) + ": " + r.body.substr(0, 200));
+  }
+  return {r.status, r.body};
 }
 
 namespace {

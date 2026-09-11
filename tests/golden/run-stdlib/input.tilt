@@ -11,10 +11,13 @@ funcao principal:
   imprimir cfg.nome, cfg.versao
   imprimir io.ler_json_seguro("ausente.json")
 
-  # rede: stub sem chamada de rede — erro estruturado ate o runtime ganhar
-  # um cliente HTTP generico
-  r = rede.get_json("http://127.0.0.1:1/status")
-  imprimir r.ok
+  # rede: cliente HTTP real — contra porta fechada falha de forma capturavel
+  # (o roundtrip com mock HTTP fica no teste de integracao http_client)
+  tentar:
+    rede.get_json("http://127.0.0.1:1/status")
+    imprimir "rede respondeu"
+  capturar e:
+    imprimir "rede indisponivel"
 
   # nn: linear, atencao causal e norma de camada sobre tensors pequenos
   w = tensor [[1.0, 0.0], [0.0, 1.0]]

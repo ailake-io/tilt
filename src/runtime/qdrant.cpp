@@ -1,14 +1,11 @@
 #include "runtime/qdrant.hpp"
 
-#include <array>
 #include <cstdio>
 #include <cstdint>
-#include <cstdlib>
-#include <fstream>
 #include <stdexcept>
 #include <string>
 
-#include "runtime/compat.hpp"
+#include "runtime/http_client.hpp"
 #include "runtime/json.hpp"
 
 namespace tilt::rt {
@@ -16,19 +13,6 @@ namespace tilt::rt {
 namespace {
 
 [[noreturn]] void die(const std::string& m) { throw std::runtime_error("qdrant: " + m); }
-
-std::string shell_quote(const std::string& s) {
-  std::string out = "'";
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\\''";
-    } else {
-      out += c;
-    }
-  }
-  out += "'";
-  return out;
-}
 
 std::string json_escape(const std::string& s) {
   std::string out;
@@ -45,44 +29,18 @@ std::string json_escape(const std::string& s) {
   return out;
 }
 
-// Executa `curl -X <metodo>` com corpo JSON opcional; HTTP >= 400 -> die com
-// o corpo do erro. Retorna o corpo da resposta.
+// Executa a requisicao via cliente HTTP generico do runtime; HTTP >= 400 ou
+// falha de transporte -> die com o corpo do erro (mesma mensagem e mesmo
+// comportamento do http_json local antigo: --fail-with-body). Retorna o
+// corpo da resposta.
 std::string http_json(const std::string& method, const std::string& url, const std::string& body) {
-  std::string body_file;
-  std::string cmd =
-      "curl -s --fail-with-body -X " + method + " -H 'content-type: application/json'";
-  if (!body.empty()) {
-    std::string body_path;
-    const int fd = tilt_tempfile("qdrant", body_path);
-    if (fd < 0) die("nao foi possivel criar arquivo temporario");
-    tilt_close_file(fd);
-    {
-      std::ofstream out(body_path, std::ios::trunc);
-      out << body;
-    }
-    body_file = body_path;
-    cmd += " --data @" + body_file;
+  // timeout 0 = sem --max-time (linha de comando identica a de antes).
+  const HttpClientResponse r =
+      http_request(method, url, {{"content-type", "application/json"}}, body, 0, true);
+  if (!r.error.empty()) {
+    die(r.error + ": verifique URL/colecao/servidor. Resposta: " + r.body.substr(0, 200));
   }
-  cmd += " " + shell_quote(url);
-
-  std::string resp;
-  {
-    std::array<char, 4096> buf{};
-    FILE* pipe = tilt_popen(cmd.c_str(), "r");
-    if (!pipe) {
-      if (!body_file.empty()) std::remove(body_file.c_str());
-      die("nao foi possivel executar 'curl'");
-    }
-    std::size_t n;
-    while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) resp.append(buf.data(), n);
-    const int rc = tilt_pclose(pipe);
-    if (!body_file.empty()) std::remove(body_file.c_str());
-    if (rc != 0) {
-      die("requisicao falhou (curl codigo " + std::to_string(rc) +
-          "): verifique URL/colecao/servidor. Resposta: " + resp.substr(0, 200));
-    }
-  }
-  return resp;
+  return r.body;
 }
 
 // UUID deterministico (versao 5 simplificada) a partir do id em texto:

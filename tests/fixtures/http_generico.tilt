@@ -1,0 +1,20 @@
+# Cobre os builtins http_get_json/http_post_json contra um mock HTTP:
+# headers custom chegando ao servidor, parse do JSON da resposta, roundtrip do
+# corpo POST, erro 404 capturavel em tilt e validacao de esquema da URL.
+funcao principal:
+  base = env "TILT_HTTP_BASE"
+  imprimir "== http =="
+  r = http_get_json base + "/status", {"x-token": "segredo123"}
+  imprimir r.status, r.token
+  p = http_post_json base + "/echo", {nome: "tilt", n: 42}, {"x-token": "segredo123"}
+  imprimir p.recebido.nome, p.recebido.n, p.ct
+  tentar:
+    http_get_json base + "/falta"
+    imprimir "nao falhou"
+  capturar e:
+    imprimir "404 capturado"
+  tentar:
+    http_get_json "ftp://exemplo.com/x"
+    imprimir "nao falhou"
+  capturar e:
+    imprimir "url invalida capturada"

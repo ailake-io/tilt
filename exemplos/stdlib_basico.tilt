@@ -1,6 +1,6 @@
 # stdlib_basico.tilt — importa os modulos da biblioteca padrao e exercita
-# uma funcao de cada um. Roda offline: rede e um stub ate o runtime ganhar
-# um cliente HTTP generico.
+# uma funcao de cada um. Roda offline: contra porta fechada, rede falha de
+# forma capturavel (o roundtrip real fica no teste http_client).
 importar io
 importar nn
 importar rede
@@ -11,5 +11,8 @@ funcao principal:
   b = tensor [10.0, 20.0]
   x = tensor [[1.0, 2.0]]
   imprimir nn.linear(x, w, b).dados
-  r = rede.get_json("http://127.0.0.1:1/status")
-  imprimir r.ok, r.erro
+  tentar:
+    r = rede.get_json("http://127.0.0.1:1/status")
+    imprimir r.status
+  capturar e:
+    imprimir "rede indisponivel:", e

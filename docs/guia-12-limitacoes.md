@@ -257,11 +257,12 @@ A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
   `salvar_json`, todos sobre os builtins de dados existentes. De fora:
   leitura de arquivo bruto como texto, tamanho em bytes (`stat`), listar e
   remover arquivos — não há builtin para isso no runtime.
-- **`rede`** — stub documentado: `get_json`/`post_json` existem com a
-  assinatura planejada, não tocam a rede e devolvem `{ok: falso, erro: ...}`.
-  O runtime ainda não expõe um cliente HTTP genérico (o `curl` interno serve
-  só aos conectores s3/llm/qdrant/iceberg). Para HTTP de saída hoje, use
-  `llm`/`perguntar` ou um `servico` como cliente via `servir`.
+- **`rede`** — `get_json`/`post_json` reais, sobre os builtins de HTTP
+  genérico `http_get_json`/`http_post_json` (cliente mínimo via subprocesso
+  `curl`, timeout padrão de 30s, só JSON). Erros de transporte, HTTP >= 400 e
+  JSON inválido abortam — use `tentar`/`capturar` para tratá-los como valor.
+  De fora: outros verbos (PUT/PATCH/DELETE), corpo bruto (não-JSON),
+  streaming e controle fino de timeout.
 - **`nn`** — `linear`, `atencao`, `atencao_causal`, `feedforward`,
   `bloco_atencao`, `norma_camada`, compostos sobre os ops de tensor
   (`.matmul`, `.softmax`, `.norma_camada()` etc.). Limites: forward-only

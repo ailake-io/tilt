@@ -1,0 +1,11 @@
+# Roundtrip da stdlib rede.tilt (get_json/post_json) sobre os builtins HTTP —
+# o mock devolve o que recebeu, entao a saida espelha o envio.
+importar rede
+
+funcao principal:
+  base = env "TILT_HTTP_BASE"
+  imprimir "== rede =="
+  g = rede.get_json(base + "/status", {"x-token": "abc"})
+  imprimir g.status, g.token
+  p = rede.post_json(base + "/echo", {ok: verdadeiro, nome: "tilt"})
+  imprimir p.recebido.ok, p.recebido.nome, p.ct
