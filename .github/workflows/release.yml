@@ -149,6 +149,13 @@ jobs:
           sudo apt-get install -y flatpak flatpak-builder
           sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 
+      # o flatpak-builder precisa do runtime e do SDK do manifesto instalados
+      - name: instalar runtime + SDK do manifesto
+        run: |
+          sudo flatpak install -y flathub \
+            org.freedesktop.Platform/x86_64/24.08 \
+            org.freedesktop.Sdk/x86_64/24.08
+
       - name: validar manifesto
         run: flatpak-builder --force-clean build-flatpak packaging/flatpak/io.github.ailake_io.tilt.json
 
