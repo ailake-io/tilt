@@ -107,7 +107,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
   MariaDB, ClickHouse, Elasticsearch/OpenSearch, Redis, Kafka, MongoDB, Qdrant,
-  pgvector, Weaviate, Pinecone e S3 rodam.
+  pgvector, Weaviate, Pinecone, Chroma e S3 rodam.
 - Elasticsearch/OpenSearch (`es_buscar`/`es_executar`/`fonte tipo:
   elasticsearch|opensearch`): REST/JSON puro pelo cliente HTTP genérico
   (subprocesso `curl`). `es_buscar` cobre só `_search` (DSL em texto ou mapa)
@@ -198,6 +198,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ausente; o score já é similaridade de cosseno (maior = melhor, sem conversão
   como no Weaviate); sem `ensure` de namespace (o upsert cria implicitamente);
   `buscar` devolve `id` e `score`, sem o `texto` (que vai no `metadata.texto`).
+- Chroma: HTTP puro, sem auth (Chroma open-source padrão; Chroma Cloud com
+  auth/tls fica fora de escopo); a coleção é get-or-create (`POST
+  /api/v1/collections` com o nome) e o `id` devolvido endereça add/query;
+  a query devolve `distances` (`distance = 1 - cosseno` com `hnsw:space
+  cosine`), então o score tilt é `1 - distance`; `buscar` devolve `id` e
+  `score`, sem o `texto` (que fica em `metadatas[].texto`/`documents[]`).
 - pgvector: exige a extensão `vector` instalada no banco (o Tilt tenta
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
@@ -238,10 +244,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
   `buscar` devolve `{ id, score }`, sem o texto), `"weaviate://host:porta/classe"`
   (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, score }`, sem
-  o texto; auth por env `WEAVIATE_API_KEY`) e
+  o texto; auth por env `WEAVIATE_API_KEY`),
   `"pinecone://host-do-indice/namespace"` (REST via `curl`, sempre HTTPS,
   `POST /query`; `buscar` devolve `{ id, score }`, sem o texto; exige env
-  `PINECONE_API_KEY` e índice já criado na conta).
+  `PINECONE_API_KEY` e índice já criado na conta) e
+  `"chroma://host[:porta]/colecao"` (REST via `curl`, HTTP puro, sem auth;
+  coleção get-or-create; `buscar` devolve `{ id, score }`, sem o texto; o
+  score é `1 - distance` da query do Chroma).
 - Os embeddings do modo `mock` são um bag-of-tokens hasheado (16 dimensões) —
   bons para testes determinísticos, não para relevância real.
 

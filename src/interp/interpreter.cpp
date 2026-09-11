@@ -51,6 +51,7 @@
 #include "runtime/pgvector.hpp"
 #include "runtime/weaviate.hpp"
 #include "runtime/pinecone.hpp"
+#include "runtime/chroma.hpp"
 #include "runtime/vectorstore.hpp"
 #include "semantic/checker.hpp"
 #include "vm/compiler.hpp"
@@ -2020,23 +2021,27 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
   // Formatos: "qdrant://host:porta/colecao" (ver run-indice-armazenamento),
   // "pgvector://colecao" (Postgres + extensao pgvector; connection string no
   // campo "url", como em fonte postgres), "weaviate://host:porta/classe"
-  // (REST; auth opcional via env WEAVIATE_API_KEY) e
+  // (REST; auth opcional via env WEAVIATE_API_KEY),
   // "pinecone://host-do-indice/namespace" (data plane hospedado, sempre
-  // HTTPS; auth obrigatoria via env PINECONE_API_KEY).
+  // HTTPS; auth obrigatoria via env PINECONE_API_KEY) e
+  // "chroma://host[:porta]/colecao" (HTTP; porta default 8000; sem auth).
   std::string qdrant_base, qdrant_col;
   std::string pgv_table, pgv_url;
   std::string weaviate_base, weaviate_classe;
   std::string pinecone_base, pinecone_ns;
+  std::string chroma_base, chroma_col;
   const bool qdrant = armazenamento.rfind("qdrant://", 0) == 0;
   const bool pgvector = armazenamento.rfind("pgvector://", 0) == 0;
   const bool weaviate = armazenamento.rfind("weaviate://", 0) == 0;
   const bool pinecone = armazenamento.rfind("pinecone://", 0) == 0;
+  const bool chroma = armazenamento.rfind("chroma://", 0) == 0;
   if (!armazenamento.empty() && armazenamento != "memoria" && !qdrant && !pgvector && !weaviate &&
-      !pinecone) {
+      !pinecone && !chroma) {
     fail(call.span, "indice '" + indice_name + "': armazenamento '" + armazenamento +
                         "' nao implementado; use \"memoria\", \"qdrant://host:porta/colecao\", "
                         "\"pgvector://colecao\" (com campo \"url\"), "
-                        "\"weaviate://host:porta/classe\" ou \"pinecone://host/namespace\"",
+                        "\"weaviate://host:porta/classe\", \"pinecone://host/namespace\" "
+                        "ou \"chroma://host[:porta]/colecao\"",
          DiagCode::ConnectorNotImplemented);
   }
   if (qdrant) {
@@ -2068,6 +2073,18 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     }
     pinecone_base = "https://" + rest.substr(0, slash);  // API hospedada: sempre HTTPS
     pinecone_ns = rest.substr(slash + 1);
+  }
+  if (chroma) {
+    const std::string rest = armazenamento.substr(9);  // depois de chroma://
+    const std::size_t slash = rest.find('/');
+    if (slash == std::string::npos || slash == 0 || slash == rest.size() - 1) {
+      fail(call.span, "indice '" + indice_name +
+                          "': armazenamento chroma deve ser 'chroma://host[:porta]/colecao'");
+    }
+    std::string hostport = rest.substr(0, slash);
+    if (hostport.find(':') == std::string::npos) hostport += ":8000";  // porta padrao do Chroma
+    chroma_base = "http://" + hostport;
+    chroma_col = rest.substr(slash + 1);
   }
   if (pgvector) {
     pgv_table = armazenamento.substr(11);  // depois de pgvector://
@@ -2119,6 +2136,12 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
         } catch (const std::exception& e) {
           fail(call.span, std::string(e.what()));
         }
+      } else if (chroma) {
+        try {
+          rt::chroma_upsert(chroma_base, chroma_col, id, text, vec);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
       } else {
         store.insert(id, text, vec);
       }
@@ -2143,7 +2166,7 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     if (const Value* tk = kw.find("top_k")) k = static_cast<std::size_t>(tk->as_number());
     const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
     Value out = Value::lista();
-    if (qdrant || pgvector || weaviate || pinecone) {
+    if (qdrant || pgvector || weaviate || pinecone || chroma) {
       std::vector<std::pair<std::string, double>> hits;
       try {
         if (qdrant) {
@@ -2153,9 +2176,11 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
         } else if (weaviate) {
           hits = rt::weaviate_search(weaviate_base, weaviate_classe,
                                      rt::llm_embed(emb_model, qt), k);
-        } else {
+        } else if (pinecone) {
           hits = rt::pinecone_search(pinecone_base, pinecone_ns,
                                      rt::llm_embed(emb_model, qt), k);
+        } else {
+          hits = rt::chroma_search(chroma_base, chroma_col, rt::llm_embed(emb_model, qt), k);
         }
       } catch (const std::exception& e) {
         fail(call.span, std::string(e.what()));

@@ -82,6 +82,7 @@ indice base:
                                      # ou pgvector://colecao (Postgres + extensão pgvector)
                                      # ou weaviate://host:porta/classe (REST via curl)
                                      # ou pinecone://host-do-indice/namespace (HTTPS)
+                                     # ou chroma://host[:porta]/colecao (HTTP, sem auth)
 
 pipeline indexar:
   passos:
@@ -127,5 +128,13 @@ pipeline indexar:
   o score do Pinecone já é similaridade de cosseno (quanto maior, melhor).
   O índice deve **já existir** na conta (criar índice é control plane e está
   fora de escopo — `404`/`401` do servidor chegam como erro com a mensagem).
+- Com `armazenamento: "chroma://host[:porta]/colecao"` (porta default
+  **8000**), delegam ao Chroma via REST em HTTP puro, **sem auth** (padrão do
+  Chroma open-source). A coleção é criada automaticamente na primeira
+  escrita (`POST /api/v1/collections` com `get_or_create`); `buscar` usa
+  `POST /api/v1/collections/{id}/query` e devolve `{ id, score }` — o Chroma
+  devolve `distances` (`distance = 1 - cosseno`), então o score tilt é
+  `1 - distance` (quanto maior, melhor, como nos demais). O texto fica em
+  `metadatas[].texto` e `documents[]` do ponto.
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).

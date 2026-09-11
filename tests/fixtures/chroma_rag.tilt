@@ -1,0 +1,34 @@
+# RAG sobre Chroma: chroma_test.sh sobe um mock REST em python3
+# (http.server) falando o subset do Chroma — POST /api/v1/collections
+# ({name, get_or_create} -> {id}), POST /api/v1/collections/{id}/add
+# ({ids, embeddings, metadatas, documents}) e POST /api/v1/collections/{id}/query
+# ({query_embeddings, n_results, include} -> {ids: [[...]], distances: [[...]]};
+# com hnsw:space cosine, distance = 1 - cosseno e o score tilt = 1 - distance).
+# Chroma open-source padrao: HTTP puro, sem auth. @PORTA@ e substituida pelo
+# script de teste: o campo armazenamento so aceita literal, entao nao da pra
+# ler env("...") aqui.
+indice kb:
+  embeddings: "m"
+  armazenamento: "chroma://127.0.0.1:@PORTA@/docs"
+
+indice invalido:
+  embeddings: "m"
+  armazenamento: "chroma://127.0.0.1:@PORTA@/Nome Invalido"
+
+pipeline rag:
+  passos:
+    - n = kb.inserir([
+        { id: "a1", texto: "gato domestico" },
+        { id: "b1", texto: "gato e cachorro" },
+        { id: "c1", texto: "engenharia de dados" },
+      ])
+    - imprimir "inseridos:", n
+    - achados = kb.buscar("gato", top_k: 2)
+    - para cada h em achados:
+        imprimir "achado:", h.id, h.score
+    - unico = kb.buscar("gato", top_k: 1)
+    - imprimir "top1:", unico[0].id
+    - tentar:
+        invalido.buscar("gato", top_k: 1)
+    capturar e:
+      imprimir "erro-nome:", e

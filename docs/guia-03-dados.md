@@ -851,6 +851,33 @@ pipeline rag:
     - achados = docs.buscar("gato", top_k: 3)
 ```
 
+## Índice vetorial no Chroma
+
+`indice` com `armazenamento: "chroma://host[:porta]/colecao"` (porta default
+8000) delega `inserir`/`buscar` ao Chroma via REST em HTTP puro (curl, mesmo
+padrão do Qdrant/Weaviate), **sem auth** (padrão do Chroma open-source). Os
+embeddings continuam vindo de `embeddings:` (`TILT_LLM=mock` offline nos
+testes). A coleção é get-or-create (`POST /api/v1/collections`,
+`{name, get_or_create}`) e o `id` devolvido endereça o add (`POST .../add`,
+`{ids, embeddings, metadatas, documents}`) e a query (`POST .../query`,
+`{query_embeddings, n_results}`). A query devolve `distances` — com
+`hnsw:space cosine`, `distance = 1 - cosseno` — e o score tilt é
+`1 - distance` (quanto maior, melhor, consistente com os demais backends).
+`buscar` devolve `{ id, score }` (o texto fica em `metadatas[].texto` /
+`documents[]`). Coberto por `tests/chroma_test.sh` (mock REST em python3 +
+embeddings em modo `mock`).
+
+```tilt
+indice docs:
+  embeddings: "meu-modelo"
+  armazenamento: "chroma://localhost:8000/docs"
+
+pipeline rag:
+  passos:
+    - docs.inserir([{ id: "a1", texto: "gato doméstico" }])
+    - achados = docs.buscar("gato", top_k: 3)
+```
+
 ## Métodos de tabela
 
 Operam sobre `tabela` e `lista` de mapas. `linha` é a variável implícita da linha atual.
