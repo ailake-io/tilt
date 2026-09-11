@@ -94,7 +94,10 @@ if [ -n "$MYSQLD" ] || [ -n "$MARIADB" ]; then
     if "$MYSQLD" --no-defaults --verbose --help 2>/dev/null | grep -q -- "--mysqlx"; then
       extra="$extra --mysqlx=OFF"
     fi
-    "$MYSQLD" --initialize-insecure --datadir="$data" >"$tmp/init.log" 2>&1 || {
+    # --no-defaults ignora o my.cnf do sistema (no runner ubuntu o pacote
+    # aponta log_error para /var/log/mysql, sem permissao para o usuario).
+    "$MYSQLD" --no-defaults --initialize-insecure --datadir="$data" \
+      --log-error="$tmp/init-error.log" >"$tmp/init.log" 2>&1 || {
       echo "mysqld --initialize-insecure falhou:"; tail -20 "$tmp/init.log"; exit 1;
     }
   else
@@ -110,7 +113,8 @@ if [ -n "$MYSQLD" ] || [ -n "$MARIADB" ]; then
       echo "mariadb-install-db ausente; pulando o teste mysql"
       exit 0
     fi
-    "$install_db" --datadir="$data" --auth-root-authentication-method=normal \
+    "$install_db" --defaults-file=/dev/null --datadir="$data" \
+      --auth-root-authentication-method=normal \
       >"$tmp/init.log" 2>&1 || {
       echo "mariadb-install-db falhou:"; tail -20 "$tmp/init.log"; exit 1;
     }
@@ -130,7 +134,7 @@ if [ -n "$MYSQLD" ] || [ -n "$MARIADB" ]; then
 
   start_local() {
     # shellcheck disable=SC2086
-    "$SERVER" --datadir="$data" --port="$1" --socket="$sock" \
+    "$SERVER" --no-defaults --datadir="$data" --port="$1" --socket="$sock" \
       --skip-networking=0 --bind-address=127.0.0.1 \
       --pid-file="$tmp/mysqld.pid" --log-error="$tmp/server.log" $extra &
     srv_pid=$!
