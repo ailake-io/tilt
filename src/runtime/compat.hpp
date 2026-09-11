@@ -179,6 +179,13 @@ std::tm tilt_localtime(std::time_t t);
 int tilt_getpid();
 bool tilt_getcwd(std::string& out);
 
+// Caminho absoluto do executavel do processo (para localizar a stdlib ao
+// lado do binario). Windows: GetModuleFileNameW; macOS: _NSGetExecutablePath
+// + realpath; demais POSIX: readlink(/proc/self/exe). Se a deteccao nativa
+// falhar, usa `argv0` — o CLI repassa argv[0] — via realpath; nome puro (sem
+// '/') e procurado no PATH. String vazia se nada resolver.
+std::string tilt_exe_path(const char* argv0 = nullptr);
+
 // --------------------------------------------------------------------------
 // Carregamento dinamico de bibliotecas (dlopen vs LoadLibrary).
 // tilt_dlopen tenta `path`; `global` corresponde a RTLD_GLOBAL (POSIX-only,

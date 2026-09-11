@@ -1,5 +1,6 @@
 #include "runtime/compat.hpp"
 
+#include <filesystem>
 #include <random>
 #include <stdexcept>
 
@@ -11,7 +12,14 @@
   #include <process.h>  // _getpid
 #else
   #include <cerrno>
-  #include <unistd.h>   // getpid, getcwd
+  #include <climits>    // PATH_MAX
+  #include <cstdlib>    // realpath, getenv
+  #include <cstring>    // strchr
+  #include <sstream>    // PATH splitting
+  #include <unistd.h>   // getpid, getcwd, readlink, access
+  #if defined(__APPLE__)
+    #include <mach-o/dyld.h>  // _NSGetExecutablePath
+  #endif
 #endif
 
 namespace tilt::rt {
@@ -161,6 +169,27 @@ bool tilt_getcwd(std::string& out) {
   return true;
 }
 
+std::string tilt_exe_path(const char* argv0) {
+  // GetModuleFileNameW trunca para o tamanho do buffer (retorno == tamanho);
+  // cresce o buffer ate caber.
+  std::wstring buf(MAX_PATH, L'\0');
+  for (;;) {
+    const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n == 0) break;  // falha real; cai no fallback
+    if (n < buf.size() - 1) {
+      buf.resize(n);
+      return std::filesystem::path(buf).string();
+    }
+    if (buf.size() >= 65536) break;
+    buf.resize(buf.size() * 2);
+  }
+  if (argv0 && *argv0) {
+    char full[MAX_PATH] = {0};
+    if (GetFullPathNameA(argv0, MAX_PATH, full, nullptr) > 0) return full;
+  }
+  return {};
+}
+
 #else  // POSIX
 
 void* tilt_dlopen(const char* path, bool global) {
@@ -230,6 +259,57 @@ bool tilt_getcwd(std::string& out) {
   if (!::getcwd(buf, sizeof(buf))) return false;
   out = buf;
   return true;
+}
+
+std::string tilt_exe_path(const char* argv0) {
+#if defined(__APPLE__)
+  // /proc nao existe no macOS; _NSGetExecutablePath devolve o caminho
+  // (possivelmente com symlinks nao resolvidos) que realpath normaliza.
+  char buf[4096];
+  uint32_t n = sizeof(buf);
+  if (::_NSGetExecutablePath(buf, &n) == 0) {
+    if (char* rp = ::realpath(buf, nullptr)) {
+      std::string out(rp);
+      std::free(rp);
+      return out;
+    }
+    return buf;
+  }
+#else
+  char buf[4096];
+  const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n > 0) {
+    buf[n] = '\0';
+    return buf;
+  }
+#endif
+  if (argv0 && *argv0) {
+    if (char* rp = ::realpath(argv0, nullptr)) {
+      std::string out(rp);
+      std::free(rp);
+      return out;
+    }
+    if (std::strchr(argv0, '/') == nullptr) {
+      // nome puro: procura no PATH
+      const char* path = ::getenv("PATH");
+      if (path) {
+        std::stringstream ss(path);
+        std::string dir;
+        while (std::getline(ss, dir, ':')) {
+          const std::string cand = (dir.empty() ? "." : dir) + "/" + argv0;
+          if (::access(cand.c_str(), X_OK) == 0) {
+            if (char* rp = ::realpath(cand.c_str(), nullptr)) {
+              std::string out(rp);
+              std::free(rp);
+              return out;
+            }
+            return cand;
+          }
+        }
+      }
+    }
+  }
+  return {};
 }
 
 #endif

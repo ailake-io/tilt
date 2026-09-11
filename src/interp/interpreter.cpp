@@ -20,12 +20,6 @@
 #include <unordered_set>
 #include <utility>
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
-
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
 #include "runtime/gpu_runtime.hpp"
@@ -95,17 +89,9 @@ std::string decl_name(const Item& it) {
 
 // Diretorio do executavel (para localizar a stdlib ao lado dele).
 std::string exe_dir() {
-#if defined(_WIN32)
-  char buf[MAX_PATH] = {0};
-  const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-  if (n == 0 || n >= MAX_PATH) return {};
-#else
-  char buf[4096] = {0};
-  const ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-  if (n <= 0) return {};
-  buf[n] = '\0';
-#endif
-  return std::filesystem::path(buf).parent_path().string();
+  const std::string exe = rt::tilt_exe_path();
+  if (exe.empty()) return {};
+  return std::filesystem::path(exe).parent_path().string();
 }
 
 // Separa uma lista de diretorios em TILT_STDLIB_PATH (':' no POSIX, ';' no
