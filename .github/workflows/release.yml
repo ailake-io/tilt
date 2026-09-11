@@ -316,6 +316,7 @@ jobs:
           else echo "set=false" >> "$GITHUB_OUTPUT"; fi
 
       - name: instalar wingetcreate
+        if: steps.tok.outputs.set == 'true'
         run: dotnet tool install --global wingetcreate
 
       - name: submeter PR ao winget-pkgs
