@@ -38,7 +38,7 @@ const std::array<std::string_view, 20> kDeclKeywords = {
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 57> kBuiltins = {
+const std::array<std::string_view, 59> kBuiltins = {
     "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
     "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
     "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
@@ -52,7 +52,8 @@ const std::array<std::string_view, 57> kBuiltins = {
     "mongo_agregar",
     "ler_s3", "escrever_s3", "listar_s3", "apagar_s3",
     "copiar_s3", "cabecalho_s3", "s3_iniciar_upload", "s3_enviar_parte",
-    "s3_concluir_upload", "s3_abortar_upload", "http_get_json", "http_post_json"};
+    "s3_concluir_upload", "s3_abortar_upload", "http_get_json", "http_post_json",
+    "es_buscar", "es_executar"};
 
 const std::array<std::string_view, 11> kTableMethods = {
     "filtrar",  "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",
@@ -203,6 +204,10 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Valida a sintaxe de um arquivo .tilt.", nullptr},
       {"executar_sql", "executar_sql(conexao, consulta)", "conexao,consulta",
        "Executa uma consulta SQL em uma conexao.", nullptr},
+      {"es_buscar", "es_buscar(url, dsl)", "url,dsl",
+       "Busca no Elasticsearch/OpenSearch (DSL JSON) e devolve {total, hits}.", nullptr},
+      {"es_executar", "es_executar(url, metodo, caminho, [corpo])", "url,metodo,caminho,corpo",
+       "Chama qualquer endpoint REST do Elasticsearch/OpenSearch.", nullptr},
       {"ler_parquet", "ler_parquet(caminho)", "caminho", "Le um arquivo Parquet como tabela.",
        nullptr},
       {"escrever_parquet", "escrever_parquet(tabela, caminho)", "tabela,caminho",

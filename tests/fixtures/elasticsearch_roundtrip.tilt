@@ -1,0 +1,49 @@
+# Roundtrip Elasticsearch/OpenSearch: elasticsearch_test.sh sobe um mock REST
+# em python3 (http.server) falando o subset JSON do ES 8 — PUT /<indice>
+# (cria/recria), PUT|POST /<indice>/_doc[/id] (indexa, com _id auto em POST),
+# POST /<indice>/_search (match_all, match simples e agregacao terms),
+# POST /<indice>/_delete_by_query, GET /_cat/indices (texto puro) e erro
+# padrao {"error": {"reason": ...}, "status": 404} para indice inexistente.
+# Quando um header Authorization chega, o mock valida o par elastic:senha
+# (401 com error.reason caso contrario). O script exporta ELASTIC_URL (com
+# /artigos, usado pela fonte) e ELASTIC_BASE (sem indice, usado pelos
+# builtins es_buscar/es_executar).
+fonte documentos:
+  tipo: elasticsearch
+  url: env "ELASTIC_URL"
+  consulta: """{"query": {"match_all": {}}}"""
+
+pipeline elasticsearch:
+  passos:
+    - base = env "ELASTIC_BASE"
+    - artigos = base + "/artigos"
+    - fantasma = base + "/inexistente"
+    # escape hatch: cria o indice e indexa dois documentos
+    - criado = es_executar base, "PUT", "/artigos", {"mappings": {"properties": {"titulo": {"type": "text"}}}}
+    - imprimir "criado:", criado.acknowledged
+    - d1 = es_executar artigos, "PUT", "/_doc/1", {"titulo": "introducao ao tilt", "autor": "ana", "acessos": 10}
+    - imprimir "doc1:", d1.result, d1._id
+    - es_executar artigos, "POST", "/_doc", {"titulo": "dados em tilt", "autor": "bruno", "acessos": 5}
+    # fonte + ler: DSL match_all devolve mapa {total, hits}
+    - resultado = ler documentos
+    - imprimir "total:", resultado.total
+    - para cada hit em resultado.hits:
+        imprimir "hit:", hit._id, hit.autor, hit.acessos
+    # es_buscar com DSL em mapa e agregacao terms
+    - aggs = es_buscar artigos, {"size": 0, "aggs": {"por_autor": {"terms": {"field": "autor"}}}}
+    - imprimir "aggs-total:", aggs.total
+    - para cada b em aggs.agregacoes.por_autor.buckets:
+        imprimir "bucket:", b.key, b.doc_count
+    # es_buscar com DSL em texto e filtro match
+    - filtro = es_buscar artigos, """{"query": {"match": {"autor": "ana"}}}"""
+    - imprimir "match-total:", filtro.total
+    # erro do servidor: motivo vem de error.reason do JSON de erro
+    - tentar:
+        es_buscar fantasma, """{"query": {"match_all": {}}}"""
+    capturar e:
+      imprimir "erro-404:", e
+    # escape hatch: delete by query + endpoint de texto puro (_cat)
+    - del = es_executar artigos, "POST", "/_delete_by_query", {"query": {"match": {"autor": "bruno"}}}
+    - imprimir "deletados:", del.deleted
+    - cat = es_executar base, "GET", "/_cat/indices"
+    - imprimir "cat:", cat

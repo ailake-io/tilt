@@ -119,6 +119,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/clickhouse_roundtrip.tilt)
 
 add_test(
+  NAME elasticsearch
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/elasticsearch_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/elasticsearch_roundtrip.tilt)
+
+add_test(
   NAME janela_offset
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/janela_offset_test.sh
           $<TARGET_FILE:tilt>

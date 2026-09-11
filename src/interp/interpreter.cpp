@@ -47,6 +47,7 @@
 #include "runtime/duckdb.hpp"
 #include "runtime/mysql.hpp"
 #include "runtime/clickhouse.hpp"
+#include "runtime/elasticsearch.hpp"
 #include "runtime/pgvector.hpp"
 #include "runtime/vectorstore.hpp"
 #include "semantic/checker.hpp"
@@ -1167,6 +1168,20 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
                                       : rt::postgres_query(path, sql);
       t.kind = ValueKind::Tabela;
       return t;
+    } catch (const std::exception& e) {
+      fail(span, std::string(e.what()));
+    }
+  }
+  if (tipo == "elasticsearch" || tipo == "opensearch") {
+    if (path.empty()) {
+      fail(span, "fonte '" + name + "': falta 'url: \"elasticsearch://...\"'");
+    }
+    const Item* c = find_field(*decl->block, "consulta");
+    if (!c || !c->value || c->value->kind != ExprKind::TextLit) {
+      fail(span, "fonte '" + name + "': falta 'consulta: \"{ ... }\"' (DSL de busca JSON)");
+    }
+    try {
+      return rt::es_query(path, Value::texto(c->value->text));
     } catch (const std::exception& e) {
       fail(span, std::string(e.what()));
     }
@@ -4175,6 +4190,33 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     try {
       if (eh_post) return rt::http_post_json(a[0].s, a[1], headers);
       return rt::http_get_json(a[0].s, headers);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "es_buscar") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "es_buscar espera (url, dsl), ex.: es_buscar "
+                      "\"elasticsearch://localhost:9200/meuindice\", "
+                      "{query: {match_all: {}}}");
+    }
+    try {
+      return rt::es_query(a[0].s, a[1]);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "es_executar") {
+    auto a = args();
+    if (a.size() < 3 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto ||
+        a[2].kind != ValueKind::Texto) {
+      fail(call.span, "es_executar espera (url, metodo, caminho, [corpo]), ex.: es_executar "
+                      "\"elasticsearch://localhost:9200\", \"PUT\", \"/meuindice\", "
+                      "{ \\\"mappings\\\": {} }");
+    }
+    try {
+      return rt::es_exec(a[0].s, a[1].s, a[2].s, a.size() > 3 ? a[3] : Value::nulo());
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

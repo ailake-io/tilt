@@ -67,6 +67,7 @@ add_library(tilt_core STATIC
   src/runtime/duckdb.cpp
   src/runtime/mysql.cpp
   src/runtime/clickhouse.cpp
+  src/runtime/elasticsearch.cpp
   src/runtime/pgvector.cpp
   src/vm/compiler.cpp
   src/vm/vm.cpp

@@ -4,7 +4,7 @@
 
 ```tilt
 fonte produtos:
-  tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | mysql | clickhouse | kafka
+  tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | mysql | clickhouse | elasticsearch | opensearch | kafka
   caminho: "dados/produtos.json"   # ou arquivo: / url:  ; aceita  env "VAR"
 ```
 
@@ -483,6 +483,53 @@ ignorado. Não existe UPDATE transacional tradicional — mutações de linha s�
 `ALTER TABLE ... UPDATE` assíncronas —, então o fluxo típico é INSERT +
 SELECT. Autenticação por userinfo da URL ou, sem ele, pelas env
 `CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD`.
+
+## Elasticsearch/OpenSearch (REST/JSON)
+
+`fonte tipo: elasticsearch` (ou `opensearch`) executa `POST /<indice>/_search`
+com o DSL de busca e devolve um **mapa** `{total, hits}` — `hits` é `tabela`,
+com cada hit achatado um nível: `_id` mais os campos de `_source`. Agregações
+(`aggregations` na resposta) vêm em `agregacoes`. Funciona tanto contra
+Elasticsearch quanto contra OpenSearch (REST/JSON puro, sem dependências de
+link — só o binário `curl`).
+
+```tilt
+fonte documentos:
+  tipo: elasticsearch
+  url: "elasticsearch://elastic:senha@localhost:9200/artigos"   # opensearch:// tambem vale
+  consulta: """{"query": {"match_all": {}}}"""
+
+pipeline busca:
+  passos:
+    - resultado = ler documentos
+    - imprimir "total:", resultado.total
+    - para cada hit em resultado.hits:
+        imprimir hit._id, hit.titulo, hit.autor
+    - por_autor = es_buscar "elasticsearch://localhost:9200/artigos",
+        {size: 0, aggs: {por_autor: {terms: {field: "autor"}}}}
+    - para cada b em por_autor.agregacoes.por_autor.buckets:
+        imprimir b.key, b.doc_count
+```
+
+- URL: `elasticsearch://[usuario[:senha]@]host[:porta][/indice]` (porta
+  default **9200**; `opensearch://` com mesmo formato). Sem usuário na URL a
+  autenticação vem das env `ELASTIC_USER`/`ELASTIC_PASSWORD`; sem nenhum dos
+  dois, as requisições saem **sem** header de autenticação. Com usuário, vai
+  `Authorization: Basic` — mesmo com senha vazia.
+- `consulta:` / `es_buscar url, dsl`: o DSL aceita **texto JSON** (string
+  tripla `"""..."""` é a forma de embutir aspas) ou **mapa** tilt
+  (`{query: {match_all: {}}}` é serializado automaticamente). Sem índice na
+  URL a busca é em todos os índices (`POST /_search`).
+- `es_executar url, metodo, caminho, [corpo]`: escape hatch genérica —
+  `PUT`/`POST`/`GET`/`PATCH`/`DELETE`/`HEAD` em qualquer endpoint. O caminho
+  é relativo ao índice da URL quando ele existe (`".../artigos"` +
+  `"/_doc/1"` → `/artigos/_doc/1`), senão relativo à raiz. Corpo em texto é
+  enviado direto; mapa/lista são serializados como JSON. A resposta vem
+  parseada (`mapa`/`lista`/etc.); corpo vazio → `nulo` e corpo não-JSON
+  (ex.: `/_cat/indices`) → `texto` cru.
+- Erros do servidor (HTTP ≥ 400) lançam exceção com o motivo do
+  `error.reason` do JSON de erro ("elasticsearch: no such index [x]"),
+  capturável com `tentar`/`capturar`. Timeout de 30s.
 
 ## Redis (RESP nativo)
 

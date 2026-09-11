@@ -668,6 +668,11 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
        "http_get_json \"https://api.exemplo.com/dados\""},
       {"http_post_json", 2, {TypeKind::Texto}, {}, TypeKind::Unknown,
        "http_post_json \"https://api.exemplo.com/dados\", {nome: \"tilt\"}"},
+      // elasticsearch/opensearch
+      {"es_buscar", 2, {TypeKind::Texto}, {}, TypeKind::Unknown,
+       "es_buscar \"elasticsearch://localhost:9200/idx\", \"{...}\""},
+      {"es_executar", 3, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown,
+       "es_executar \"elasticsearch://localhost:9200\", \"PUT\", \"/meuindice\", {}"},
   };
   for (const auto& s : kSigs) {
     if (name == s.name) return &s;

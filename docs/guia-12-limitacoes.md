@@ -106,7 +106,19 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   parquet com field-ids) carrega no **pyiceberg**.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
-  MariaDB, ClickHouse, Redis, Kafka, MongoDB, Qdrant, pgvector e S3 rodam.
+  MariaDB, ClickHouse, Elasticsearch/OpenSearch, Redis, Kafka, MongoDB, Qdrant,
+  pgvector e S3 rodam.
+- Elasticsearch/OpenSearch (`es_buscar`/`es_executar`/`fonte tipo:
+  elasticsearch|opensearch`): REST/JSON puro pelo cliente HTTP genérico
+  (subprocesso `curl`). `es_buscar` cobre só `_search` (DSL em texto ou mapa)
+  e devolve `{total, hits}` com os hits achatados um nível (`_id` + campos de
+  `_source`); agregações vêm cruas em `agregacoes` sem conveniências extras.
+  Qualquer outro endpoint (indexação, `_delete_by_query`, `_cat`, settings)
+  é via `es_executar`, que devolve o JSON parseado ou `texto` cru quando a
+  resposta não é JSON. Auth só Basic (userinfo da URL ou env
+  `ELASTIC_USER`/`ELASTIC_PASSWORD`), sem API keys/SASL/SSO, e HTTP apenas —
+  esquema `https://` ainda não é configurável na URL (use o `es_executar`
+  com reverse proxy local ou a rede interna).
 - MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
   `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
   básico completo — restam: `mongo_agregar` lê só o `firstBatch` do cursor
