@@ -11,7 +11,7 @@ confinement: classic
 
 apps:
   tilt:
-    command: bin/tilt
+    command: usr/bin/tilt
 
 parts:
   tilt:
@@ -20,6 +20,7 @@ parts:
     cmake-parameters:
       - -DCMAKE_BUILD_TYPE=Release
       - -DTILT_WERROR=ON
+      - -DCMAKE_INSTALL_PREFIX=/usr
     build-snaps: [cmake]
     # adopt-info exige que a part publique a versao (da tag, ex.: v0.1.0-rc1).
     # GITHUB_REF_NAME nao chega dentro da instancia LXD: com fallback para
