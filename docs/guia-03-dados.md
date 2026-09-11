@@ -825,6 +825,32 @@ pipeline rag:
     - achados = docs.buscar("gato", top_k: 3)
 ```
 
+## Índice vetorial no Pinecone
+
+`indice` com `armazenamento: "pinecone://host-do-indice/namespace"` delega
+`inserir`/`buscar` ao data plane do Pinecone via REST, sempre em HTTPS (curl,
+mesmo padrão do Qdrant/Weaviate). Os embeddings continuam vindo de
+`embeddings:` (`TILT_LLM=mock` offline nos testes). A env `PINECONE_API_KEY`
+é obrigatória (header `Api-Key`); ausente, o erro é claro antes da rede.
+`inserir` faz upsert (`POST /vectors/upsert`,
+`{namespace, vectors: [{id, values, metadata: {texto}}]}`); `buscar` usa
+`POST /query` (`{namespace, vector, topK}`) e devolve `{ id, score }` — o
+score do Pinecone já é similaridade de cosseno. O índice deve **já existir**
+na conta: criar índice é control plane e fica fora de escopo. Coberto por
+`tests/pinecone_test.sh` (mock REST sobre TLS com cert auto-assinado +
+embeddings em modo `mock`).
+
+```tilt
+indice docs:
+  embeddings: "meu-modelo"
+  armazenamento: "pinecone://meu-indice-abc.svc.us-east1-gcp.pinecone.io/ns1"
+
+pipeline rag:
+  passos:
+    - docs.inserir([{ id: "a1", texto: "gato doméstico" }])
+    - achados = docs.buscar("gato", top_k: 3)
+```
+
 ## Métodos de tabela
 
 Operam sobre `tabela` e `lista` de mapas. `linha` é a variável implícita da linha atual.

@@ -1,0 +1,33 @@
+# RAG sobre Pinecone: pinecone_test.sh sobe um mock REST em python3 sobre TLS
+# (cert auto-assinado gerado na hora com a CLI openssl; o curl do runtime
+# confia via env CURL_CA_BUNDLE) falando o data plane do Pinecone — POST
+# /vectors/upsert ({namespace, vectors: [{id, values, metadata: {texto}}]}) e
+# POST /query ({namespace, vector, topK} -> matches[] com id/score; o score
+# ja e similaridade de cosseno). Auth: header Api-Key com PINECONE_API_KEY
+# (obrigatoria). @PORTA@ e substituida pelo script de teste: o campo
+# armazenamento so aceita literal, entao nao da pra ler env("...") aqui.
+indice kb:
+  embeddings: "m"
+  armazenamento: "pinecone://127.0.0.1:@PORTA@/ns1"
+
+indice errado:
+  embeddings: "m"
+  armazenamento: "pinecone://127.0.0.1:@PORTA@/fantasma"
+
+pipeline rag:
+  passos:
+    - n = kb.inserir([
+        { id: "a1", texto: "gato domestico" },
+        { id: "b1", texto: "gato e cachorro" },
+        { id: "c1", texto: "engenharia de dados" },
+      ])
+    - imprimir "inseridos:", n
+    - achados = kb.buscar("gato", top_k: 2)
+    - para cada h em achados:
+        imprimir "achado:", h.id, h.score
+    - unico = kb.buscar("gato", top_k: 1)
+    - imprimir "top1:", unico[0].id
+    - tentar:
+        errado.buscar("gato", top_k: 1)
+    capturar e:
+      imprimir "erro-404:", e

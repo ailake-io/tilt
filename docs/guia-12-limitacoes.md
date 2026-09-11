@@ -107,7 +107,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
   MariaDB, ClickHouse, Elasticsearch/OpenSearch, Redis, Kafka, MongoDB, Qdrant,
-  pgvector, Weaviate e S3 rodam.
+  pgvector, Weaviate, Pinecone e S3 rodam.
 - Elasticsearch/OpenSearch (`es_buscar`/`es_executar`/`fonte tipo:
   elasticsearch|opensearch`): REST/JSON puro pelo cliente HTTP genérico
   (subprocesso `curl`). `es_buscar` cobre só `_search` (DSL em texto ou mapa)
@@ -192,6 +192,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `score` (sem o `texto`, que fica na propriedade `texto` do objeto); no
   Weaviate real o `id` do objeto deve ser UUID; auth só por env
   `WEAVIATE_API_KEY` (Bearer), sem usuário/senha nem TLS dedicado (HTTP puro).
+- Pinecone: data plane apenas — o índice deve já existir na conta (criar
+  índice é control plane, fora de escopo); sempre HTTPS; `PINECONE_API_KEY`
+  é obrigatória (header `Api-Key`), com erro claro antes da rede quando
+  ausente; o score já é similaridade de cosseno (maior = melhor, sem conversão
+  como no Weaviate); sem `ensure` de namespace (o upsert cria implicitamente);
+  `buscar` devolve `id` e `score`, sem o `texto` (que vai no `metadata.texto`).
 - pgvector: exige a extensão `vector` instalada no banco (o Tilt tenta
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
@@ -230,10 +236,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
   `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
-  `buscar` devolve `{ id, score }`, sem o texto) e
-  `"weaviate://host:porta/classe"` (REST via curl, GraphQL `nearVector`;
-  `buscar` devolve `{ id, score }`, sem o texto; auth por env
-  `WEAVIATE_API_KEY`).
+  `buscar` devolve `{ id, score }`, sem o texto), `"weaviate://host:porta/classe"`
+  (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, score }`, sem
+  o texto; auth por env `WEAVIATE_API_KEY`) e
+  `"pinecone://host-do-indice/namespace"` (REST via `curl`, sempre HTTPS,
+  `POST /query`; `buscar` devolve `{ id, score }`, sem o texto; exige env
+  `PINECONE_API_KEY` e índice já criado na conta).
 - Os embeddings do modo `mock` são um bag-of-tokens hasheado (16 dimensões) —
   bons para testes determinísticos, não para relevância real.
 

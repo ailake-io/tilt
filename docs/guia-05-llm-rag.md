@@ -81,6 +81,7 @@ indice base:
   armazenamento: "memoria"          # ou qdrant://host:porta/colecao (REST via curl)
                                      # ou pgvector://colecao (Postgres + extensão pgvector)
                                      # ou weaviate://host:porta/classe (REST via curl)
+                                     # ou pinecone://host-do-indice/namespace (HTTPS)
 
 pipeline indexar:
   passos:
@@ -117,5 +118,14 @@ pipeline indexar:
   env, a requisição é anônima. `buscar` devolve `{ id, score }` — o texto
   fica na propriedade `texto` do objeto. O nome da classe deve ser de
   GraphQL (`[A-Z][_a-zA-Z0-9]*`) e, no Weaviate real, o `id` deve ser UUID.
+- Com `armazenamento: "pinecone://host-do-indice/namespace"` (ex.:
+  `pinecone://meu-indice.svc.us-east1-gcp.pinecone.io/ns1`), delegam ao data
+  plane do Pinecone, sempre em HTTPS. A env `PINECONE_API_KEY` é
+  **obrigatória** (header `Api-Key`); sem ela, o erro é claro antes de tocar
+  na rede. `inserir` faz upsert (`POST /vectors/upsert`, texto no
+  `metadata.texto`); `buscar` usa `POST /query` e devolve `{ id, score }` —
+  o score do Pinecone já é similaridade de cosseno (quanto maior, melhor).
+  O índice deve **já existir** na conta (criar índice é control plane e está
+  fora de escopo — `404`/`401` do servidor chegam como erro com a mensagem).
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).
