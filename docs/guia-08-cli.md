@@ -72,5 +72,7 @@ Despejam a árvore sintática (S-expression) e o fluxo de tokens. Debug.
 | `TILT_GPU` | executar | `off` (padrão) · `auto` · `fake` |
 | `TILT_VM_DEBUG` | executar | `1` despeja o bytecode das funções |
 | `TILT_STDLIB_PATH` | executar, servir | diretórios com módulos `importar` (sep. `:`), consultados antes de `../share/tilt/stdlib` |
+| `TILT_JANELA_ESTADO` | executar | `memoria` desliga o offset persistente do streaming `janela:` |
+| `TILT_TLS_SKIP_VERIFY` | executar, servir | `1` desliga verificação de certificado TLS nos clientes (testes com cert auto-assinado) |
 | `CC` | compilar | compilador C do link final |
 | `NO_COLOR` | todos | diagnósticos sem cor |

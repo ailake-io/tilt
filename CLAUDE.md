@@ -547,6 +547,15 @@ tilt/
 
 ## 14. Roteiro de Implementação Passo a Passo
 
+> **Status (2026-09):** fases 1–5 concluídas na 1ª passada; fases 6–11 entregues
+> (pruning/partição composta Delta+Iceberg, Parquet snappy/V2/listas, codecs
+> Avro, enriquecimento de Mongo/Postgres/Redis/Kafka/S3, conv2d/norma_lote,
+> shape solver e inferência de tipos, LSP completo, stdlib + `importar`
+> funcional, codegen ARM64, HTTP genérico, conectores DuckDB/MySQL/ClickHouse/
+> Elasticsearch e vetoriais Weaviate/Pinecone/Chroma). Os checkboxes abaixo
+> são o plano original; o estado corrente por área está em
+> `docs/guia-12-limitacoes.md`.
+
 ### Fase 1 — Lexer baseado em linhas e indentação
 - [ ] Leitura de buffer com `std::string_view` (zero alocação dinâmica no lexer).
 - [ ] Máquina de estados de indentação: contar espaços no início da linha (múltiplos exatos de 2), comparar com `std::vector<size_t> indent_stack`, emitir `TOKEN_INDENT` / `TOKEN_DEDENT` / `TOKEN_NEWLINE`.
@@ -560,8 +569,8 @@ tilt/
 - [ ] Controle de fluxo: `se/senao`, `para cada`, `enquanto`, `tentar/capturar`, `retornar`, `funcao`.
 
 ### Fase 3 — Analisador semântico e validação de tensores
-- [ ] Inferência de tipos ascendente; anotações opcionais viram contratos verificados.
-- [ ] `shape_solver`: propagar formas por `densa`, `conv2d`, `atencao`, `@` (matmul); rejeitar incompatibilidades antes do codegen.
+- [x] Inferência de tipos ascendente; anotações opcionais viram contratos verificados. *(fase 8: subconjunto conservador — operadores, ~55 builtins, métodos, retorno de `funcao`; `T011`)*
+- [~] `shape_solver`: propagar formas por `densa`, `conv2d`, `atencao`, `@` (matmul); rejeitar incompatibilidades antes do codegen. *(fase 8: formas literais com `matmul`/`conv2d`/`reformar`/`transposta`/ativações; `atencao` e formas dinâmicas ficam para runtime; `T012`)*
 - [ ] Classificar alocação: escalares/registros → Request Arena; tensores → Unified Memory / ponteiro de device.
 - [ ] Validar `dispositivo: auto` resolvendo a ordem `cuda → metal → cpu` em tempo de execução, mas checando o caminho em compilação.
 - [ ] Verificar que segredos usam `env` e nunca literais.

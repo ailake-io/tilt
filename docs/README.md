@@ -14,7 +14,7 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 06 | [Agentes](guia-06-agentes.md) | `ferramenta`, `agente`, `.responder`, `rastro`, `memoria`, `equipe`, `estrategia` |
 | 07 | [Serviços HTTP](guia-07-http.md) | `servico`, `rota`, `entrada`, `responder`, `tilt servir`, validação, códigos de status |
 | 08 | [CLI](guia-08-cli.md) | cada comando, flags, códigos de saída, variáveis de ambiente |
-| 09 | [VM e nativo](guia-09-vm-nativo.md) | subconjunto da VM de bytecode e do codegen x86-64, limitações |
+| 09 | [VM e nativo](guia-09-vm-nativo.md) | subconjunto da VM de bytecode e do codegen x86-64/ARM64, limitações |
 | 10 | [IA e editores](guia-10-ia-editores.md) | `checar --json`, `referencia`, `checar_tilt`, `tilt lsp`/`completar`, Neovim, VS Code |
 | 11 | [Diagnósticos](guia-11-diagnosticos.md) | todos os códigos `Tnnn` com exemplo |
 | 12 | [Limitações](guia-12-limitacoes.md) | status da 1ª passada — o que ainda não funciona |

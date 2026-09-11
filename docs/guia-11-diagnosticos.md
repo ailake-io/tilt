@@ -26,7 +26,7 @@ entrega tudo em JSON.
 | Código | Significado |
 |---|---|
 | `T011` | tipo incompatível com a anotação |
-| `T012` | forma de tensor incompatível — solver de `densa`/`linear`; demais camadas: futuro |
+| `T012` | forma de tensor incompatível — solver cobre formas literais (`matmul`, `conv2d`, `reformar`, `transposta`, ativações); camadas fora desse subconjunto: validadas só em runtime |
 | `T020` | segredo literal em `chave`/`token`/`senha`/`segredo`/`api_key` — use `env "VAR"` |
 | `T021` | `dispositivo:` fora de `auto`, `cpu`, `gpu`, `metal`, `"cuda:N"` |
 | `T030` | nome não definido — resolvido em `passos:`/`executar:` com escopo global + variáveis implícitas |
