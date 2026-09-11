@@ -128,14 +128,21 @@ Ele compila em release, roda a suíte de testes e gera/anexa por
 plataforma (Linux x86_64 e macOS arm64):
 
 - `tilt-*.tar.gz` + `.sha256` (todas as plataformas);
-- `tilt-*.deb` e `tilt-*.rpm` + `.sha256` (Linux, do CPack);
+- `tilt-*.deb` e `tilt-*.rpm` + `.sha256` (Linux, do CPack — o job instala
+  o `rpm` no runner porque o gerador RPM precisa do `rpmbuild`);
 - `tilt-*.dmg` (macOS, do CPack DragNDrop);
+- `tilt-*.msi` e `tilt-*.zip` + `.sha256` (Windows, do job `windows` com
+  CPack WIX);
 - `tilt_*.snap` (job `snap`, via `snapcraft` em `snap/snapcraft.yaml` —
   publica na Snap Store automaticamente se o secret `SNAPCRAFT_TOKEN`
   estiver configurado, senão só anexa o arquivo);
-- `tilt-*.vsix` (extensão VS Code).
+- `tilt-<versao>.flatpak` + `.sha256` (job `flatpak` — bundle instalável
+  gerado com `flatpak build-bundle` após o `flatpak-builder`);
+- `tilt-*.vsix` (extensão VS Code);
+- manifesto winget atualizado (job `winget` — PR automático ao
+  winget-pkgs com `WINGET_TOKEN`, senão o manifesto é anexado à Release).
 
-O job `flatpak` valida o manifesto
+O job `flatpak` também valida o manifesto
 (`packaging/flatpak/io.github.ailake_io.tilt.json`) com
 `flatpak-builder`; para gerar o pacote localmente:
 

@@ -30,6 +30,11 @@ jobs:
       - name: test
         run: ctest --preset release --output-on-failure
 
+      # o gerador RPM do CPack precisa do rpmbuild (nao vem no runner ubuntu).
+      - name: deps de empacotamento (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
       - name: package
         working-directory: build/release
         run: cpack
@@ -151,6 +156,22 @@ jobs:
         run: |
           appstreamcli validate --no-net packaging/flatpak/io.github.ailake_io.tilt.metainfo.xml \
             || true   # metainfo ainda nao publicado; warn de <release> e ok
+
+      # empacota um .flatpak instalavel para anexar à Release
+      - name: gerar bundle .flatpak
+        run: |
+          flatpak-builder --repo=repo build-flatpak packaging/flatpak/io.github.ailake_io.tilt.json
+          ver="${GITHUB_REF_NAME#v}"
+          flatpak build-bundle repo "tilt-${ver}.flatpak" io.github.ailake_io.tilt
+
+      - name: checksum do bundle
+        run: sha256sum "tilt-${GITHUB_REF_NAME#v}.flatpak" > "tilt-${GITHUB_REF_NAME#v}.flatpak.sha256"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tilt-*.flatpak
+            tilt-*.flatpak.sha256
 
   # --- Homebrew: valida a sintaxe da formula (brew test precisa de tap).
   homebrew:
