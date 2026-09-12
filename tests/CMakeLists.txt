@@ -101,6 +101,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_rest_sobrescrita.tilt)
 
 add_test(
+  NAME spark
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/spark_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/spark_interop.tilt)
+
+add_test(
   NAME duckdb
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/duckdb_test.sh
           $<TARGET_FILE:tilt>

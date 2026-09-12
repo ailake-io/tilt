@@ -1,0 +1,41 @@
+pipeline principal:
+  passos:
+    # (a) Delta particionado por [estado]: escrita + append com evolucao de
+    #     schema (coluna nova "canal" entra nullable; linhas antigas leem nulo)
+    - vendas1 = [
+        { estado: "sp", cidade: "santos", valor: 10 },
+        { estado: "rj", cidade: "niteroi", valor: 20 }
+      ]
+    - escrever_delta vendas1, "vendas_delta", particionar_por: ["estado"]
+    - vendas2 = [
+        { estado: "sp", cidade: "campinas", valor: 30, canal: "web" },
+        { estado: "mg", cidade: "bh", valor: 40, canal: "loja" },
+        { estado: "rj", cidade: "rio", valor: 50, canal: "web" }
+      ]
+    - anexar_delta vendas2, "vendas_delta"
+    - de_volta = ler_delta "vendas_delta"
+    - imprimir "delta linhas:", tamanho de_volta
+    - para cada linha em de_volta:
+        - imprimir linha.estado, linha.cidade, linha.valor, linha.canal
+    # (b) Iceberg particionado por [estado] (catalogo Hadoop local)
+    - clientes = [
+        { estado: "sp", nome: "ana", idade: 30 },
+        { estado: "rj", nome: "bruno", idade: 40 },
+        { estado: "sp", nome: "carla", idade: 50 }
+      ]
+    - escrever_iceberg clientes, "clientes_iceberg", particionar_por: ["estado"]
+    - gelo = ler_iceberg "clientes_iceberg"
+    - imprimir "iceberg linhas:", tamanho gelo
+    - para cada linha em gelo:
+        - imprimir linha.estado, linha.nome, linha.idade
+    # (c) Parquet com listas + gzip
+    - produtos = [
+        { nome: "caneta", tags: ["escrita", "azul"], precos: [1.5, 2.0] },
+        { nome: "caderno", tags: [], precos: [] },
+        { nome: "borracha", tags: ["escrita"], precos: [0.5] }
+      ]
+    - escrever_parquet produtos, "produtos.parquet", codec: "gzip"
+    - volta = ler_parquet "produtos.parquet"
+    - imprimir "parquet linhas:", tamanho volta
+    - para cada linha em volta:
+        - imprimir linha.nome, linha.tags, linha.precos

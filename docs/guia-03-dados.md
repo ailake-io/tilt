@@ -173,7 +173,8 @@ streaming — ver guia 12.
 ## Parquet nativo
 
 `ler_parquet`/`escrever_parquet` e `fonte tipo: parquet` usam o reader/writer
-próprio do tilt (zero dependências), interoperável com pyarrow/parquet-cpp:
+próprio do tilt (zero dependências), interoperável com pyarrow/parquet-cpp e
+com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
 
 - tipos: `logico`→BOOLEAN, `inteiro`→INT64, `decimal`→DOUBLE,
   `texto`→BYTE_ARRAY com anotação **UTF8** (lê como `string` no pyarrow);
@@ -253,6 +254,11 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   log). Predicados em colunas comuns (não particionadas) viram filtro de linha
   aplicado após a leitura — o resultado é o mesmo, sem o custo de ler arquivo
   algum fora da partição. Sem match, retorna tabela vazia;
+- interoperável com **Spark 3.5**: tabelas escritas pelo tilt são lidas por
+  `spark.read.format("delta").load(dir)` (pacote `io.delta:delta-spark_2.12`,
+  container `apache/spark:3.5.3` via `spark-submit`) — partição hive
+  reidratada, append com evolução de schema (coluna nova visível com `null`
+  nas linhas antigas). Coberto por `tests/spark_test.sh` (fase 12-1);
 - interoperável com delta-rs: `DeltaTable(dir).to_pyarrow_table()` lê tabelas
   escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
   sem dictionary e com colunas obrigatórias;
@@ -331,6 +337,14 @@ os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
   **pyiceberg** (`StaticTable.from_metadata(...).scan().to_arrow()`) — field
   ids da spec v2 nos schemas Avro, `field.id` nos parquet e coluna de
   partição reidratada pelo reader de verdade;
+- interop com **Spark 3.5** (gap de writer, fase 12-5): `tests/spark_test.sh`
+  sobe o Spark 3.5 real (container `apache/spark:3.5.3` + pacote
+  `org.apache.iceberg:iceberg-spark-runtime-3.5_2.12`) e tenta ler a tabela
+  Hadoop local via `SparkCatalog` — hoje a leitura falha com "Table does not
+  exist" porque o metadata `v<N>-<uuid>.metadata.json` está fora da convenção
+  `v<N>.metadata.json` que o `HadoopTableOperations` do Iceberg resolve (o
+  teste reporta `SPARK GAP iceberg`, sem contornar; as verificações estritas
+  passam a valer quando o writer for corrigido);
 - limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
   local, sem JDBC), só transform identity, lê o que o tilt escreve (sem
   garantia de tabelas de outros escritores) e single-writer (sem locks nem
