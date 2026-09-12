@@ -726,6 +726,9 @@ std::string format_document(const std::string& text) {
 
   const std::uint32_t n = src.line_count();
   std::string out;
+  // Normalize to the file's own indentation style: 1 tab per level in tab
+  // files, 2 spaces per level in space files (default when no line is indented).
+  const bool tab_style = lexer.indent_style() == IndentStyle::Tabs;
   for (std::uint32_t l = 1; l <= n; ++l) {
     const std::string_view raw = src.line_text(l);
     if (in_string[l]) {
@@ -733,7 +736,11 @@ std::string format_document(const std::string& text) {
     } else {
       const std::string trimmed = trim_right(raw);
       if (l < line_level.size() && line_level[l] >= 0) {
-        out.append(static_cast<std::size_t>(line_level[l]) * 2, ' ');
+        if (tab_style) {
+          out.append(static_cast<std::size_t>(line_level[l]), '\t');
+        } else {
+          out.append(static_cast<std::size_t>(line_level[l]) * 2, ' ');
+        }
         std::size_t lead = 0;
         while (lead < trimmed.size() && (trimmed[lead] == ' ' || trimmed[lead] == '\t')) ++lead;
         out.append(trimmed.data() + lead, trimmed.size() - lead);

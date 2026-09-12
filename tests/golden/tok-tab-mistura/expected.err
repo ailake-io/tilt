@@ -1,0 +1,8 @@
+erro[T002]: mistura de tab e espacos na mesma indentacao
+  --> input.tilt:2:1
+   |
+ 2 |   	b: 1
+   | ^^^
+   |
+   = sugestao: use um unico estilo por arquivo: 1 tab ou 2 espacos por nivel
+

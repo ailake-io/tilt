@@ -442,7 +442,7 @@ CLI
   tilt tokens <a>   referencia   versao
 
 DIAGNOSTICOS (codigo estavel Tnnn)
-  T001 indent nao-multiplo-de-2   T002 tab   T003 texto aberto   T004 char invalido
+  T001 indent nao-multiplo-de-2   T002 mistura tab/espacos   T003 texto aberto   T004 char invalido
   T010 indent inesperada   T013 token esperado   T014 token inesperado
   T020 segredo literal (use env)   T021 dispositivo invalido
   T030 nome nao definido   T031 referencia desconhecida   T032 declaracao duplicada

@@ -2,14 +2,24 @@
 
 ## Indentação
 
-**2 espaços por nível, rígido.** Tab na indentação é erro (`T002`); indentação
-que não é múltiplo de 2 é erro (`T001`). Blocos são abertos por `:` no fim da
+**Um estilo por arquivo: 2 espaços OU 1 tab por nível.** O estilo é definido
+pela primeira linha indentada do arquivo e vale até o fim: uma linha depois
+indentada com o outro estilo (ou um prefixo misturando tab e espaços) é erro
+(`T002`). Com espaços, o nível precisa ser múltiplo de 2 (`T001`); com tabs,
+1 tab = 1 nível (a largura do tab no editor não importa). Arquivo sem nenhuma
+linha indentada aceita qualquer estilo. Blocos são abertos por `:` no fim da
 linha e delimitados pela indentação — não há `{ }` nem `end`.
 
 ```tilt
 pipeline exemplo:
   passos:
     - x = 1
+```
+
+```tilt
+pipeline exemplo:
+	passos:
+		- x = 1
 ```
 
 ## Comentários

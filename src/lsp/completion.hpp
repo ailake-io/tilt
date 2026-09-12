@@ -37,7 +37,8 @@ struct SigHelp {
 SigHelp signature_help(const SourceFile& src, std::uint32_t line, std::uint32_t column);
 
 // Deterministic whole-document formatting: normalizes indentation to the block
-// level derived from the token stream (2 spaces per level), trims trailing
+// level derived from the token stream using the file's own style (1 tab per
+// level in tab files, 2 spaces per level otherwise), trims trailing
 // whitespace and guarantees a single final newline. Lines inside multiline
 // (triple-quoted) strings, comment lines and bracket-continuation lines are
 // left untouched.

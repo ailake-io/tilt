@@ -45,7 +45,7 @@ pipeline ola_dados:
 ## 3. Sintaxe Essencial
 
 ### 3.1 Indentação, comentários e literais
-- Indentação **rígida de 2 espaços**. Tabs são erro de compilação.
+- Indentação de **2 espaços OU 1 tab por nível** — um estilo por arquivo, definido na primeira linha indentada; misturar é erro de compilação (`T002`).
 - Comentário de linha: `#`.
 - Literais: `texto` (`"..."`), `inteiro` (`42`), `decimal` (`3.14`), `logico` (`verdadeiro` / `falso`), `nulo`.
 - Texto multilinha e interpolação: `"""..."""` e `{{expressao}}`.
@@ -559,7 +559,7 @@ tilt/
 ### Fase 1 — Lexer baseado em linhas e indentação
 - [ ] Leitura de buffer com `std::string_view` (zero alocação dinâmica no lexer).
 - [ ] Máquina de estados de indentação: contar espaços no início da linha (múltiplos exatos de 2), comparar com `std::vector<size_t> indent_stack`, emitir `TOKEN_INDENT` / `TOKEN_DEDENT` / `TOKEN_NEWLINE`.
-- [ ] Tabs → erro com mensagem clara. Reconhecer `chave:`, literais (texto, decimal, inteiro, `verdadeiro`/`falso`/`nulo`), `-`, `{ }` de mapa inline, `"""` multilinha, `{{ }}` de interpolação.
+- [x] Tabs na indentação → 1 tab = 1 nível, um estilo por arquivo (definido na 1ª linha indentada); mistura tab/espaços é `T002` com mensagem que ensina. *(atualizado: tabs são alternativa válida, não erro absoluto)* Reconhecer `chave:`, literais (texto, decimal, inteiro, `verdadeiro`/`falso`/`nulo`), `-`, `{ }` de mapa inline, `"""` multilinha, `{{ }}` de interpolação.
 
 ### Fase 2 — Parser dos blocos declarativos
 - [ ] `ProgramNode` com declarações de alto nível.

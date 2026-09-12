@@ -105,17 +105,17 @@ void Lexer::handle_line_start() {
   const std::size_t ws_start = pos_;
   const std::uint32_t ws_line = line_;
   const std::uint32_t ws_col = col_;
-  bool tab_seen = false;
-  std::uint32_t width = 0;
+  std::uint32_t spaces = 0;
+  std::uint32_t tabs = 0;
 
   while (true) {
     const char c = peek();
     if (c == ' ') {
       advance();
-      ++width;
+      ++spaces;
     } else if (c == '\t') {
-      tab_seen = true;
       advance();
+      ++tabs;
     } else {
       break;
     }
@@ -144,20 +144,45 @@ void Lexer::handle_line_start() {
     return;
   }
 
-  if (tab_seen) {
-    report(DiagCode::TabInIndent,
-           Span{static_cast<std::uint32_t>(ws_start), static_cast<std::uint32_t>(pos_ - ws_start),
-                ws_line, ws_col},
-           "tab encontrado na indentacao", {}, std::string("troque tabs por 2 espacos"));
+  const Span ws_span{static_cast<std::uint32_t>(ws_start),
+                     static_cast<std::uint32_t>(pos_ - ws_start), ws_line, ws_col};
+
+  // One indentation style per file, defined by the first indented line:
+  // 1 tab per level, or 2 spaces per level. Later lines using the other
+  // style (or mixing both in the same prefix) are an error.
+  if (style_ == IndentStyle::Undetected && (spaces > 0 || tabs > 0)) {
+    style_ = src_[ws_start] == '\t' ? IndentStyle::Tabs : IndentStyle::Spaces;
+    style_line_ = ws_line;
   }
-  if (width % 2 != 0) {
-    report(DiagCode::IndentNotMultipleOfTwo,
-           Span{static_cast<std::uint32_t>(ws_start), width, ws_line, ws_col},
-           "indentacao de " + std::to_string(width) + " espacos nao e multiplo de 2", {},
-           std::string("use blocos de 2 espacos"));
+  if (tabs > 0 && spaces > 0) {
+    report(DiagCode::TabInIndent, ws_span, "mistura de tab e espacos na mesma indentacao", {},
+           std::string("use um unico estilo por arquivo: 1 tab ou 2 espacos por nivel"));
+  } else if (style_ == IndentStyle::Tabs && spaces > 0) {
+    report(DiagCode::TabInIndent, ws_span,
+           "mistura de tab e espacos na indentacao; este arquivo usa 'tabs' (definido na linha " +
+               std::to_string(style_line_) + ")",
+           {}, std::string("troque os espacos iniciais por tabs"));
+  } else if (style_ == IndentStyle::Spaces && tabs > 0) {
+    report(DiagCode::TabInIndent, ws_span,
+           "mistura de tab e espacos na indentacao; este arquivo usa 'espacos' (definido na linha " +
+               std::to_string(style_line_) + ")",
+           {}, std::string("troque os tabs iniciais por 2 espacos por nivel"));
   }
 
-  const int level = static_cast<int>(width);
+  int level;
+  if (style_ == IndentStyle::Tabs) {
+    level = static_cast<int>(tabs + spaces / 2);  // mixing error already reported
+  } else {
+    if (tabs == 0 && spaces % 2 != 0) {
+      report(DiagCode::IndentNotMultipleOfTwo, ws_span,
+             "indentacao de " + std::to_string(spaces) + " espacos nao e multiplo de 2", {},
+             std::string("use blocos de 2 espacos"));
+    }
+    // In space-style files a stray tab still counts as one 2-space level so
+    // the block structure (and the T002 alone) reflects the likely intent.
+    level = static_cast<int>(spaces + tabs * 2);
+  }
+
   const int top = indent_stack_.back();
   if (level > top) {
     indent_stack_.push_back(level);
@@ -168,8 +193,7 @@ void Lexer::handle_line_start() {
       push_structural(TokenKind::Dedent);
     }
     if (indent_stack_.back() != level) {
-      report(DiagCode::UnexpectedIndent,
-             Span{static_cast<std::uint32_t>(ws_start), width, ws_line, ws_col},
+      report(DiagCode::UnexpectedIndent, ws_span,
              "indentacao inesperada", {"nenhum bloco aberto neste nivel de indentacao"},
              std::nullopt);
       indent_stack_.push_back(level);

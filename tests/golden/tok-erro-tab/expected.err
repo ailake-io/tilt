@@ -1,8 +1,8 @@
-erro[T002]: tab encontrado na indentacao
-  --> input.tilt:2:1
+erro[T002]: mistura de tab e espacos na indentacao; este arquivo usa 'espacos' (definido na linha 2)
+  --> input.tilt:3:1
    |
- 2 | 	b: 1
+ 3 | 	c: 2
    | ^
    |
-   = sugestao: troque tabs por 2 espacos
+   = sugestao: troque os tabs iniciais por 2 espacos por nivel
 

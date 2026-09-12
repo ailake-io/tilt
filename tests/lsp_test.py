@@ -284,6 +284,50 @@ def main() -> int:
         if again != formatted:
             problems.append("formatting nao e idempotente")
 
+    # ------------------------------------------- formatting preserva estilo tab
+    # Arquivo no estilo tab (1ª linha indentada com tab): formatação deve
+    # normalizar para tabs (1 por nível), nunca converter para espaços.
+    tabbed = (
+        "pipeline etl:\t\n"
+        "\tpassos:\n"
+        "\t\t- x = 1  \n"
+        "\t\t- se x == 1:\n"
+        "\t\t\timprimir \"um\"\n"
+    )
+    esperado_tab = (
+        "pipeline etl:\n"
+        "\tpassos:\n"
+        "\t\t- x = 1\n"
+        "\t\t- se x == 1:\n"
+        "\t\t\timprimir \"um\"\n"
+    )
+
+    frames = run_lsp(binary, tabbed, [fmt_req(50)])
+    if frames is None:
+        return 1
+    r = by_id(frames)
+    edits_tab = r.get(50, {}).get("result") or []
+    if not edits_tab:
+        problems.append("formatting (tab) nao retornou edicoes")
+        formatted_tab = tabbed
+    else:
+        formatted_tab = edits_tab[0]["newText"]
+
+    if formatted_tab != esperado_tab:
+        problems.append(f"formatting converteu tab para espacos: {formatted_tab[:60]!r}")
+    if any(line.endswith((" ", "\t")) for line in formatted_tab.split("\n")):
+        problems.append("formatting (tab) deixou espaco trailing")
+
+    frames = run_lsp(binary, formatted_tab, [fmt_req(51)])
+    if frames is None:
+        return 1
+    r = by_id(frames)
+    edits_tab2 = r.get(51, {}).get("result")
+    if edits_tab2 not in (None, []):
+        again_tab = edits_tab2[0]["newText"]
+        if again_tab != formatted_tab:
+            problems.append("formatting (tab) nao e idempotente")
+
     for p in problems:
         print(p)
     print("lsp_test ok" if not problems else "lsp_test FAIL")

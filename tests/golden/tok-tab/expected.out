@@ -1,0 +1,4 @@
+== pipeline soma ==
+dobro: 42
+vinte e um
+soma 1..4: 10

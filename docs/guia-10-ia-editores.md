@@ -76,7 +76,8 @@ Filtro por prefixo (case-insensitive).
   do builtin mais interno na linha, com o parâmetro ativo destacado (só
   argumentos na mesma linha);
 - **formatting** (`documentFormattingProvider`): indentação normalizada para
-  2 espaços por nível de bloco (derivada do stream de tokens do lexer),
+  o estilo do arquivo — 2 espaços por nível em arquivo que usa espaços, 1 tab
+  por nível em arquivo que usa tabs (derivada do stream de tokens do lexer),
   remoção de espaços trailing e newline final único. Linhas dentro de strings
   multilinha (`"""`), linhas de comentário e continuações dentro de
   `(`/`[`/`{` não são alteradas.

@@ -9,7 +9,7 @@ entrega tudo em JSON.
 | Código | Significado | Causa comum |
 |---|---|---|
 | `T001` | indentação não é múltiplo de 2 | 3 espaços em vez de 2 ou 4 |
-| `T002` | tab na indentação | tecla Tab; troque por 2 espaços |
+| `T002` | mistura de tab e espaços na indentação | tecla Tab em arquivo que usa espaços (ou o contrário); o estilo é definido na 1ª linha indentada e vale por todo o arquivo |
 | `T003` | texto não terminado | falta a aspa de fechamento na mesma linha, ou `"""` sem fim |
 | `T004` | caractere inválido | `!` sozinho (use `nao` ou `!=`), `?` sozinho (use `?.`) |
 
