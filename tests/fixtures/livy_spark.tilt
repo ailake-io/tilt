@@ -1,0 +1,41 @@
+# Spark via Apache Livy: livy_test.sh sobe um mock REST em python3
+# (http.server) falando o subset do Livy — POST /sessions ({kind, conf} ->
+# {id}; sessoes novas ja nascem "idle" no mock), GET /sessions (lista com
+# state para o cliente reusar a idle), POST /sessions/{id}/statements
+# ({code} -> statement "running") e GET /sessions/{id}/statements/{st}
+# ("available" no 1o poll, com output.data["text/plain"] simulando
+# toJSON.collectAsList().toString(); SQL com "tabela_inexistente" vira
+# statement em "error" com ename/evalue). @PORTA@ e substituida pelo script
+# de teste (o campo url da fonte so aceita literal/env).
+fonte vendas:
+  tipo: spark
+  url: "http://127.0.0.1:@PORTA@"
+  consulta: "select id, nome from vendas order by id"
+
+fonte por_regiao:
+  tipo: spark
+  url: "http://127.0.0.1:@PORTA@"
+  consulta: "select regiao, count(*) as total from vendas group by regiao"
+
+pipeline spark:
+  passos:
+    # builtin spark_sql com agregacao: cria a 1a sessao e repassa o conf
+    - total = spark_sql "http://127.0.0.1:@PORTA@", "select count(*) as total from vendas", conf: {"spark.master": "local[2]"}
+    - imprimir "total:", total[0].total
+    # fonte spark: SELECT simples -> tabela (reusa a sessao idle)
+    - linhas = ler vendas
+    - imprimir "linhas:", tamanho linhas
+    - para cada c em linhas:
+        imprimir "linha:", c.id, c.nome
+    # fonte spark com agregacao
+    - regs = ler por_regiao
+    - para cada r em regs:
+        imprimir "regiao:", r.regiao, r.total
+    # spark_executar: codigo verbatim, saida em texto
+    - saida = spark_executar "http://127.0.0.1:@PORTA@", "1 + 1"
+    - imprimir "executar:", saida
+    # SQL invalido: statement em error -> excecao capturavel com a mensagem
+    - tentar:
+        spark_sql "http://127.0.0.1:@PORTA@", "select * from tabela_inexistente"
+    capturar e:
+      imprimir "erro-sql:", e

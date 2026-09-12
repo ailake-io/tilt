@@ -42,6 +42,7 @@
 #include "runtime/mysql.hpp"
 #include "runtime/clickhouse.hpp"
 #include "runtime/elasticsearch.hpp"
+#include "runtime/livy.hpp"
 #include "runtime/pgvector.hpp"
 #include "runtime/weaviate.hpp"
 #include "runtime/pinecone.hpp"
@@ -1171,6 +1172,36 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
     }
     try {
       return rt::es_query(path, Value::texto(c->value->text));
+    } catch (const std::exception& e) {
+      fail(span, std::string(e.what()));
+    }
+  }
+  if (tipo == "spark") {
+    // Spark remoto via Apache Livy (REST): url do servidor Livy + consulta
+    // SQL; opcionais: lingua ("scala" default | "pyspark") e conf da sessao.
+    if (path.empty()) {
+      fail(span, "fonte '" + name + "': falta 'url: \"http://host:8998\"'");
+    }
+    const Item* c = find_field(*decl->block, "consulta");
+    if (!c || !c->value || c->value->kind != ExprKind::TextLit) {
+      fail(span, "fonte '" + name + "': falta 'consulta: \"select ...\"'");
+    }
+    std::string lingua = field_text("lingua");
+    if (lingua.empty()) lingua = "scala";
+    Value conf = Value::nulo();
+    if (const Item* cf = find_field(*decl->block, "conf"); cf && cf->value) {
+      Env cenv;
+      cenv.parent = &root_;
+      conf = eval(*cf->value, cenv);
+      if (conf.kind != ValueKind::Mapa) {
+        fail(span, "fonte '" + name + "': 'conf' deve ser um mapa {...} (conf de sessao Spark)");
+      }
+    }
+    try {
+      Value t = rt::livy_sql(path, c->value->text, lingua,
+                             conf.kind == ValueKind::Mapa ? &conf : nullptr);
+      t.kind = ValueKind::Tabela;
+      return t;
     } catch (const std::exception& e) {
       fail(span, std::string(e.what()));
     }
@@ -3818,6 +3849,44 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
     return Value::nulo();
+  }
+  if (name == "spark_sql" || name == "spark_executar") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span, name + " espera (url, " +
+                           std::string(name == "spark_sql" ? "sql" : "codigo") +
+                           ", [lingua:, conf:]), ex.: " + name +
+                           " \"http://localhost:8998\", \"" +
+                           (name == "spark_sql" ? "select * from vendas" : "1 + 1") + "\"");
+    }
+    std::string lingua = "scala";
+    if (const Value* l = kw.find("lingua")) {
+      if (l->kind != ValueKind::Texto || (l->s != "scala" && l->s != "pyspark")) {
+        fail(call.span, name + ": 'lingua' deve ser \"scala\" ou \"pyspark\"");
+      }
+      lingua = l->s;
+    }
+    Value conf = Value::nulo();
+    if (const Value* cf = kw.find("conf")) {
+      if (cf->kind != ValueKind::Mapa || !cf->map) {
+        fail(call.span, name + ": 'conf' deve ser um mapa {...} (conf de sessao Spark, "
+                               "ex.: { \"spark.jars.packages\": \"...\" })");
+      }
+      conf = *cf;
+    }
+    try {
+      if (name == "spark_sql") {
+        Value t = rt::livy_sql(a[0].s, a[1].s, lingua,
+                               conf.kind == ValueKind::Mapa ? &conf : nullptr);
+        t.kind = ValueKind::Tabela;
+        return t;
+      }
+      return rt::livy_executar(a[0].s, a[1].s, lingua,
+                               conf.kind == ValueKind::Mapa ? &conf : nullptr);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
   }
   // Opcoes {senha:, banco:, tls:} comuns a ler_redis/escrever_redis; senha e
   // banco vencem a URL, tls liga TLS (rediss:// tambem liga).

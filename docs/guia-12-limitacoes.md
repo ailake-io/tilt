@@ -107,7 +107,18 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
   MariaDB, ClickHouse, Elasticsearch/OpenSearch, Redis, Kafka, MongoDB, Qdrant,
-  pgvector, Weaviate, Pinecone, Chroma e S3 rodam.
+  pgvector, Weaviate, Pinecone, Chroma, S3 e Spark (via Livy) rodam.
+- Spark via Livy (`fonte tipo: spark`/`spark_sql`/`spark_executar`): REST/JSON
+  pelo cliente HTTP genérico (subprocesso `curl`) — sessões **não são
+  fechadas** pelo cliente (reuso deliberado: ele lista `GET /sessions` e pega
+  a primeira idle com o `kind` da `lingua:`; o `conf:` só vale na criação e
+  não casa sessão por conteúdo de conf); polling de statement com timeout
+  fixo de ~120s (sem parametrizar intervalo/orçamento); `spark_sql` sempre
+  materializa o resultado inteiro em memória via `toJSON` (sem streaming) e o
+  parse assume array de objetos JSON; `spark_executar` devolve só o
+  `data.text/plain` do último resultado (sem imagens/HTML); sem auth
+  (Kerberos/Bearer), sem HTTPS próprio e sem gerenciamento de fila de
+  statements — Livy sem auth em rede interna é o alvo.
 - Elasticsearch/OpenSearch (`es_buscar`/`es_executar`/`fonte tipo:
   elasticsearch|opensearch`): REST/JSON puro pelo cliente HTTP genérico
   (subprocesso `curl`). `es_buscar` cobre só `_search` (DSL em texto ou mapa)

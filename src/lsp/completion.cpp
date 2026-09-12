@@ -38,12 +38,12 @@ const std::array<std::string_view, 20> kDeclKeywords = {
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 59> kBuiltins = {
+const std::array<std::string_view, 61> kBuiltins = {
     "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
     "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
     "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
     "incorporar", "dividir_texto", "responder", "tensor",   "zeros",   "checar_tilt",
-    "executar_sql",
+    "executar_sql", "spark_sql", "spark_executar",
     "ler_parquet", "escrever_parquet", "ler_delta", "escrever_delta", "anexar_delta",
     "ler_iceberg", "escrever_iceberg", "anexar_iceberg",
     "ler_redis", "escrever_redis", "redis_executar", "redis_lote", "ler_kafka",
@@ -78,7 +78,7 @@ const std::vector<FieldSet>& field_sets() {
        {"dados", "perda", "otimizador", "epocas", "taxa", "taxa_aprendizado", "lote", "verboso"}},
       {"tarefa", {"entrada", "executar"}},
       {"indice", {"embeddings", "armazenamento", "dimensao", "metrica"}},
-      {"fonte", {"tipo", "caminho", "arquivo", "url", "consulta", "formato", "brokers", "topico"}},
+      {"fonte", {"tipo", "caminho", "arquivo", "url", "consulta", "formato", "brokers", "topico", "lingua", "conf"}},
       {"pipeline", {"passos", "agenda", "ao_falhar"}},
       {"fluxo", {"entrada", "passos"}},
       {"ferramenta", {"descricao", "entrada", "executar"}},
@@ -267,6 +267,12 @@ const std::vector<BuiltinDoc>& builtin_docs() {
       {"http_post_json", "http_post_json(url, corpo, cabecalhos?)", "url,corpo,cabecalhos",
        "Envia um valor como JSON (POST) e retorna o JSON da resposta.",
        "http_post_json url, {nome: \"tilt\"}"},
+      {"spark_sql", "spark_sql(url, sql, lingua?, conf?)", "url,sql,lingua,conf",
+       "Executa Spark SQL via Apache Livy e retorna a tabela de linhas.",
+       "spark_sql \"http://localhost:8998\", \"select * from vendas\""},
+      {"spark_executar", "spark_executar(url, codigo, lingua?, conf?)", "url,codigo,lingua,conf",
+       "Executa codigo (Scala/PySpark) via Apache Livy e retorna o texto do resultado.",
+       "spark_executar \"http://localhost:8998\", \"spark.range(10).count()\""},
   };
   return docs;
 }

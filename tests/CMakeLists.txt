@@ -107,6 +107,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/spark_interop.tilt)
 
 add_test(
+  NAME livy
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/livy_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/livy_spark.tilt)
+
+add_test(
   NAME duckdb
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/duckdb_test.sh
           $<TARGET_FILE:tilt>

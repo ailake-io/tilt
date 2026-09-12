@@ -641,6 +641,10 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       {"checar_tilt", 1, {TypeKind::Texto}, {}, TypeKind::Mapa, nullptr},
       // conectores
       {"executar_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown, nullptr},
+      {"spark_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Tabela,
+       "spark_sql \"http://localhost:8998\", \"select * from vendas\""},
+      {"spark_executar", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Texto,
+       "spark_executar \"http://localhost:8998\", \"1 + 1\""},
       {"escrever_kafka", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"ler_kafka", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
       {"escrever_redis", 3, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Nulo, nullptr},

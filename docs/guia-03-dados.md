@@ -796,6 +796,66 @@ pipeline pedidos:
   (section kind 1) são aceitas, mas `batchSize`/`max` de 100 cabem na section
   kind 0 de qualquer forma.
 
+## Spark via Livy
+
+`fonte tipo: spark` e os builtins `spark_sql`/`spark_executar` falam REST/JSON
+com um servidor [Apache Livy](https://livy.apache.org/) (`http://host:8998`) —
+a ponte zero-link para **Spark SQL** e para executar código num cluster Spark
+sem linkar nada: o cliente HTTP genérico do runtime (subprocesso `curl`, mesmo
+padrão do ClickHouse/Elasticsearch/S3) implementa o subset do Livy: criação de
+sessão (`POST /sessions` com `{kind, conf}`), listagem (`GET /sessions`),
+statements (`POST /sessions/{id}/statements`) e polling de estado
+(`GET /sessions/{id}/statements/{st}` até `available`/`error`, timeout ~120s).
+
+```tilt
+fonte vendas:
+  tipo: spark
+  url: "http://localhost:8998"
+  consulta: "select id, nome from vendas order by id"
+
+fonte agregada:
+  tipo: spark
+  url: "http://localhost:8998"
+  lingua: "pyspark"            # default "scala" (sessão Livy kind "spark")
+  conf: {"spark.master": "yarn", "spark.jars.packages": "org.example:lib:1.0"}
+
+pipeline etl:
+  passos:
+    - linhas = ler vendas                       # SELECT -> tabela
+    - total = spark_sql "http://localhost:8998", "select count(*) as total from vendas"
+    - saida = spark_executar "http://localhost:8998", "spark.range(100).filter(\"id % 2 = 0\").count()"
+```
+
+| Campo/opção | Efeito |
+|---|---|
+| `url:` | endereço do servidor Livy (`http://host:8998`) |
+| `consulta:` | SQL `SELECT` (Spark SQL) — o cliente envolve em `spark.sql("""...""")` e parseia o `toJSON` da resposta em `tabela` |
+| `lingua:` | `"scala"` (default; sessão Livy `kind: "spark"`) ou `"pyspark"` (sessão `kind: "pyspark"`; wrapper em Python) |
+| `conf:` | mapa de conf da **sessão** (ex.: `spark.master`, `spark.jars.packages`); só vale na criação |
+
+- `spark_sql url, sql, [lingua:, conf:]` devolve `tabela` (lista de objetos
+  JSON → linhas de mapa; números, textos e nulos chegam tipados). O SQL roda
+  como `spark.sql("""<sql>""").toJSON.collectAsList().toString()` em Scala
+  (ou o equivalente `json.dumps` sobre `toJSON().collect()` em PySpark).
+- `spark_executar url, codigo, [lingua:, conf:]` envia o código **verbatim**
+  (Scala ou Python conforme `lingua:`) e devolve o texto do output do
+  statement (`texto`) — útil para pipelines `RDD`/`Dataset`, `CREATE TABLE`,
+  `INSERT`, etc.
+- **Sessões não são fechadas**: criar uma sessão faz o driver Spark subir do
+  zero, então o cliente lista `GET /sessions` e **reutiliza a primeira sessão
+  idle com o `kind` correspondente**; só cria nova quando não há nenhuma. A
+  sessão fica no pool do Livy (que derruba por inatividade conforme o conf do
+  servidor, ex.: `livy.server.session.timeout`). O `conf:` só é enviado no
+  `POST /sessions` de criação.
+- Erros: statement em `error` vêm como exceção `livy: <ename>: <evalue>`
+  (mensagem do Spark), capturável com `tentar`/`capturar`; sessão que morre ao
+  iniciar e timeout de polling (~120s) também são reportados.
+- Autenticação: Livy sem auth (rede interna) nesta fase; sem Kerberos/HTTPS
+  próprio do cliente.
+- Coberto por `tests/livy_test.sh` (mock REST em python3 com o subset acima —
+  criação/listagem de sessões, statements com polling e output simulando
+  `toJSON`, reuso da sessão idle entre execuções).
+
 ## Índice vetorial no Qdrant
 
 `indice` com `armazenamento: "qdrant://host:porta/colecao"` delega
