@@ -45,14 +45,19 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
   por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
-  RLE) e **listas de escalares** (anotação LIST, elementos sempre required na
-  escrita). A leitura cobre múltiplos row groups, campos REQUIRED/OPTIONAL/
+  RLE), **listas de escalares** (anotação LIST, elementos sempre required na
+  escrita) e **structs** (Fase 12-5a: `mapa` vira grupo STRUCT recursivo —
+  escalares, listas de escalares e structs aninhados; struct nulo por linha
+  vira grupo OPTIONAL; leitura distingue struct nulo de struct definido com
+  todos os campos nulos pelos definition levels — validado com pyarrow nos
+  dois sentidos). A leitura cobre múltiplos row groups, campos REQUIRED/OPTIONAL/
   REPEATED (listas aninhadas de escalares, inclusive o element OPTIONAL que o
   pyarrow grava — erro claro apenas para elemento nulo de fato), páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
   gzip/deflate (zlib via `dlopen`) e **snappy** (codec próprio, sem dlopen).
   Ainda fora do subconjunto: dictionary encoding na escrita, listas de
-  listas/structs, elementos nulos em listas e tipos físicos fora de
+  listas, listas de structs, elementos nulos em listas, structs com
+  `field_ids` explícitos (caminho Iceberg) e tipos físicos fora de
   BOOLEAN/INT64/DOUBLE/BYTE_ARRAY.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
@@ -64,7 +69,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `ler_delta ... onde: {...}` (igualdade; predicados em coluna de partição pulam
   arquivos inteiros pelo log, o resto filtra linhas). Ainda assim: valor nulo
   em coluna de partição e valores com `/` não são suportados (erro claro, sem
-  `__HIVE_DEFAULT_PARTITION__` nem escaping) e não há checkpoints; a leitura
+  `__HIVE_DEFAULT_PARTITION__` nem escaping) e checkpoint tilt-native a cada
+  10 versões (`<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` em
+  _delta_log, ignorados por leitores externos; sem `_last_checkpoint` padrão
+  ainda); a leitura
   herda o subconjunto do Parquet acima. **Evolução de schema (fase 27)**: o
   append aceita colunas a mais — toda coluna antiga presente (ordem livre),
   coluna nova entra nullable no fim do `schemaString` com `metaData` novo no
@@ -78,7 +86,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   location `file://` apenas (o tilt grava os arquivos localmente e commita as
   locations) e single-writer como no Hadoop; sobrescrita de tabela existente
   mantém o partition spec (divergência → erro claro). Sem as env vars o modo
-  Hadoop continua, byte a byte. Demais limites: a
+  Hadoop continua, byte a byte. Na direção inversa, `tilt servir-catalogo`
+  (fase 30) expõe as tabelas Hadoop locais como **catálogo REST server
+  read-only** (subconjunto de leitura v1: config/namespaces/tables/loadTable +
+  endpoint de arquivos com proteção contra path traversal; createTable/commit →
+  501) — o metadata servido reescreve as locations para URLs do servidor, mas
+  para o Spark/Hadoop (cujo `fs.http` reporta length -1, rejeitado pelo leitor
+  Avro do Iceberg) há o modo `--sem-reecrita-manifests`, em que manifest lists,
+  manifests e data files seguem `file://` absolutos (o
+  `tests/spark_catalog_test.sh` monta o diretório no mesmo path dentro do
+  container). Demais limites: a
   leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
   escritores sem garantia além dele) e single-writer (sem locks nem optimistic
   concurrency);
@@ -93,17 +110,25 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   do append gravados com esses field-ids; leitura projeta nulo nas linhas dos
   arquivos antigos (union-by-name por field-id/nome — validado com pyiceberg).
   Remover coluna ou mudar o tipo de uma existente → erro claro.
-  Partições suportam **uma ou mais colunas** (composta: `particionar_por:
-  ["c1", "c2"]`, field-ids 1000, 1001, ...) e só com transform `identity`
-  (layout `<c1>=<v1>/<c2>=<valor>/00000-0-<uuid>.parquet` sem as colunas no
-  parquet, record `partition` no manifest e colunas reidratadas na leitura com
-  conversão de tipo), com **pruning** em `ler_iceberg ... onde: {...}`
-  (igualdade; predicados em coluna de partição pulam data files inteiros pelos
-  manifests, o resto filtra linhas). Mas: valor nulo em coluna de partição,
-  valores com `/` e coluna repetida não são suportados (erro claro, sem
-  escaping), não há partitions summary nos manifests e data sequence numbers
-  são sempre 0. A estrutura escrita (metadata, manifest list, manifest e
-  parquet com field-ids) carrega no **pyiceberg**.
+   Partições suportam **uma ou mais colunas** (composta: `particionar_por:
+   ["c1", "c2"]`, field-ids 1000, 1001, ...) com transform `identity`
+   (layout `<c1>=<v1>/<c2>=<valor>/00000-0-<uuid>.parquet` sem as colunas no
+   parquet, record `partition` no manifest e colunas reidratadas na leitura com
+   conversão de tipo) e **`bucket[N]`** (Fase 12-5a: `particionar_por:
+   ["bucket[4](id)"]`, murmur3 da spec, campo `id_bucket_4` int, coluna de
+   origem mantida no parquet, poda por hash + residual exato — validado com
+   pyiceberg e referência mmh3), com **pruning** em `ler_iceberg ... onde:
+   {...}` (igualdade; predicados em coluna de partição pulam data files
+   inteiros pelos manifests, o resto filtra linhas). Outros transforms
+   (`truncate`, `year`, `month`, `day`, `hour`) são aceitos na leitura sem
+   poda por valor. **Deletes (Fase 12-5a)**: `apagar_iceberg` (position e
+   equality) + leitura filtrada; pyiceberg aplica os position deletes do
+   tilt (equality deletes o próprio pyiceberg ainda não suporta — upstream).
+   Mas: valor nulo em coluna de partição,
+   valores com `/` e coluna repetida não são suportados (erro claro, sem
+   escaping), não há partitions summary nos manifests e data sequence numbers
+   são sempre 0. A estrutura escrita (metadata, manifest list, manifest e
+   parquet com field-ids) carrega no **pyiceberg**.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
   MariaDB, ClickHouse, Elasticsearch/OpenSearch, Redis, Kafka, MongoDB, Qdrant,
@@ -144,7 +169,11 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   uma conexão (com handshake `isMaster`) por chamada e payload inteiro em
   memória; banco por `MONGO_URL` (path) ou opção `banco:`.
 - Kafka (`ler_kafka`/`escrever_kafka`/`fonte tipo: kafka`): wire protocol
-  0.9-era — consumer groups com rebalanceamento `"roundrobin"` real (o líder
+  0.9-era — produce com `acks=-1` (all) + retry (3x em 5/6/7 com refresh de
+  metadata) + `chave:` + probe best-effort de `InitProducerId` (API 22, com
+  fallback legado em broker 0.9-era); RecordBatch EOS completo (Produce v3 +
+  CRC32C) e transações multi-partição ficam para a Fase 12-4b com validação
+  contra broker real. Consumer groups com rebalanceamento `"roundrobin"` real (o líder
   calcula o assignment e o SyncGroup o distribui; heartbeat a cada 3s em
   thread; rejoin com retomada do offset commitado em
   RebalanceInProgress/IllegalGeneration), porém a detecção de entrada/saída de
@@ -219,11 +248,14 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
   strings); nome de coleção restrito a `[a-z0-9_]`.
-- Streaming com `janela:`: buffer e relógio da última execução ficam só em
-  memória (não há repartição de estado entre réplicas nem checkpoint
-  distribuído); o offset persiste em `<fonte>.tilt-offset` apenas para janela
-  de contagem sobre fonte de arquivo (csv/json) — Kafka, Mongo etc. não têm
-  checkpoint local; sem `grupo:` na fonte Kafka ela é relida do início por
+- Streaming com `janela:`: buffer fica em memoria; o offset persiste em
+  `<fonte>.tilt-offset` para fonte de arquivo (csv/json) — com
+  `TILT_CHECKPOINT_DIR` o arquivo mora no diretorio compartilhado (checkpoint
+  distribuido file-based) e janelas de tempo/throttle tambem persistem
+  `last_run`; eleicao de lider por lease em arquivo (`TILT_LEADER_LEASE`,
+  `TILT_LEADER_TTL`) garante escritor unico no `--agendar` multi-replica.
+  Backends S3/Kafka de checkpoint e RecordBatch EOS ficam para a Fase 12-4b.
+  Kafka, Mongo etc. sem `grupo:` nao têm checkpoint local; sem `grupo:` na fonte Kafka ela é relida do início por
   inteiro a cada tick, o que não escala para tópicos grandes (com `grupo:` o
   checkpoint é o offset commitado no broker).
 - `--agendar` entra em loop real de agenda, mas o parser cron é numérico

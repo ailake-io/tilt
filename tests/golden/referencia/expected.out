@@ -33,7 +33,7 @@ BUILTINS
   imprimir registrar env tamanho contar somar media min max intervalo dividir
   ler_csv escrever_csv ler_json escrever_json ler_parquet escrever_parquet
   ler_delta escrever_delta anexar_delta
-  ler_iceberg escrever_iceberg anexar_iceberg
+  ler_iceberg escrever_iceberg anexar_iceberg apagar_iceberg
   ler_redis escrever_redis redis_executar redis_lote
   ler_kafka escrever_kafka
   mongo_inserir mongo_buscar mongo_atualizar mongo_deletar mongo_criar_indice
@@ -52,6 +52,8 @@ BUILTINS
 CLI
   tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
   tilt servir <a> [--porta N] [--requisicoes N] [--threads N]
+  tilt servir-catalogo <dir> [--porta N] [--prefixo P]  (Iceberg REST read-only;
+                                     --sem-reecrita-manifests p/ Spark/Hadoop)
   tilt compilar <a> --saida <bin> [--asm] [--arch x86_64|arm64]
   tilt tokens <a>   referencia   versao
 

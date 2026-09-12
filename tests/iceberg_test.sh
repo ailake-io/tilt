@@ -541,4 +541,127 @@ done
 
 [ "$fail_codec" = 0 ] || exit 1
 
+# --- 4. bucket[N] + deletes (Fase 12-5a) ----------------------------------------
+cat > "$tmp/bucket_deletes.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - t = [{ id: 1, v: "a" }, { id: 2, v: "b" }, { id: 3, v: "c" }, { id: 4, v: "d" }, { id: 5, v: "e" }]
+    - escrever_iceberg t, "vendas_bkt", particionar_por: ["bucket[4](id)"]
+    - tudo = ler_iceberg "vendas_bkt"
+    - imprimir "total: ", tamanho tudo
+    - so1 = ler_iceberg "vendas_bkt", onde: { id: 1 }
+    - imprimir "id1: ", tamanho so1
+    - n = apagar_iceberg "vendas_bkt", onde: { id: 2 }
+    - imprimir "apagadas: ", n
+    - resto = ler_iceberg "vendas_bkt"
+    - imprimir "restam: ", tamanho resto
+    - n2 = apagar_iceberg "vendas_bkt", onde: { v: "c" }, modo: "igualdade"
+    - imprimir "apagadas2: ", n2
+    - resto2 = ler_iceberg "vendas_bkt"
+    - imprimir "restam2: ", tamanho resto2
+TILTEOF
+out_bkt=$(cd "$tmp" && "$BIN" executar bucket_deletes.tilt)
+printf '%s\n' "$out_bkt"
+
+fail_bkt=0
+confere_bkt() {
+  echo "$out_bkt" | grep -qE "$1" || { echo "saida (bucket/deletes) sem /$1/"; fail_bkt=1; }
+}
+confere_bkt "total: +5"
+confere_bkt "id1: +1"
+confere_bkt "apagadas: +1"
+confere_bkt "restam: +4"
+confere_bkt "apagadas2: +1"
+confere_bkt "restam2: +3"
+
+# pyiceberg valida o spec bucket, o hash (murmur3) e o position delete
+python3 - "$tmp/vendas_bkt" <<'PYEOF'
+import glob
+import sys
+
+
+class Erro(Exception):
+    pass
+
+
+try:
+    from pyiceberg.table import StaticTable
+    from pyiceberg.transforms import BucketTransform
+    from pyiceberg.types import LongType
+except ImportError:
+    print("pyiceberg ausente; validacao de bucket/deletes pulada")
+    sys.exit(0)
+
+tab = sys.argv[1]
+metas = sorted(glob.glob(tab + "/metadata/v*.metadata.json"))
+if not metas:
+    raise Erro("metadata v<N>.metadata.json ausente em " + tab)
+
+# spec bucket[4] em id, campo id_bucket_4
+t0 = StaticTable.from_metadata(metas[0])
+fields = list(t0.metadata.spec().fields)
+if len(fields) != 1 or fields[0].name != "id_bucket_4":
+    raise Erro("spec bucket divergente: %r" % [(f.name, str(f.transform)) for f in fields])
+if "bucket[4]" not in str(fields[0].transform).lower().replace(" ", ""):
+    raise Erro("transform bucket divergente: %r" % (fields[0].transform,))
+
+# hash do tilt == murmur3 da spec (converte via to_arrow + bucket manual)
+import struct
+
+try:
+    import mmh3
+except ImportError:
+    print("mmh3 ausente; validacao do hash pulada")
+    sys.exit(0)
+
+
+def bucket4_long(x):
+    return mmh3.hash(struct.pack("<q", x), signed=True) % 4
+
+
+import os
+
+import pyarrow.parquet as pq
+
+vistos = {}
+for root, _dirs, files in os.walk(os.path.join(tab, "data")):
+    for fn in files:
+        if not fn.endswith(".parquet") or "deletes" in fn:
+            continue
+        rel = os.path.relpath(os.path.join(root, fn), os.path.join(tab, "data"))
+        parte = os.path.dirname(rel)
+        assert parte.startswith("id_bucket_4="), parte
+        b_arquivo = int(parte.split("=")[1])
+        for r in pq.read_table(os.path.join(root, fn)).to_pylist():
+            b_ref = bucket4_long(r["id"])
+            if b_arquivo != b_ref:
+                raise Erro("id %d no bucket %d, referencia murmur3=%d"
+                           % (r["id"], b_arquivo, b_ref))
+            vistos[r["id"]] = b_arquivo
+if sorted(vistos) != [1, 2, 3, 4, 5]:
+    raise Erro("ids nos data files divergem: %r" % sorted(vistos))
+print("murmur3: layout bucket do tilt confere com a referencia")
+
+# snapshot v1 = apos o position delete (id 2 fora): pyiceberg aplica o delete
+t1 = StaticTable.from_metadata(metas[1])
+ids1 = sorted(r["id"] for r in t1.scan().to_arrow().to_pylist())
+if ids1 != [1, 3, 4, 5]:
+    raise Erro("position delete nao aplicado pelo pyiceberg: %r" % ids1)
+
+# snapshot final = apos o equality delete (pyiceberg nao suporta equality —
+# https://github.com/apache/iceberg/issues/6568 — mas deve RECONHECER o nosso
+# manifest como equality delete, nao falhar no parse; o tilt ja conferiu
+# restam2: 3 acima)
+t2 = StaticTable.from_metadata(metas[-1])
+try:
+    plan = t2.scan().to_arrow()
+    raise Erro("pyiceberg aplicou equality deletes (suporte novo? atualize o teste)")
+except ValueError as e:
+    if "equality deletes" not in str(e):
+        raise Erro("erro inesperado no snapshot com equality: %s" % e)
+print("pyiceberg: spec bucket[4], murmur3 e position delete validados")
+PYEOF
+
+[ "$fail_bkt" = 0 ] || exit 1
+
 echo "iceberg_test ok"

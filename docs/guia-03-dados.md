@@ -96,16 +96,30 @@ os `N` elementos do lote, mas apenas `N - M` saem do buffer — os `M` últimos
 repetem no início do próximo lote (janela deslizante clássica). Ex.: fonte
 `1..5`, `janela: 3`, `sobreposicao: 1` → lotes `[1,2,3]` e `[3,4,5]`.
 
-**Offset persistente**: em janela de contagem sobre fonte de arquivo
+**Offset persistente**: em janela de contagem ou de tempo sobre fonte de arquivo
 (`tipo: csv`/`json`), o offset fica gravado em `<caminho-da-fonte>.tilt-offset`
-(JSON com um mapa por pipeline, p. ex. `{"contagens": 120}` — a chave é o
-par pipeline + fonte, então pipelines diferentes sobre a mesma fonte não
-interferem). O arquivo é gravado atomicamente (tmp + rename) sempre que o
+(JSON com um mapa por pipeline; contagem usa o formato legado numero-puro, p.
+ex. `{"contagens": 120}`, e tempo/throttle guardam `{offset, last_run}` — a
+chave é o par pipeline + fonte, então pipelines diferentes sobre a mesma fonte
+não interferem). O arquivo é gravado atomicamente (tmp + rename) sempre que o
 offset avança, e lido na inicialização — reiniciar o processo continua de onde
 parou, sem reprocessar elementos. Defina `TILT_JANELA_ESTADO=memoria` para
 voltar ao comportamento antigo (só memória, sem arquivo — útil para testes e
 pipelines efêmeros). Fonte Kafka com `grupo:` não usa arquivo: o checkpoint é
 o commit de offsets do grupo no broker.
+
+**Checkpoint distribuído (Fase 12-4)**: com `TILT_CHECKPOINT_DIR=<dir
+compartilhado>` (NFS/EFS), o `.tilt-offset` mora nesse diretório (mesmo
+basename) em vez do lado da fonte — réplicas diferentes passam a compartilhar
+o offset. Combine com a eleição de líder abaixo para ter escritor único.
+`TILT_CHECKPOINT_DIR=s3://...` ou `kafka:...` falham com erro claro (backends
+S3/Kafka ficam para a Fase 12-4b).
+
+**Eleição de líder (Fase 12-4)**: com `TILT_LEADER_LEASE=<path do lease>` (em
+filesystem compartilhado) + `TILT_LEADER_TTL=<segundos, default 15>`, cada tick
+do `--agendar` tenta o lease (criação `O_EXCL`; takeover quando expirado);
+quem não é líder pula o tick com log `sem lideranca (...)`. Sem a env, o
+comportamento é single-replica de sempre.
 
 Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
 (a janela "fecha" na primeira execução). Durações aceitas: `"Ns"`, `"Nmin"`,
@@ -264,7 +278,12 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   sem dictionary e com colunas obrigatórias;
 - limitações: `escrever_delta` sobrescreve a tabela (recria a versão 0);
   `anexar_delta` pressupõe um único escritor (sem locks nem optimistic
-  concurrency), sem checkpoints, sem transações concorrentes.
+  concurrency), sem transações concorrentes. **Checkpoint tilt-native (Fase
+  12-5a)**: a cada 10 versões o append materializa
+  `_delta_log/<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` e a leitura
+  usa o checkpoint mais recente como base (só os JSONs maiores são
+  repassados); arquivos ignorados por delta-rs/Spark. O `_last_checkpoint`
+  padrão fica para a Fase 12-5b.
 
 ## Iceberg (catálogo Hadoop)
 
@@ -299,7 +318,7 @@ os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
   Spark), snapshot e `partition-specs` com `default-spec-id: 0`; data files,
   manifests e manifest lists são referenciados por `file://` com **caminho
   absoluto** (legível de qualquer diretório de trabalho);
-- partições (1ª passada): `particionar_por: "coluna"` (ou **partição
+- partições: `particionar_por: "coluna"` (ou **partição
   composta** `particionar_por: ["estado", "ano"]`) aceita texto, inteiro,
   decimal ou lógico e cria um partition spec **identity** com um campo por
   coluna — `partition-spec` legado (lista de nomes) + `partition-specs` com
@@ -312,6 +331,22 @@ os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
   convertendo pelo tipo do schema. Valor nulo em coluna de partição, texto
   com `/` e coluna repetida ou inexistente falham com erro claro (sem
   `__HIVE_DEFAULT_PARTITION__` nem escaping);
+- **partição bucket (Fase 12-5a)**: `particionar_por: ["bucket[4](id)"]`
+  (coluna inteira/texto/lógica) cria o campo `id_bucket_4` com transform
+  `bucket[4]` (murmur3_x86_32 da spec, validado contra referência e
+  pyiceberg); layout `id_bucket_4=<b>/00000-0-<uuid>.parquet`, record
+  `partition` com o inteiro e coluna de origem **mantida no parquet**.
+  `ler_iceberg ... onde: { id: 5 }` poda pelo hash (mais filtro residual
+  exato contra colisões). Outros transforms (`truncate`, `year`, `month`,
+  `day`, `hour`) são aceitos na leitura de tabelas externas sem poda por
+  valor;
+- **deletes (Fase 12-5a)**: `apagar_iceberg "dir", onde: { id: 2 }` escreve um
+  position-delete file (`{file_path, pos}`) + snapshot `operation: "delete"`
+  e devolve as linhas apagadas; `modo: "igualdade"` escreve equality deletes
+  (linhas-chave). A leitura aplica ambos (posição por índice físico,
+  igualdade por match em todas as colunas em comum, exigindo ao menos 1).
+  Um delete file por partição atingida, com o record `partition`
+  correspondente — pyiceberg aplica os position deletes do tilt;
 - `anexar_iceberg` valida o schema **por nome** (todas as colunas do metadata
   corrente presentes na tabela anexada, tipos em comum iguais, ordem livre) e
   suporta **evolução de schema**: coluna nova entra `required: false` no fim
@@ -350,9 +385,10 @@ os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
   partição (`contains_null`/`lower_bound`/`upper_bound`, record `r508`) do
   manifest list;
 - limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
-  local, sem JDBC), só transform identity, lê o que o tilt escreve (sem
-  garantia de tabelas de outros escritores) e single-writer (sem locks nem
-  optimistic concurrency).
+  local, sem JDBC), lê o que o tilt escreve (sem garantia de tabelas de
+  outros escritores além do subconjunto validado) e single-writer (sem locks
+  nem optimistic concurrency). Sem escrita de equality deletes pelo REST e
+  sem `apagar_iceberg` no modo REST.
 
 ### Iceberg REST catalog (opt-in, fase 29)
 
@@ -405,6 +441,72 @@ single-writer (sem locks no catálogo) e 1ª passada: sem namespaces além de
 `default`, sem paginação, sem OAuth e com location `file://` apenas. Fluxo
 completo coberto por `tests/iceberg_rest_test.sh` (mock HTTP + validação do
 metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
+
+### `tilt servir-catalogo`: catálogo REST server (fase 30)
+
+`tilt servir-catalogo <diretorio-raiz> [--porta N] [--prefixo P]` (porta
+default **8191**) sobe um **servidor Iceberg REST Open API read-only** sobre as
+tabelas Iceberg locais escritas pela tilt (formato Hadoop, subseção acima) —
+uma engine como Spark SQL configura um `SparkCatalog` tipo `rest` com a URI
+apontando para o tilt e lê as tabelas pelo nome, sem HadoopCatalog local:
+
+```
+tilt servir-catalogo /dados/iceberg --porta 8191
+# tabelas servidas (2):
+#   default.tabela_iceberg
+#   default.vendas_part
+# servir-catalogo: escutando http://127.0.0.1:8191/v1 (root: /dados/iceberg)
+```
+
+```python
+spark = (SparkSession.builder
+         .config("spark.sql.catalog.tiltcat", "org.apache.iceberg.spark.SparkCatalog")
+         .config("spark.sql.catalog.tiltcat.type", "rest")
+         .config("spark.sql.catalog.tiltcat.uri", "http://<host>:8191")
+         .getOrCreate())
+df = spark.read.table("tiltcat.default.tabela_iceberg")
+```
+
+Tabela Iceberg detectada = subdiretório direto do root que contém `metadata/`;
+todas vivem no namespace `default`. Subconjunto v1 implementado (prefixo
+configurável via `--prefixo`, default `/v1`):
+
+| Rota | Resposta |
+|---|---|
+| `GET /v1/config` | `{"defaults":{},"overrides":{}}` |
+| `GET /v1/namespaces` | `[["default"]]` |
+| `GET /v1/namespaces/default` | namespace + properties vazios |
+| `GET /v1/namespaces/default/tables` | identifiers de todas as tabelas |
+| `GET /v1/namespaces/default/tables/<tabela>` | loadTable: `metadata-location` + `metadata` do `v<N>.metadata.json` mais recente (mesma regra do modo Hadoop: maior versão parseada do nome) + `config` |
+| `GET/HEAD /v1/files/<rel-ao-root>` | bytes do arquivo (metadata.json, manifest `.avro`, data `.parquet`); a forma legada `?path=<abs>` também é aceita |
+
+O loadTable **reescreve** as locations `file://<abs>` do metadata servido
+(`snapshots[].manifest-list`) para URLs deste servidor
+(`http://host:porta/v1/files/<caminho-relativo-ao-root>`) — usando o header
+`Host` da requisição, para o cliente resolver o mesmo endereço que usou no
+loadTable. A forma path-style (em vez de `?path=`) é de propósito: o `Path` do
+Hadoop, usado pelo cliente Spark, re-encodea query strings. Assim o cliente
+baixa metadata e manifest lists via HTTP (Iceberg aceita locations http(s) em
+manifests/data); os arquivos servidos pelo `/v1/files` são **byte a byte** os
+arquivos locais. O endpoint valida que o path resolvido (canonicalização real,
+com symlinks) fica **dentro do diretório-raiz** — path traversal (`../`,
+symlink para fora) recebe 403.
+
+Ressalva engines Hadoop/Spark (1ª passada): o `fs.http` do Hadoop reporta
+`getFileStatus().getLen() == -1` e o leitor Avro do Iceberg rejeita
+`length < 4` sem ler o arquivo (`InvalidAvroMagicException`) — então, para o
+Spark ler manifest lists pelo FileSystem, suba com **`--sem-reecrita-manifests`**
+(mantém `file://` nas manifest-lists; o caller precisa acessar esses arquivos
+locais, ex.: montando o diretório no mesmo path — como faz
+`tests/spark_catalog_test.sh`). O `metadata-location` continua servido por
+HTTP em todos os casos, e o restante do protocolo REST é idêntico. É **read-only** na 1ª passada: `createTable`/`commit`
+(POST `…/transactions`)/HEAD de tabela respondem **501** com mensagem clara,
+tabela ou rota inexistente respondem 404 (`NoSuchTableException` /
+`NotFoundException`). Coberto por `tests/iceberg_catalog_test.sh` (cliente
+urllib exercendo o subconjunto + traversal + read-only) e validado com
+**Spark 3.5 real** via catálogo REST em `tests/spark_catalog_test.sh` (container
+`apache/spark:3.5.3` + `iceberg-spark-runtime`, `--network host` e o dir montado
+no mesmo path absoluto — manifests/data continuam `file://` absolutos).
 
 ## Bancos relacionais (SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse)
 
@@ -665,12 +767,18 @@ pipeline eventos:
     - novas = ler_kafka "pedidos", { grupo: "etl", max: 100 }
 ```
 
-- `escrever_kafka topico, valor, {particao: N}`: produce com
-  `required_acks=1`; `texto` vai bruto, demais valores são serializados com
-  `json_dump`. `particao` é opcional (default 0). O cliente resolve o líder
-  da partição via metadata e conecta nele. `{tls: verdadeiro}` liga TLS
-  (todas as conexões da chamada: metadata, produce/fetch e coordenação de
-  grupo; ver nota de TLS na seção Redis).
+- `escrever_kafka topico, valor, {particao:, chave:, acks:, tentativas:, idempotente:}`:
+  produce com `acks=-1` (all, default; `acks: 1` volta ao modo leader) e retry
+  (default 3 tentativas em erros retriáveis 5/6/7 com refresh de metadata);
+  `texto` vai bruto, demais valores são serializados com `json_dump`.
+  `particao` é opcional (default 0); `chave:` (default vazio = NULL) envia a
+  chave do message set (compactação/dedup downstream). `idempotente:` (default
+  verdadeiro) faz probe de `InitProducerId` (API 22) como base da sequência por
+  partição, com fallback legado quando o broker é 0.9-era — o RecordBatch EOS
+  completo (Produce v3 + CRC32C + transações) fica para a Fase 12-4b. O cliente
+  resolve o líder da partição via metadata e conecta nele. `{tls: verdadeiro}`
+  liga TLS (todas as conexões da chamada: metadata, produce/fetch e coordenação
+  de grupo; ver nota de TLS na seção Redis).
 - `ler_kafka topico, {desde:, max:, broker:, tls:}`: stateless — devolve `lista`
   de `texto` na ordem do log. `desde: "inicio"` (default) lê do earliest;
   `"fim"` lê do high watermark (só mensagens novas). `max` limita a

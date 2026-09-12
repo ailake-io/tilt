@@ -55,9 +55,12 @@ add_library(tilt_core STATIC
   src/runtime/parquet.cpp
   src/runtime/delta.cpp
   src/runtime/iceberg.cpp
+  src/runtime/iceberg_catalog_server.cpp
   src/runtime/qdrant.cpp
   src/runtime/redis.cpp
   src/runtime/kafka.cpp
+  src/runtime/leader.cpp
+  src/runtime/checkpoint.cpp
   src/runtime/mongo.cpp
   src/runtime/tls.cpp
   src/runtime/s3.cpp

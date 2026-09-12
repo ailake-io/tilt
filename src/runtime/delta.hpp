@@ -35,6 +35,13 @@ namespace tilt::rt {
 //   leitura (union-by-name) projeta nulo nas linhas deles. Remover coluna ou
 //   mudar o tipo de uma existente -> erro claro ("evolucao de schema
 //   suporta apenas adicao de colunas").
+// - checkpoint tilt-native (Fase 12-5a): a cada 10 versoes o append
+//   materializa `<versao>.checkpoint.parquet` (colunas caminho,
+//   particao_json, tamanho, mtime) + `<versao>.checkpoint.meta.json`
+//   (version, schemaString, partitionColumns) em _delta_log; a leitura usa o
+//   checkpoint mais recente como base e repassa so os JSONs maiores que ele.
+//   Arquivos ignorados por leitores externos (delta-rs/Spark seguem pelo
+//   replay dos JSONs); o `_last_checkpoint` padrao fica para a Fase 12-5b.
 // - leitura aplica o log em ordem de versao (add/remove) e concatena os
 //   parquet listados. Sem transacoes concorrentes.
 void delta_write(const std::string& dir, const Value& tabela,

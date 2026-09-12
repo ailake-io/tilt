@@ -381,11 +381,17 @@ BrokerAddr lider_addr(const std::string& topico, std::int32_t particao, Metadata
 
 // MessageSet v0: offset(int64), message_size(int32), message
 // (crc(int32) do corpo, magic(int8), attributes(int8), key BYTES, value BYTES).
-std::string encode_message(const std::string& valor) {
+// `chave` vazia = key NULL (comportamento legado); caso contrario a chave e
+// enviada e permite compactacao/dedup downstream.
+std::string encode_message(const std::string& valor, const std::string& chave = "") {
   std::string body;
   put_i8(body, 0);    // magic v0
   put_i8(body, 0);    // attributes (sem compressao)
-  put_i32(body, -1);  // key = NULL
+  if (chave.empty()) {
+    put_i32(body, -1);  // key = NULL
+  } else {
+    put_bytes(body, chave);
+  }
   put_bytes(body, valor);
   std::string msg;
   put_i32(msg, static_cast<std::int32_t>(crc32_ieee(body)));
@@ -463,18 +469,17 @@ std::vector<std::pair<std::int64_t, std::string>> fetch_msgs(Conn& conn, const s
 
 }  // namespace
 
-std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
-                            std::int32_t particao, bool tls) {
-  if (particao < 0) die("particao deve ser >= 0");
-
-  Metadata md;
+std::int64_t kafka_produzir_uma(const std::string& topico, const std::string& valor,
+                                 std::int32_t particao, const ProduceOptions& opt, bool tls,
+                                 const BrokerAddr& bootstrap, Metadata& md) {
   const BrokerAddr addr = lider_addr(topico, particao, md, tls);
+  (void)bootstrap;
   Conn conn(addr.host, addr.port, tls);
 
-  const std::string message_set = encode_message(valor);
+  const std::string message_set = encode_message(valor, opt.chave);
 
   std::string payload;
-  put_i16(payload, 1);     // required_acks = 1 (espera o lider gravar)
+  put_i16(payload, static_cast<std::int16_t>(opt.acks));  // required_acks (-1 = all)
   put_i32(payload, 5000);  // timeout ms
   put_i32(payload, 1);     // [topic_data]
   put_str(payload, topico);
@@ -500,6 +505,83 @@ std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
     }
   }
   die("resposta de produce sem a particao " + std::to_string(particao));
+}
+
+// Erros retriaveis do produce (leader em eleicao, not-leader, timeout):
+// vale a pena refrescar o metadata e tentar de novo em vez de falhar.
+bool erro_retriavel_produce(const std::string& what) {
+  return what.find("(kafka codigo 5)") != std::string::npos ||
+         what.find("(kafka codigo 6)") != std::string::npos ||
+         what.find("(kafka codigo 7)") != std::string::npos;
+}
+
+// InitProducerId (api 22, v0) best-effort para o caminho idempotente
+// (Fase 12-4): devolve {producer_id, epoch} quando o broker suporta;
+// nullopt quando o broker e 0.9-era (mock/testes) ou rejeita. O RecordBatch
+// EOS completo (Produce v3 + CRC32C) fica para a Fase 12-4b com validacao
+// contra broker real; aqui o PID serve como probe de capacidade + base da
+// sequencia por particao.
+std::optional<std::pair<std::int64_t, std::int16_t>> init_producer_id(const BrokerAddr& addr,
+                                                                      bool tls) {
+  try {
+    Conn conn(addr.host, addr.port, tls);
+    std::string payload;
+    put_i16(payload, -1);  // transactional_id = NULL
+    put_i32(payload, 60000);
+    const std::string resp = roundtrip(conn, 22, 0, kClientIdCorrBase + 9, payload);
+    Reader r{resp};
+    r.i32();  // throttle_ms
+    const std::int16_t erro = r.i16();
+    if (erro != 0) return std::nullopt;
+    const std::int64_t pid = r.i64();
+    const std::int16_t epoch = r.i16();
+    if (pid < 0) return std::nullopt;
+    return std::make_pair(pid, epoch);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
+                            std::int32_t particao, const ProduceOptions& opt, bool tls) {
+  if (particao < 0) die("particao deve ser >= 0");
+  const int tentativas = opt.tentativas < 1 ? 1 : opt.tentativas;
+
+  // Probe idempotente (nao fatal se o broker nao suportar).
+  if (opt.idempotente) {
+    try {
+      Metadata md0;
+      const BrokerAddr b0 = bootstrap_addr();
+      md0 = metadata(topico, b0, tls);
+      const BrokerAddr l0 = lider_addr_md(topico, particao, md0);
+      (void)init_producer_id(l0, tls);
+    } catch (const std::exception&) {
+      // Segue para o caminho legado com retry.
+    }
+  }
+
+  const BrokerAddr bootstrap = bootstrap_addr();
+  std::string ultimo_erro;
+  for (int t = 0; t < tentativas; ++t) {
+    try {
+      Metadata md;
+      // Primeiro refresh via bootstrap; nas retentativas o lider_addr refaz
+      // o metadata (novo lider apos eleicao).
+      (void)bootstrap;
+      return kafka_produzir_uma(topico, valor, particao, opt, tls, bootstrap, md);
+    } catch (const std::exception& e) {
+      ultimo_erro = e.what();
+      if (t + 1 >= tentativas || !erro_retriavel_produce(ultimo_erro)) throw;
+      std::this_thread::sleep_for(std::chrono::milliseconds(100 * (t + 1)));
+    }
+  }
+  die(ultimo_erro.empty() ? "falha ao produzir" : ultimo_erro);
+}
+
+std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
+                            std::int32_t particao, bool tls) {
+  ProduceOptions opt;
+  return kafka_produzir(topico, valor, particao, opt, tls);
 }
 
 Value kafka_ler(const std::string& topico, bool do_fim, std::int64_t max,

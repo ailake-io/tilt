@@ -32,6 +32,22 @@ Funções puras compilam para bytecode e rodam na VM. `--agendar` valida o
 Sobe o primeiro `servico` declarado. `--porta` sobrepõe `porta:`.
 `--requisicoes N` atende N e encerra (0 = para sempre). Ver [guia 07](guia-07-http.md).
 
+## `tilt servir-catalogo <diretorio-raiz> [--porta N] [--prefixo P]`
+
+Sobe um **catálogo Iceberg REST Open API read-only** (porta default 8191,
+prefixo default `/v1`) expondo as tabelas Iceberg locais — subdiretórios de
+`<diretorio-raiz>` que contêm `metadata/` — no namespace `default`. Engines
+como Spark SQL configuram `SparkCatalog` tipo `rest` com a URI do servidor e
+lêem pelo nome (`spark.read.table("catalogo.default.tabela")`). Lista as
+tabelas servidas ao subir. O loadTable devolve o metadata mais recente com as
+locations reescritas para URLs deste servidor; `/v1/files/<rel>` serve os
+arquivos (metadata.json, manifests, data files) validando que o path fica
+dentro do root (traversal → 403). Escrita (createTable/commit) → 501.
+`--sem-reecrita-manifests` mantém `file://` nas manifest-lists — necessário
+para o Spark/Hadoop (o `fs.http` reporta length -1 e o leitor Avro do Iceberg
+rejeita); nesse modo o leitor precisa acessar os arquivos locais.
+Ver [guia 03](guia-03-dados.md#tilt-servir-catalogo-catálogo-rest-server-fase-30).
+
 ## `tilt compilar <arquivo> --saida <bin> [--asm] [--arch x86_64|arm64]`
 
 Gera Assembly do subconjunto **inteiro puro** (backends x86-64 e ARM64/AArch64,

@@ -12,6 +12,8 @@ namespace tilt::rt {
 // Cliente Kafka nativo via wire protocol 0.9-era (sockets POSIX, sem
 // dependencias): MetadataRequest (api 3, v0), ProduceRequest (api 0, v1) e
 // FetchRequest (api 1, v1), com CRC32-IEEE proprio para o message set.
+// Fase 12-4: produce com acks=all + retry + chave + InitProducerId
+// best-effort (API 22; fallback legado quando o broker nao suporta).
 // Consumer groups com rebalanceamento real: FindCoordinator (api 10, v0),
 // JoinGroup (api 11, v0), Heartbeat (api 12, v0), LeaveGroup (api 13, v0),
 // SyncGroup (api 14, v0), OffsetFetch (api 9, v0) e OffsetCommit (api 8, v1).
@@ -29,8 +31,21 @@ namespace tilt::rt {
 // `KAFKA_BOOTSTRAP` (default "127.0.0.1:9092").
 
 // Produz `valor` bruto (ja serializado pelo chamador) no topico/particao.
-// required_acks=1; error_code != 0 na resposta vira excecao com o nome do
-// erro. Retorna o offset atribuido (nao usado pelo builtin, util p/ testes).
+// Opcoes de durabilidade/idempotencia (Fase 12-4): `acks` (-1 = all,
+// 1 = leader), `tentativas` (retries em erros retriaveis 5/6/7 com refresh
+// de metadata), `chave` ("" = NULL; quando presente permite compactacao/
+// dedup downstream e particionamento deterministico) e `idempotente` (tenta
+// InitProducerId + sequencia por particao; com broker 0.9-era faz fallback
+// para o caminho legado com acks=all+retry). Retorna o offset atribuido.
+struct ProduceOptions {
+  std::string chave;
+  int acks = -1;
+  int tentativas = 3;
+  bool idempotente = true;
+};
+std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
+                            std::int32_t particao, const ProduceOptions& opt,
+                            bool tls = false);
 std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
                             std::int32_t particao, bool tls = false);
 

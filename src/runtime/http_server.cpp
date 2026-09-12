@@ -45,10 +45,12 @@ const char* status_text(int code) {
     case 201: return "Created";
     case 204: return "No Content";
     case 400: return "Bad Request";
+    case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 411: return "Length Required";
     case 500: return "Internal Server Error";
+    case 501: return "Not Implemented";
     case 503: return "Service Unavailable";
     default: return "OK";
   }
@@ -96,6 +98,7 @@ ParseResult parse_request(std::string& in, TiltArena& arena, HttpRequest& req) {
   std::size_t content_length = 0;
   bool connection_close = false;
   bool connection_keep_alive = false;
+  std::string host_header;
 
   std::size_t pos = l1 == std::string::npos ? head.size() : l1 + 2;
   while (pos < head.size()) {
@@ -117,6 +120,8 @@ ParseResult parse_request(std::string& in, TiltArena& arena, HttpRequest& req) {
           for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
           if (v == "close") connection_close = true;
           if (v == "keep-alive") connection_keep_alive = true;
+        } else if (k == "host") {
+          host_header = v;
         }
       }
     }
@@ -131,6 +136,7 @@ ParseResult parse_request(std::string& in, TiltArena& arena, HttpRequest& req) {
   req.method = method;
   req.path = path;
   req.body = in.substr(header_end + 4, content_length);
+  req.host = host_header;
   in.erase(0, total);
 
   // HTTP/1.1 mantem a conexao por padrao; HTTP/1.0 so com keep-alive explicito.

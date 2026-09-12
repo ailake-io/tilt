@@ -29,6 +29,7 @@
 #include "parser/ast_dump.hpp"
 #include "parser/parser.hpp"
 #include "runtime/compat.hpp"
+#include "runtime/iceberg_catalog_server.hpp"
 #include "runtime/json.hpp"
 #include "runtime/value.hpp"
 #include "semantic/checker.hpp"
@@ -92,6 +93,9 @@ void print_usage(std::ostream& os) {
      << "  executar --vm <arquivo>            roda pipelines pelo bytecode VM\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "                                     [--requisicoes N] [--threads N]\n"
+     << "  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via\n"
+     << "                                     REST catalog read-only [--prefixo P]\n"
+     << "                                     [--sem-reecrita-manifests]\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "                                     [--asm] [--arch x86_64|arm64]\n"
      << "  referencia                         referencia compacta da linguagem\n"
@@ -420,7 +424,7 @@ BUILTINS
   imprimir registrar env tamanho contar somar media min max intervalo dividir
   ler_csv escrever_csv ler_json escrever_json ler_parquet escrever_parquet
   ler_delta escrever_delta anexar_delta
-  ler_iceberg escrever_iceberg anexar_iceberg
+  ler_iceberg escrever_iceberg anexar_iceberg apagar_iceberg
   ler_redis escrever_redis redis_executar redis_lote
   ler_kafka escrever_kafka
   mongo_inserir mongo_buscar mongo_atualizar mongo_deletar mongo_criar_indice
@@ -439,6 +443,8 @@ BUILTINS
 CLI
   tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
   tilt servir <a> [--porta N] [--requisicoes N] [--threads N]
+  tilt servir-catalogo <dir> [--porta N] [--prefixo P]  (Iceberg REST read-only;
+                                     --sem-reecrita-manifests p/ Spark/Hadoop)
   tilt compilar <a> --saida <bin> [--asm] [--arch x86_64|arm64]
   tilt tokens <a>   referencia   versao
 
@@ -622,6 +628,62 @@ int cmd_servir(const std::vector<std::string_view>& args) {
   return rc == 0 ? kOk : kDiagnostics;
 }
 
+int cmd_servir_catalogo(const std::vector<std::string_view>& args) {
+  std::string_view root_arg;
+  int port = 8191;
+  std::string prefix = "/v1";
+  bool reescrever_manifests = true;
+  for (std::size_t k = 1; k < args.size(); ++k) {
+    if (args[k] == "--porta" && k + 1 < args.size()) {
+      port = std::atoi(std::string(args[++k]).c_str());
+    } else if (args[k] == "--prefixo" && k + 1 < args.size()) {
+      prefix = std::string(args[++k]);
+    } else if (args[k] == "--sem-reecrita-manifests") {
+      // Engine Hadoop/Spark le manifest list por fs.http, que reporta length
+      // -1 (o leitor Avro do Iceberg rejeita) — mantem file:// nas manifest
+      // lists do metadata servido; o caller acessa os arquivos locais.
+      reescrever_manifests = false;
+    } else if (args[k].rfind("--", 0) == 0) {
+      std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
+      return kUsage;
+    } else if (root_arg.empty()) {
+      root_arg = args[k];
+    }
+  }
+  if (root_arg.empty()) {
+    std::cerr << "tilt: uso: tilt servir-catalogo <diretorio-raiz> [--porta N] "
+                 "[--prefixo P] [--sem-reecrita-manifests]\n";
+    return kUsage;
+  }
+  if (port <= 0 || port > 65535) {
+    std::cerr << "tilt: porta invalida: " << port << "\n";
+    return kUsage;
+  }
+
+  std::error_code ec;
+  const std::filesystem::path root =
+      std::filesystem::weakly_canonical(std::filesystem::path(root_arg), ec);
+  if (ec || root.empty() || !std::filesystem::is_directory(root, ec)) {
+    std::cerr << "tilt: diretorio-raiz invalido: '" << root_arg
+              << "' (informe o diretorio que contem as tabelas Iceberg)\n";
+    return kUsage;
+  }
+
+  const std::vector<std::string> tabelas = rt::iceberg_catalog_tables(root.string());
+  std::cout << "tabelas servidas (" << tabelas.size() << "):\n";
+  for (const std::string& t : tabelas) std::cout << "  default." << t << "\n";
+  if (tabelas.empty()) {
+    std::cout << "  (nenhuma subpasta com metadata/ em " << root.string() << ")\n";
+  }
+
+  rt::IcebergCatalogConfig cfg;
+  cfg.root = root.string();
+  cfg.port = port;
+  cfg.prefix = prefix;
+  cfg.reescrever_manifests = reescrever_manifests;
+  return rt::iceberg_catalog_serve(cfg) == 0 ? kOk : kDiagnostics;
+}
+
 }  // namespace
 
 int run_cli(int argc, char** argv) {
@@ -655,6 +717,7 @@ int run_cli(int argc, char** argv) {
   if (cmd == "checar") return cmd_checar(args);
   if (cmd == "executar") return cmd_executar(args);
   if (cmd == "servir") return cmd_servir(args);
+  if (cmd == "servir-catalogo") return cmd_servir_catalogo(args);
 
   if (cmd == "compilar") return cmd_compilar(args);
 

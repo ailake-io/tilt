@@ -9,6 +9,7 @@ struct HttpRequest {
   std::string method;
   std::string path;
   std::string body;
+  std::string host;         // valor do header Host (authority), quando presente
   bool keep_alive = false;  // negotiated from the request line + Connection header
 };
 

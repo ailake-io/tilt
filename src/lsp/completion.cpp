@@ -38,14 +38,14 @@ const std::array<std::string_view, 20> kDeclKeywords = {
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 61> kBuiltins = {
+const std::array<std::string_view, 62> kBuiltins = {
     "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
     "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
     "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
     "incorporar", "dividir_texto", "responder", "tensor",   "zeros",   "checar_tilt",
     "executar_sql", "spark_sql", "spark_executar",
     "ler_parquet", "escrever_parquet", "ler_delta", "escrever_delta", "anexar_delta",
-    "ler_iceberg", "escrever_iceberg", "anexar_iceberg",
+    "ler_iceberg", "escrever_iceberg", "anexar_iceberg", "apagar_iceberg",
     "ler_redis", "escrever_redis", "redis_executar", "redis_lote", "ler_kafka",
     "escrever_kafka", "mongo_inserir",
     "mongo_buscar", "mongo_atualizar", "mongo_deletar", "mongo_criar_indice",
@@ -222,6 +222,8 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Grava uma tabela em Iceberg.", nullptr},
       {"anexar_iceberg", "anexar_iceberg(tabela, caminho)", "tabela,caminho",
        "Anexa linhas a uma tabela Iceberg.", nullptr},
+      {"apagar_iceberg", "apagar_iceberg(caminho, onde: {...})", "caminho",
+       "Apaga linhas de uma tabela Iceberg (position/equality deletes).", nullptr},
       {"ler_redis", "ler_redis(conexao, chave)", "conexao,chave", "Le um valor do Redis.",
        nullptr},
       {"escrever_redis", "escrever_redis(conexao, chave, valor)", "conexao,chave,valor",

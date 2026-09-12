@@ -101,6 +101,18 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_rest_sobrescrita.tilt)
 
 add_test(
+  NAME iceberg_catalog
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/iceberg_catalog_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_catalogo.tilt)
+
+add_test(
+  NAME spark_catalog
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/spark_catalog_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/iceberg_catalogo.tilt)
+
+add_test(
   NAME spark
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/spark_test.sh
           $<TARGET_FILE:tilt>
@@ -139,6 +151,12 @@ add_test(
 add_test(
   NAME janela_offset
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/janela_offset_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/janela_offset)
+
+add_test(
+  NAME leader_checkpoint
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/leader_checkpoint_test.sh
           $<TARGET_FILE:tilt>
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/janela_offset)
 

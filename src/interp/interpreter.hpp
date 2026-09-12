@@ -201,14 +201,16 @@ class Interpreter {
     bool offset_loaded = false;        // arquivo de offset ja foi consultado
   };
   std::unordered_map<std::string, WindowState> window_states_;
-  // Offset persistente da janela de contagem: resolve o arquivo
-  // `<fonte>.tilt-offset` quando a fonte e baseada em arquivo (csv/json)
-  // — vazio para os demais conectores. Gravacao atomica (tmp + rename).
+  // Offset persistente da janela: resolve o arquivo `<fonte>.tilt-offset`
+  // quando a fonte e baseada em arquivo (csv/json) — vazio para os demais
+  // conectores. Gravacao atomica (tmp + rename). Fase 12-4: com
+  // TILT_CHECKPOINT_DIR o arquivo mora no diretorio compartilhado; janelas
+  // de tempo/throttle tambem persistem `last_run` (com_relogio).
   std::string janela_offset_file(const std::string& fonte);
   void janela_offset_load(WindowState& st, const std::string& pipeline,
                           const std::string& offset_file);
   void janela_offset_save(WindowState& st, const std::string& pipeline,
-                          const std::string& offset_file);
+                          const std::string& offset_file, bool com_relogio = false);
   bool gpu_announced_ = false;  // printed the backend banner once
 
   // Serializam caches/armazenamento mutavel compartilhado entre as threads

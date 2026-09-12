@@ -68,5 +68,38 @@ assert sel2.column("estado").to_pylist() == ["rj"]
 print("pyarrow: layout hive, reidratacao e filtros validados (%d linhas)" % n)
 PYEOF
 
+[ "$fail" = 0 ] || exit "$fail"
+
+# --- 4. checkpoint tilt-native a cada 10 versoes (Fase 12-5a) --------------------
+cat > "$tmp/cp.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - base = [{ id: 1, v: "a" }]
+    - escrever_delta base, "cp"
+    - para cada i em [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]:
+        - nova = [{ id: i, v: "x" }]
+        - anexar_delta nova, "cp"
+    - tudo = ler_delta "cp"
+    - imprimir "total: ", tamanho tudo
+TILTEOF
+out_cp=$(cd "$tmp" && "$BIN" executar cp.tilt)
+printf '%s\n' "$out_cp"
+echo "$out_cp" | grep -qE "total: +12" || { echo "checkpoint: total errado"; fail=1; }
+[ -f "$tmp/cp/_delta_log/00000000000000000010.checkpoint.parquet" ] || {
+  echo "checkpoint v10 nao materializado"; ls "$tmp/cp/_delta_log"; fail=1
+}
+# releitura usa o checkpoint como base + replay da cauda
+cat > "$tmp/cp_ler.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - tudo = ler_delta "cp"
+    - imprimir "releitura: ", tamanho tudo
+    - so1 = ler_delta "cp", onde: { id: 1 }
+    - imprimir "filtro: ", tamanho so1
+TILTEOF
+out_cp2=$(cd "$tmp" && "$BIN" executar cp_ler.tilt)
+printf '%s\n' "$out_cp2"
+echo "$out_cp2" | grep -qE "releitura: +12" || { echo "checkpoint: releitura errada"; fail=1; }
+echo "$out_cp2" | grep -qE "filtro: +2" || { echo "checkpoint: filtro errado"; fail=1; }
 [ "$fail" = 0 ] && echo "delta_test ok"
 exit "$fail"

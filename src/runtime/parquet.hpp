@@ -13,17 +13,23 @@ namespace tilt::rt {
 //   nulos omitidos); paginas DATA_PAGE v1 por padrao ou v2 com
 //   `paginas_v2`; compressao gzip (padrao) ou snappy literal-only; strings
 //   levam anotacao UTF8; listas de escalares viram campos REPEATED com
-//   anotacao LIST (3-level padrao); cada coluna leva o field_id
-//   (thrift SchemaElement[9]) — 1..N por padrao, ou o vetor explicito em
-//   `field_ids` (mesma ordem das colunas), para casar com os ids do schema
+//   anotacao LIST (3-level padrao); cada folha leva um field_id
+//   (thrift SchemaElement[9]) — sequencial por folha, ou o vetor explicito em
+//   `field_ids` (um por coluna top-level; structs com field-ids explicitos
+//   ainda nao suportados), para casar com os ids do schema
 //   Iceberg quando uma coluna fica fora do arquivo (ex.: coluna de
 //   particao);
 // - tipos: logico -> BOOLEAN, inteiro -> INT64, decimal -> DOUBLE,
-//   texto -> BYTE_ARRAY (UTF8), lista de escalares -> REPEATED + LIST;
-//   listas aninhadas (list<list<...>>), structs e elementos nulos em lista
-//   falham com erro claro;
+//   texto -> BYTE_ARRAY (UTF8), lista de escalares -> REPEATED + LIST,
+//   mapa -> STRUCT (grupo sem anotacao, recursivo: escalares, listas de
+//   escalares e structs aninhados; struct nulo por linha vira grupo OPTIONAL,
+//   chave ausente vira campo OPTIONAL); listas aninhadas (list<list<...>>),
+//   listas de structs e elementos nulos em lista falham com erro claro;
+//   structs com `field_ids` explicitos (caminho Iceberg) ainda nao suportados;
 // - reader: le todos os row groups (concatena), campos REQUIRED, OPTIONAL e
-//   REPEATED (definition/repetition levels RLE), paginas v1 e v2, PLAIN e
+//   REPEATED (definition/repetition levels RLE), structs aninhados (grupos
+//   sem anotacao LIST; struct OPTIONAL definido com todos os campos nulos
+//   distingue-se do struct nulo pelos definition levels), paginas v1 e v2, PLAIN e
 //   DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e codecs gzip/deflate
 //   (zlib via dlopen("libz.so.1")) e snappy (codec proprio, sem dlopen).
 //

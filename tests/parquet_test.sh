@@ -238,5 +238,56 @@ assert t["nums"] == [[1, 2, 3], [], None], t["nums"]
 print("pyarrow: listas escritas pelo tilt validadas (tipos e valores ok)")
 PYEOF
 
+# --- 8. structs nos dois sentidos (Fase 12-5a) -----------------------------------
+cat > "$tmp/escrita_struct.tilt" <<'TILTEOF'
+pipeline escrita_struct:
+  passos:
+    - t = [{ id: 1, end: { cidade: "santos", n: 10 } }, { id: 2, end: { cidade: "rio", n: 20 } }, { id: 3, end: nulo }]
+    - escrever_parquet t, "saida_struct.parquet"
+    - volta = ler_parquet "saida_struct.parquet"
+    - imprimir tamanho volta
+    - imprimir volta[0].end.cidade
+    - imprimir volta[2].end
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_struct.tilt)
+printf '%s\n' "$out"
+confere "santos"
+confere "nulo"
+
+python3 - "$tmp/saida_struct.parquet" "$tmp/py_struct.parquet" <<'PYEOF'
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+t = pq.read_table(sys.argv[1])
+tipos = [str(t.schema.field(k).type) for k in range(t.num_columns)]
+assert tipos[1].startswith("struct<"), tipos
+rows = t.to_pylist()
+assert rows[0]["end"] == {"cidade": "santos", "n": 10}, rows[0]
+assert rows[2]["end"] is None, rows[2]
+print("pyarrow: struct escrito pelo tilt validado (tipos e valores ok)")
+
+# struct do pyarrow (com aninhado + nulo) lido pelo tilt
+t2 = pa.table({
+    "id": [1, 2],
+    "deep": [{"a": {"b": 10}}, {"a": None}],
+})
+pq.write_table(t2, sys.argv[2])
+print("pyarrow: py_struct.parquet gerado (struct aninhado)")
+PYEOF
+
+cat > "$tmp/leitura_struct.tilt" <<'TILTEOF'
+pipeline leitura_struct:
+  passos:
+    - dados = ler_parquet "py_struct.parquet"
+    - imprimir tamanho dados
+    - imprimir dados[0].deep.a.b
+    - imprimir dados[1].deep.a
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_struct.tilt)
+printf '%s\n' "$out"
+confere "10"
+confere "nulo"
+
 [ "$fail" = 0 ] && echo "parquet_test ok"
 exit "$fail"

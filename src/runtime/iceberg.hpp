@@ -54,10 +54,26 @@ namespace tilt::rt {
 //   remove-snapshot-ref/remove-snapshots (sobrescrita). Sobrescrita de
 //   tabela existente mantem o partition spec (divergencia -> erro claro).
 //   Sem as env vars o comportamento e o HadoopCatalog local, byte a byte.
+//   Para expor as tabelas Hadoop locais a engines como Spark como catalogo
+//   REST read-only, ver iceberg_catalog_server.hpp (`tilt servir-catalogo`).
+// - particao bucket (Fase 12-5a): `part_cols` aceita "bucket[N](col)"
+//   (inteiro/texto/logico); o spec grava o transform bucket[N] com campo
+//   "col_bucket_N" (int) e a coluna de origem permanece no parquet; a leitura
+//   poda predicados na coluna de origem via hash (mais filtro residual exato).
+//   Outros transforms (truncate/year/month/day/hour) sao aceitos na leitura
+//   sem poda por valor;
+// - deletes (Fase 12-5a): a leitura aplica position deletes ({file_path,
+//   pos}) e equality deletes (linhas-chave; apaga quando todas as colunas em
+//   comum batem) dos manifests do snapshot corrente; `iceberg_delete`
+//   escreve um delete file + snapshot "delete" e devolve as linhas apagadas.
 void iceberg_write(const std::string& dir, const Value& tabela,
                    const std::vector<std::string>& part_cols = {});
 void iceberg_append(const std::string& dir, const Value& tabela,
                     const std::vector<std::string>& part_cols_req = {});
+// Apaga por igualdade (`onde`, mesma semantica do `ler_iceberg ... onde:`).
+// `igualdade` = false -> position deletes; true -> equality deletes.
+// Devolve o numero de linhas apagadas (0 = sem commit).
+std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igualdade = false);
 // `onde` (opcional): mapa coluna -> valor. Igualdade; colunas de particao
 // podam data files, o resto filtra linhas. Resultado pode ser tabela vazia.
 Value iceberg_read(const std::string& dir, const Value* onde = nullptr);  // -> tabela (lista de mapas)

@@ -10,6 +10,9 @@ comandos:
   executar --vm <arquivo>            roda pipelines pelo bytecode VM
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
                                      [--requisicoes N] [--threads N]
+  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via
+                                     REST catalog read-only [--prefixo P]
+                                     [--sem-reecrita-manifests]
   compilar <arquivo> --saida <bin>   gera binario nativo
                                      [--asm] [--arch x86_64|arm64]
   referencia                         referencia compacta da linguagem

@@ -34,6 +34,8 @@
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
 #include "runtime/kafka.hpp"
+#include "runtime/leader.hpp"
+#include "runtime/checkpoint.hpp"
 #include "runtime/mongo.hpp"
 #include "runtime/s3.hpp"
 #include "runtime/sqlite.hpp"
@@ -716,6 +718,10 @@ int Interpreter::run_scheduled() {
     }
 
     long fired_total = 0;
+    const char* lease_env = std::getenv("TILT_LEADER_LEASE");
+    const std::string lease_path = lease_env ? lease_env : "";
+    int lease_ttl = 15;
+    if (const char* ttl = std::getenv("TILT_LEADER_TTL")) lease_ttl = std::atoi(ttl);
     while (true) {
       // proximo disparo entre todos os pipelines agendados
       std::time_t next = -1;
@@ -734,6 +740,17 @@ int Interpreter::run_scheduled() {
         }
       }
       now = next;
+      // Eleicao de lider (Fase 12-4): com TILT_LEADER_LEASE, so o dono do
+      // lease dispara; followers pulam o tick com log.
+      if (!lease_path.empty()) {
+        std::string motivo;
+        if (!rt::leader_tentar(lease_path, lease_ttl, motivo)) {
+          out_ << "sem lideranca (" << motivo << "); tick pulado\n";
+          ++fired_total;
+          if (max_runs > 0 && fired_total >= max_runs) break;
+          continue;
+        }
+      }
       for (const Scheduled& s : scheduled) {
         if (next_cron_fire(s.cron, now - 60) == now) run_pipeline(*s.pipeline, now);
       }
@@ -842,10 +859,11 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
 
   const std::string pipe_name = decl_name(pipeline);
   WindowState& st = window_states_[pipe_name];
-  // Offset persistente: so janela de contagem com fonte de arquivo, e nunca
-  // com TILT_JANELA_ESTADO=memoria (pipelines efemeros/testes).
+  // Offset persistente: janela de contagem OU de tempo com fonte de arquivo, e
+  // nunca com TILT_JANELA_ESTADO=memoria (pipelines efemeros/testes).
+  // Fase 12-4: o arquivo mora em TILT_CHECKPOINT_DIR quando configurado.
   std::string offset_file;
-  if (spec.kind == JanelaSpec::Contagem && !fonte.empty()) {
+  if (!fonte.empty()) {
     const char* estado = std::getenv("TILT_JANELA_ESTADO");
     if (!estado || std::string(estado) != "memoria") {
       offset_file = janela_offset_file(fonte);
@@ -892,6 +910,11 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
   if (roda) {
     st.ran_once = true;
     st.last_run = now;
+    // Persiste o relogio para janelas de tempo/throttle entre replicas
+    // (contagem mantem o formato legado numero-puro).
+    if (!offset_file.empty() && spec.kind != JanelaSpec::Contagem) {
+      janela_offset_save(st, pipe_name, offset_file, true);
+    }
   }
   return roda;
 }
@@ -1002,6 +1025,8 @@ std::string fonte_field_text(const ast::Block& block, std::string_view key) {
 // compartilhado entre pipelines pela mesma fonte (o JSON dentro e um mapa por
 // pipeline). Somente fontes baseadas em arquivo (csv/json); Kafka com `grupo:`
 // ja tem checkpoint no broker e os demais conectores nao usam offset de arquivo.
+// Fase 12-4: o path passa por checkpoint_resolve() — com TILT_CHECKPOINT_DIR
+// o offset mora no diretorio compartilhado (multi-replica).
 std::string Interpreter::janela_offset_file(const std::string& fonte) {
   const Item* decl = entities_.at(fonte);
   if (!decl->block) return "";
@@ -1012,7 +1037,12 @@ std::string Interpreter::janela_offset_file(const std::string& fonte) {
   if (path.empty()) path = fonte_field_text(*decl->block, "url");
   if (path.rfind("file://", 0) == 0) path = path.substr(7);
   if (path.empty()) return "";
-  return path + ".tilt-offset";
+  const std::string local = path + ".tilt-offset";
+  try {
+    return rt::checkpoint_resolve(local);
+  } catch (const std::exception& e) {
+    fail(decl->span, std::string(e.what()));
+  }
 }
 
 void Interpreter::janela_offset_load(WindowState& st, const std::string& pipeline,
@@ -1030,14 +1060,27 @@ void Interpreter::janela_offset_load(WindowState& st, const std::string& pipelin
     return;  // arquivo corrompido/incompleto: recomeca do zero
   }
   if (parsed.kind != ValueKind::Mapa || !parsed.map) return;
-  if (const Value* v = parsed.map->find(pipeline); v && v->is_number()) {
-    st.offset = static_cast<std::size_t>(v->as_number());
-    st.persisted_offset = st.offset;
+  if (const Value* v = parsed.map->find(pipeline)) {
+    // Formato legado: numero puro = offset. Formato 12-4: mapa por pipeline
+    // {offset, last_run} — permite retomar throttle/tempo entre replicas.
+    if (v->is_number()) {
+      st.offset = static_cast<std::size_t>(v->as_number());
+      st.persisted_offset = st.offset;
+    } else if (v->kind == ValueKind::Mapa && v->map) {
+      if (const Value* o = v->map->find("offset"); o && o->is_number()) {
+        st.offset = static_cast<std::size_t>(o->as_number());
+        st.persisted_offset = st.offset;
+      }
+      if (const Value* lr = v->map->find("last_run"); lr && lr->is_number()) {
+        st.last_run = static_cast<std::time_t>(lr->as_number());
+        st.ran_once = true;
+      }
+    }
   }
 }
 
 void Interpreter::janela_offset_save(WindowState& st, const std::string& pipeline,
-                                     const std::string& offset_file) {
+                                     const std::string& offset_file, bool com_relogio) {
   Value map = Value::mapa();
   std::ifstream in(offset_file);
   if (in) {
@@ -1047,14 +1090,23 @@ void Interpreter::janela_offset_save(WindowState& st, const std::string& pipelin
       Value parsed = rt::json_parse(ss.str());
       if (parsed.kind == ValueKind::Mapa && parsed.map) {
         for (const auto& [k, v] : parsed.map->items) {
-          if (k != pipeline && v.is_number()) map.map->set(k, v);  // offsets dos demais pipelines
+          if (k == pipeline) continue;
+          // Preserva tanto o formato legado (numero) quanto o 12-4 (mapa).
+          if (v.is_number() || v.kind == ValueKind::Mapa) map.map->set(k, v);
         }
       }
     } catch (const std::exception&) {
       // sobrescreve arquivo ilegivel
     }
   }
-  map.map->set(pipeline, Value::inteiro(static_cast<std::int64_t>(st.offset)));
+  if (com_relogio && st.ran_once) {
+    Value entry = Value::mapa();
+    entry.map->set("offset", Value::inteiro(static_cast<std::int64_t>(st.offset)));
+    entry.map->set("last_run", Value::inteiro(static_cast<std::int64_t>(st.last_run)));
+    map.map->set(pipeline, std::move(entry));
+  } else {
+    map.map->set(pipeline, Value::inteiro(static_cast<std::int64_t>(st.offset)));
+  }
   const std::string tmp = offset_file + ".tmp";
   {
     std::ofstream out(tmp, std::ios::trunc);
@@ -3733,6 +3785,30 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "apagar_iceberg") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "apagar_iceberg espera (diretorio, onde: {...})");
+    }
+    const Value* onde = kw.find("onde");
+    if (!onde || onde->kind != ValueKind::Mapa) {
+      fail(call.span, "apagar_iceberg: 'onde' deve ser um mapa de colunas e valores "
+                      "(ex.: onde: { id: 3 })");
+    }
+    bool igualdade = false;
+    if (const Value* mv = kw.find("modo")) {
+      if (mv->kind != ValueKind::Texto || (mv->s != "posicao" && mv->s != "igualdade")) {
+        fail(call.span, "apagar_iceberg: 'modo' deve ser \"posicao\" ou \"igualdade\"");
+      }
+      igualdade = mv->s == "igualdade";
+    }
+    try {
+      return Value::inteiro(rt::iceberg_delete(a[0].s, *onde, igualdade));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "responder") {
     rt::ValueMap kw = eval_kwargs(call, env);
     out_ << "resposta:";
@@ -4049,20 +4125,47 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     auto a = args();
     if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
       fail(call.span,
-           "escrever_kafka espera (topico, valor, {particao:}), ex.: escrever_kafka "
-           "\"pedidos\", valor");
+           "escrever_kafka espera (topico, valor, {particao:, chave:, acks:, tentativas:, "
+           "idempotente:}), ex.: escrever_kafka \"pedidos\", valor");
     }
     std::int64_t particao = 0;
     bool tls = false;
+    rt::ProduceOptions opt;
     if (a.size() >= 3) {
       if (a[2].kind != ValueKind::Mapa || !a[2].map) {
-        fail(call.span, "escrever_kafka: opcoes devem ser um mapa {particao:, tls:}");
+        fail(call.span,
+             "escrever_kafka: opcoes devem ser um mapa {particao:, chave:, acks:, tentativas:, "
+             "idempotente:, tls:}");
       }
       if (const Value* pv = a[2].map->find("particao")) {
         if (pv->kind != ValueKind::Inteiro) {
           fail(call.span, "escrever_kafka: 'particao' deve ser inteiro");
         }
         particao = pv->i;
+      }
+      if (const Value* kv = a[2].map->find("chave")) {
+        if (kv->kind != ValueKind::Texto) {
+          fail(call.span, "escrever_kafka: 'chave' deve ser texto");
+        }
+        opt.chave = kv->s;
+      }
+      if (const Value* av = a[2].map->find("acks")) {
+        if (av->kind != ValueKind::Inteiro || (av->i != -1 && av->i != 1)) {
+          fail(call.span, "escrever_kafka: 'acks' deve ser -1 (all) ou 1 (leader)");
+        }
+        opt.acks = static_cast<int>(av->i);
+      }
+      if (const Value* tv2 = a[2].map->find("tentativas")) {
+        if (tv2->kind != ValueKind::Inteiro || tv2->i < 1 || tv2->i > 10) {
+          fail(call.span, "escrever_kafka: 'tentativas' deve ser inteiro entre 1 e 10");
+        }
+        opt.tentativas = static_cast<int>(tv2->i);
+      }
+      if (const Value* iv = a[2].map->find("idempotente")) {
+        if (iv->kind != ValueKind::Logico) {
+          fail(call.span, "escrever_kafka: 'idempotente' deve ser logico");
+        }
+        opt.idempotente = iv->b;
       }
       if (const Value* tv = a[2].map->find("tls")) {
         if (tv->kind != ValueKind::Logico) fail(call.span, "escrever_kafka: 'tls' deve ser logico");
@@ -4071,7 +4174,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       const std::string body = a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
-      rt::kafka_produzir(a[0].s, body, static_cast<std::int32_t>(particao), tls);
+      rt::kafka_produzir(a[0].s, body, static_cast<std::int32_t>(particao), opt, tls);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

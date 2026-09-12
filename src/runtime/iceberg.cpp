@@ -12,7 +12,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -795,15 +797,120 @@ struct Column {
   bool required = true;      // false = nullable (colunas novas por evolucao)
 };
 
-// Campo de um partition spec (somente transform "identity"). `avro_ty` e o
-// tipo do campo no record `partition` do manifest — o tipo da coluna no
-// schema iceberg.
+// Campo de um partition spec. `transform` e "identity" (padrao) ou
+// "bucket[N]" (Fase 12-5a); outros transforms de leitura (truncate, year,
+// month, day, hour) sao aceitos no parse sem die, mas sem poda por valor.
+// `name` e o nome do campo de particao (identity: a coluna; bucket[N](col):
+// "col_bucket_N", padrao Iceberg); `source_name` e a coluna de origem.
+// `avro_ty` e o tipo do campo no record `partition` do manifest.
 struct PartitionField {
   std::string name;
   std::int64_t field_id = 1000;
   std::int64_t source_id = 0;
   std::string avro_ty = "string";
+  std::string transform = "identity";
+  int num_buckets = 0;
+  std::string source_name;
+  std::string source_type;  // iceberg type da coluna de origem (bucket)
 };
+
+// MurmurHash3 x86_32 (seed 0), como a spec Iceberg usa no bucket transform.
+std::uint32_t murmur3_x86_32(const std::uint8_t* data, std::size_t len) {
+  const std::uint32_t c1 = 0xcc9e2d51u;
+  const std::uint32_t c2 = 0x1b873593u;
+  std::uint32_t h = 0;
+  const std::size_t nblocks = len / 4;
+  for (std::size_t i = 0; i < nblocks; ++i) {
+    std::uint32_t k;
+    std::memcpy(&k, data + i * 4, 4);
+    k *= c1;
+    k = (k << 15) | (k >> 17);
+    k *= c2;
+    h ^= k;
+    h = (h << 13) | (h >> 19);
+    h = h * 5 + 0xe6546b64u;
+  }
+  const std::uint8_t* tail = data + nblocks * 4;
+  std::uint32_t k = 0;
+  switch (len & 3) {
+    case 3: k ^= static_cast<std::uint32_t>(tail[2]) << 16; [[fallthrough]];
+    case 2: k ^= static_cast<std::uint32_t>(tail[1]) << 8; [[fallthrough]];
+    case 1:
+      k ^= static_cast<std::uint32_t>(tail[0]);
+      k *= c1;
+      k = (k << 15) | (k >> 17);
+      k *= c2;
+      h ^= k;
+  }
+  h ^= static_cast<std::uint32_t>(len);
+  h ^= h >> 16;
+  h *= 0x85ebca6bu;
+  h ^= h >> 13;
+  h *= 0xc2b2ae35u;
+  h ^= h >> 16;
+  return h;
+}
+
+// Serializacao do valor para o hash do bucket (spec Iceberg): int 4B LE,
+// long 8B LE, string UTF-8, boolean 1B. double/float/decimal nao suportados
+// (erro claro — o hash de ponto flutuante exige normalizacao de NaN).
+std::string bucket_hash_bytes(const Value& v, const std::string& iceberg_type,
+                              const std::string& col) {
+  std::string out;
+  if (iceberg_type == "int") {
+    if (v.kind != ValueKind::Inteiro) die("bucket: coluna '" + col + "' exige inteiro");
+    const std::int32_t x = static_cast<std::int32_t>(v.i);
+    for (int k = 0; k < 4; ++k) out.push_back(static_cast<char>((x >> (8 * k)) & 0xFF));
+    return out;
+  }
+  if (iceberg_type == "long") {
+    if (v.kind != ValueKind::Inteiro) die("bucket: coluna '" + col + "' exige inteiro");
+    const std::uint64_t x = static_cast<std::uint64_t>(v.i);
+    for (int k = 0; k < 8; ++k) out.push_back(static_cast<char>((x >> (8 * k)) & 0xFF));
+    return out;
+  }
+  if (iceberg_type == "string") {
+    if (v.kind != ValueKind::Texto) die("bucket: coluna '" + col + "' exige texto");
+    return v.s;
+  }
+  if (iceberg_type == "boolean") {
+    if (v.kind != ValueKind::Logico) die("bucket: coluna '" + col + "' exige logico");
+    out.push_back(v.b ? '\1' : '\0');
+    return out;
+  }
+  die("bucket: coluna '" + col + "' do tipo '" + iceberg_type +
+      "' nao suportada (use inteiro, texto ou logico)");
+}
+
+// bucket(v) = murmur3(bytes) % N com semantica Java (% com sinal).
+int bucket_of(const Value& v, const std::string& iceberg_type, int n, const std::string& col) {
+  if (v.kind == ValueKind::Nulo) die("valor nulo em coluna de particao '" + col + "'");
+  const std::string bytes = bucket_hash_bytes(v, iceberg_type, col);
+  const std::int32_t h = static_cast<std::int32_t>(murmur3_x86_32(
+      reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
+  const int r = h % n;
+  return r < 0 ? r + n : r;
+}
+
+// "bucket[16](col)" -> {col, 16}; "" quando nao e sintaxe bucket.
+std::pair<std::string, int> parse_bucket(const std::string& s) {
+  if (s.rfind("bucket[", 0) != 0) return {"", 0};
+  const std::size_t rb = s.find(']', 7);
+  if (rb == std::string::npos || rb + 1 >= s.size() || s[rb + 1] != '(' || s.back() != ')') {
+    die("particionar_por: '" + s +
+        "' invalido (use bucket[N](coluna), ex.: bucket[16](id))");
+  }
+  int n = 0;
+  try {
+    n = std::stoi(s.substr(7, rb - 7));
+  } catch (const std::exception&) {
+    die("particionar_por: '" + s + "' com N invalido (use bucket[N](coluna))");
+  }
+  if (n <= 0 || n > 100000) die("particionar_por: '" + s + "' com N fora de 1..100000");
+  const std::string col = s.substr(rb + 2, s.size() - rb - 3);
+  if (col.empty()) die("particionar_por: '" + s + "' sem coluna (use bucket[N](coluna))");
+  return {col, n};
+}
 
 std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
   if (tabela.kind != ValueKind::Lista && tabela.kind != ValueKind::Tabela) {
@@ -848,8 +955,8 @@ std::string partition_spec_json(const std::vector<PartitionField>& spec) {
   for (std::size_t k = 0; k < spec.size(); ++k) {
     const PartitionField& pf = spec[k];
     out += (k ? ", " : "") + std::string("{ \"field-id\": ") + std::to_string(pf.field_id) +
-           ", \"source-id\": " + std::to_string(pf.source_id) +
-           ", \"transform\": \"identity\", \"name\": \"" + json_escape(pf.name) + "\" }";
+           ", \"source-id\": " + std::to_string(pf.source_id) + ", \"transform\": \"" +
+           json_escape(pf.transform) + "\", \"name\": \"" + json_escape(pf.name) + "\" }";
   }
   out += "]}";
   return out;
@@ -878,7 +985,10 @@ std::string join_part_cols(const std::vector<std::string>& cols) {
 // Monta o spec a partir da tabela escrita: localiza cada coluna (erro claro
 // em repetida ou inexistente), deduz o tipo pelo iceberg type do schema e o
 // source-id pelo id da coluna (posicao + 1). Field-ids 1000, 1001, ... na
-// ordem das colunas.
+// ordem das colunas. Alem de nomes de coluna (identity), aceita
+// "bucket[N](col)" (Fase 12-5a): campo "col_bucket_N" com transform
+// bucket[N] e avro int; a coluna de origem permanece no parquet (o valor de
+// particao e derivado).
 std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
                                       const std::vector<std::string>& part_cols,
                                       const char* ctx) {
@@ -888,21 +998,37 @@ std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
     if (std::count(part_cols.begin(), part_cols.end(), col) > 1) {
       die(std::string(ctx) + ": coluna de particao '" + col + "' repetida");
     }
+    const auto [bsrc, nbuckets] = parse_bucket(col);
+    const bool eh_bucket = !bsrc.empty();
+    if (!eh_bucket && col.find('(') != std::string::npos) {
+      die(std::string(ctx) + ": transform '" + col +
+          "' nao suportado na escrita (suportados: coluna para identity, bucket[N](col))");
+    }
+    const std::string lookup = eh_bucket ? bsrc : col;
     bool achou = false;
     for (std::size_t k = 0; k < cols.size(); ++k) {
-      if (cols[k].name == col) {
+      if (cols[k].name == lookup) {
         PartitionField pf;
-        pf.name = col;
         pf.field_id = 1000 + static_cast<std::int64_t>(i);
         pf.source_id = static_cast<std::int64_t>(k + 1);
-        pf.avro_ty = cols[k].type;
+        pf.source_name = lookup;
+        if (eh_bucket) {
+          pf.name = lookup + "_bucket_" + std::to_string(nbuckets);
+          pf.transform = "bucket[" + std::to_string(nbuckets) + "]";
+          pf.num_buckets = nbuckets;
+          pf.avro_ty = "int";
+          pf.source_type = cols[k].type;
+        } else {
+          pf.name = col;
+          pf.avro_ty = cols[k].type;
+        }
         spec.push_back(std::move(pf));
         achou = true;
         break;
       }
     }
     if (!achou) {
-      die(std::string(ctx) + ": coluna de particao '" + col +
+      die(std::string(ctx) + ": coluna de particao '" + lookup +
           "' nao existe na tabela (colunas: " + join_names(cols) + ")");
     }
   }
@@ -934,15 +1060,16 @@ std::string partition_value_string(const Value& v, const std::string& col) {
   }
 }
 
-// Linha sem as colunas de particao: o parquet nao armazena as colunas de
-// particao (standard Iceberg — os valores vivem no path e no record
-// `partition` do manifest).
+// Linha sem as colunas de particao identity: o parquet nao armazena essas
+// colunas (os valores vivem no path e no record `partition` do manifest).
+// Campos derivados (bucket etc.) nao sao removidos: a coluna de origem
+// permanece no arquivo e o valor de particao e derivado.
 Value strip_partition_columns(const Value& row, const std::vector<PartitionField>& spec) {
   Value m = Value::mapa();
   for (const auto& kv : row.map->items) {
     bool eh_particao = false;
     for (const PartitionField& pf : spec) {
-      if (kv.first == pf.name) eh_particao = true;
+      if (pf.transform == "identity" && kv.first == pf.name) eh_particao = true;
     }
     if (!eh_particao) m.map->set(kv.first, kv.second);
   }
@@ -965,6 +1092,22 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela,
     PartitionGroup candidato;
     candidato.part_map = Value::mapa();
     for (const PartitionField& pf : spec) {
+      if (pf.transform.rfind("bucket[", 0) == 0) {
+        // Bucket: hash da coluna de origem; o record carrega o inteiro e a
+        // coluna de origem permanece no parquet.
+        const Value* cell = row.map->find(pf.source_name);
+        const Value& v = cell ? *cell : Value::nulo();
+        if (v.kind != ValueKind::Inteiro && v.kind != ValueKind::Texto &&
+            v.kind != ValueKind::Logico) {
+          if (v.kind == ValueKind::Nulo)
+            die("valor nulo em coluna de particao '" + pf.source_name + "'");
+          die("coluna de particao '" + pf.source_name + "' deve ser texto, inteiro ou logico");
+        }
+        const int b = bucket_of(v, pf.source_type, pf.num_buckets, pf.source_name);
+        candidato.key += (candidato.key.empty() ? "" : "/") + pf.name + "=" + std::to_string(b);
+        candidato.part_map.map->set(pf.name, Value::inteiro(b));
+        continue;
+      }
       const Value* cell = row.map->find(pf.name);
       const Value& v = cell ? *cell : Value::nulo();
       const std::string valor = partition_value_string(v, pf.name);
@@ -1106,9 +1249,11 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     if (ver.id == out.current_schema_id) out.schema_cols = ver.fields;
   }
 
-  // partition spec corrente (default-spec-id): so "identity" e suportado,
-  // com uma ou mais colunas. Aceita "partition-specs" (formato atual) e cai
-  // no legado "partition-spec" (lista de nomes) quando so ele existe.
+  // partition spec corrente (default-spec-id): identity e bucket[N]
+  // (Fase 12-5a) com uma ou mais colunas; truncate/year/month/day/hour sao
+  // aceitos na leitura sem poda por valor. Aceita "partition-specs" (formato
+  // atual) e cai no legado "partition-spec" (lista de nomes) quando so ele
+  // existe.
   std::int64_t default_spec = 0;
   if (const Value* ds = map_find(md, "default-spec-id"); ds && ds->kind == ValueKind::Inteiro) {
     default_spec = ds->i;
@@ -1123,13 +1268,42 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     pf.field_id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 1000;
     pf.source_id = sid && sid->kind == ValueKind::Inteiro ? sid->i : 0;
     const std::string transform = tr && tr->kind == ValueKind::Texto ? tr->s : "";
-    if (transform != "identity") {
-      die("transform de particao '" + transform + "' nao suportada (fase 26: somente identity)");
+    if (transform == "identity" || transform.empty()) {
+      pf.transform = "identity";
+    } else if (transform.rfind("bucket[", 0) == 0) {
+      pf.transform = transform;
+      // "bucket[16]" ou "bucket(16)" / "bucket" com num_buckets separado
+      const std::size_t rb = transform.find(']');
+      try {
+        pf.num_buckets = rb == std::string::npos
+                             ? 0
+                             : std::stoi(transform.substr(7, rb - 7));
+      } catch (const std::exception&) {
+        pf.num_buckets = 0;
+      }
+      if (pf.num_buckets <= 0) {
+        die("transform de particao '" + transform + "' com N invalido");
+      }
+      pf.avro_ty = "int";
+    } else if (transform == "year" || transform == "month" || transform == "day" ||
+               transform == "hour" || transform.rfind("truncate[", 0) == 0) {
+      // Leitura sem poda por valor (o valor de particao e derivado e nao ha
+      // coluna correspondente no schema); nunca dar die aqui.
+      pf.transform = transform;
+      pf.avro_ty = "int";
+    } else if (transform == "void") {
+      pf.transform = transform;
+      pf.avro_ty = "int";
+    } else {
+      die("transform de particao '" + transform +
+          "' nao suportada (suportadas: identity, bucket[N], truncate[W], year, month, day, hour)");
     }
     for (std::size_t k = 0; k < out.schema_cols.size(); ++k) {
       // o source-id e o field-id da coluna no schema (estavel entre versoes)
       if (out.schema_cols[k].id == pf.source_id) {
-        pf.avro_ty = out.schema_cols[k].type;
+        if (pf.transform == "identity") pf.avro_ty = out.schema_cols[k].type;
+        pf.source_name = out.schema_cols[k].name;
+        pf.source_type = out.schema_cols[k].type;
       }
     }
     out.spec.push_back(std::move(pf));
@@ -1252,7 +1426,7 @@ std::string manifest_entry_schema_json(const std::vector<PartitionField>& spec) 
 }
 
 Value make_manifest_entry(int status, std::int64_t snapshot_id, const std::string& file_path,
-                          std::int64_t record_count, std::int64_t file_size,
+                          std::int64_t record_count, std::int64_t file_size, int content,
                           const std::vector<PartitionField>& spec, const Value& part_map) {
   Value e = Value::mapa();
   e.map->set("status", Value::inteiro(status));
@@ -1260,7 +1434,7 @@ Value make_manifest_entry(int status, std::int64_t snapshot_id, const std::strin
   e.map->set("sequence_number", Value::nulo());
   e.map->set("file_sequence_number", Value::nulo());
   Value df = Value::mapa();
-  df.map->set("content", Value::inteiro(0));
+  df.map->set("content", Value::inteiro(content));
   df.map->set("file_path", Value::texto(file_path));
   df.map->set("file_format", Value::texto("PARQUET"));
   Value part = Value::mapa();
@@ -1281,6 +1455,7 @@ struct FileInfo {
   std::string path;  // com file://
   std::int64_t records = 0;
   std::int64_t size = 0;
+  int content = 0;   // 0 DATA, 1 POSITION DELETES, 2 EQUALITY DELETES
   Value part_map;  // valores de particao (tipados) por coluna; vazio = sem particao
 };
 
@@ -1302,8 +1477,8 @@ std::string write_manifest(const std::string& meta_dir,
       if (f.path == path) info = &f;
     }
     records.push_back(make_manifest_entry(status, snapshot_id, path, info ? info->records : 0,
-                                          info ? info->size : 0, spec,
-                                          info ? info->part_map : Value::mapa()));
+                                          info ? info->size : 0, info ? info->content : 0,
+                                          spec, info ? info->part_map : Value::mapa()));
   }
   const std::string name = new_uuid() + "-m0.avro";
   const std::string path = meta_dir + "/" + name;
@@ -1327,8 +1502,9 @@ bool partition_less(const Value& a, const Value& b) {
 }
 
 // Serializacao binaria de um valor de particao para lower/upper_bound do
-// manifest list (single-value serialization da spec): string UTF-8, long e
-// double em 8 bytes little-endian, boolean 1 byte.
+// manifest list (single-value serialization da spec): string UTF-8, int em
+// 4 bytes little-endian, long e double em 8 bytes little-endian, boolean
+// 1 byte.
 std::string partition_bound_bytes(const PartitionField& pf, const Value& v) {
   std::string out;
   if (pf.avro_ty == "string") {
@@ -1336,6 +1512,13 @@ std::string partition_bound_bytes(const PartitionField& pf, const Value& v) {
   }
   if (pf.avro_ty == "boolean") {
     out += (v.kind == ValueKind::Logico && v.b) ? '\1' : '\0';
+    return out;
+  }
+  if (pf.avro_ty == "int") {
+    const std::int32_t x = v.kind == ValueKind::Inteiro
+                               ? static_cast<std::int32_t>(v.i)
+                               : static_cast<std::int32_t>(v.as_number());
+    for (int k = 0; k < 4; ++k) out.push_back(static_cast<char>((x >> (8 * k)) & 0xFF));
     return out;
   }
   if (pf.avro_ty == "double" || pf.avro_ty == "float") {
@@ -1355,7 +1538,7 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
                                 std::int64_t snapshot_id, int added, int existing, int deleted,
                                 std::int64_t added_rows, std::int64_t existing_rows,
                                 const std::vector<FileInfo>& files,
-                                const std::vector<PartitionField>& spec) {
+                                const std::vector<PartitionField>& spec, int list_content = 0) {
   Value schema;
   try {
     schema = json_parse(kManifestListSchema);
@@ -1370,7 +1553,7 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
   rec.map->set("manifest_path", Value::texto("file://" + manifest_path));
   rec.map->set("manifest_length", Value::inteiro(manifest_length));
   rec.map->set("partition_spec_id", Value::inteiro(0));
-  rec.map->set("content", Value::inteiro(0));  // DATA
+  rec.map->set("content", Value::inteiro(list_content));  // 0 DATA, 1 DELETES
   // 1a passada: sem data sequence numbers reais (manifest entries os tem
   // nulos); 0 e o neutro e readers reais aceitam.
   rec.map->set("sequence_number", Value::inteiro(0));
@@ -1476,8 +1659,8 @@ std::string build_metadata_json(const std::string& dir, const std::string& uuid,
   for (std::size_t k = 0; k < spec.size(); ++k) {
     const PartitionField& pf = spec[k];
     out += (k ? ", " : "") + std::string("{ \"field-id\": ") + std::to_string(pf.field_id) +
-           ", \"source-id\": " + std::to_string(pf.source_id) +
-           ", \"transform\": \"identity\", \"name\": \"" + json_escape(pf.name) + "\" }";
+           ", \"source-id\": " + std::to_string(pf.source_id) + ", \"transform\": \"" +
+           json_escape(pf.transform) + "\", \"name\": \"" + json_escape(pf.name) + "\" }";
   }
   out += "] }\n  ],\n";
   out += "  \"default-spec-id\": 0,\n";
@@ -1552,15 +1735,17 @@ const Snapshot* find_snapshot(const TableMeta& meta, std::int64_t id) {
 
 // Entrada de manifest: caminho do data file + record `partition` (mapa com o
 // valor de particao por nome de coluna; vazio = sem particao) + contagens.
+// `content`: 0 = DATA, 1 = POSITION DELETES, 2 = EQUALITY DELETES (Fase 12-5a).
 struct ActiveEntry {
   int status = 0;
+  int content = 0;
   std::string path;
   Value partition;
   std::int64_t records = 0;
   std::int64_t size = 0;
 };
 
-// coleta (status, file_path, partition) dos manifests de um snapshot
+// coleta (status, content, file_path, partition) dos manifests de um snapshot
 void collect_manifest_entries(const Snapshot& snap, std::vector<ActiveEntry>& out) {
   std::string list_path = snap.manifest_list;
   if (list_path.rfind("file://", 0) == 0) list_path = list_path.substr(7);
@@ -1584,6 +1769,8 @@ void collect_manifest_entries(const Snapshot& snap, std::vector<ActiveEntry>& ou
       ActiveEntry entry;
       entry.status = static_cast<int>(status->i);
       entry.path = fp->s;
+      const Value* ct = map_find(*df, "content");
+      entry.content = ct && ct->kind == ValueKind::Inteiro ? static_cast<int>(ct->i) : 0;
       const Value* part = map_find(*df, "partition");
       entry.partition = (part && part->kind == ValueKind::Mapa) ? *part : Value::mapa();
       const Value* rc = map_find(*df, "record_count");
@@ -1597,7 +1784,13 @@ void collect_manifest_entries(const Snapshot& snap, std::vector<ActiveEntry>& ou
 
 // arquivos ativos no snapshot corrente: percorre a cadeia de pais do mais
 // antigo para o mais novo aplicando adds menos removes (remove = status 2).
-std::vector<ActiveEntry> resolve_active_files(const TableMeta& meta) {
+// Entradas com content 1/2 (position/equality deletes, Fase 12-5a) vao para
+// `deletes`; as de dados (content 0) para `data`.
+struct ResolvedFiles {
+  std::vector<ActiveEntry> data;
+  std::vector<ActiveEntry> deletes;
+};
+ResolvedFiles resolve_files(const TableMeta& meta) {
   if (meta.current_snapshot < 0) die("tabela em '" + meta.location + "' esta vazia (sem snapshots)");
 
   // cadeia do atual ate a raiz
@@ -1614,25 +1807,33 @@ std::vector<ActiveEntry> resolve_active_files(const TableMeta& meta) {
     die("cadeia de snapshots quebrada em '" + meta.location + "'");
   }
 
-  std::vector<ActiveEntry> active;
+  ResolvedFiles out;
+  auto apaga_por_path = [](std::vector<ActiveEntry>& v, const std::string& path) {
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [&](const ActiveEntry& a) { return a.path == path; }),
+            v.end());
+  };
+  auto contem = [](const std::vector<ActiveEntry>& v, const std::string& path) {
+    return std::find_if(v.begin(), v.end(),
+                        [&](const ActiveEntry& a) { return a.path == path; }) != v.end();
+  };
   for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
     std::vector<ActiveEntry> entries;
     collect_manifest_entries(**it, entries);
     for (const ActiveEntry& entry : entries) {
+      std::vector<ActiveEntry>& alvo = entry.content == 0 ? out.data : out.deletes;
       if (entry.status == 2) {  // DELETED
-        active.erase(std::remove_if(active.begin(), active.end(),
-                                    [&](const ActiveEntry& a) { return a.path == entry.path; }),
-                     active.end());
+        apaga_por_path(alvo, entry.path);
       } else {  // ADDED (1) ou EXISTING (0)
-        if (std::find_if(active.begin(), active.end(), [&](const ActiveEntry& a) {
-              return a.path == entry.path;
-            }) == active.end()) {
-          active.push_back(entry);
-        }
+        if (!contem(alvo, entry.path)) alvo.push_back(entry);
       }
     }
   }
-  return active;
+  return out;
+}
+
+std::vector<ActiveEntry> resolve_active_files(const TableMeta& meta) {
+  return resolve_files(meta).data;
 }
 
 std::string strip_scheme(const std::string& path) {
@@ -1903,10 +2104,19 @@ AppendCore append_core(const std::string& dir, const std::string& dir_display,
     spec_fields = meta.spec;
     std::vector<std::string> nomes;
     for (const PartitionField& pf : meta.spec) nomes.push_back(pf.name);
-    if (!part_cols_req.empty() && part_cols_req != nomes) {
-      die("anexar_iceberg: tabela em '" + dir_display + "' ja e particionada por " +
-          join_part_cols(nomes) + " (recebido particionar_por: " +
-          join_part_cols(part_cols_req) + ")");
+    if (!part_cols_req.empty()) {
+      // Normaliza o pedido ("bucket[4](id)" -> "id_bucket_4") antes de
+      // comparar com os nomes derivados do spec corrente.
+      std::vector<std::string> pedidos;
+      for (const std::string& p : part_cols_req) {
+        const auto [bsrc, n] = parse_bucket(p);
+        pedidos.push_back(bsrc.empty() ? p : bsrc + "_bucket_" + std::to_string(n));
+      }
+      if (pedidos != nomes) {
+        die("anexar_iceberg: tabela em '" + dir_display + "' ja e particionada por " +
+            join_part_cols(nomes) + " (recebido particionar_por: " +
+            join_part_cols(part_cols_req) + ")");
+      }
     }
     // as colunas de particao precisam existir na tabela anexada (schema ja
     // foi validado acima, entao so falta o valor em si — validado ao agrupar)
@@ -2022,6 +2232,21 @@ OndeFilter split_onde(const Value* onde, const std::vector<PartitionField>& spec
       for (const PartitionField& pf : spec) {
         if (pf.name == kv.first) eh_particao = true;
       }
+      // Bucket: predicado na coluna de ORIGEM vira poda — converte o valor
+      // para o bucket e compara com o inteiro do record `partition`.
+      // (O predicado original segue tambem como residual: poda aproxima por
+      // hash, o filtro confirma o valor exato.)
+      for (const PartitionField& pf : spec) {
+        if (pf.transform.rfind("bucket[", 0) == 0 && pf.source_name == kv.first) {
+          try {
+            const int b = bucket_of(kv.second, pf.source_type, pf.num_buckets, pf.source_name);
+            f.prune.emplace_back(pf.name, Value::inteiro(b));
+          } catch (const std::exception&) {
+            // valor incompativel (ex.: nulo): sem poda, segue como residual
+          }
+          break;
+        }
+      }
       if (eh_particao) {
         f.prune.push_back(kv);
       } else {
@@ -2050,9 +2275,73 @@ bool passa_pruning(const ActiveEntry& e, const std::vector<std::pair<std::string
   return true;
 }
 
+// Deletes da Fase 12-5a, carregados dos manifests do snapshot corrente:
+// - position: arquivo {file_path, pos} -> linhas apagadas por (arquivo,
+//   indice fisico no arquivo);
+// - equality: linhas-chave; apaga a linha de dados quando TODAS as colunas
+//   em comum batem (pred_eq) — exige ao menos 1 coluna em comum.
+struct LoadedDeletes {
+  std::map<std::string, std::set<std::int64_t>> pos;  // path sem scheme -> posicoes
+  std::vector<Value> eq;                              // linhas de equality delete
+};
+
+LoadedDeletes load_deletes(const std::vector<ActiveEntry>& deletes) {
+  LoadedDeletes out;
+  for (const ActiveEntry& d : deletes) {
+    const std::string path = strip_scheme(d.path);
+    Value chunk;
+    try {
+      chunk = parquet_read(path);
+    } catch (const std::exception& e) {
+      die("arquivo de delete '" + path + "' ilegivel: " + e.what());
+    }
+    if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) continue;
+    if (d.content == 1) {
+      for (const Value& row : *chunk.list) {
+        if (row.kind != ValueKind::Mapa || !row.map) continue;
+        const Value* fp = row.map->find("file_path");
+        const Value* ps = row.map->find("pos");
+        if (!fp || fp->kind != ValueKind::Texto || !ps || !ps->is_number()) continue;
+        out.pos[strip_scheme(fp->s)].insert(static_cast<std::int64_t>(ps->as_number()));
+      }
+    } else if (d.content == 2) {
+      for (const Value& row : *chunk.list) {
+        if (row.kind == ValueKind::Mapa && row.map) out.eq.push_back(row);
+      }
+    }
+  }
+  return out;
+}
+
+// Linha de dados apagada por position ou equality delete?
+bool apagada_por_delete(const std::string& fpath_norm, std::int64_t pos, const Value& row,
+                        const LoadedDeletes& dels) {
+  const auto itp = dels.pos.find(fpath_norm);
+  if (itp != dels.pos.end() && itp->second.count(pos)) return true;
+  if (row.kind != ValueKind::Mapa || !row.map) return false;
+  for (const Value& d : dels.eq) {
+    if (d.kind != ValueKind::Mapa || !d.map) continue;
+    int compartilhadas = 0;
+    bool bate = true;
+    for (const auto& kv : d.map->items) {
+      const Value* cell = row.map->find(kv.first);
+      if (!cell) continue;
+      ++compartilhadas;
+      if (!pred_eq(*cell, kv.second)) {
+        bate = false;
+        break;
+      }
+    }
+    if (bate && compartilhadas > 0) return true;
+  }
+  return false;
+}
+
 Value read_core(const TableMeta& meta, const Value* onde) {
   const OndeFilter filtro = split_onde(onde, meta.spec);
-  std::vector<ActiveEntry> active = resolve_active_files(meta);
+  const ResolvedFiles resolvidos = resolve_files(meta);
+  std::vector<ActiveEntry> active = resolvidos.data;
+  const LoadedDeletes dels = load_deletes(resolvidos.deletes);
   // Pruning: data file so entra se bater com todos os predicados de particao.
   if (!filtro.prune.empty()) {
     active.erase(std::remove_if(active.begin(), active.end(),
@@ -2078,7 +2367,9 @@ Value read_core(const TableMeta& meta, const Value* onde) {
   };
 
   // Tabela particionada: reidrata as colunas de particao a partir do record
-  // `partition` dos manifests, na ordem do schema do metadata.
+  // `partition` dos manifests, na ordem do schema do metadata. Deletes
+  // (position por indice fisico, equality por valor) filtram antes do
+  // residual.
   if (!meta.spec.empty() && !meta.schema_cols.empty()) {
     Value out = Value::tabela();
     for (const ActiveEntry& f : active) {
@@ -2087,6 +2378,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
       if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
         die("arquivo '" + path + "' nao e uma tabela parquet");
       }
+      std::int64_t pos = 0;
       for (Value& row : *chunk.list) {
         if (row.kind != ValueKind::Mapa || !row.map) {
           die("linha de '" + path + "' nao e um mapa");
@@ -2110,6 +2402,9 @@ Value read_core(const TableMeta& meta, const Value* onde) {
                 "' fora do metadata)");
           }
         }
+        const bool apagada = apagada_por_delete(path, pos, m, dels);
+        ++pos;
+        if (apagada) continue;
         if (passa_residual(m)) out.list->push_back(std::move(m));
       }
     }
@@ -2127,6 +2422,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
       if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
         die("arquivo '" + path + "' nao e uma tabela parquet");
       }
+      std::int64_t pos = 0;
       for (Value& row : *chunk.list) {
         if (row.kind != ValueKind::Mapa || !row.map) {
           die("linha de '" + path + "' nao e um mapa");
@@ -2149,6 +2445,9 @@ Value read_core(const TableMeta& meta, const Value* onde) {
                 "' fora do metadata)");
           }
         }
+        const bool apagada = apagada_por_delete(path, pos, m, dels);
+        ++pos;
+        if (apagada) continue;
         if (passa_residual(m)) out.list->push_back(std::move(m));
       }
     }
@@ -2164,6 +2463,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
     if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
       die("arquivo '" + path + "' nao e uma tabela parquet");
     }
+    std::int64_t pos = 0;
     for (Value& row : *chunk.list) {
       if (row.kind != ValueKind::Mapa || !row.map) die("linha de '" + path + "' nao e um mapa");
       if (schema_cols.empty()) {
@@ -2180,6 +2480,9 @@ Value read_core(const TableMeta& meta, const Value* onde) {
           }
         }
       }
+      const bool apagada = apagada_por_delete(path, pos, row, dels);
+      ++pos;
+      if (apagada) continue;
       if (passa_residual(row)) out.list->push_back(std::move(row));
     }
   }
@@ -2635,6 +2938,207 @@ void iceberg_append(const std::string& dir, const Value& tabela,
   latest_metadata_path(location, meta);
   const AppendCore ac = append_core(location, dir, meta, tabela, part_cols_req);
   commit_metadata(location, ac.version, ac.json);
+}
+
+// Filtro residual sobre a linha final (compartilhado entre leitura e delete).
+bool residual_match(const Value& row,
+                    const std::vector<std::pair<std::string, Value>>& residual) {
+  for (const auto& [col, val] : residual) {
+    const Value* cell = row.map ? row.map->find(col) : nullptr;
+    if (!pred_eq(cell ? *cell : Value::nulo(), val)) return false;
+  }
+  return true;
+}
+
+// Projeta a linha bruta do parquet no schema corrente (mesma regra da
+// leitura: reidrata particao identity, nulo no resto).
+Value project_row(const ActiveEntry& f, const Value& row, const TableMeta& meta) {
+  if (!meta.spec.empty() && !meta.schema_cols.empty()) {
+    Value m = Value::mapa();
+    for (const Column& c : meta.schema_cols) {
+      if (const Value* cell = row.map->find(c.name)) {
+        m.map->set(c.name, *cell);
+        continue;
+      }
+      const Value* pv = f.partition.map ? f.partition.map->find(c.name) : nullptr;
+      m.map->set(c.name, pv ? partition_rehydrate(*pv, c.type) : Value::nulo());
+    }
+    return m;
+  }
+  if (!meta.schema_cols.empty()) {
+    Value m = Value::mapa();
+    for (const Column& c : meta.schema_cols) {
+      if (const Value* cell = row.map->find(c.name)) {
+        m.map->set(c.name, *cell);
+      } else {
+        m.map->set(c.name, Value::nulo());
+      }
+    }
+    return m;
+  }
+  return row;
+}
+
+// Apaga linhas por predicado de igualdade (`onde`, mesma semantica do
+// `ler_iceberg ... onde:`): escreve um delete file + novo snapshot
+// (operation "delete"). `igualdade` = false -> position deletes
+// ({file_path, pos}); true -> equality deletes (linhas completas projetadas).
+// Devolve o numero de linhas apagadas (0 = sem commit).
+std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igualdade) {
+  if (rest_cfg().ativo) {
+    die("apagar_iceberg ainda nao suportado no modo REST (use o catalogo Hadoop local)");
+  }
+  const std::string location = abs_path(dir);
+  TableMeta meta;
+  latest_metadata_path(location, meta);
+  const OndeFilter filtro = split_onde(&onde, meta.spec);
+  const ResolvedFiles resolvidos = resolve_files(meta);
+  // Deletes ja commitados: nao reapaga o ja apagado.
+  const LoadedDeletes vigentes = load_deletes(resolvidos.deletes);
+
+  struct Alvo {
+    std::string path;  // file:// do data file
+    std::int64_t pos;
+    Value row;     // projetada (modo igualdade)
+    Value part;    // record `partition` do data file (para a entrada do manifest)
+  };
+  std::vector<Alvo> alvos;
+  for (const ActiveEntry& f : resolvidos.data) {
+    if (!filtro.prune.empty() && !passa_pruning(f, filtro.prune, meta.spec)) continue;
+    const std::string path = strip_scheme(f.path);
+    Value chunk = parquet_read(path);
+    if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) continue;
+    std::int64_t pos = 0;
+    for (Value& row : *chunk.list) {
+      if (row.kind != ValueKind::Mapa || !row.map) {
+        die("linha de '" + path + "' nao e um mapa");
+      }
+      Value m = project_row(f, row, meta);
+      const bool ja_apagada = apagada_por_delete(path, pos, m, vigentes);
+      if (!ja_apagada && residual_match(m, filtro.residual)) {
+        alvos.push_back({f.path, pos, std::move(m), f.partition});
+      }
+      ++pos;
+    }
+  }
+  if (alvos.empty()) return 0;
+
+  // Um delete file por particao dos data files atingidos (com o record
+  // `partition` correspondente na entrada do manifest): readers que casam
+  // deletes com dados pela particao (ex.: pyiceberg) aplicam o delete em
+  // cada particao. Tabela sem particao: um unico arquivo.
+  auto part_chave = [](const Value& part) {
+    std::string k;
+    if (part.kind == ValueKind::Mapa && part.map) {
+      for (const auto& kv : part.map->items) {
+        k += "|" + kv.first + "=";
+        if (kv.second.kind == ValueKind::Texto) k += "t:" + kv.second.s;
+        else if (kv.second.kind == ValueKind::Inteiro) k += "i:" + std::to_string(kv.second.i);
+        else if (kv.second.kind == ValueKind::Decimal) k += "d:" + std::to_string(kv.second.d);
+        else if (kv.second.kind == ValueKind::Logico) k += kv.second.b ? "b:1" : "b:0";
+        else k += "n";
+      }
+    }
+    return k;
+  };
+  struct GrupoDel {
+    Value part;
+    std::vector<const Alvo*> itens;
+  };
+  std::vector<GrupoDel> grupos_del;
+  for (const Alvo& a : alvos) {
+    const std::string k = part_chave(a.part);
+    auto it = std::find_if(grupos_del.begin(), grupos_del.end(), [&](const GrupoDel& g) {
+      return part_chave(g.part) == k;
+    });
+    if (it == grupos_del.end()) {
+      grupos_del.push_back({a.part, {&a}});
+    } else {
+      it->itens.push_back(&a);
+    }
+  }
+  mkdir_if_missing(location + "/data");
+  std::vector<std::pair<int, std::string>> del_changes;
+  std::vector<FileInfo> del_infos;
+  int del_idx = 0;
+  for (const GrupoDel& g : grupos_del) {
+    Value del_table = Value::tabela();
+    if (!igualdade) {
+      for (const Alvo* a : g.itens) {
+        Value r = Value::mapa();
+        r.map->set("file_path", Value::texto(a->path));
+        r.map->set("pos", Value::inteiro(a->pos));
+        del_table.list->push_back(std::move(r));
+      }
+    } else {
+      for (const Alvo* a : g.itens) del_table.list->push_back(a->row);
+    }
+    const std::string del_name = std::string("00000-1-") + new_uuid() +
+                                 (igualdade ? ".eq-deletes.parquet" : ".pos-deletes.parquet");
+    const std::string del_path = location + "/data/" + del_name;
+    parquet_write(del_path, del_table);
+    const std::int64_t del_size = file_size(del_path);
+    if (del_size <= 0) die("falha ao gravar '" + del_path + "'");
+    FileInfo dinfo;
+    dinfo.path = "file://" + del_path;
+    dinfo.records = static_cast<std::int64_t>(g.itens.size());
+    dinfo.size = del_size;
+    dinfo.content = igualdade ? 2 : 1;
+    dinfo.part_map = g.part;
+    del_changes.emplace_back(1, dinfo.path);
+    del_infos.push_back(std::move(dinfo));
+    ++del_idx;
+  }
+
+  const std::string meta_dir = location + "/metadata";
+  const std::int64_t snapshot_id = new_snapshot_id();
+  const std::int64_t ts = now_ms();
+  // Como no append: os data files ja ativos entram no novo manifest como
+  // EXISTING — readers como pyiceberg so enxergam os manifests do snapshot
+  // corrente e nao andam a cadeia de pais.
+  std::vector<std::pair<int, std::string>> changes;
+  std::vector<FileInfo> infos;
+  std::int64_t existing_rows = 0;
+  for (const ActiveEntry& e : resolvidos.data) {
+    if (e.content != 0) continue;
+    changes.emplace_back(0, e.path);
+    FileInfo info;
+    info.path = e.path;
+    info.records = e.records;
+    info.size = e.size;
+    info.part_map = e.partition;
+    infos.push_back(std::move(info));
+    existing_rows += e.records;
+  }
+  std::int64_t del_rows = 0;
+  for (std::size_t k = 0; k < del_changes.size(); ++k) {
+    changes.push_back(del_changes[k]);
+    infos.push_back(del_infos[k]);
+    del_rows += del_infos[k].records;
+  }
+  const std::string manifest_name =
+      write_manifest(meta_dir, changes, snapshot_id, infos, meta.spec);
+  const std::string list_path = write_manifest_list(
+      meta_dir, manifest_name, snapshot_id, static_cast<int>(del_changes.size()),
+      static_cast<int>(resolvidos.data.size()), 0, del_rows, existing_rows, infos, meta.spec, 1);
+
+  Snapshot snap;
+  snap.id = snapshot_id;
+  snap.ts = ts;
+  snap.operation = "delete";
+  snap.manifest_list = list_path;
+  snap.parent = meta.current_snapshot;
+  snap.has_parent = meta.current_snapshot >= 0;
+  std::vector<Snapshot> snapshots = meta.snapshots;
+  snapshots.push_back(snap);
+  std::vector<std::pair<std::int64_t, std::int64_t>> log = meta.snapshot_log;
+  log.emplace_back(ts, snapshot_id);
+  const std::int64_t version = meta.version < 0 ? 0 : meta.version + 1;
+  commit_metadata(location, version,
+                  build_metadata_json(location, meta.uuid.empty() ? new_uuid() : meta.uuid,
+                                      meta.schemas, meta.current_schema_id, meta.last_column_id,
+                                      meta.spec, snapshots, log, snapshot_id, ts));
+  return static_cast<std::int64_t>(alvos.size());
 }
 
 Value iceberg_read(const std::string& dir, const Value* onde) {
