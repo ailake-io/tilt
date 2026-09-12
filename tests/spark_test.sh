@@ -3,21 +3,16 @@
 # tabelas num dir temporario via tests/fixtures/spark_interop.tilt —
 #   (a) Delta particionado por [estado] com 2 appends (o 2o traz a coluna nova
 #       "canal": evolucao de schema, linhas antigas leem nulo);
-#   (b) Iceberg particionado por [estado] (catalogo Hadoop local);
+#   (b) Iceberg particionado por [estado] (catalogo Hadoop, metadata no nome
+#       canonico v<N>.metadata.json e file_path absolutos);
 #   (c) Parquet com listas + gzip;
-# e um container apache/spark:3.5.3 le o que consegue de volta via
-# spark-submit (pyspark), conferindo contagens, valores de linhas conhecidas,
-# coluna de particao reidratada, a coluna nova do append Delta e as listas do
-# Parquet. O Iceberg expoe um gap real de writer (fase 12-5): o tilt grava o
-# metadata como v<N>-<uuid>.metadata.json e o HadoopTableOperations do
-# Iceberg/Spark so resolve v<N>.metadata.json — a leitura falha com "Table
-# does not exist" e o teste reporta "SPARK GAP iceberg" sem contornar; as
-# verificacoes estritas de Iceberg passam a valer quando o writer for
-# corrigido. Requer docker; a 1a execucao tambem precisa de rede para baixar
-# a imagem e os pacotes io.delta:delta-spark /
-# org.apache.iceberg:iceberg-spark-runtime do Maven Central (--packages do
-# spark-submit). Sem docker (ou sem rede para a imagem), pula com mensagem —
-# padrao dos testes de integracao do projeto.
+# e um container apache/spark:3.5.3 le as tres de volta via spark-submit
+# (pyspark), conferindo contagens, valores de linhas conhecidas, coluna de
+# particao reidratada, a coluna nova do append Delta e as listas do Parquet.
+# Requer docker; a 1a execucao tambem precisa de rede para baixar a imagem e
+# os pacotes io.delta:delta-spark / org.apache.iceberg:iceberg-spark-runtime
+# do Maven Central (--packages do spark-submit). Sem docker (ou sem rede para
+# a imagem), pula com mensagem — padrao dos testes de integracao do projeto.
 set -eu
 
 BIN="$1"
@@ -74,10 +69,11 @@ confere "caderno [] []"
 [ "$fail" = 0 ] || exit 1
 
 # layout de catalogo Hadoop para o Spark resolver a tabela Iceberg pelo nome
-# (warehouse/namespace/tabela -> dir gravado pelo tilt). O symlink usa o
-# caminho visto DENTRO do container (/data): o tmp eh montado la em /data.
+# (warehouse/namespace/tabela -> dir gravado pelo tilt). O tmp eh montado no
+# MESMO path absoluto dentro do container: os manifests/metadata do tilt
+# referenciam file:// com path absoluto do host.
 mkdir -p "$tmp/spark_cat/default"
-ln -s "/data/clientes_iceberg" "$tmp/spark_cat/default/clientes_iceberg"
+ln -s "$tmp/clientes_iceberg" "$tmp/spark_cat/default/clientes_iceberg"
 
 # --- 2. spark (container) le as tres tabelas e confere ---------------------------
 cat > "$tmp/verifica_spark.py" <<'PYEOF'
@@ -134,39 +130,36 @@ print("SPARK OK delta (%d linhas, particao reidratada, "
       "coluna nova do append visivel com nulo nas linhas antigas)" % n)
 
 # ---------------------------------------------------------- (b) Iceberg
-# Gap conhecido (writer, fase 12-5): o tilt grava o metadata como
-# v<N>-<uuid>.metadata.json, mas o HadoopTableOperations do Iceberg/Spark so
-# resolve "v<N>.metadata.json" (regex v([^\..*]) + Integer.parseInt e
-# procura exata do arquivo; ver core/src/main/java/org/apache/iceberg/hadoop/
-# HadoopTableOperations.java). Enquanto nao for corrigido, a leitura via
-# HadoopCatalog falha com "Table does not exist" — reportada como gap, sem
-# contornar. Se o writer passar a usar v<N>.metadata.json, as verificacoes
-# estritas abaixo passam a valer automaticamente.
-try:
-    ice = spark.table("tiltice.default.clientes_iceberg")
-except Exception as e:
-    msg = str(e)
-    if "TABLE_OR_VIEW_NOT_FOUND" in msg and "clientes_iceberg" in msg:
-        print("SPARK GAP iceberg (writer, fase 12-5): metadata "
-              "v<N>-<uuid>.metadata.json fora da convencao v<N>.metadata.json "
-              "do HadoopCatalog; a leitura via SparkCatalog falha com "
-              "'Table does not exist'")
-    else:
-        falha("iceberg: falha inesperada na leitura: %s" % msg.splitlines()[0])
-else:
-    n = ice.count()
-    if n != 3:
-        falha("iceberg: esperadas 3 linhas, lidas %d" % n)
-    if ice.columns != ["estado", "nome", "idade"]:
-        falha("iceberg: schema divergente: %r" % (ice.columns,))
-    linhas = {r["nome"]: (r["estado"], r["idade"]) for r in ice.collect()}
-    esperado = {"ana": ("sp", 30), "bruno": ("rj", 40), "carla": ("sp", 50)}
-    if linhas != esperado:
-        falha("iceberg: linhas divergem: %r" % (linhas,))
-    nulos = ice.filter(F.col("estado").isNull()).count()
-    if nulos != 0:
-        falha("iceberg: coluna de particao reidratada com %d nulos" % nulos)
-    print("SPARK OK iceberg (%d linhas, particao identity reidratada)" % n)
+# metadata no nome canonico v<N>.metadata.json (HadoopCatalog) + file_path
+# absolutos no manifest: o SparkCatalog type=hadoop resolve a tabela pelo
+# warehouse e le data/manifests direto.
+ice = spark.table("tiltice.default.clientes_iceberg")
+n = ice.count()
+if n != 3:
+    falha("iceberg: esperadas 3 linhas, lidas %d" % n)
+if ice.columns != ["estado", "nome", "idade"]:
+    falha("iceberg: schema divergente: %r" % (ice.columns,))
+linhas = {r["nome"]: (r["estado"], r["idade"]) for r in ice.collect()}
+esperado = {"ana": ("sp", 30), "bruno": ("rj", 40), "carla": ("sp", 50)}
+if linhas != esperado:
+    falha("iceberg: linhas divergem: %r" % (linhas,))
+nulos = ice.filter(F.col("estado").isNull()).count()
+if nulos != 0:
+    falha("iceberg: coluna de particao reidratada com %d nulos" % nulos)
+# pruning real: o predicate de particao poda pelos summaries do manifest
+# list (contains_null/bounds) e o residual filtra linhas
+sp = ice.filter(F.col("estado") == "sp").count()
+if sp != 2:
+    falha("iceberg: pruning estado=sp deveria achar 2 linhas, achou %d" % sp)
+ana = ice.filter((F.col("estado") == "sp") & (F.col("nome") == "ana")).collect()
+if len(ana) != 1 or ana[0]["idade"] != 30:
+    falha("iceberg: pruning+residual sp/ana diverge: %r" % ana)
+mg = ice.filter(F.col("estado") == "mg").count()
+if mg != 0:
+    falha("iceberg: estado=mg fora dos bounds deveria achar 0, achou %d" % mg)
+print("SPARK OK iceberg (%d linhas, particao identity reidratada, "
+      "metadata v<N>.metadata.json, file_path absolutos, pruning por bounds)"
+      % n)
 
 # ---------------------------------------------------------- (c) Parquet
 par = spark.read.parquet(base + "/produtos.parquet")
@@ -192,15 +185,17 @@ spark.stop()
 PYEOF
 
 # o container roda como root para poder ler o dir temporario (mktemp -d vem
-# 0700); os pacotes --packages vao para o ivy cache do root no 1o uso
+# 0700) e monta o tmp no mesmo path absoluto do host (os file_path absolutos
+# dos manifests apontam para ele); os pacotes --packages vao para o ivy cache
+# do root no 1o uso
 if ! docker run --rm --user root \
-       -v "$tmp:/data" -w /data \
+       -v "$tmp:$tmp" \
        "$IMAGEM" \
        /opt/spark/bin/spark-submit --master "local[*]" \
          --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
          --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
          --packages "$PKGS" \
-         /data/verifica_spark.py /data > "$tmp/spark.log" 2>&1; then
+         "$tmp/verifica_spark.py" "$tmp" > "$tmp/spark.log" 2>&1; then
   echo "spark-submit falhou (tail do log):"
   tail -40 "$tmp/spark.log"
   exit 1

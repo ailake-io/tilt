@@ -764,7 +764,7 @@ const char* kManifestListSchema = R"AVRO({"type":"record","name":"manifest_file"
 {"name":"added_rows_count","type":"long","field-id":512},
 {"name":"existing_rows_count","type":"long","field-id":513},
 {"name":"deleted_rows_count","type":"long","field-id":514},
-{"name":"partitions","type":["null",{"type":"array","element-id":508,"items":{"type":"record","name":"partition_field_summary","fields":[
+{"name":"partitions","type":["null",{"type":"array","element-id":508,"items":{"type":"record","name":"r508","fields":[
 {"name":"contains_null","type":"boolean","field-id":509},
 {"name":"contains_nan","type":["null","boolean"],"default":null,"field-id":518},
 {"name":"lower_bound","type":["null","bytes"],"default":null,"field-id":510},
@@ -983,7 +983,8 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela,
 }
 
 // ---------------------------------------------------------------------------
-// Metadata (v<N>-<uuid>.metadata.json)
+// Metadata (v<N>.metadata.json — nome canonico do HadoopCatalog; o leitor
+// tambem aceita o layout legado v<N>-<uuid>.metadata.json)
 // ---------------------------------------------------------------------------
 
 std::vector<std::string> list_metadata_files(const std::string& meta_dir) {
@@ -1000,6 +1001,19 @@ std::vector<std::string> list_metadata_files(const std::string& meta_dir) {
   out.reserve(found.size());
   for (auto& f : found) out.push_back(std::move(f.second));
   return out;
+}
+
+// Versao pelo nome do arquivo: "v10.metadata.json" -> 10 (canonico);
+// "v0-<uuid>.metadata.json" -> 0 (legado). Fora de "v" + digitos -> -1
+// (desconhecida; perde na comparacao de "maior versao").
+std::int64_t metadata_version_from_name(const std::string& path) {
+  const std::string base = path.substr(path.find_last_of('/') + 1);
+  if (base.size() < 2 || base[0] != 'v' || base[1] < '0' || base[1] > '9') return -1;
+  try {
+    return std::stoll(base.substr(1));
+  } catch (const std::exception&) {
+    return -1;
+  }
 }
 
 struct Snapshot {
@@ -1030,6 +1044,7 @@ struct TableMeta {
   std::vector<PartitionField> spec;  // do default-spec-id (vazio = sem particao)
   std::int64_t version = -1;
   std::string location;
+  std::string uuid;  // estavel por tabela (metadata "uuid", spec v2)
 };
 
 Value parse_metadata(const std::string& path, TableMeta& out) {
@@ -1045,6 +1060,9 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
   }
   if (const Value* loc = map_find(md, "location"); loc && loc->kind == ValueKind::Texto) {
     out.location = loc->s;
+  }
+  if (const Value* id = map_find(md, "table-uuid"); id && id->kind == ValueKind::Texto) {
+    out.uuid = id->s;
   }
   if (const Value* lu = map_find(md, "last-updated-ms"); lu && lu->kind == ValueKind::Inteiro) {
     out.last_updated = lu->i;
@@ -1184,27 +1202,28 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     }
   }
 
-  // versao pelo nome do arquivo v<N>-<uuid>.metadata.json
-  const std::string base = path.substr(path.find_last_of('/') + 1);
-  if (base.size() > 1 && base[0] == 'v') {
-    try {
-      out.version = std::stoll(base.substr(1));
-    } catch (const std::exception&) {
-      out.version = -1;
-    }
-  }
+  // versao pelo nome do arquivo (v<N>.metadata.json canonico; v<N>-<uuid>
+  // legado ainda aceito na leitura)
+  out.version = metadata_version_from_name(path);
   return md;
 }
 
-// le o metadata mais recente (maior versao)
+// le o metadata mais recente (maior versao; empate lexicografico). Comparar
+// pela versao parseada, nao pela ordem lexicografica do nome: "v10" < "v2".
 std::string latest_metadata_path(const std::string& dir, TableMeta& meta) {
   const std::string meta_dir = dir + "/metadata";
   const std::vector<std::string> files = list_metadata_files(meta_dir);
   if (files.empty()) {
     die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
   }
-  parse_metadata(files.back(), meta);
-  return files.back();
+  const std::string* best = &files.front();
+  for (const std::string& f : files) {
+    const std::int64_t v = metadata_version_from_name(f);
+    const std::int64_t bv = metadata_version_from_name(*best);
+    if (v > bv || (v == bv && f > *best)) best = &f;
+  }
+  parse_metadata(*best, meta);
+  return *best;
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,9 +1315,47 @@ std::string write_manifest(const std::string& meta_dir,
   return name;
 }
 
+// Comparacao natural de valores de particao (min/max dos summaries do
+// manifest list): numerico por valor, texto lexicografico, booleano 0<1.
+bool partition_less(const Value& a, const Value& b) {
+  const bool a_num = a.kind == ValueKind::Inteiro || a.kind == ValueKind::Decimal;
+  const bool b_num = b.kind == ValueKind::Inteiro || b.kind == ValueKind::Decimal;
+  if (a_num && b_num) return a.as_number() < b.as_number();
+  if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) return a.s < b.s;
+  if (a.kind == ValueKind::Logico && b.kind == ValueKind::Logico) return !a.b && b.b;
+  return false;  // tipos divergentes: nao reordena
+}
+
+// Serializacao binaria de um valor de particao para lower/upper_bound do
+// manifest list (single-value serialization da spec): string UTF-8, long e
+// double em 8 bytes little-endian, boolean 1 byte.
+std::string partition_bound_bytes(const PartitionField& pf, const Value& v) {
+  std::string out;
+  if (pf.avro_ty == "string") {
+    return v.kind == ValueKind::Texto ? v.s : std::string();
+  }
+  if (pf.avro_ty == "boolean") {
+    out += (v.kind == ValueKind::Logico && v.b) ? '\1' : '\0';
+    return out;
+  }
+  if (pf.avro_ty == "double" || pf.avro_ty == "float") {
+    const double d = v.as_number();
+    std::uint64_t bits;
+    std::memcpy(&bits, &d, 8);
+    put_u64(out, bits);
+    return out;
+  }
+  put_u64(out, static_cast<std::uint64_t>(v.kind == ValueKind::Inteiro
+                                              ? v.i
+                                              : static_cast<std::int64_t>(v.as_number())));
+  return out;
+}
+
 std::string write_manifest_list(const std::string& meta_dir, const std::string& manifest_name,
                                 std::int64_t snapshot_id, int added, int existing, int deleted,
-                                std::int64_t added_rows, std::int64_t existing_rows) {
+                                std::int64_t added_rows, std::int64_t existing_rows,
+                                const std::vector<FileInfo>& files,
+                                const std::vector<PartitionField>& spec) {
   Value schema;
   try {
     schema = json_parse(kManifestListSchema);
@@ -1325,7 +1382,43 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
   rec.map->set("added_rows_count", Value::inteiro(added_rows));
   rec.map->set("existing_rows_count", Value::inteiro(existing_rows));
   rec.map->set("deleted_rows_count", Value::inteiro(0));
-  rec.map->set("partitions", Value::lista());
+  // Summaries por campo de particao (field-id 507): readers reais (Spark)
+  // consultam contains_null/lower/upper para podar manifests por predicado
+  // de particao — lista vazia em tabela particionada estoura no evaluator.
+  // Sem spec, null (como o writer real). Bounds em bytes single-value.
+  Value parts = Value::nulo();
+  if (!spec.empty()) {
+    parts = Value::lista();
+    for (const PartitionField& pf : spec) {
+      bool contains_null = false;
+      bool has = false;
+      Value lower;
+      Value upper;
+      for (const FileInfo& f : files) {
+        const Value* pv = f.part_map.map ? f.part_map.map->find(pf.name) : nullptr;
+        if (!pv || pv->kind == ValueKind::Nulo) {
+          contains_null = true;
+          continue;
+        }
+        if (!has) {
+          lower = upper = *pv;
+          has = true;
+          continue;
+        }
+        if (partition_less(*pv, lower)) lower = *pv;
+        if (partition_less(upper, *pv)) upper = *pv;
+      }
+      Value s = Value::mapa();
+      s.map->set("contains_null", Value::logico(contains_null));
+      s.map->set("contains_nan", Value::nulo());
+      s.map->set("lower_bound",
+                 has ? Value::texto(partition_bound_bytes(pf, lower)) : Value::nulo());
+      s.map->set("upper_bound",
+                 has ? Value::texto(partition_bound_bytes(pf, upper)) : Value::nulo());
+      parts.list->push_back(std::move(s));
+    }
+  }
+  rec.map->set("partitions", std::move(parts));
   rec.map->set("key_metadata", Value::nulo());
 
   const std::string name = "snap-" + std::to_string(snapshot_id) + "-0-" + new_uuid() + ".avro";
@@ -1343,7 +1436,8 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
 // Metadata JSON (format-version 2)
 // ---------------------------------------------------------------------------
 
-std::string build_metadata_json(const std::string& dir, const std::vector<SchemaVer>& schemas,
+std::string build_metadata_json(const std::string& dir, const std::string& uuid,
+                                const std::vector<SchemaVer>& schemas,
                                 std::int64_t current_schema_id, std::int64_t last_column_id,
                                 const std::vector<PartitionField>& spec,
                                 const std::vector<Snapshot>& snapshots,
@@ -1351,9 +1445,18 @@ std::string build_metadata_json(const std::string& dir, const std::vector<Schema
                                 std::int64_t current_snapshot, std::int64_t last_updated) {
   std::string out = "{\n";
   out += "  \"format-version\": 2,\n";
+  out += "  \"table-uuid\": \"" + json_escape(uuid) + "\",\n";
   out += "  \"location\": \"" + json_escape(dir) + "\",\n";
+  // campos obrigatorios do spec v2 que readers reais (Spark/TableMetadataParser)
+  // exigem: sequence numbers ainda nao sao atribuidos (tabela nova = 0) e a
+  // tabela fica sem sort order (order vazio, como uma tabela recém-criada).
+  out += "  \"last-sequence-number\": 0,\n";
   out += "  \"last-updated-ms\": " + std::to_string(last_updated) + ",\n";
   out += "  \"last-column-id\": " + std::to_string(last_column_id) + ",\n";
+  // ids de campo de particao comecam em 1000 (spec); sem spec fica 999
+  std::int64_t last_partition_id = 999;
+  for (const PartitionField& pf : spec) last_partition_id = std::max(last_partition_id, pf.field_id);
+  out += "  \"last-partition-id\": " + std::to_string(last_partition_id) + ",\n";
   out += "  \"schemas\": [\n";
   for (std::size_t k = 0; k < schemas.size(); ++k) {
     out += (k ? ",\n" : "");
@@ -1401,15 +1504,21 @@ std::string build_metadata_json(const std::string& dir, const std::vector<Schema
            ", \"snapshot-id\": " + std::to_string(snapshot_log[k].second) + " }";
   }
   out += "\n  ],\n";
-  out += "  \"metadata-log\": []\n";
+  out += "  \"metadata-log\": [],\n";
+  out += "  \"sort-orders\": [ { \"order-id\": 0, \"fields\": [] } ],\n";
+  out += "  \"default-sort-order-id\": 0\n";
   out += "}\n";
   return out;
 }
 
 void commit_metadata(const std::string& dir, std::int64_t version, const std::string& content) {
   const std::string meta_dir = dir + "/metadata";
+  // Nome canonico do HadoopCatalog: o HadoopTableOperations do Iceberg/Spark
+  // resolve "v<N>.metadata.json" (regex v([^\..*]) + parseInt do numero e
+  // procura exata do arquivo). O layout antigo v<N>-<uuid>.metadata.json
+  // segue aceito na leitura (metadata_version_from_name).
   const std::string final_path =
-      meta_dir + "/v" + std::to_string(version) + "-" + new_uuid() + ".metadata.json";
+      meta_dir + "/v" + std::to_string(version) + ".metadata.json";
   const std::string tmp_path =
       meta_dir + "/.commit-" + std::to_string(tilt::rt::tilt_getpid()) + ".tmp";
   {
@@ -1423,6 +1532,11 @@ void commit_metadata(const std::string& dir, std::int64_t version, const std::st
     std::remove(tmp_path.c_str());
     die("falha ao commitar o metadata em '" + final_path + "'");
   }
+  // version-hint.txt: ponteiro de versao best-effort, como o HadoopCatalog
+  // real grava — readers (Spark) leem o hint antes de listar o diretorio.
+  // Falha aqui nao invalida o commit (o fallback de listagem cobre).
+  std::ofstream hint(meta_dir + "/version-hint.txt", std::ios::trunc);
+  if (hint) hint << version;
 }
 
 // ---------------------------------------------------------------------------
@@ -1743,7 +1857,8 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
   for (const FileInfo& f : datas) added_rows += f.records;
   const std::string list_path =
       write_manifest_list(meta_dir, manifest_name, snapshot_id,
-                          static_cast<int>(datas.size()), 0, 0, added_rows, 0);
+                          static_cast<int>(datas.size()), 0, 0, added_rows, 0, datas,
+                          wc.spec_fields);
 
   wc.snap.id = snapshot_id;
   wc.snap.ts = ts;
@@ -1752,7 +1867,7 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
   wc.snap.has_parent = false;
   wc.snap.parent = -1;
 
-  wc.json = build_metadata_json(dir, {SchemaVer{schema_id, wc.cols}}, schema_id,
+  wc.json = build_metadata_json(dir, new_uuid(), {SchemaVer{schema_id, wc.cols}}, schema_id,
                                 static_cast<std::int64_t>(wc.cols.size()), wc.spec_fields,
                                 {wc.snap}, {{ts, snapshot_id}}, snapshot_id, ts);
   return wc;
@@ -1769,7 +1884,8 @@ struct AppendCore {
   std::string json;
 };
 
-AppendCore append_core(const std::string& dir, const TableMeta& meta, const Value& tabela,
+AppendCore append_core(const std::string& dir, const std::string& dir_display,
+                       const TableMeta& meta, const Value& tabela,
                        const std::vector<std::string>& part_cols_req) {
   AppendCore ac;
   // Validacao de schema por nome com merge para evolucao (fase 27): colunas
@@ -1778,7 +1894,8 @@ AppendCore append_core(const std::string& dir, const TableMeta& meta, const Valu
   ac.cols = merged.cols;
 
   // Particao: herda o spec da tabela existente; erro se explicita e diverge
-  // (a ordem das colunas importa).
+  // (a ordem das colunas importa). Mensagens com o dir digitado pelo usuario
+  // (dir_display), nao com a location absoluta usada na gravacao.
   const std::vector<PartitionField>* pspec = nullptr;
   std::vector<PartitionField> spec_fields;
   if (!meta.spec.empty()) {
@@ -1787,15 +1904,15 @@ AppendCore append_core(const std::string& dir, const TableMeta& meta, const Valu
     std::vector<std::string> nomes;
     for (const PartitionField& pf : meta.spec) nomes.push_back(pf.name);
     if (!part_cols_req.empty() && part_cols_req != nomes) {
-      die("anexar_iceberg: tabela em '" + dir + "' ja e particionada por " +
+      die("anexar_iceberg: tabela em '" + dir_display + "' ja e particionada por " +
           join_part_cols(nomes) + " (recebido particionar_por: " +
           join_part_cols(part_cols_req) + ")");
     }
     // as colunas de particao precisam existir na tabela anexada (schema ja
     // foi validado acima, entao so falta o valor em si — validado ao agrupar)
   } else if (!part_cols_req.empty()) {
-    die("anexar_iceberg: tabela em '" + dir +
-        "' nao e particionada — recrie-a com escrever_iceberg tabela, \"" + dir +
+    die("anexar_iceberg: tabela em '" + dir_display +
+        "' nao e particionada — recrie-a com escrever_iceberg tabela, \"" + dir_display +
         "\", particionar_por: \"" + part_cols_req.front() + "\"");
   }
 
@@ -1837,7 +1954,7 @@ AppendCore append_core(const std::string& dir, const TableMeta& meta, const Valu
       write_manifest(meta_dir, changes, snapshot_id, infos, spec_fields);
   const std::string list_path = write_manifest_list(
       meta_dir, manifest_name, snapshot_id, static_cast<int>(datas.size()),
-      static_cast<int>(previous.size()), 0, added_rows, existing_rows);
+      static_cast<int>(previous.size()), 0, added_rows, existing_rows, infos, spec_fields);
 
   ac.snap.id = snapshot_id;
   ac.snap.ts = ts;
@@ -1867,8 +1984,10 @@ AppendCore append_core(const std::string& dir, const TableMeta& meta, const Valu
 
   ac.last_column_id = merged.last_column_id;
   ac.version = meta.version < 0 ? 0 : meta.version + 1;
-  ac.json = build_metadata_json(dir, ac.schemas, ac.current_schema_id, merged.last_column_id,
-                                spec_fields, snapshots, log, snapshot_id, ts);
+  // uuid estavel por tabela (spec v2): reaproveita o do metadata corrente
+  ac.json = build_metadata_json(dir, meta.uuid.empty() ? new_uuid() : meta.uuid, ac.schemas,
+                                ac.current_schema_id, merged.last_column_id, spec_fields,
+                                snapshots, log, snapshot_id, ts);
   return ac;
 }
 
@@ -2125,7 +2244,8 @@ std::string slurp_file(const std::string& path) {
   return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
 
-// Caminho relativo -> absoluto (a location local da tabela no modo REST).
+// Caminho relativo -> absoluto (a location local da tabela — usada nos modos
+// Hadoop e REST; readers reais esperam file:// com path absoluto).
 std::string abs_path(const std::string& dir) {
   if (!dir.empty() && (dir.front() == '/' || (dir.size() > 2 && dir[1] == ':'))) return dir;
   std::string cwd;
@@ -2445,7 +2565,7 @@ void iceberg_append_rest(const RestCfg& rc, const std::string& dir, const Value&
   TableMeta meta;
   parse_metadata(fetch_metadata_path(map_find(resp, "metadata-location")->s), meta);
 
-  const AppendCore ac = append_core(location, meta, tabela, part_cols_req);
+  const AppendCore ac = append_core(location, dir, meta, tabela, part_cols_req);
   commit_metadata(location, ac.version, ac.json);
 
   std::vector<std::string> upds;
@@ -2482,13 +2602,17 @@ void iceberg_write(const std::string& dir, const Value& tabela,
     iceberg_write_rest(rc, dir, tabela, part_cols);
     return;
   }
-  const WriteCore wc = write_core(dir, tabela, part_cols, /*schema_id=*/0);
+  // location absoluta (mesmo criterio do modo REST): data files, manifests e
+  // metadata referenciados por file:// absoluto, legiveis de qualquer cwd —
+  // e nao relativos ao diretorio corrente da escrita.
+  const std::string location = abs_path(dir);
+  const WriteCore wc = write_core(location, tabela, part_cols, /*schema_id=*/0);
   // sobrescreve: remove metadata anterior (data avro/parquet orfao fica para
   // tras, como no delta — a leitura so enxerga o que o metadata referencia).
-  for (const std::string& old : list_metadata_files(dir + "/metadata")) {
+  for (const std::string& old : list_metadata_files(location + "/metadata")) {
     if (std::remove(old.c_str()) != 0) die("nao foi possivel limpar '" + old + "'");
   }
-  commit_metadata(dir, 0, wc.json);
+  commit_metadata(location, 0, wc.json);
 }
 
 void iceberg_append(const std::string& dir, const Value& tabela,
@@ -2506,10 +2630,11 @@ void iceberg_append(const std::string& dir, const Value& tabela,
     die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
   }
 
+  const std::string location = abs_path(dir);
   TableMeta meta;
-  latest_metadata_path(dir, meta);
-  const AppendCore ac = append_core(dir, meta, tabela, part_cols_req);
-  commit_metadata(dir, ac.version, ac.json);
+  latest_metadata_path(location, meta);
+  const AppendCore ac = append_core(location, dir, meta, tabela, part_cols_req);
+  commit_metadata(location, ac.version, ac.json);
 }
 
 Value iceberg_read(const std::string& dir, const Value* onde) {

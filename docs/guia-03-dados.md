@@ -290,10 +290,15 @@ os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
   `<dir>/data/<c1>=<v1>/<c2>=<v2>/00000-0-<uuid>.parquet` (naming iceberg:
   `<partition-path>/<file>.parquet`), `<dir>/metadata/<uuid>-m0.avro`
   (manifest), `<dir>/metadata/snap-<id>-0-<uuid>.avro` (manifest list) e
-  `<dir>/metadata/v<N>-<uuid>.metadata.json` com `format-version: 2`, schema
-  (tipos `texto`→string, `inteiro`→long, `decimal`→double, `logico`→boolean;
-  as colunas de partição ficam `required: false`, como no Spark), snapshot e
-  `partition-specs` com `default-spec-id: 0`;
+  `<dir>/metadata/v<N>.metadata.json` (nome canônico do HadoopCatalog, com
+  `version-hint.txt` de apoio; o leitor também aceita o layout legado
+  `v<N>-<uuid>.metadata.json`), com `format-version: 2`, `table-uuid` estável
+  por tabela, `last-sequence-number`, `last-partition-id`, `sort-orders`,
+  schema (tipos `texto`→string, `inteiro`→long, `decimal`→double,
+  `logico`→boolean; as colunas de partição ficam `required: false`, como no
+  Spark), snapshot e `partition-specs` com `default-spec-id: 0`; data files,
+  manifests e manifest lists são referenciados por `file://` com **caminho
+  absoluto** (legível de qualquer diretório de trabalho);
 - partições (1ª passada): `particionar_por: "coluna"` (ou **partição
   composta** `particionar_por: ["estado", "ano"]`) aceita texto, inteiro,
   decimal ou lógico e cria um partition spec **identity** com um campo por
@@ -337,14 +342,13 @@ os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
   **pyiceberg** (`StaticTable.from_metadata(...).scan().to_arrow()`) — field
   ids da spec v2 nos schemas Avro, `field.id` nos parquet e coluna de
   partição reidratada pelo reader de verdade;
-- interop com **Spark 3.5** (gap de writer, fase 12-5): `tests/spark_test.sh`
-  sobe o Spark 3.5 real (container `apache/spark:3.5.3` + pacote
-  `org.apache.iceberg:iceberg-spark-runtime-3.5_2.12`) e tenta ler a tabela
-  Hadoop local via `SparkCatalog` — hoje a leitura falha com "Table does not
-  exist" porque o metadata `v<N>-<uuid>.metadata.json` está fora da convenção
-  `v<N>.metadata.json` que o `HadoopTableOperations` do Iceberg resolve (o
-  teste reporta `SPARK GAP iceberg`, sem contornar; as verificações estritas
-  passam a valer quando o writer for corrigido);
+- interop com **Spark 3.5**: `tests/spark_test.sh` sobe o Spark 3.5 real
+  (container `apache/spark:3.5.3` + pacote
+  `org.apache.iceberg:iceberg-spark-runtime-3.5_2.12`) e lê a tabela Hadoop
+  local via `SparkCatalog` — metadata `v<N>.metadata.json`, partição identity
+  reidratada, `file_path` absolutos e pruning real pelos summaries de
+  partição (`contains_null`/`lower_bound`/`upper_bound`, record `r508`) do
+  manifest list;
 - limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
   local, sem JDBC), só transform identity, lê o que o tilt escreve (sem
   garantia de tabelas de outros escritores) e single-writer (sem locks nem

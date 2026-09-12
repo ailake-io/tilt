@@ -1,8 +1,11 @@
 {
   "format-version": 2,
-  "location": "multi",
-  "last-updated-ms": 1789214305594,
+  "table-uuid": "fd11928f-f4b7-4eb5-9f28-c06bb0d4be76",
+  "location": "/home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi",
+  "last-sequence-number": 0,
+  "last-updated-ms": 1789218190858,
   "last-column-id": 4,
+  "last-partition-id": 1001,
   "schemas": [
     {
       "schema-id": 0,
@@ -16,25 +19,19 @@
     { "spec-id": 0, "fields": [{ "field-id": 1000, "source-id": 1, "transform": "identity", "name": "estado" }, { "field-id": 1001, "source-id": 2, "transform": "identity", "name": "ano" }] }
   ],
   "default-spec-id": 0,
-  "current-snapshot-id": 4064880508491678551,
+  "current-snapshot-id": 7504523010955196797,
   "snapshots": [
     {
-      "snapshot-id": 8480694525023379375,
-      "timestamp-ms": 1789214305556,
+      "snapshot-id": 7504523010955196797,
+      "timestamp-ms": 1789218190858,
       "summary": { "operation": "overwrite" },
-      "manifest-list": "file://multi/metadata/snap-8480694525023379375-0-2ba1d47b-eec5-4e88-830f-b4cd7bd44988.avro"
-    },
-    {
-      "snapshot-id": 4064880508491678551,
-      "timestamp-ms": 1789214305594,
-      "summary": { "operation": "append" },
-      "parent-snapshot-id": 8480694525023379375,
-      "manifest-list": "file://multi/metadata/snap-4064880508491678551-0-34aadb76-86fb-4ae1-9814-0a4dd8ef344c.avro"
+      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-7504523010955196797-0-1436d16e-3a04-492c-b551-b9ac7015ee6e.avro"
     }
   ],
   "snapshot-log": [
-    { "timestamp-ms": 1789214305556, "snapshot-id": 8480694525023379375 },
-    { "timestamp-ms": 1789214305594, "snapshot-id": 4064880508491678551 }
+    { "timestamp-ms": 1789218190858, "snapshot-id": 7504523010955196797 }
   ],
-  "metadata-log": []
+  "metadata-log": [],
+  "sort-orders": [ { "order-id": 0, "fields": [] } ],
+  "default-sort-order-id": 0
 }
