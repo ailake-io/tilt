@@ -204,17 +204,22 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   INT32 (com anotação INTEGER, checagem de alcance) e FLOAT;
 - **nulos**: coluna com `nulo` vira **OPTIONAL** (definition levels RLE,
   valores nulos omitidos das páginas); coluna sem nulos segue REQUIRED.
-  Uma coluna só de nulos (ou só de listas vazias) gera erro — o tipo não pode
-  ser inferido;
+  Elemento Nulo dentro de lista vira element OPTIONAL; lista interna Nula
+  (em `list<list<...>>`) e elemento struct Nulo (em lista de structs) viram
+  grupos OPTIONAL. Uma coluna só de nulos (ou só de listas vazias) gera
+  erro — o tipo não pode ser inferido;
 - **compressão**: `escrever_parquet tabela, "saida.parquet", codec: "gzip"`
   (padrão) ou `codec: "snappy"` — o compressor snappy próprio é
   "literal-only" (emite um bloco snappy válido sem matching, sem redução de
   espaço), então qualquer leitor descomprime; a leitura descomprime snappy
   genérico (com matching) e gzip/deflate (zlib via `dlopen("libz.so.1")`);
+- **dictionary**: encoding DICTIONARY automático por coluna quando há
+  repetição (dicionário em PLAIN + índices RLE; `dicionario: falso` volta ao
+  PLAIN puro);
 - **páginas**: DATA_PAGE v1 por padrão; `paginas: "v2"` grava DATA_PAGE_V2
   (definition/repetition levels fora da seção comprimida). A leitura aceita
   v1 e v2 de qualquer escritor;
-- escrita: encoding **PLAIN** (sem dictionary), um row group por arquivo;
+- escrita: encoding **PLAIN** ou **DICTIONARY** (acima), um row group por arquivo;
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;
 - leitura: **todos os row groups** (concatenados), campos REQUIRED, OPTIONAL
@@ -223,8 +228,7 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   TIMESTAMP/DECIMAL** (data/hora/timestamp viram texto ISO, decimal vira
   decimal, dictionary pages PLAIN ou PLAIN_DICTIONARY), páginas **PLAIN** e
   **DICTIONARY** (`PLAIN_DICTIONARY`/`RLE_DICTIONARY`) e compressão
-  **gzip/deflate** e **snappy**. Listas de
-  listas, listas de structs e elementos nulos dentro de lista seguem com erro claro.
+  **gzip/deflate** e **snappy**. Listas com 3+ níveis seguem com erro claro.
 
 Exemplo de interoperabilidade com Python (arquivos de outras ferramentas —
 dictionary, gzip/snappy, v2 e listas — são lidos diretamente):

@@ -664,4 +664,63 @@ PYEOF
 
 [ "$fail_bkt" = 0 ] || exit 1
 
+# --- 5. structs aninhados + evolucao (Marco 2 / B5) -------------------------------
+cat > "$tmp/struct_evo.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - t = [{ id: 1, e: { cid: "sp", n: 10 } }, { id: 2, e: { cid: "rj", n: 20 } }]
+    - escrever_iceberg t, "tab_struct"
+    - tudo = ler_iceberg "tab_struct"
+    - imprimir "total: ", tamanho tudo
+    - imprimir tudo[0].e.cid
+    - n2 = [{ id: 3, e: { cid: "mg", n: 30 }, x: "nova" }]
+    - anexar_iceberg n2, "tab_struct"
+    - tudo2 = ler_iceberg "tab_struct"
+    - imprimir "total2: ", tamanho tudo2
+    - imprimir tudo2[2].e.cid, tudo2[2].x
+    - imprimir tudo2[0].x
+TILTEOF
+out_st=$(cd "$tmp" && "$BIN" executar struct_evo.tilt)
+printf '%s\n' "$out_st"
+
+fail_st=0
+confere_st() {
+  echo "$out_st" | grep -qE "$1" || { echo "saida (struct) sem /$1/"; fail_st=1; }
+}
+confere_st "total: +2"
+confere_st "total2: +3"
+confere_st "mg nova"
+
+python3 - "$tmp/tab_struct" <<'PYEOF'
+import glob
+import sys
+
+
+class Erro(Exception):
+    pass
+
+
+try:
+    from pyiceberg.table import StaticTable
+except ImportError:
+    print("pyiceberg ausente; validacao de structs pulada")
+    sys.exit(0)
+
+tab = sys.argv[1]
+metas = sorted(glob.glob(tab + "/metadata/v*.metadata.json"))
+if len(metas) != 2:
+    raise Erro("esperados 2 metadatas (write+evolucao), obtidos %d" % len(metas))
+tabela = StaticTable.from_metadata(metas[-1])
+rows = tabela.scan().to_arrow().to_pylist()
+if [r["id"] for r in rows] != [1, 2, 3]:
+    raise Erro("ids divergem: %r" % rows)
+if rows[2]["e"] != {"cid": "mg", "n": 30}:
+    raise Erro("struct divergente: %r" % rows[2])
+if rows[0]["x"] is not None or rows[2]["x"] != "nova":
+    raise Erro("evolucao divergente: %r" % rows)
+print("pyiceberg: structs aninhados + evolucao validados (%d linhas)" % len(rows))
+PYEOF
+
+[ "$fail_st" = 0 ] || exit 1
+
 echo "iceberg_test ok"

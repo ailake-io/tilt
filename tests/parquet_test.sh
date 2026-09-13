@@ -351,5 +351,168 @@ assert t.to_pylist() == [{"id": 1, "x": 1.5}, {"id": -2, "x": 2.25}], t.to_pylis
 print("pyarrow: int32/float escritos pelo tilt validados")
 PYEOF
 
+# --- 10. elementos nulos em lista (Marco 2 / B3) ---------------------------------
+cat > "$tmp/escrita_nulos.tilt" <<'TILTEOF'
+pipeline escrita_nulos:
+  passos:
+    - t = [{ id: 1, xs: [1, nulo, 3] }, { id: 2, xs: [] }, { id: 3, xs: nulo }]
+    - escrever_parquet t, "saida_nulos.parquet"
+    - volta = ler_parquet "saida_nulos.parquet"
+    - imprimir tamanho volta
+    - imprimir volta[0].xs
+    - imprimir volta[1].xs
+    - imprimir volta[2].xs
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_nulos.tilt)
+printf '%s\n' "$out"
+confere "[1, nulo, 3]"
+confere "nulo"
+
+python3 - "$tmp/saida_nulos.parquet" "$tmp/py_nulos.parquet" <<'PYEOF'
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+t = pq.read_table(sys.argv[1])
+assert t.to_pylist()[0]["xs"] == [1, None, 3], t.to_pylist()
+assert t.to_pylist()[1]["xs"] == [], t.to_pylist()
+assert t.to_pylist()[2]["xs"] is None, t.to_pylist()
+print("pyarrow: nulos em lista escritos pelo tilt validados")
+
+t2 = pa.table({"xs": pa.array([[1, None, 3], None],
+                              type=pa.list_(pa.field("element", pa.int64(),
+                                                     nullable=True)))})
+pq.write_table(t2, sys.argv[2])
+print("pyarrow: py_nulos.parquet gerado (elemento nullable)")
+PYEOF
+
+cat > "$tmp/leitura_nulos.tilt" <<'TILTEOF'
+pipeline leitura_nulos:
+  passos:
+    - dados = ler_parquet "py_nulos.parquet"
+    - imprimir tamanho dados
+    - imprimir dados[0].xs
+    - imprimir dados[1].xs
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_nulos.tilt)
+printf '%s\n' "$out"
+confere "[1, nulo, 3]"
+
+# --- 11. dictionary encoding na escrita (Marco 2 / B4) ---------------------------
+cat > "$tmp/escrita_dict.tilt" <<'TILTEOF'
+pipeline escrita_dict:
+  passos:
+    - t = [{ c: "sp", v: 1 }, { c: "rj", v: 2 }, { c: "sp", v: 3 }, { c: "sp", v: 4 }, { c: "rj", v: 5 }, { c: "sp", v: 6 }, { c: "mg", v: 7 }, { c: "sp", v: 8 }]
+    - escrever_parquet t, "saida_dict.parquet"
+    - escrever_parquet t, "saida_dict_v2.parquet", paginas: "v2", codec: "snappy"
+    - escrever_parquet t, "saida_dict_off.parquet", dicionario: falso
+    - volta = ler_parquet "saida_dict.parquet"
+    - imprimir tamanho volta
+    - imprimir volta[0].c, volta[7].c
+    - v2 = ler_parquet "saida_dict_v2.parquet"
+    - imprimir tamanho v2
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_dict.tilt)
+printf '%s\n' "$out"
+confere "sp sp"
+
+python3 - "$tmp/saida_dict.parquet" "$tmp/saida_dict_v2.parquet" "$tmp/saida_dict_off.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+
+f = pq.ParquetFile(sys.argv[1])
+enc = [f.metadata.row_group(0).column(i).encodings
+       for i in range(f.metadata.num_columns)]
+assert enc[0] == ("PLAIN", "RLE", "PLAIN_DICTIONARY"), enc
+assert enc[1] == ("PLAIN", "RLE"), enc  # sem repeticao: PLAIN
+t = pq.read_table(sys.argv[1])
+assert t.num_rows == 8 and t.to_pylist()[7]["c"] == "sp", t.to_pylist()
+print("pyarrow: dictionary v1 do tilt validado (coluna repetida)")
+
+f2 = pq.ParquetFile(sys.argv[2])
+enc2 = [f2.metadata.row_group(0).column(i).encodings
+        for i in range(f2.metadata.num_columns)]
+assert enc2[0] == ("PLAIN", "RLE", "RLE_DICTIONARY"), enc2
+assert pq.read_table(sys.argv[2]).num_rows == 8
+print("pyarrow: dictionary v2+snappy do tilt validado")
+
+f3 = pq.ParquetFile(sys.argv[3])
+enc3 = [f3.metadata.row_group(0).column(i).encodings
+        for i in range(f3.metadata.num_columns)]
+assert all(e == ("PLAIN", "RLE") for e in enc3), enc3
+print("pyarrow: dicionario: falso respeitado (PLAIN puro)")
+PYEOF
+
+# --- 12. listas aninhadas e listas de structs (Marco 2 / B2) ---------------------
+cat > "$tmp/escrita_nest.tilt" <<'TILTEOF'
+pipeline escrita_nest:
+  passos:
+    - t = [{ m: [[1, 2], [3]] }, { m: [] }, { m: nulo }, { m: [[], [4, nulo]] }, { m: [nulo] }]
+    - escrever_parquet t, "saida_nest.parquet"
+    - s = [{ id: 1, itens: [{ a: 1, b: "x" }, { a: 2, b: nulo }] }, { id: 2, itens: [] }, { id: 3, itens: nulo }, { id: 4, itens: [nulo] }]
+    - escrever_parquet s, "saida_structs.parquet"
+    - v = ler_parquet "saida_nest.parquet"
+    - imprimir tamanho v
+    - imprimir v[0].m
+    - imprimir v[1].m
+    - imprimir v[2].m
+    - imprimir v[3].m
+    - imprimir v[4].m
+    - w = ler_parquet "saida_structs.parquet"
+    - imprimir tamanho w
+    - imprimir w[0].itens
+    - imprimir w[1].itens
+    - imprimir w[2].itens
+    - imprimir w[3].itens
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_nest.tilt)
+printf '%s\n' "$out"
+confere "[[1, 2], [3]]"
+confere "[nulo]"
+confere "[{a: 1, b: x}, {a: 2, b: nulo}]"
+
+python3 - "$tmp/saida_nest.parquet" "$tmp/saida_structs.parquet" "$tmp/py_nest.parquet" "$tmp/py_structs.parquet" <<'PYEOF'
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+t = pq.read_table(sys.argv[1])
+assert t.to_pylist()[0]["m"] == [[1, 2], [3]], t.to_pylist()
+assert t.to_pylist()[2]["m"] is None, t.to_pylist()
+assert t.to_pylist()[4]["m"] == [None], t.to_pylist()
+s = pq.read_table(sys.argv[2])
+assert s.to_pylist()[0]["itens"] == [{"a": 1, "b": "x"}, {"a": 2, "b": None}], s.to_pylist()
+assert s.to_pylist()[3]["itens"] == [None], s.to_pylist()
+print("pyarrow: aninhadas e structs escritos pelo tilt validados")
+
+t2 = pa.table({"m": pa.array([[[1, 2], [3]], [], None, [[], [4, None]], [None]],
+                             type=pa.list_(pa.list_(pa.int64())))})
+pq.write_table(t2, sys.argv[3])
+s2 = pa.table({"l": pa.array([[ {"a": 1, "b": "x"}, {"a": 2, "b": None}], [], None, [None]],
+                             type=pa.list_(pa.field("element", pa.struct(
+                                 [("a", pa.int64()), ("b", pa.string())]))))})
+pq.write_table(s2, sys.argv[4])
+print("pyarrow: fixtures aninhadas gerados")
+PYEOF
+
+cat > "$tmp/leitura_nest.tilt" <<'TILTEOF'
+pipeline leitura_nest:
+  passos:
+    - dados = ler_parquet "py_nest.parquet"
+    - imprimir tamanho dados
+    - imprimir dados[0].m
+    - imprimir dados[2].m
+    - imprimir dados[4].m
+    - s = ler_parquet "py_structs.parquet"
+    - imprimir tamanho s
+    - imprimir s[0].l
+    - imprimir s[2].l
+    - imprimir s[3].l
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_nest.tilt)
+printf '%s\n' "$out"
+confere "[[1, 2], [3]]"
+confere "[{a: 1, b: x}, {a: 2, b: nulo}]"
+
 [ "$fail" = 0 ] && echo "parquet_test ok"
 exit "$fail"

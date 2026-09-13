@@ -32,11 +32,14 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   aceita `texto + numero` e `"a" < "b"`, que o runtime suporta), builtins com
   aridade e 1º/2º argumento tipados (ex.: `tamanho 42`, `ler_csv 123`),
   métodos/campos de receiver conhecido (ex.: `"abc".matmul`, `t.filtrar` em
-  tensor, `5.maiusculas`) e retorno de `funcao` anotada (`-> texto` com
-  `retornar 42` — `inteiro` amplia para `decimal`, união de literais aceita
-  texto). Fora daí o tipo vira "desconhecido" e segue sem verificação:
-  tipos através de chamadas de `funcao`, campos dinâmicos de mapas/tabelas,
-  `verificar`/`ao_falhar`, agregações em colunas e broadcast parcial.
+  tensor, `5.maiusculas`), retorno de `funcao` (anotado `-> T` ou inferido do
+  corpo por unanimidade dos `retornar`), campos de mapas (literais e
+  variáveis com literal, com erro de campo inexistente), índice em lista de
+  elemento homogêneo e agregações (`somar`/`min`/`max` refinam pelo elemento;
+  `media` é decimal). Fluxo-insensível a ramos (o estado anterior é
+  restaurado) e por entidade — fora daí o tipo vira "desconhecido" e segue
+  sem verificação: campos de `tipo` Registro, campos dinâmicos de tabelas,
+  `verificar`/`ao_falhar` e broadcast parcial.
 
 ## Dados
 
@@ -45,20 +48,24 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
   por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
-  RLE), **listas de escalares** (anotação LIST, elementos sempre required na
-  escrita), **structs** (Fase 12-5a) e estreitamento opt-in `tipos: {col:
-  "int32"|"float"}` (Marco 1 / B1, com anotação INTEGER). A leitura cobre
+  RLE), **listas de escalares** (anotação LIST, elemento Nulo vira OPTIONAL —
+  Marco 2 / B3), **structs** (Fase 12-5a), **listas aninhadas**
+  (`list<list<...>>`, Marco 2 / B2a, nulos em todos os níveis) e **listas de
+  structs** (Marco 2 / B2b, elemento Nulo vira OPTIONAL) — tudo validado com
+  pyarrow nos dois sentidos — e estreitamento opt-in `tipos: {col:
+  "int32"|"float"}` (Marco 1 / B1, com anotação INTEGER) e dictionary
+  encoding automático com fallback (Marco 2 / B4, `dicionario: falso`
+  desliga). A leitura cobre
   múltiplos row groups, campos REQUIRED/OPTIONAL/
-  REPEATED (listas aninhadas de escalares, inclusive o element OPTIONAL que o
-  pyarrow grava — erro claro apenas para elemento nulo de fato), tipos
+  REPEATED (listas aninhadas e de structs, inclusive o element OPTIONAL que o
+  pyarrow grava, com Nulo preservado), tipos
   **INT32/INT64/FLOAT/DOUBLE/BOOLEAN/BYTE_ARRAY/FIXED_LEN_BYTE_ARRAY/INT96**,
   lógicos **UTF8/STRING/INTEGER/DATE/TIME/TIMESTAMP/DECIMAL** (data/hora/
   timestamp viram texto ISO, decimal vira decimal) e dictionary pages com
   encoding PLAIN ou PLAIN_DICTIONARY, páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
   gzip/deflate (zlib via `dlopen`) e **snappy** (codec próprio, sem dlopen).
-  Ainda fora do subconjunto: dictionary encoding na escrita, listas de
-  listas, listas de structs, elementos nulos em listas, structs com
+  Ainda fora do subconjunto: 3+ níveis de lista, structs com
   `field_ids` explícitos (caminho Iceberg), decimais com mais de 8 bytes e
   UUID como tipo próprio.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
@@ -121,8 +128,11 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
    conversão de tipo) e **`bucket[N]`** (Fase 12-5a: `particionar_por:
    ["bucket[4](id)"]`, murmur3 da spec, campo `id_bucket_4` int, coluna de
    origem mantida no parquet, poda por hash + residual exato — validado com
-   pyiceberg e referência mmh3), com **pruning** em `ler_iceberg ... onde:
-   {...}` (igualdade; predicados em coluna de partição pulam data files
+   pyiceberg e referência mmh3), **structs aninhados** (Marco 2 / B5: `mapa`
+   vira STRUCT com field-ids em profundidade e ids nos grupos do footer;
+   evolução adiciona (sub)coluna optional no fim com id novo, com projeção
+   de nulo em arquivos antigos — validado com pyiceberg), com **pruning**
+   em `ler_iceberg ... onde: {...}` (igualdade; predicados em coluna de partição pulam data files
    inteiros pelos manifests, o resto filtra linhas). Outros transforms
    (`truncate`, `year`, `month`, `day`, `hour`) são aceitos na leitura sem
    poda por valor. **Deletes (Fase 12-5a)**: `apagar_iceberg` (position e

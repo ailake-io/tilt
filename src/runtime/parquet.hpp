@@ -51,6 +51,9 @@ struct ParquetWriteOpts {
   // ("col" ou "struct.campo") -> "int32" (de inteiro, com checagem de
   // alcance) ou "float" (de decimal). Sem entrada: INT64/DOUBLE de sempre.
   std::map<std::string, std::string> tipos;
+  // Dictionary encoding automatico quando ha repeticao (Marco 2 / B4);
+  // `dicionario: falso` volta ao PLAIN puro.
+  bool dicionario = true;
 };
 
 void parquet_write(const std::string& path, const Value& tabela,

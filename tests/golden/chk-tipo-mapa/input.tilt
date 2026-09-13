@@ -1,0 +1,6 @@
+pipeline principal:
+  passos:
+    - m = { nome: "ana", idade: 30 }
+    - x = m.idade
+    - y = m.nome
+    - z = m.cidade

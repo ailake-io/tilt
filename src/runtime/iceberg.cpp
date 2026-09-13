@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <random>
 #include <set>
@@ -785,16 +786,19 @@ std::string iceberg_type_name(const Value& v) {
     case ValueKind::Inteiro: return "long";
     case ValueKind::Decimal: return "double";
     case ValueKind::Texto: return "string";
+    case ValueKind::Mapa: return "struct";  // aninhado (Marco 2 / B5)
     default: return "string";
   }
 }
 
 struct Column {
   std::string name;
-  std::string type;  // iceberg
+  std::string type;  // iceberg ("struct" para aninhados; ver children)
   Value sample;      // valor da 1a linha (deduzir tipo)
   std::int64_t id = 0;       // field-id no schema iceberg (0 = nao atribuido)
   bool required = true;      // false = nullable (colunas novas por evolucao)
+  bool is_struct = false;    // grupo STRUCT (Marco 2 / B5)
+  std::vector<Column> children;
 };
 
 // Campo de um partition spec. `transform` e "identity" (padrao) ou
@@ -912,6 +916,60 @@ std::pair<std::string, int> parse_bucket(const std::string& s) {
   return {col, n};
 }
 
+// Colunas da 1a linha, recursivo para mapas (structs aninhados; listas e
+// escalares sao folhas). Chaves de struct: uniao em ordem de 1a aparicao
+// (como o writer parquet); tipo pela 1a celula nao nula da chave.
+// Colunas de struct com valor Nulo na 1a linha e mapa depois: a chave entra
+// via uniao (tipo deduzido quando aparece).
+void collect_struct_fields(const std::vector<const Value*>& cells, Column& out) {
+  static const Value kNull = Value::nulo();
+  std::vector<std::string> keys;
+  for (const Value* cell : cells) {
+    if (cell->kind != ValueKind::Mapa || !cell->map) continue;
+    for (const auto& kv : cell->map->items) {
+      if (std::find(keys.begin(), keys.end(), kv.first) == keys.end()) keys.push_back(kv.first);
+    }
+  }
+  for (const std::string& k : keys) {
+    Column ch;
+    ch.name = k;
+    for (const Value* cell : cells) {
+      if (cell->kind != ValueKind::Mapa || !cell->map) continue;
+      const Value* f = cell->map->find(k);
+      if (!f || f->kind == ValueKind::Nulo) continue;
+      if (f->kind == ValueKind::Lista) {
+        die("coluna struct com campo lista '" + k +
+            "' ainda nao suportada no Iceberg (use colunas escalares/aninhadas)");
+      }
+      if (f->kind == ValueKind::Mapa) {
+        ch.type = "struct";
+        ch.is_struct = true;
+        ch.sample = *f;
+        std::vector<const Value*> sub;
+        for (const Value* c2 : cells) {
+          if (c2->kind == ValueKind::Mapa && c2->map) {
+            if (const Value* f2 = c2->map->find(k)) {
+              sub.push_back(f2);
+              continue;
+            }
+          }
+          sub.push_back(&kNull);
+        }
+        collect_struct_fields(sub, ch);
+      } else {
+        ch.type = iceberg_type_name(*f);
+        ch.sample = *f;
+      }
+      break;
+    }
+    if (ch.type.empty()) {
+      ch.type = "string";  // so nulos: assume texto (parquet falha se vazio de fato)
+      ch.required = false;
+    }
+    out.children.push_back(std::move(ch));
+  }
+}
+
 std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
   if (tabela.kind != ValueKind::Lista && tabela.kind != ValueKind::Tabela) {
     die(std::string(ctx) + " espera uma tabela (lista de mapas)");
@@ -921,22 +979,79 @@ std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
   if (first.kind != ValueKind::Mapa || !first.map) die("linhas devem ser mapas { campo: valor }");
   std::vector<Column> cols;
   for (const auto& kv : first.map->items) {
-    cols.push_back({kv.first, iceberg_type_name(kv.second), kv.second});
+    // Tipo pela 1a celula nao nula (struct Nulo na 1a linha e mapa depois).
+    const Value* rep = &kv.second;
+    if (rep->kind == ValueKind::Nulo) {
+      for (const Value& row : *tabela.list) {
+        if (row.kind != ValueKind::Mapa || !row.map) break;
+        const Value* f = row.map->find(kv.first);
+        if (f && f->kind != ValueKind::Nulo) {
+          rep = f;
+          break;
+        }
+      }
+    }
+    Column c;
+    c.name = kv.first;
+    if (rep->kind == ValueKind::Mapa) {
+      c.type = "struct";
+      c.is_struct = true;
+      c.sample = *rep;
+      std::vector<const Value*> cells;
+      for (const Value& row : *tabela.list) {
+        if (row.kind == ValueKind::Mapa && row.map) {
+          if (const Value* f = row.map->find(kv.first)) {
+            cells.push_back(f);
+            continue;
+          }
+        }
+        static const Value kNull = Value::nulo();
+        cells.push_back(&kNull);
+      }
+      collect_struct_fields(cells, c);
+    } else {
+      c.type = iceberg_type_name(kv.second);
+      c.sample = kv.second;
+    }
+    cols.push_back(std::move(c));
   }
   return cols;
 }
 
+// Atribui field-ids em profundidade (struct recebe id, depois os filhos).
+void assign_ids(std::vector<Column>& cols, std::int64_t& proximo) {
+  for (Column& c : cols) {
+    c.id = ++proximo;
+    if (c.is_struct) assign_ids(c.children, proximo);
+  }
+}
+
+// Ids em profundidade (struct recebe id, depois os filhos — mesma ordem do
+// footer parquet, incluindo grupos struct para o mapeamento por id).
+void leaf_ids(const std::vector<Column>& cols, std::vector<int>& out) {
+  for (const Column& c : cols) {
+    out.push_back(static_cast<int>(c.id));
+    if (c.is_struct) {
+      leaf_ids(c.children, out);
+    }
+  }
+}
+
 // Fields de um schema no metadata ({"id","name","required","type"} por campo,
-// ids/required ja resolvidos no vetor). Na escrita os ids sao 1..N e a coluna
-// fonte da particao fica optional (padrao Spark): ela nao esta no parquet e
-// readers reais so reidratam campos optional.
+// ids/required ja resolvidos no vetor). Struct aninhado: "type" e objeto
+// {"type":"struct","fields":[...]} recursivo.
 std::string schema_json_fields(const std::vector<Column>& fields) {
   std::string out = "[";
   for (std::size_t k = 0; k < fields.size(); ++k) {
     if (k) out += ',';
     out += "{\"id\":" + std::to_string(fields[k].id) + ",\"name\":\"" + json_escape(fields[k].name) +
-           "\",\"required\":" + (fields[k].required ? "true" : "false") + ",\"type\":\"" +
-           fields[k].type + "\"}";
+           "\",\"required\":" + (fields[k].required ? "true" : "false") + ",\"type\":";
+    if (fields[k].is_struct) {
+      out += "{\"type\":\"struct\",\"fields\":" + schema_json_fields(fields[k].children) + "}";
+    } else {
+      out += "\"" + fields[k].type + "\"";
+    }
+    out += "}";
   }
   out += ']';
   return out;
@@ -1008,6 +1123,10 @@ std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
     bool achou = false;
     for (std::size_t k = 0; k < cols.size(); ++k) {
       if (cols[k].name == lookup) {
+        if (cols[k].is_struct) {
+          die(std::string(ctx) + ": coluna de particao '" + lookup +
+              "' e struct (particao exige coluna escalar)");
+        }
         PartitionField pf;
         pf.field_id = 1000 + static_cast<std::int64_t>(i);
         pf.source_id = static_cast<std::int64_t>(k + 1);
@@ -1222,25 +1341,50 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     out.last_column_id = lc->i;
   }
   if (const Value* schemas = map_find(md, "schemas"); schemas && schemas->kind == ValueKind::Lista) {
+    // Campos recursivos (structs aninhados tem "type" objeto).
+    std::function<void(const Value&, std::vector<Column>&)> le_campos =
+        [&](const Value& lista, std::vector<Column>& dst) {
+          if (lista.kind != ValueKind::Lista || !lista.list) return;
+          for (const Value& f : *lista.list) {
+            const Value* fid = map_find(f, "id");
+            const Value* name = map_find(f, "name");
+            const Value* type = map_find(f, "type");
+            const Value* req = map_find(f, "required");
+            Column c;
+            c.id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 0;
+            c.name = name && name->kind == ValueKind::Texto ? name->s : "";
+            c.required = req ? (req->kind == ValueKind::Logico ? req->b : true) : true;
+            if (type && type->kind == ValueKind::Mapa && type->map) {
+              const Value* st = map_find(*type, "type");
+              const Value* sub = map_find(*type, "fields");
+              if (st && st->kind == ValueKind::Texto && st->s == "struct" && sub) {
+                c.type = "struct";
+                c.is_struct = true;
+                le_campos(*sub, c.children);
+              } else {
+                c.type = "string";
+              }
+            } else {
+              c.type = type && type->kind == ValueKind::Texto ? type->s : "string";
+            }
+            out.last_column_id = std::max(out.last_column_id, c.id);
+            std::function<void(const Column&)> max_filho = [&](const Column& x) {
+              for (const Column& ch : x.children) {
+                out.last_column_id = std::max(out.last_column_id, ch.id);
+                max_filho(ch);
+              }
+            };
+            max_filho(c);
+            dst.push_back(std::move(c));
+          }
+        };
     for (const Value& s : *schemas->list) {
       const Value* sid = map_find(s, "schema-id");
       if (!sid || sid->kind != ValueKind::Inteiro) continue;
       SchemaVer ver;
       ver.id = sid->i;
-      if (const Value* fields = map_find(s, "fields"); fields && fields->kind == ValueKind::Lista) {
-        for (const Value& f : *fields->list) {
-          const Value* fid = map_find(f, "id");
-          const Value* name = map_find(f, "name");
-          const Value* type = map_find(f, "type");
-          const Value* req = map_find(f, "required");
-          Column c;
-          c.id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 0;
-          c.name = name && name->kind == ValueKind::Texto ? name->s : "";
-          c.type = type && type->kind == ValueKind::Texto ? type->s : "string";
-          c.required = req ? (req->kind == ValueKind::Logico ? req->b : true) : true;
-          out.last_column_id = std::max(out.last_column_id, c.id);
-          ver.fields.push_back(std::move(c));
-        }
+      if (const Value* fields = map_find(s, "fields")) {
+        le_campos(*fields, ver.fields);
       }
       out.schemas.push_back(std::move(ver));
     }
@@ -1853,25 +1997,34 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
                                        const std::vector<Column>* ids_by_name) {
   std::vector<FileInfo> out;
   std::vector<PartitionGroup> grupos;
-  // ids das colunas no schema iceberg = posicao (1..N) na 1a linha original;
-  // os field_ids do parquet seguem esses ids, nao a posicao dentro do
-  // arquivo (a coluna de particao fica fora do parquet mas mantem o id).
-  std::vector<std::pair<std::string, int>> col_ids;
-  if (spec != nullptr && ids_by_name == nullptr) {
-    const Value& first = tabela.list->front();
-    for (const auto& kv : first.map->items) {
-      col_ids.emplace_back(kv.first, static_cast<int>(col_ids.size()) + 1);
+  // ids das colunas no schema iceberg: arvore com field-ids em profundidade;
+  // os field_ids do parquet seguem esses ids na ordem das folhas (a coluna
+  // de particao identity fica fora do parquet mas mantem o id).
+  // Nomes top-level removidos do parquet (identity).
+  std::vector<std::string> removidas;
+  if (spec != nullptr) {
+    for (const PartitionField& pf : *spec) {
+      if (pf.transform == "identity") removidas.push_back(pf.name);
     }
   }
-  auto resolve_id = [&](const std::string& name) -> int {
-    if (ids_by_name != nullptr) {
-      for (const Column& c : *ids_by_name) {
-        if (c.name == name) return static_cast<int>(c.id);
+  std::vector<Column> arvore_ids;
+  if (spec != nullptr && ids_by_name == nullptr) {
+    arvore_ids = table_columns(tabela, "escrever_iceberg");
+    std::int64_t proximo = 0;
+    assign_ids(arvore_ids, proximo);
+  }
+  auto resolve_folhas = [&](const std::string& name, std::vector<int>& dst) {
+    const std::vector<Column>& base =
+        ids_by_name != nullptr ? *ids_by_name : arvore_ids;
+    for (const Column& c : base) {
+      if (c.name != name) continue;
+      std::vector<int> tmp;
+      leaf_ids(std::vector<Column>{c}, tmp);  // struct entra com o proprio id
+      if (tmp.empty() || tmp.front() <= 0) {
+        die("coluna '" + name + "' sem field-id no schema (evolucao de schema inconsistente)");
       }
-      die("coluna '" + name + "' sem field-id no schema (evolucao de schema inconsistente)");
-    }
-    for (const auto& ci : col_ids) {
-      if (ci.first == name) return ci.second;
+      dst.insert(dst.end(), tmp.begin(), tmp.end());
+      return;
     }
     die("coluna '" + name + "' fora do schema (evolucao de schema inconsistente)");
   };
@@ -1898,7 +2051,10 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
     if (spec != nullptr || ids_by_name != nullptr) {
       const Value& first = g.rows.list->front();
       for (const auto& kv : first.map->items) {
-        field_ids.push_back(resolve_id(kv.first));
+        if (std::find(removidas.begin(), removidas.end(), kv.first) != removidas.end()) {
+          continue;  // identity fora do parquet
+        }
+        resolve_folhas(kv.first, field_ids);
       }
     }
     parquet_write(path, g.rows, field_ids.empty() ? nullptr : &field_ids);
@@ -1949,61 +2105,87 @@ struct MergedSchema {
 // parquet na leitura e por nome/field-id.
 MergedSchema merge_append_schema(const TableMeta& meta, const Value& tabela) {
   const std::vector<Column> got = table_columns(tabela, "anexar_iceberg");
-  // tipo deduzido do 1o valor nao nulo de cada coluna (ordem da 1a linha);
-  // tipo vazio = so nulos — o parquet ja falha com erro claro ao gravar
-  std::vector<std::pair<std::string, std::string>> new_types;
-  for (const Column& c : got) {
-    std::string ty;
-    for (const Value& row : *tabela.list) {
-      if (row.kind != ValueKind::Mapa || !row.map) break;
-      const Value* cell = row.map->find(c.name);
-      if (cell && cell->kind != ValueKind::Nulo) {
-        ty = iceberg_type_name(*cell);
-        break;
-      }
-    }
-    new_types.emplace_back(c.name, ty);
-  }
-  auto find_type = [&](const std::string& name) -> const std::string* {
-    for (const auto& nt : new_types) {
-      if (nt.first == name) return &nt.second;
-    }
-    return nullptr;
-  };
   MergedSchema merged;
   merged.cols = meta.schema_cols;
   merged.last_column_id = meta.last_column_id;
   if (merged.last_column_id <= 0) {
-    for (const Column& c : merged.cols) {
-      merged.last_column_id = std::max(merged.last_column_id, c.id);
-    }
+    std::function<void(const std::vector<Column>&)> max_id = [&](const std::vector<Column>& cs) {
+      for (const Column& c : cs) {
+        merged.last_column_id = std::max(merged.last_column_id, c.id);
+        if (c.is_struct) max_id(c.children);
+      }
+    };
+    max_id(merged.cols);
   }
-  for (const Column& old : merged.cols) {
-    const std::string* ty = find_type(old.name);
-    if (!ty) {
-      die("anexar_iceberg: coluna '" + old.name +
-          "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)");
-    }
-    if (!ty->empty() && *ty != old.type) {
-      die("anexar_iceberg: coluna '" + old.name + "' com tipo divergente (esperado " + old.type +
-          "; recebido " + *ty +
-          ") (evolucao de schema suporta apenas adicao de colunas)");
-    }
-  }
-  for (const auto& [name, ty] : new_types) {
-    bool known = false;
-    for (const Column& c : merged.cols) {
-      if (c.name == name) known = true;
-    }
-    if (known) continue;
-    Column c;
-    c.name = name;
-    c.type = ty.empty() ? "string" : ty;
-    c.id = ++merged.last_column_id;
-    c.required = false;  // coluna nova e optional (linhas antigas ficam nulas)
-    merged.cols.push_back(std::move(c));
-    merged.evolved = true;
-  }
+  // Compara recursiva: struct casa com struct (filhos por nome, ids
+  // estaveis); escalar casa por tipo. Nova (sub)coluna entra optional no fim
+  // com id novo. Tipos escalares top-level: deduzidos da tabela (1o nao
+  // nulo, como antes); aninhados: ja deduzidos em table_columns.
+  std::function<void(std::vector<Column>&, const std::vector<Column>&, const std::string&)> mescla =
+      [&](std::vector<Column>& velhas, const std::vector<Column>& novas, const std::string& ctx) {
+        for (Column& old : velhas) {
+          const Column* ty = nullptr;
+          for (const Column& nt : novas) {
+            if (nt.name == old.name) ty = &nt;
+          }
+          if (!ty) {
+            die("anexar_iceberg: coluna '" + ctx + old.name +
+                "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de "
+                "colunas)");
+          }
+          if (old.is_struct || ty->is_struct) {
+            if (!old.is_struct || !ty->is_struct) {
+              die("anexar_iceberg: coluna '" + ctx + old.name +
+                  "' com tipo divergente (struct x escalar)");
+            }
+            mescla(old.children, ty->children, ctx + old.name + ".");
+            continue;
+          }
+          std::string ty_s;
+          if (ctx.empty()) {
+            for (const Value& row : *tabela.list) {
+              if (row.kind != ValueKind::Mapa || !row.map) break;
+              const Value* cell = row.map->find(ty->name);
+              if (cell && cell->kind != ValueKind::Nulo) {
+                ty_s = iceberg_type_name(*cell);
+                break;
+              }
+            }
+          } else {
+            ty_s = ty->type;
+          }
+          if (!ty_s.empty() && ty_s != old.type) {
+            die("anexar_iceberg: coluna '" + ctx + old.name + "' com tipo divergente (esperado " +
+                old.type + "; recebido " + ty_s +
+                ") (evolucao de schema suporta apenas adicao de colunas)");
+          }
+        }
+        for (const Column& x : novas) {
+          bool known = false;
+          for (const Column& o : velhas) {
+            if (o.name == x.name) known = true;
+          }
+          if (known) continue;
+          Column c = x;
+          if (c.type.empty()) c.type = "string";
+          c.id = ++merged.last_column_id;
+          c.required = false;  // nova e optional (linhas antigas ficam nulas)
+          if (c.is_struct) {
+            std::function<void(Column&)> renumera = [&](Column& y) {
+              for (Column& ch : y.children) {
+                if (ch.type.empty()) ch.type = "string";
+                ch.id = ++merged.last_column_id;
+                ch.required = false;
+                if (ch.is_struct) renumera(ch);
+              }
+            };
+            renumera(c);
+          }
+          velhas.push_back(std::move(c));
+          merged.evolved = true;
+        }
+      };
+  mescla(merged.cols, got, "");
   return merged;
 }
 
@@ -2028,10 +2210,12 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
                      const std::vector<std::string>& part_cols, std::int64_t schema_id) {
   WriteCore wc;
   wc.cols = table_columns(tabela, "escrever_iceberg");
-  // ids 1..N na ordem do schema; as colunas fonte da particao ficam optional
-  // no metadata (padrao Spark — readers reais so reidratam campo optional)
+  // ids em profundidade (struct recebe id, depois os filhos); as colunas
+  // fonte da particao ficam optional no metadata (padrao Spark — readers
+  // reais so reidratam campo optional)
+  std::int64_t proximo = 0;
+  assign_ids(wc.cols, proximo);
   for (std::size_t k = 0; k < wc.cols.size(); ++k) {
-    wc.cols[k].id = static_cast<std::int64_t>(k + 1);
     wc.cols[k].required = std::find(part_cols.begin(), part_cols.end(), wc.cols[k].name) ==
                           part_cols.end();
   }
@@ -2042,7 +2226,7 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
   mkdir_if_missing(meta_dir);
   mkdir_if_missing(dir + "/data");
 
-  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, nullptr);
+  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, &wc.cols);
 
   std::vector<std::pair<int, std::string>> changes;
   for (const FileInfo& f : datas) changes.emplace_back(1, f.path);
@@ -2069,7 +2253,7 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
   wc.snap.parent = -1;
 
   wc.json = build_metadata_json(dir, new_uuid(), {SchemaVer{schema_id, wc.cols}}, schema_id,
-                                static_cast<std::int64_t>(wc.cols.size()), wc.spec_fields,
+                                proximo, wc.spec_fields,
                                 {wc.snap}, {{ts, snapshot_id}}, snapshot_id, ts);
   return wc;
 }
@@ -2337,6 +2521,76 @@ bool apagada_por_delete(const std::string& fpath_norm, std::int64_t pos, const V
   return false;
 }
 
+// Projeta a linha no schema (union-by-name recursivo, Marco 2 / B5):
+// coluna ausente -> Nulo (evolucao); struct casa por nome dos campos;
+// chave fora do schema -> die.
+Value project_schema(const Value& row, const std::vector<Column>& schema, const std::string& path,
+                     const std::string& fpath) {
+  Value m = Value::mapa();
+  for (const Column& c : schema) {
+    const Value* cell = (row.kind == ValueKind::Mapa && row.map) ? row.map->find(c.name) : nullptr;
+    if (c.is_struct) {
+      if (!cell || cell->kind == ValueKind::Nulo) {
+        m.map->set(c.name, Value::nulo());
+      } else if (cell->kind != ValueKind::Mapa || !cell->map) {
+        die("schema divergente em '" + fpath + "' (coluna '" + path + c.name + "' nao e struct)");
+      } else {
+        m.map->set(c.name, project_schema(*cell, c.children, path + c.name + ".", fpath));
+      }
+      continue;
+    }
+    m.map->set(c.name, cell ? *cell : Value::nulo());
+  }
+  if (row.kind == ValueKind::Mapa && row.map) {
+    for (const auto& kv : row.map->items) {
+      bool known = false;
+      for (const Column& c : schema) {
+        if (c.name == kv.first) known = true;
+      }
+      if (!known) {
+        die("schema divergente em '" + fpath + "' (coluna '" + path + kv.first +
+            "' fora do metadata)");
+      }
+    }
+  }
+  return m;
+}
+
+// Filtro residual sobre a linha final (compartilhado entre leitura e delete).
+bool residual_match(const Value& row,
+                    const std::vector<std::pair<std::string, Value>>& residual) {
+  for (const auto& [col, val] : residual) {
+    const Value* cell = row.map ? row.map->find(col) : nullptr;
+    if (!pred_eq(cell ? *cell : Value::nulo(), val)) return false;
+  }
+  return true;
+}
+
+// Projeta a linha bruta do parquet no schema corrente (mesma regra da
+// leitura: reidrata particao identity, nulo no resto; structs por nome).
+Value project_row(const ActiveEntry& f, const Value& row, const TableMeta& meta) {
+  if (!meta.spec.empty() && !meta.schema_cols.empty()) {
+    Value base = Value::mapa();
+    if (row.kind == ValueKind::Mapa && row.map) {
+      for (const auto& kv : row.map->items) base.map->set(kv.first, kv.second);
+    }
+    for (const Column& c : meta.schema_cols) {
+      if (c.is_struct) continue;  // particao nunca e struct
+      if (!base.map->find(c.name)) {
+        const Value* pv = f.partition.map ? f.partition.map->find(c.name) : nullptr;
+        base.map->set(c.name, pv ? partition_rehydrate(*pv, c.type) : Value::nulo());
+      }
+    }
+    const std::string path = strip_scheme(f.path);
+    return project_schema(base, meta.schema_cols, "", path);
+  }
+  if (!meta.schema_cols.empty()) {
+    const std::string path = strip_scheme(f.path);
+    return project_schema(row, meta.schema_cols, "", path);
+  }
+  return row;
+}
+
 Value read_core(const TableMeta& meta, const Value* onde) {
   const OndeFilter filtro = split_onde(onde, meta.spec);
   const ResolvedFiles resolvidos = resolve_files(meta);
@@ -2383,29 +2637,11 @@ Value read_core(const TableMeta& meta, const Value* onde) {
         if (row.kind != ValueKind::Mapa || !row.map) {
           die("linha de '" + path + "' nao e um mapa");
         }
-        Value m = Value::mapa();
-        for (const Column& c : meta.schema_cols) {
-          if (const Value* cell = row.map->find(c.name)) {
-            m.map->set(c.name, *cell);
-            continue;
-          }
-          const Value* pv = f.partition.map ? f.partition.map->find(c.name) : nullptr;
-          m.map->set(c.name, pv ? partition_rehydrate(*pv, c.type) : Value::nulo());
-        }
-        for (const auto& kv : row.map->items) {
-          bool known = false;
-          for (const Column& c : meta.schema_cols) {
-            if (c.name == kv.first) known = true;
-          }
-          if (!known) {
-            die("schema divergente em '" + path + "' (coluna '" + kv.first +
-                "' fora do metadata)");
-          }
-        }
+        const Value m = project_row(f, row, meta);
         const bool apagada = apagada_por_delete(path, pos, m, dels);
         ++pos;
         if (apagada) continue;
-        if (passa_residual(m)) out.list->push_back(std::move(m));
+        if (passa_residual(m)) out.list->push_back(m);
       }
     }
     return out;
@@ -2427,28 +2663,11 @@ Value read_core(const TableMeta& meta, const Value* onde) {
         if (row.kind != ValueKind::Mapa || !row.map) {
           die("linha de '" + path + "' nao e um mapa");
         }
-        Value m = Value::mapa();
-        for (const Column& c : meta.schema_cols) {
-          if (const Value* cell = row.map->find(c.name)) {
-            m.map->set(c.name, *cell);
-          } else {
-            m.map->set(c.name, Value::nulo());
-          }
-        }
-        for (const auto& kv : row.map->items) {
-          bool known = false;
-          for (const Column& c : meta.schema_cols) {
-            if (c.name == kv.first) known = true;
-          }
-          if (!known) {
-            die("schema divergente em '" + path + "' (coluna '" + kv.first +
-                "' fora do metadata)");
-          }
-        }
+        const Value m = project_schema(row, meta.schema_cols, "", path);
         const bool apagada = apagada_por_delete(path, pos, m, dels);
         ++pos;
         if (apagada) continue;
-        if (passa_residual(m)) out.list->push_back(std::move(m));
+        if (passa_residual(m)) out.list->push_back(m);
       }
     }
     return out;
@@ -2468,7 +2687,11 @@ Value read_core(const TableMeta& meta, const Value* onde) {
       if (row.kind != ValueKind::Mapa || !row.map) die("linha de '" + path + "' nao e um mapa");
       if (schema_cols.empty()) {
         for (const auto& kv : row.map->items) {
-          schema_cols.push_back({kv.first, iceberg_type_name(kv.second), kv.second});
+          Column nc;
+          nc.name = kv.first;
+          nc.type = iceberg_type_name(kv.second);
+          nc.sample = kv.second;
+          schema_cols.push_back(std::move(nc));
         }
       } else {
         if (row.map->items.size() != schema_cols.size()) {
@@ -2938,45 +3161,6 @@ void iceberg_append(const std::string& dir, const Value& tabela,
   latest_metadata_path(location, meta);
   const AppendCore ac = append_core(location, dir, meta, tabela, part_cols_req);
   commit_metadata(location, ac.version, ac.json);
-}
-
-// Filtro residual sobre a linha final (compartilhado entre leitura e delete).
-bool residual_match(const Value& row,
-                    const std::vector<std::pair<std::string, Value>>& residual) {
-  for (const auto& [col, val] : residual) {
-    const Value* cell = row.map ? row.map->find(col) : nullptr;
-    if (!pred_eq(cell ? *cell : Value::nulo(), val)) return false;
-  }
-  return true;
-}
-
-// Projeta a linha bruta do parquet no schema corrente (mesma regra da
-// leitura: reidrata particao identity, nulo no resto).
-Value project_row(const ActiveEntry& f, const Value& row, const TableMeta& meta) {
-  if (!meta.spec.empty() && !meta.schema_cols.empty()) {
-    Value m = Value::mapa();
-    for (const Column& c : meta.schema_cols) {
-      if (const Value* cell = row.map->find(c.name)) {
-        m.map->set(c.name, *cell);
-        continue;
-      }
-      const Value* pv = f.partition.map ? f.partition.map->find(c.name) : nullptr;
-      m.map->set(c.name, pv ? partition_rehydrate(*pv, c.type) : Value::nulo());
-    }
-    return m;
-  }
-  if (!meta.schema_cols.empty()) {
-    Value m = Value::mapa();
-    for (const Column& c : meta.schema_cols) {
-      if (const Value* cell = row.map->find(c.name)) {
-        m.map->set(c.name, *cell);
-      } else {
-        m.map->set(c.name, Value::nulo());
-      }
-    }
-    return m;
-  }
-  return row;
 }
 
 // Apaga linhas por predicado de igualdade (`onde`, mesma semantica do

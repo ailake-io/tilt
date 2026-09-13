@@ -5,8 +5,10 @@
 
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <functional>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
@@ -219,6 +221,18 @@ struct Column {
   std::vector<bool> defined;
   bool optional = false;
   std::size_t rows = 0;
+  // Lista com elemento Nulo em alguma linha (B3): elemento OPTIONAL.
+  bool elem_nullable = false;
+  // Lista de listas (Marco 2 / B2a): elementos sao listas (ou Nulo);
+  // escalares internos sao do tipo da coluna; `inner_nullable` = lista
+  // interna Nula em alguma linha.
+  bool nested_list = false;
+  bool inner_nullable = false;
+  // Lista de structs (Marco 2 / B2b): elementos sao mapas (ou Nulo) com
+  // campos escalares; `children` = campos do elemento; `elem_struct_nullable`
+  // = elemento Nulo em alguma linha.
+  bool struct_list = false;
+  bool elem_struct_nullable = false;
   // Coluna struct (Fase 12-5a): grupo sem anotacao; `children` sao os campos
   // (recursivo: escalar, lista de escalares ou struct aninhado).
   // `struct_defined` alinha por linha (falso = struct nulo na linha).
@@ -254,16 +268,16 @@ const char* type_name(PType t) {
   return "?";
 }
 
-// Confere um elemento de lista e devolve o tipo fisico dele.
-PType element_type_of(const std::string& col, const Value& v) {
-  if (v.kind == ValueKind::Nulo) {
-    die("coluna '" + col + "': elementos nulos dentro de listas ainda nao suportados");
-  }
+// Confere um elemento de lista e devolve o tipo fisico dele. Nulo e
+// permitido (B3: elemento OPTIONAL) e devolve false (sem tipo).
+bool element_type_of(const std::string& col, const Value& v, PType& tipo) {
+  if (v.kind == ValueKind::Nulo) return false;
   if (v.kind == ValueKind::Lista || v.kind == ValueKind::Mapa) {
     die("coluna '" + col +
         "': listas aninhadas e structs dentro de listas ainda nao suportados");
   }
-  return type_of(v);
+  tipo = type_of(v);
+  return true;
 }
 
 void note_type(Column& c, PType t) {
@@ -290,7 +304,11 @@ void fill_leaf(Column& c, const std::vector<const Value*>& cells) {
         die("coluna '" + c.name + "' mistura listas e escalares em uma das linhas");
       }
       for (const Value& e : *cell->list) {
-        const PType t = element_type_of(c.name, e);
+        PType t = PT_BYTE_ARRAY;
+        if (!element_type_of(c.name, e, t)) {
+          c.elem_nullable = true;  // B3: elemento Nulo -> OPTIONAL
+          continue;
+        }
         note_type(c, t);
         switch (c.type) {
           case PT_BOOLEAN: c.bools.push_back(e.b); break;
@@ -406,13 +424,178 @@ Column infer_column(const std::string& name, const std::vector<const Value*>& ce
     return c;
   }
   if (first->kind == ValueKind::Lista) {
+    // B2a/B2b: elementos lista -> lista de listas; elementos mapa ->
+    // lista de structs (campos escalares); resto escalar.
+    bool aninhada = false;
+    bool de_structs = false;
+    for (const Value* cell : cells) {
+      if (cell->kind != ValueKind::Lista || !cell->list) continue;
+      for (const Value& e : *cell->list) {
+        if (e.kind == ValueKind::Lista) aninhada = true;
+        if (e.kind == ValueKind::Mapa) de_structs = true;
+      }
+    }
+    if (aninhada && de_structs) {
+      die("coluna '" + name + "': elementos lista e struct misturados");
+    }
+    if (de_structs) {
+      c.repeated = true;
+      c.struct_list = true;
+      // Campos: uniao das chaves dos elementos definidos; escalares apenas.
+      std::vector<std::string> keys;
+      for (const Value* cell : cells) {
+        if (cell->kind != ValueKind::Lista || !cell->list) continue;
+        for (const Value& e : *cell->list) {
+          if (e.kind != ValueKind::Mapa || !e.map) continue;
+          for (const auto& kv : e.map->items) {
+            if (kv.second.kind == ValueKind::Lista || kv.second.kind == ValueKind::Mapa) {
+              die("coluna '" + name + "': campos compostos em elementos de lista ainda nao "
+                  "suportados");
+            }
+            if (std::find(keys.begin(), keys.end(), kv.first) == keys.end()) {
+              keys.push_back(kv.first);
+            }
+          }
+        }
+      }
+      if (keys.empty()) {
+        die("coluna '" + name + "': elementos struct sem campos deduziveis");
+      }
+      static const Value kNull = Value::nulo();
+      for (const std::string& k : keys) {
+        Column ch;
+        ch.name = k;
+        // Tipo pela 1a celula nao nula do campo (em elementos definidos).
+        for (const Value* cell : cells) {
+          if (cell->kind != ValueKind::Lista || !cell->list) continue;
+          for (const Value& e : *cell->list) {
+            if (e.kind != ValueKind::Mapa || !e.map) continue;
+            if (const Value* f = e.map->find(k)) {
+              if (f->kind != ValueKind::Nulo) {
+                note_type(ch, type_of(*f));
+                goto proximo_campo;
+              }
+            }
+          }
+        }
+      proximo_campo:;
+        if (!ch.has_type) {
+          die("coluna '" + name + "." + k + "': so valores nulos (tipo nao deduzivel)");
+        }
+        // Preenche (elemento Nulo ou chave ausente -> Nulo no campo).
+        for (const Value* cell : cells) {
+          if (cell->kind != ValueKind::Lista || !cell->list) continue;
+          for (const Value& e : *cell->list) {
+            if (e.kind != ValueKind::Mapa || !e.map) continue;
+            if (const Value* f = e.map->find(k)) {
+              if (f->kind == ValueKind::Nulo) {
+                ch.optional = true;
+                continue;  // payload so dos definidos (abaixo)
+              }
+              note_type(ch, type_of(*f));
+            } else {
+              ch.optional = true;
+              continue;
+            }
+          }
+        }
+        // Payload dos definidos, na ordem dos elementos.
+        for (const Value* cell : cells) {
+          if (cell->kind != ValueKind::Lista || !cell->list) continue;
+          for (const Value& e : *cell->list) {
+            if (e.kind != ValueKind::Mapa || !e.map) continue;
+            const Value* f = e.map->find(k);
+            if (!f || f->kind == ValueKind::Nulo) continue;
+            switch (ch.type) {
+              case PT_BOOLEAN: ch.bools.push_back(f->b); break;
+              case PT_INT32:
+              case PT_INT64:
+              case PT_FLOAT:
+              case PT_DOUBLE: ch.nums.push_back(f->as_number()); break;
+              case PT_BYTE_ARRAY: ch.strings.push_back(f->s); break;
+              default:
+                die("coluna '" + name + "': tipo de escrita nao suportado");
+            }
+          }
+        }
+        ch.rows = cells.size();  // linhas da tabela (para o cabecalho v2)
+        c.children.push_back(std::move(ch));
+      }
+      for (const Value* cell : cells) {
+        ++c.rows;
+        if (cell->kind == ValueKind::Nulo) {
+          c.optional = true;
+          c.cells.push_back(Value::nulo());
+        } else if (cell->kind != ValueKind::Lista) {
+          die("coluna '" + name + "' mistura listas e escalares em uma das linhas");
+        } else {
+          for (const Value& e : *cell->list) {
+            if (e.kind == ValueKind::Nulo) c.elem_struct_nullable = true;
+          }
+          c.cells.push_back(*cell);
+        }
+      }
+      return c;
+    }
     c.repeated = true;
+    if (aninhada) {
+      c.nested_list = true;
+      for (const Value* cell : cells) {
+        if (cell->kind != ValueKind::Nulo && cell->kind != ValueKind::Lista) {
+          die("coluna '" + name + "' mistura listas e escalares em uma das linhas");
+        }
+        if (cell->kind == ValueKind::Lista) {
+          for (const Value& e : *cell->list) {
+            if (e.kind != ValueKind::Nulo && e.kind != ValueKind::Lista) {
+              die("coluna '" + name + "' mistura listas e escalares nos elementos");
+            }
+            if (e.kind == ValueKind::Lista) {
+              for (const Value& s : *e.list) {
+                if (s.kind == ValueKind::Nulo) {
+                  c.elem_nullable = true;
+                } else {
+                  if (s.kind == ValueKind::Lista || s.kind == ValueKind::Mapa) {
+                    die("coluna '" + name + "': 3 niveis de lista ainda nao suportados");
+                  }
+                  note_type(c, type_of(s));
+                }
+              }
+            } else {
+              c.inner_nullable = true;  // elemento interno Nulo
+            }
+          }
+        }
+      }
+      // Preenche celulas (payloads vao no flatten); conta linhas/nulos.
+      for (const Value* cell : cells) {
+        ++c.rows;
+        if (cell->kind == ValueKind::Nulo) {
+          c.optional = true;
+          c.cells.push_back(Value::nulo());
+        } else {
+          c.cells.push_back(*cell);
+        }
+      }
+      if (!c.has_type) {
+        die("coluna '" + name +
+            "' so tem valores nulos/listas vazias; forneca ao menos um valor nao nulo para "
+            "inferir o tipo");
+      }
+      return c;
+    }
     for (const Value* cell : cells) {
       if (cell->kind != ValueKind::Nulo && cell->kind != ValueKind::Lista) {
         die("coluna '" + name + "' mistura listas e escalares em uma das linhas");
       }
       if (cell->kind == ValueKind::Lista) {
-        for (const Value& e : *cell->list) note_type(c, element_type_of(name, e));
+        for (const Value& e : *cell->list) {
+          PType t = PT_BYTE_ARRAY;
+          if (element_type_of(name, e, t)) {
+            note_type(c, t);
+          } else {
+            c.elem_nullable = true;  // B3
+          }
+        }
       }
     }
   } else {
@@ -599,7 +782,8 @@ void flatten_list(const Column& c, std::vector<std::string> path, int def_base,
   fl.leaf = &c;
   fl.lv.max_rep = 1;
   const int outer = c.optional ? 1 : 0;
-  fl.lv.max_def = def_base + outer + 1;
+  // B3: elemento Nulo -> OPTIONAL (um nivel a mais; def max-1 = nulo).
+  fl.lv.max_def = def_base + outer + 1 + (c.elem_nullable ? 1 : 0);
   for (std::size_t r = 0; r < c.cells.size(); ++r) {
     const int anc = r < null_lv.size() ? null_lv[r] : -1;
     if (anc >= 0) {
@@ -626,8 +810,11 @@ void flatten_list(const Column& c, std::vector<std::string> path, int def_base,
       continue;
     }
     for (std::size_t k = 0; k < elems.size(); ++k) {
-      fl.lv.defs.push_back(static_cast<std::uint32_t>(fl.lv.max_def));
+      const bool nulo = elems[k].kind == ValueKind::Nulo;
+      fl.lv.defs.push_back(
+          static_cast<std::uint32_t>(nulo ? fl.lv.max_def - 1 : fl.lv.max_def));
       fl.lv.reps.push_back(k == 0 ? 0u : 1u);
+      if (nulo) ++fl.lv.num_nulls;
       ++fl.lv.num_values;
     }
   }
@@ -635,7 +822,181 @@ void flatten_list(const Column& c, std::vector<std::string> path, int def_base,
 }
 
 void flatten_into(const Column& c, std::vector<std::string> path, int def_base,
-                  const std::vector<int>& null_lv, std::vector<FlatLeaf>& out) {
+                  const std::vector<int>& null_lv, std::deque<Column>& owned,
+                  std::vector<FlatLeaf>& out);  // adiante
+
+// Lista de structs (B2b): uma folha por campo do elemento; cada elemento
+// (definido, nulo ou ausente) contribui com exatamente uma entrada por campo:
+// rep j==0?0:1; def base=nula externa, +O1=vazia, +1=elemento nulo (O2),
+// max-1=campo nulo (O3), max=valor. Payloads ja preenchidos na inferencia,
+// consumidos em ordem por cursor.
+void flatten_struct_list(const Column& c, std::vector<std::string> path, int def_base,
+                         const std::vector<int>& null_lv, std::vector<FlatLeaf>& out) {
+  const int o1 = c.optional ? 1 : 0;
+  const int o2 = c.elem_struct_nullable ? 1 : 0;
+  // Cursor de payload por campo (indice no vetor do tipo).
+  // Pre-computa as entradas por campo para alinhar (mesma sequencia).
+  struct Entrada {
+    std::uint32_t rep;
+    std::uint32_t def;
+    bool tem_valor;
+  };
+  std::vector<std::vector<Entrada>> entradas(c.children.size());
+  for (std::size_t r = 0; r < c.cells.size(); ++r) {
+    const int anc = r < null_lv.size() ? null_lv[r] : -1;
+    const Value& cell = c.cells[r];
+    const bool nula_ext = anc >= 0 || cell.kind == ValueKind::Nulo;
+    const bool vazia_ext = !nula_ext && cell.list->empty();
+    for (std::size_t f = 0; f < c.children.size(); ++f) {
+      const Column& ch = c.children[f];
+      const int o3 = ch.optional ? 1 : 0;
+      const int maxd = def_base + o1 + 1 + o2 + o3;
+      if (nula_ext) {
+        const int d = anc >= 0 ? anc : def_base;
+        entradas[f].push_back({0u, static_cast<std::uint32_t>(d), false});
+        continue;
+      }
+      if (vazia_ext) {
+        entradas[f].push_back({0u, static_cast<std::uint32_t>(def_base + o1), false});
+        continue;
+      }
+      const ValueList& elems = *cell.list;
+      for (std::size_t j = 0; j < elems.size(); ++j) {
+        const std::uint32_t rep = (j == 0) ? 0u : 1u;
+        const Value& e = elems[j];
+        if (e.kind != ValueKind::Mapa || !e.map) {
+          entradas[f].push_back({rep, static_cast<std::uint32_t>(def_base + o1 + 1), false});
+          continue;  // elemento Nulo (O2)
+        }
+        const Value* fv = e.map->find(ch.name);
+        if (!fv || fv->kind == ValueKind::Nulo) {
+          entradas[f].push_back({rep, static_cast<std::uint32_t>(maxd - 1), false});
+          continue;  // campo nulo (O3)
+        }
+        entradas[f].push_back({rep, static_cast<std::uint32_t>(maxd), true});
+      }
+    }
+  }
+  for (std::size_t f = 0; f < c.children.size(); ++f) {
+    const Column& ch = c.children[f];
+    FlatLeaf fl;
+    fl.path = path;
+    fl.path.push_back(ch.name);
+    fl.leaf = &ch;
+    const int o3 = ch.optional ? 1 : 0;
+    fl.lv.max_rep = 1;
+    fl.lv.max_def = def_base + o1 + 1 + o2 + o3;
+    for (const Entrada& e : entradas[f]) {
+      fl.lv.defs.push_back(e.def);
+      fl.lv.reps.push_back(e.rep);
+      if (!e.tem_valor) ++fl.lv.num_nulls;
+      ++fl.lv.num_values;
+    }
+    out.push_back(std::move(fl));
+  }
+}
+
+// Lista de listas (B2a): uma folha sintetica com payload proprio; levels com
+// rep 0/1/2 (linha / lista interna / elemento) e O1/O2/O3 (nulos em cada
+// nivel). def: base=nula externa, base+O1=vazia, +1=interna nula (O2),
+// +1+O2=vazia interna, max-1=elemento nulo (O3), max=elemento. O +1 extra
+// conta a entrada do grupo `list` repetido que contem a interna.
+void flatten_nested(const Column& c, std::vector<std::string> path, int def_base,
+                    const std::vector<int>& null_lv, std::deque<Column>& owned,
+                    std::vector<FlatLeaf>& out) {
+  owned.emplace_back();
+  Column& leaf = owned.back();
+  leaf.name = c.name;
+  leaf.type = c.type;
+  leaf.has_type = true;
+  leaf.repeated = true;
+  leaf.rows = c.rows;
+  leaf.optional = c.optional;
+  leaf.elem_nullable = c.elem_nullable;
+
+  FlatLeaf fl;
+  fl.path = std::move(path);
+  fl.leaf = &leaf;
+  const int o1 = c.optional ? 1 : 0;
+  const int o2 = c.inner_nullable ? 1 : 0;
+  const int o3 = c.elem_nullable ? 1 : 0;
+  fl.lv.max_rep = 2;
+  fl.lv.max_def = def_base + o1 + 1 + o2 + 1 + o3;
+  auto poe_valor = [&](const Value& e) {
+    switch (leaf.type) {
+      case PT_BOOLEAN: leaf.bools.push_back(e.b); break;
+      case PT_INT32:
+      case PT_INT64:
+      case PT_FLOAT:
+      case PT_DOUBLE: leaf.nums.push_back(e.as_number()); break;
+      case PT_BYTE_ARRAY: leaf.strings.push_back(e.s); break;
+      default:
+        die("coluna '" + c.name + "': tipo de escrita nao suportado");
+    }
+  };
+  for (std::size_t r = 0; r < c.cells.size(); ++r) {
+    const int anc = r < null_lv.size() ? null_lv[r] : -1;
+    if (anc >= 0) {
+      fl.lv.defs.push_back(static_cast<std::uint32_t>(anc));
+      fl.lv.reps.push_back(0);
+      ++fl.lv.num_nulls;
+      ++fl.lv.num_values;
+      continue;
+    }
+    const Value& cell = c.cells[r];
+    if (cell.kind == ValueKind::Nulo) {
+      fl.lv.defs.push_back(static_cast<std::uint32_t>(def_base));
+      fl.lv.reps.push_back(0);
+      ++fl.lv.num_nulls;
+      ++fl.lv.num_values;
+      continue;
+    }
+    const ValueList& iners = *cell.list;
+    if (iners.empty()) {
+      fl.lv.defs.push_back(static_cast<std::uint32_t>(def_base + o1));
+      fl.lv.reps.push_back(0);
+      ++fl.lv.num_nulls;
+      ++fl.lv.num_values;
+      continue;
+    }
+    for (std::size_t j = 0; j < iners.size(); ++j) {
+      const Value& in = iners[j];
+      const std::uint32_t rep_ini = (j == 0) ? 0u : 1u;
+      if (in.kind == ValueKind::Nulo) {
+        fl.lv.defs.push_back(static_cast<std::uint32_t>(def_base + o1 + 1));
+        fl.lv.reps.push_back(rep_ini);
+        ++fl.lv.num_nulls;
+        ++fl.lv.num_values;
+        continue;
+      }
+      const ValueList& elems = *in.list;
+      if (elems.empty()) {
+        fl.lv.defs.push_back(static_cast<std::uint32_t>(def_base + o1 + 1 + o2));
+        fl.lv.reps.push_back(rep_ini);
+        ++fl.lv.num_nulls;
+        ++fl.lv.num_values;
+        continue;
+      }
+      for (std::size_t k = 0; k < elems.size(); ++k) {
+        const bool nulo = elems[k].kind == ValueKind::Nulo;
+        fl.lv.defs.push_back(static_cast<std::uint32_t>(
+            nulo ? fl.lv.max_def - 1 : fl.lv.max_def));
+        fl.lv.reps.push_back(k == 0 ? rep_ini : 2u);
+        if (nulo) {
+          ++fl.lv.num_nulls;
+        } else {
+          poe_valor(elems[k]);
+        }
+        ++fl.lv.num_values;
+      }
+    }
+  }
+  out.push_back(std::move(fl));
+}
+
+void flatten_into(const Column& c, std::vector<std::string> path, int def_base,
+                  const std::vector<int>& null_lv, std::deque<Column>& owned,
+                  std::vector<FlatLeaf>& out) {
   if (c.is_struct) {
     std::vector<int> child_null(c.rows, -1);
     for (std::size_t r = 0; r < c.rows; ++r) {
@@ -650,8 +1011,16 @@ void flatten_into(const Column& c, std::vector<std::string> path, int def_base,
     for (const Column& ch : c.children) {
       std::vector<std::string> cp = path;
       cp.push_back(ch.name);
-      flatten_into(ch, std::move(cp), child_base, child_null, out);
+      flatten_into(ch, std::move(cp), child_base, child_null, owned, out);
     }
+    return;
+  }
+  if (c.repeated && c.nested_list) {
+    flatten_nested(c, std::move(path), def_base, null_lv, owned, out);
+    return;
+  }
+  if (c.repeated && c.struct_list) {
+    flatten_struct_list(c, std::move(path), def_base, null_lv, out);
     return;
   }
   if (c.repeated) {
@@ -661,11 +1030,12 @@ void flatten_into(const Column& c, std::vector<std::string> path, int def_base,
   }
 }
 
-std::vector<FlatLeaf> flatten_columns(const std::vector<Column>& cols) {
+std::vector<FlatLeaf> flatten_columns(const std::vector<Column>& cols,
+                                      std::deque<Column>& owned) {
   std::vector<FlatLeaf> out;
   for (const Column& c : cols) {
     std::vector<int> none(c.rows, -1);
-    flatten_into(c, {c.name}, 0, none, out);
+    flatten_into(c, {c.name}, 0, none, owned, out);
   }
   return out;
 }
@@ -1125,6 +1495,13 @@ struct ColDesc {
   int max_rep = 0;
   bool repeated = false;
   bool elem_nullable = false;  // lista com element OPTIONAL (max_def 3): def max-1 = elemento nulo
+  bool nested_list = false;    // lista de listas (Marco 2 / B2a)
+  bool inner_nullable = false;  // grupo element interno OPTIONAL
+  // Lista de structs (B2b): marcador de elemento Nulo (def exato).
+  int elem_null_level = -1;
+  // Lista de structs (B2b): campo de elemento; o nulo da linha externa e
+  // def < def_base (sem a clausula legada def == 0).
+  bool struct_elem_field = false;
   // Mapas (Fase A3): valores Nulo viram Nulo no mapa em vez de erro.
   bool allow_null_element = false;
   // Base de levels dos structs ancestrais + opcionalidade do proprio grupo
@@ -1400,11 +1777,99 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       }
       continue;
     }
-    // REPEATED: cada linha comeca numa entrada com rep == 0; def == max_def
-    // acrescenta um elemento a lista da linha; def intermediario sem rep
-    // marca lista vazia (ou nula, quando o grupo externo e OPTIONAL e
-    // def == 0). Elemento nulo (def == max_def-1 com element OPTIONAL, como
-    // o pyarrow grava) nao tem representacao em tilt: erro claro.
+    // REPEATED aninhado (B2a, max_rep 2): rep 0 = linha, 1 = lista interna,
+    // 2 = elemento. Niveis (B = def_base, O1 = outer, O2 = inner, O3 = elem):
+    // <B+O1 = nula externa; ==B+O1 (sozinha) = vazia; ==B+O1+1 = interna
+    // nula (O2) — com lookahead: sozinha tambem pode ser vazia externa;
+    // ==B+O1+1+O2 = interna vazia; ==max-1 = elemento nulo (O3); ==max.
+    if (cd.max_rep == 2) {
+      const int b = cd.def_base;
+      const int o1 = cd.outer_optional ? 1 : 0;
+      const int o2 = cd.inner_nullable ? 1 : 0;
+      const int d_outer = b + o1;
+      const int d_inner_null = b + o1 + 1;
+      const int d_inner_vazia = b + o1 + 1 + o2;
+      std::size_t vi = 0;
+      std::size_t k = 0;
+      const std::size_t npg = static_cast<std::size_t>(page_values);
+      auto no_fim = [&] { return k >= npg; };
+      while (!no_fim()) {
+        // rep 0: nova linha (a anterior ja foi fechada)
+        const std::uint32_t rep0 = reps[k];
+        const int def0 = static_cast<int>(defs[k]);
+        if (rep0 != 0) {
+          die(ctx + ": repetition level inicial de linha != 0 em lista aninhada");
+        }
+        if (def0 < d_outer) {
+          out.push_back(Value::nulo());
+          if (row_def) row_def->push_back(def0);
+          ++k;
+          continue;
+        }
+        if (def0 == d_outer) {
+          // Vazia externa se sozinha (prox rep 0 / fim); senao e a 1a
+          // interna (nula ou vazia conforme O2 — tratada no loop abaixo
+          // como interna com rep_ini 0).
+          const bool sozinha =
+              (k + 1 >= npg) || (reps[k + 1] == 0);
+          if (sozinha) {
+            out.push_back(Value::lista());
+            if (row_def) row_def->push_back(def0);
+            ++k;
+            continue;
+          }
+        }
+        Value row = Value::lista();
+        int row_max = def0;
+        bool primeira = true;
+        while (!no_fim() && (primeira || reps[k] != 0)) {
+          const int def = static_cast<int>(defs[k]);
+          if (def > row_max) row_max = def;
+          if (primeira && def == d_outer) {
+            die(ctx + ": definition level de lista externa vazia com entradas a seguir");
+          }
+          if (def == d_inner_null && o2) {
+            row.list->push_back(Value::nulo());  // interna nula
+            primeira = false;
+            ++k;
+            continue;
+          }
+          if (def == d_inner_vazia && (o2 || def < max_def)) {
+            // Interna vazia (O2=0: cai aqui com def==d_inner_vazia).
+            row.list->push_back(Value::lista());
+            primeira = false;
+            ++k;
+            continue;
+          }
+          if (def == max_def) {
+            // Elemento: abre a interna corrente se preciso.
+            if (primeira || reps[k] == 1) {
+              row.list->push_back(Value::lista());
+            }
+            row.list->back().list->push_back(vals[vi++]);
+            primeira = false;
+            ++k;
+            continue;
+          }
+          if (cd.elem_nullable && def == max_def - 1) {
+            if (!cd.allow_null_element) {
+              die(ctx + ": elementos nulos dentro de listas ainda nao suportados");
+            }
+            if (primeira || reps[k] == 1) {
+              row.list->push_back(Value::lista());
+            }
+            row.list->back().list->push_back(Value::nulo());
+            primeira = false;
+            ++k;
+            continue;
+          }
+          die(ctx + ": definition level inesperado em lista aninhada");
+        }
+        out.push_back(std::move(row));
+        if (row_def) row_def->push_back(row_max);
+      }
+      continue;
+    }
     std::size_t vi = 0;
     bool have_row = false;
     bool cur_null = false;
@@ -1424,7 +1889,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
         // caso legado flat (max_def >= 2 com def == 0).
         cur_null = static_cast<int>(def) < cd.def_base ||
                    (cd.outer_optional && static_cast<int>(def) == cd.def_base) ||
-                   (max_def >= 2 && def == 0);
+                   (!cd.struct_elem_field && max_def >= 2 && def == 0);
         cur_maxdef = static_cast<int>(def);
         cur = Value::lista();
       } else if (static_cast<int>(def) > cur_maxdef) {
@@ -1432,6 +1897,8 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       }
       if (static_cast<int>(def) == max_def) {
         cur.list->push_back(vals[vi++]);
+      } else if (cd.elem_null_level >= 0 && static_cast<int>(def) == cd.elem_null_level) {
+        cur.list->push_back(Value::nulo());  // marcador de elemento Nulo (B2b)
       } else if (cd.elem_nullable && static_cast<int>(def) == max_def - 1) {
         if (cd.allow_null_element) {
           cur.list->push_back(Value::nulo());  // valor Nulo em mapa
@@ -1475,46 +1942,49 @@ void write_logical_integer(Tw& w, int bits, bool is_signed) {
 }
 
 // Contagem de SchemaElements da arvore (raiz excluida): folha = 1,
-// lista = 3 (grupo LIST + list + element), struct = 1 + filhos.
+// lista = 3 (grupo LIST + list + element), lista de listas = 5,
+// lista de structs = 3 + campos, struct = 1 + filhos.
 std::size_t count_schema_nodes(const Column& c) {
   if (c.is_struct) {
     std::size_t n = 1;
     for (const Column& ch : c.children) n += count_schema_nodes(ch);
     return n;
   }
+  if (c.repeated && c.nested_list) return 5;
+  if (c.repeated && c.struct_list) return 3 + c.children.size();
   return c.repeated ? 3 : 1;
 }
 
 // Alocador de field-ids do footer: com `field_ids` (caminho Iceberg) consome
-// um id por coluna top-level; sem eles, sequencial por folha. Structs no
-// caminho com field-ids ainda nao sao suportados (erro claro) — o schema
-// Iceberg aninhado fica para a fase seguinte.
+// um id por FOLHA em profundidade (mesma ordem do flatten); sem eles,
+// sequencial por folha. Structs aninhados sao suportados quando os ids vêm
+// de fora (Iceberg aninha); sem ids, sequencial.
 struct FidAlloc {
   const std::vector<int>* ids = nullptr;
-  std::size_t top = 0;
+  std::size_t pos = 0;
   std::int32_t seq = 1;
-  std::int32_t take(bool is_top) {
-    if (is_top && ids) {
-      if (top >= ids->size()) die("field-ids insuficientes para as colunas");
-      return (*ids)[top++];
+  std::int32_t take() {
+    if (ids) {
+      if (pos >= ids->size()) die("field-ids insuficientes para as folhas");
+      return (*ids)[pos++];
     }
     return seq++;
   }
 };
 
-void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {  if (c.is_struct) {
-    if (is_top && fa.ids) {
-      die("coluna '" + c.name + "': structs com field-ids Iceberg ainda nao suportados");
-    }
+void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {
+  (void)is_top;
+  if (c.is_struct) {
     fw.struct_begin();
     fw.field_i32(3, c.optional ? 1 : 0);  // 0 = REQUIRED, 1 = OPTIONAL
     fw.field_str(4, c.name);
     fw.field_i32(5, static_cast<std::int32_t>(c.children.size()));
+    fw.field_i32(9, fa.take());  // field-id do grupo (Iceberg aninha por id)
     fw.struct_end();
     for (const Column& ch : c.children) write_schema_tree(fw, ch, fa, false);
     return;
   }
-  const std::int32_t fid = fa.take(is_top);
+  const std::int32_t fid = fa.take();
   if (!c.repeated) {
     fw.struct_begin();
     fw.field_i32(1, static_cast<std::int32_t>(c.type));
@@ -1530,8 +2000,114 @@ void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {  if
   }
   // lista aninhada (3-level, padrao parquet-mr/pyarrow):
   //   optional|required group <nome> (LIST) {
-  //     repeated group list { required <tipo> element; }
+  //     repeated group list { <tipo> element; }
   //   }
+  // Lista de structs (B2b, espelho do pyarrow):
+  //   optional|required group <nome> (LIST) {
+  //     repeated group list {
+  //       optional|required group element { <campos...> }
+  //     }
+  //   }
+  if (c.repeated && c.struct_list) {
+    fw.struct_begin();
+    fw.field_i32(3, c.optional ? 1 : 0);
+    fw.field_str(4, c.name);
+    fw.field_i32(5, 1);
+    fw.field_i32(6, 3);  // ConvertedType.LIST
+    fw.field(10, T_STRUCT);
+    fw.struct_begin();
+    fw.field(3, T_STRUCT);  // LogicalType.LIST
+    fw.struct_begin();
+    fw.struct_end();
+    fw.struct_end();
+    fw.struct_end();
+    fw.struct_begin();
+    fw.field_i32(3, 2);  // REPEATED
+    fw.field_str(4, "list");
+    fw.field_i32(5, 1);
+    fw.struct_end();
+    fw.struct_begin();
+    fw.field_i32(3, c.elem_struct_nullable ? 1 : 0);
+    fw.field_str(4, "element");
+    fw.field_i32(5, static_cast<std::int32_t>(c.children.size()));
+    fw.struct_end();
+    for (const Column& ch : c.children) {
+      fw.struct_begin();
+      fw.field_i32(1, static_cast<std::int32_t>(ch.type));
+      fw.field_i32(3, ch.optional ? 1 : 0);
+      fw.field_str(4, ch.name);
+      fw.field_i32(9, fa.take());
+      if (ch.type == PT_BYTE_ARRAY) {
+        fw.field_i32(6, 0);
+        write_logical_string(fw);
+      }
+      if (ch.type == PT_INT32) {
+        fw.field_i32(6, 17);
+        write_logical_integer(fw, 32, true);
+      }
+      fw.struct_end();
+    }
+    return;
+  }
+  // Lista de listas (B2a, espelho do pyarrow):
+  //   optional|required group <nome> (LIST) {
+  //     repeated group list {
+  //       optional|required group element (LIST) {
+  //         repeated group list { <tipo> element; }
+  //       }
+  //     }
+  //   }
+  if (c.repeated && c.nested_list) {
+    fw.struct_begin();
+    fw.field_i32(3, c.optional ? 1 : 0);
+    fw.field_str(4, c.name);
+    fw.field_i32(5, 1);
+    fw.field_i32(6, 3);  // ConvertedType.LIST
+    fw.field(10, T_STRUCT);
+    fw.struct_begin();
+    fw.field(3, T_STRUCT);  // LogicalType.LIST
+    fw.struct_begin();
+    fw.struct_end();
+    fw.struct_end();
+    fw.struct_end();
+    fw.struct_begin();
+    fw.field_i32(3, 2);  // REPEATED
+    fw.field_str(4, "list");
+    fw.field_i32(5, 1);
+    fw.struct_end();
+    fw.struct_begin();
+    fw.field_i32(3, c.inner_nullable ? 1 : 0);
+    fw.field_str(4, "element");
+    fw.field_i32(5, 1);
+    fw.field_i32(6, 3);  // ConvertedType.LIST
+    fw.field(10, T_STRUCT);
+    fw.struct_begin();
+    fw.field(3, T_STRUCT);  // LogicalType.LIST
+    fw.struct_begin();
+    fw.struct_end();
+    fw.struct_end();
+    fw.struct_end();
+    fw.struct_begin();
+    fw.field_i32(3, 2);  // REPEATED
+    fw.field_str(4, "list");
+    fw.field_i32(5, 1);
+    fw.struct_end();
+    fw.struct_begin();
+    fw.field_i32(1, static_cast<std::int32_t>(c.type));
+    fw.field_i32(3, c.elem_nullable ? 1 : 0);
+    fw.field_str(4, "element");
+    fw.field_i32(9, fid);
+    if (c.type == PT_BYTE_ARRAY) {
+      fw.field_i32(6, 0);  // ConvertedType.UTF8
+      write_logical_string(fw);
+    }
+    if (c.type == PT_INT32) {
+      fw.field_i32(6, 17);  // ConvertedType.INT_32
+      write_logical_integer(fw, 32, true);
+    }
+    fw.struct_end();
+    return;
+  }
   fw.struct_begin();
   fw.field_i32(3, c.optional ? 1 : 0);
   fw.field_str(4, c.name);
@@ -1551,7 +2127,7 @@ void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {  if
   fw.struct_end();
   fw.struct_begin();
   fw.field_i32(1, static_cast<std::int32_t>(c.type));
-  fw.field_i32(3, 0);  // element REQUIRED (lista de escalares sem nulos)
+  fw.field_i32(3, c.elem_nullable ? 1 : 0);  // element OPTIONAL (B3) ou REQUIRED
   fw.field_str(4, "element");
   fw.field_i32(9, fid);
   if (c.type == PT_BYTE_ARRAY) {
@@ -1573,6 +2149,14 @@ void aplicar_tipos(std::vector<Column>& cols, const std::map<std::string, std::s
   std::function<void(Column&, const std::string&)> visita = [&](Column& c,
                                                                 const std::string& path) {
     if (c.is_struct) {
+      for (Column& ch : c.children) visita(ch, path + "." + ch.name);
+      return;
+    }
+    if (c.repeated && c.struct_list) {
+      const auto it0 = tipos.find(path);
+      if (it0 != tipos.end()) {
+        die("tipos: '" + path + "' e lista de structs (use campos: '" + path + ".campo')");
+      }
       for (Column& ch : c.children) visita(ch, path + "." + ch.name);
       return;
     }
@@ -1603,10 +2187,99 @@ void aplicar_tipos(std::vector<Column>& cols, const std::map<std::string, std::s
           if (c.is_struct) {
             for (const Column& ch : c.children) confere(ch, p + "." + ch.name);
           }
+          if (c.repeated && c.struct_list) {
+            for (const Column& ch : c.children) confere(ch, p + "." + ch.name);
+          }
         };
     for (const Column& c : cols) confere(c, c.name);
     if (!achou) die("tipos: coluna '" + path + "' nao existe na tabela");
   }
+}
+
+// Dicionario de valores para encoding DICTIONARY (Marco 2 / B4): valores
+// distintos em PLAIN (ordem de 1a aparicao) + indice por valor definido.
+struct DictBuild {
+  std::string dict_plain;
+  std::vector<std::uint32_t> indices;  // por valor definido, na ordem
+  std::size_t distintas = 0;
+};
+
+// Largura em bits para enderecar `distintas` entradas (>= 1).
+unsigned dict_bit_width(std::size_t distintas) {
+  unsigned w = 1;
+  while (distintas > (std::size_t{1} << w)) ++w;
+  return w;
+}
+
+// Codificacao PLAIN de um valor numerico ja convertido (double) no fisico.
+std::string dict_num_bytes(PType t, double d) {
+  std::string raw;
+  if (t == PT_INT32) {
+    const std::int32_t v = static_cast<std::int32_t>(static_cast<std::int64_t>(d));
+    raw.assign(reinterpret_cast<const char*>(&v), 4);
+  } else if (t == PT_FLOAT) {
+    const float v = static_cast<float>(d);
+    raw.assign(reinterpret_cast<const char*>(&v), 4);
+  } else if (t == PT_INT64) {
+    const std::int64_t v = static_cast<std::int64_t>(d);
+    raw.assign(reinterpret_cast<const char*>(&v), 8);
+  } else {
+    raw.assign(reinterpret_cast<const char*>(&d), 8);
+  }
+  return raw;
+}
+
+// Constroi o dicionario da folha (nullopt = PLAIN direto): so quando ha
+// repeticao (distintos <= definidos/2, teto 1024); deterministico.
+std::optional<DictBuild> build_dict(const Column& c, bool permitido) {
+  if (!permitido || c.is_struct) return std::nullopt;
+  if (c.type != PT_INT32 && c.type != PT_INT64 && c.type != PT_FLOAT &&
+      c.type != PT_DOUBLE && c.type != PT_BYTE_ARRAY) {
+    return std::nullopt;  // BOOLEAN e afins: PLAIN ja e compacto
+  }
+  const bool texto = c.type == PT_BYTE_ARRAY;
+  const std::size_t definidos = texto ? c.strings.size() : c.nums.size();
+  if (definidos < 8) return std::nullopt;
+  DictBuild db;
+  std::vector<std::string> chaves;  // PLAIN de cada distinto
+  chaves.reserve(64);
+  auto indice_de = [&](const std::string& raw, bool& novo) -> std::uint32_t {
+    for (std::uint32_t k = 0; k < chaves.size(); ++k) {
+      if (chaves[k] == raw) {
+        novo = false;
+        return k;
+      }
+    }
+    if (chaves.size() >= 1024) return 0xFFFFFFFFu;  // teto: desiste
+    chaves.push_back(raw);
+    novo = true;
+    return static_cast<std::uint32_t>(chaves.size() - 1);
+  };
+  if (texto) {
+    for (const std::string& s : c.strings) {
+      std::string raw;
+      const std::uint32_t n = static_cast<std::uint32_t>(s.size());
+      raw.append(reinterpret_cast<const char*>(&n), 4);
+      raw += s;
+      bool novo = false;
+      const std::uint32_t ix = indice_de(raw, novo);
+      if (ix == 0xFFFFFFFFu) return std::nullopt;
+      if (novo) db.dict_plain += raw;
+      db.indices.push_back(ix);
+    }
+  } else {
+    for (double d : c.nums) {
+      const std::string raw = dict_num_bytes(c.type, d);
+      bool novo = false;
+      const std::uint32_t ix = indice_de(raw, novo);
+      if (ix == 0xFFFFFFFFu) return std::nullopt;
+      if (novo) db.dict_plain += raw;
+      db.indices.push_back(ix);
+    }
+  }
+  if (chaves.size() * 2 > definidos) return std::nullopt;  // sem repeticao util
+  db.distintas = chaves.size();
+  return db;
 }
 
 void parquet_write(const std::string& path, const Value& tabela,
@@ -1630,12 +2303,19 @@ void parquet_write(const std::string& path, const Value& tabela,
     std::int64_t uncompressed_size = 0;  // header + payload sem compressao
     std::int64_t num_values = 0;         // entradas de level
     std::int64_t num_nulls = 0;
+    bool dict = false;                     // dictionary encoding (B4)
+    int data_enc = E_PLAIN;                // encoding da data page
+    std::int64_t dict_page_offset = -1;    // dictionary page (quando dict)
+    std::int64_t dict_uncompressed = 0;
+    std::int64_t dict_compressed = 0;
   };
   std::vector<ChunkInfo> infos;
 
-  // Achata a arvore (structs aninhados viram uma folha por campo, com o
-  // caminho completo e os levels herdados dos grupos ancestrais).
-  const std::vector<FlatLeaf> leaves = flatten_columns(cols);
+  // Achata a arvore (structs aninhados viram uma folha por campo, listas
+  // aninhadas viram uma folha sintetica, com o caminho completo e os levels
+  // herdados dos grupos ancestrais).
+  std::deque<Column> owned;  // folhas sinteticas (refs estaveis)
+  const std::vector<FlatLeaf> leaves = flatten_columns(cols, owned);
 
   for (const FlatLeaf& fl : leaves) {
     const Column& c = *fl.leaf;
@@ -1652,13 +2332,29 @@ void parquet_write(const std::string& path, const Value& tabela,
         lv.max_def > 0 ? rle_encode_levels(lv.defs, def_bw) : std::string();
     const std::string levels = rep_rle + def_rle;
 
-    const std::string values_plain = plain_encode(c);
+    // Dictionary encoding (B4): dicionario em PLAIN + pagina de dados com
+    // indices RLE (bit width em 1 byte). Fallback para PLAIN sem repeticao.
+    const std::optional<DictBuild> dict = build_dict(c, opts.dicionario);
+    const int data_enc =
+        dict ? (opts.paginas_v2 ? E_RLE_DICTIONARY : E_PLAIN_DICTIONARY) : E_PLAIN;
+    std::string values_plain;
+    std::string values_section;
+    if (dict) {
+      const unsigned bw = dict_bit_width(dict->distintas);
+      std::string idx = rle_encode_levels(dict->indices, bw);
+      values_section.push_back(static_cast<char>(bw));
+      values_section += idx;
+      values_plain = dict->dict_plain;  // para a dictionary page
+    } else {
+      values_plain = plain_encode(c);
+    }
     std::string payload;
     std::int64_t payload_uncompressed;
     if (opts.paginas_v2) {
-      const std::string values_comp = compress_payload(values_plain, codec, c.name);
+      const std::string values_comp = compress_payload(values_section.empty() ? values_plain : values_section, codec, c.name);
       payload = levels + values_comp;
-      payload_uncompressed = static_cast<std::int64_t>(levels.size() + values_plain.size());
+      payload_uncompressed = static_cast<std::int64_t>(
+          levels.size() + (values_section.empty() ? values_plain.size() : values_section.size()));
     } else {
       std::string raw;
       if (lv.max_rep > 0) {
@@ -1671,7 +2367,7 @@ void parquet_write(const std::string& path, const Value& tabela,
         raw.append(reinterpret_cast<const char*>(&dl), 4);
         raw += def_rle;
       }
-      raw += values_plain;
+      raw += values_section.empty() ? values_plain : values_section;
       payload = compress_payload(raw, codec, c.name);
       payload_uncompressed = static_cast<std::int64_t>(raw.size());
     }
@@ -1684,9 +2380,33 @@ void parquet_write(const std::string& path, const Value& tabela,
       ci.path.push_back("list");
       ci.path.push_back("element");
     }
-    ci.data_page_offset = static_cast<std::int64_t>(body.size());
     ci.num_values = lv.num_values;
     ci.num_nulls = lv.num_nulls;
+    ci.dict = dict.has_value();
+    ci.data_enc = data_enc;
+
+    // Dictionary page antes da data page (valores do dicionario em PLAIN).
+    if (dict) {
+      ci.dict_page_offset = static_cast<std::int64_t>(body.size());
+      const std::string dict_comp = compress_payload(values_plain, codec, c.name);
+      Tw dw{body};
+      dw.struct_begin();  // PageHeader
+      dw.field_i32(1, PG_DICTIONARY);
+      dw.field_i32(2, static_cast<std::int32_t>(values_plain.size()));
+      dw.field_i32(3, static_cast<std::int32_t>(dict_comp.size()));
+      dw.field(7, T_STRUCT);
+      dw.struct_begin();  // DictionaryPageHeader
+      dw.field_i32(1, static_cast<std::int32_t>(dict->distintas));
+      dw.field_i32(2, E_PLAIN);
+      dw.struct_end();
+      dw.struct_end();  // STOP do PageHeader
+      ci.dict_uncompressed = static_cast<std::int64_t>(body.size()) - ci.dict_page_offset +
+                             static_cast<std::int64_t>(values_plain.size());
+      ci.dict_compressed = static_cast<std::int64_t>(body.size()) - ci.dict_page_offset +
+                           static_cast<std::int64_t>(dict_comp.size());
+      body += dict_comp;
+    }
+    ci.data_page_offset = static_cast<std::int64_t>(body.size());
 
     Tw hw{body};
     hw.struct_begin();  // PageHeader
@@ -1697,7 +2417,7 @@ void parquet_write(const std::string& path, const Value& tabela,
       hw.field(5, T_STRUCT);
       hw.struct_begin();
       hw.field_i32(1, static_cast<std::int32_t>(lv.num_values));
-      hw.field_i32(2, E_PLAIN);
+      hw.field_i32(2, data_enc);
       hw.field_i32(3, E_RLE);  // def/rep encodings: RLE, como em parquet-cpp
       hw.field_i32(4, E_RLE);
       hw.struct_end();
@@ -1713,7 +2433,7 @@ void parquet_write(const std::string& path, const Value& tabela,
       hw.field_i32(1, static_cast<std::int32_t>(lv.num_values));
       hw.field_i32(2, static_cast<std::int32_t>(lv.num_nulls));
       hw.field_i32(3, static_cast<std::int32_t>(c.rows));
-      hw.field_i32(4, E_PLAIN);
+      hw.field_i32(4, data_enc);
       hw.field_i32(5, static_cast<std::int32_t>(def_len));
       hw.field_i32(6, static_cast<std::int32_t>(rep_len));
       hw.field_bool(7, codec != C_NONE);  // is_compressed
@@ -1725,6 +2445,11 @@ void parquet_write(const std::string& path, const Value& tabela,
                            payload_uncompressed;
     ci.compressed_size = static_cast<std::int64_t>(body.size()) - ci.data_page_offset +
                          static_cast<std::int64_t>(payload.size());
+    if (ci.dict) {
+      // Tamanhos cobrem dictionary + data page (mesmo ColumnChunk).
+      ci.uncompressed_size += ci.dict_uncompressed;
+      ci.compressed_size += ci.dict_compressed;
+    }
     infos.push_back(ci);
     body += payload;
   }
@@ -1757,9 +2482,16 @@ void parquet_write(const std::string& path, const Value& tabela,
       fw.field(3, T_STRUCT);                        // ColumnChunk.meta_data
       fw.struct_begin();
       fw.field_i32(1, static_cast<std::int32_t>(infos[k].type));
-      fw.list_begin(2, T_I32, 2);
-      fw.zz(E_PLAIN);
-      fw.zz(E_RLE);
+      if (infos[k].dict) {
+        fw.list_begin(2, T_I32, 3);
+        fw.zz(E_PLAIN);
+        fw.zz(E_RLE);
+        fw.zz(infos[k].data_enc);
+      } else {
+        fw.list_begin(2, T_I32, 2);
+        fw.zz(E_PLAIN);
+        fw.zz(E_RLE);
+      }
       fw.list_begin(3, T_BINARY, infos[k].path.size());
       for (const std::string& p : infos[k].path) {
         fw.varint(p.size());
@@ -1770,6 +2502,9 @@ void parquet_write(const std::string& path, const Value& tabela,
       fw.field_i64(6, infos[k].uncompressed_size);
       fw.field_i64(7, infos[k].compressed_size);
       fw.field_i64(9, infos[k].data_page_offset);
+      if (infos[k].dict) {
+        fw.field_i64(11, infos[k].dict_page_offset);  // dictionary_page_offset
+      }
       fw.struct_end();
       fw.struct_end();
     }
@@ -1778,9 +2513,9 @@ void parquet_write(const std::string& path, const Value& tabela,
     fw.struct_end();
   }
   const char* codec_nome = codec == C_GZIP ? "gzip" : codec == C_SNAPPY ? "snappy" : "sem compressao";
-  fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain, paginas ") +
-                      (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
-                      ", opcionais com nulos, listas)");
+  fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain/dictionary, paginas ") +
+                       (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
+                       ", opcionais com nulos, listas)");
   fw.struct_end();
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -2159,10 +2894,16 @@ Value parquet_read(const std::string& path) {
     bool is_struct = false;
     bool is_list = false;
     bool is_map = false;      // grupo MAP: key/value como listas zipadas
+    bool nested_list = false;  // lista de listas (Marco 2 / B2a)
+    bool inner_nullable = false;  // grupo element interno OPTIONAL
+    bool struct_list = false;  // lista de structs (Marco 2 / B2b)
+    bool elem_struct_nullable = false;  // elemento struct Nulo (OPTIONAL)
+    int elem_null_level = -1;  // def do marcador de elemento Nulo
     bool optional = false;  // rep==1 no proprio nivel (struct) ou outer (lista)
     bool repeated = false;  // folha de lista
     bool elem_nullable = false;
     bool allow_null_element = false;  // valores Nulo em mapa
+    bool struct_elem_field = false;  // campo de elemento de lista de structs
     PType leaf_type = PT_BYTE_ARRAY;
     int max_def = 0;
     int max_rep = 0;
@@ -2233,8 +2974,80 @@ Value parquet_read(const std::string& path) {
         die("coluna '" + e.name + "': listas de structs/elementos multiplos ainda nao suportadas");
       }
       const SchemaElem& el = selem[static_cast<std::size_t>(ek[0])];
+      if (el.type < 0 && el.converted != 3 && !el.logical_list) {
+        // Lista de structs (B2b): grupo element sem anotacao LIST; campos
+        // escalares (listas/mapas/structs internos: erro claro). Cada campo
+        // vira folha-lista (rep 0/1 por elemento) e a remontagem zipa.
+        if (el.rep > 1) {
+          die("coluna '" + e.name + "': grupo element com repetition_type invalido");
+        }
+        f.struct_list = true;
+        f.elem_struct_nullable = el.rep == 1;
+        f.repeated = true;
+        f.max_rep = 1;
+        f.optional = e.rep == 1;
+        f.def_base = def_base;
+        f.outer_optional = e.rep == 1;
+        const int fbase = outer + 1 + (el.rep == 1 ? 1 : 0);
+        for (int fk : children_of(ek[0])) {
+          RField ch = parse_no(fk, fbase);
+          if (ch.is_struct || ch.is_map || ch.is_list || ch.nested_list) {
+            die("coluna '" + e.name + "': campo '" + ch.name +
+                "' composto em elemento de lista ainda nao suportado");
+          }
+          // Decodifica como lista (uma entrada por elemento): Nulo de
+          // elemento vira placeholder em todos os campos.
+          ch.repeated = true;
+          ch.is_list = true;
+          ch.max_rep = 1;
+          ch.elem_null_level = el.rep == 1 ? outer + 1 : -1;
+          ch.allow_null_element = true;
+          ch.struct_elem_field = true;
+          ch.def_base = outer;
+          ch.outer_optional = false;
+          f.children.push_back(std::move(ch));
+        }
+        if (f.children.empty()) {
+          die("coluna '" + e.name + "': elemento struct sem campos");
+        }
+        f.max_def = fbase;
+        for (const RField& ch : f.children) f.max_def = std::max(f.max_def, ch.max_def);
+        return f;
+      }
       if (el.type < 0) {
-        die("coluna '" + e.name + "': listas aninhadas (list<list<...>>) ainda nao suportadas");
+        // Lista de listas (B2a): grupo element com anotacao LIST.
+        if (el.rep > 1) {
+          die("coluna '" + e.name + "': grupo element com repetition_type invalido");
+        }
+        f.nested_list = true;
+        f.inner_nullable = el.rep == 1;
+        const int obase = outer + 1;
+        const std::vector<int> ik = children_of(ek[0]);
+        if (ik.size() != 1) {
+          die("coluna '" + e.name + "': lista interna com " + std::to_string(ik.size()) +
+              " filhos (esperado 1)");
+        }
+        const SchemaElem& ig = selem[static_cast<std::size_t>(ik[0])];
+        if (ig.type >= 0 || ig.rep != 2) {
+          die("coluna '" + e.name + "': grupo interno da lista interna deve ser REPEATED");
+        }
+        const std::vector<int> lk = children_of(ik[0]);
+        if (lk.size() != 1) {
+          die("coluna '" + e.name + "': 3 niveis de lista ainda nao suportados");
+        }
+        const SchemaElem& leaf = selem[static_cast<std::size_t>(lk[0])];
+        if (leaf.type < 0) {
+          die("coluna '" + e.name + "': 3 niveis de lista ainda nao suportados");
+        }
+        if (leaf.rep > 1) {
+          die("coluna '" + e.name + "': elementos REPEATED na lista interna");
+        }
+        check_leaf_type(e.name, leaf.type);
+        resolve_conv(e.name, leaf, f.leaf_type, f.conv, f.dec_scale, f.fixed_len);
+        f.elem_nullable = leaf.rep == 1;
+        f.max_rep = 2;
+        f.max_def = obase + (el.rep == 1 ? 1 : 0) + 1 + (f.elem_nullable ? 1 : 0);
+        return f;
       }
       if (el.rep > 1) {
         die("coluna '" + e.name +
@@ -2333,6 +3146,13 @@ Value parquet_read(const std::string& path) {
       f.value_idx = f.children[1].leaf_idx;
       return;
     }
+    if (f.struct_list) {
+      for (RField& ch : f.children) {
+        flat_no(ch);
+        f.sub_leaves.insert(f.sub_leaves.end(), ch.sub_leaves.begin(), ch.sub_leaves.end());
+      }
+      return;
+    }
     f.leaf_idx = static_cast<int>(cols_desc.size());
     f.sub_leaves.push_back(f.leaf_idx);
     ColDesc d;
@@ -2342,7 +3162,12 @@ Value parquet_read(const std::string& path) {
     d.max_rep = f.max_rep;
     d.repeated = f.repeated;
     d.elem_nullable = f.elem_nullable;
-    d.allow_null_element = f.allow_null_element;
+    d.nested_list = f.nested_list;
+    d.inner_nullable = f.inner_nullable;
+    d.elem_null_level = f.elem_null_level;
+    d.struct_elem_field = f.struct_elem_field;
+    // B3: elemento Nulo vira Nulo (listas comuns e valores de mapa).
+    d.allow_null_element = f.allow_null_element || f.elem_nullable;
     d.def_base = f.def_base;
     d.outer_optional = f.outer_optional;
     d.conv = f.conv;
@@ -2376,9 +3201,52 @@ Value parquet_read(const std::string& path) {
   // Remonta os valores: folhas viram escalares/listas; structs viram mapas.
   // Struct OPTIONAL e Nulo quando nenhum definition level da subarvore passa
   // do nivel do struct (tudo indefinido a partir dele); senao e mapa (com
-  // Nulo nos campos ausentes). Struct REQUIRED e sempre mapa.
+  // Nulo nos campos ausentes). Struct REQUIRED e sempre mapa. Listas de
+  // structs zipam os campos por posicao (elemento todo-Nulo vira Nulo
+  // quando o grupo element e OPTIONAL).
   std::function<Value(const RField&, std::size_t)> build_no =
       [&](const RField& f, std::size_t r) -> Value {
+    if (f.struct_list) {
+      // Linha nula (externa ou ancestral): todos os campos Nulo -> Nulo;
+      // vazia: todos [] -> []; senao zipa por posicao.
+      bool tudo_nulo = true;
+      for (const RField& ch : f.children) {
+        const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
+        if (r < col.size() && col[r].kind == ValueKind::Lista) {
+          tudo_nulo = false;
+          break;
+        }
+      }
+      if (tudo_nulo) return Value::nulo();
+      Value out = Value::lista();
+      std::size_t n = 0;
+      for (const RField& ch : f.children) {
+        const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
+        if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list) {
+          n = std::max(n, col[r].list->size());
+        }
+      }
+      for (std::size_t j = 0; j < n; ++j) {
+        bool algum = false;
+        Value m = Value::mapa();
+        for (const RField& ch : f.children) {
+          const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
+          Value v;
+          if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list &&
+              j < col[r].list->size()) {
+            v = (*col[r].list)[j];
+          }
+          if (v.kind != ValueKind::Nulo) algum = true;
+          m.map->set(ch.name, std::move(v));
+        }
+        if (f.elem_struct_nullable && !algum) {
+          out.list->push_back(Value::nulo());
+        } else {
+          out.list->push_back(std::move(m));
+        }
+      }
+      return out;
+    }
     if (f.is_map) {
       const auto& keys =
           columns[static_cast<std::size_t>(f.leaf_idx)];

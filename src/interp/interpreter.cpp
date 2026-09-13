@@ -3718,6 +3718,12 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         opts.tipos[kv.first] = kv.second.s;
       }
     }
+    if (const Value* dic = kw.find("dicionario")) {
+      if (dic->kind != ValueKind::Logico) {
+        fail(call.span, "escrever_parquet: 'dicionario' deve ser logico");
+      }
+      opts.dicionario = dic->b;
+    }
     try {
       rt::parquet_write(a[1].s, a[0], nullptr, opts);
     } catch (const std::exception& e) {

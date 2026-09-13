@@ -1,0 +1,9 @@
+erro[T011]: mapa 'm' nao tem o campo 'cidade'
+  --> input.tilt:6:11
+   |
+ 6 |     - z = m.cidade
+   |           ^
+   |
+   = campos conhecidos: idade, nome
+
+1 erro(s) em input.tilt

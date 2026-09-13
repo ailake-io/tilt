@@ -1,5 +1,6 @@
 #include "semantic/checker.hpp"
 
+#include <algorithm>
 #include <initializer_list>
 #include <memory>
 #include <utility>
@@ -70,6 +71,7 @@ void SemanticChecker::run() {
 
 void SemanticChecker::report(DiagCode code, Span span, std::string message,
                              std::vector<std::string> notes) {
+  if (silencioso_) return;  // pre-passagem de coleta (C1): sem diagnostico
   Diagnostic d;
   d.severity = Severity::Error;
   d.code = code;
@@ -312,6 +314,11 @@ void SemanticChecker::resolve_types() {
   for (const auto& item : program_.items) {
     if (item && item->kind == ItemKind::Decl) resolve_type_annotations(*item);
   }
+  infer_funcao_returns();
+  // Formas por variavel nao sobrevivem entre entidades (cada corpo anda com
+  // env proprio); limpa o que a pre-passagem possa ter registrado.
+  formas_mapa_.clear();
+  elem_lista_.clear();
 }
 
 // ------------------------------------------------------------------- pass 3
@@ -497,8 +504,7 @@ std::optional<TensorShape> tensor_literal_dims(const Expr& e) {
 // Dimensoes inteiras de uma anotacao `tensor[f32, 1, 3, 32, 32]` (dtype
 // opcional). `std::nullopt` se a anotacao nao for essa forma ou tiver
 // dimensoes nao literais ('_' incluido).
-std::optional<TensorShape> tensor_annotation_dims(const Expr* e) {
-  if (!e || e->kind != ExprKind::Index || !e->lhs || e->lhs->kind != ExprKind::Name ||
+std::optional<TensorShape> tensor_annotation_dims(const Expr* e) {  if (!e || e->kind != ExprKind::Index || !e->lhs || e->lhs->kind != ExprKind::Name ||
       e->lhs->text != "tensor" || e->elems.empty()) {
     return std::nullopt;
   }
@@ -1023,13 +1029,64 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
     case ExprKind::Index: {
       const std::string base = (e.lhs && e.lhs->kind == ExprKind::Name) ? e.lhs->text : "";
       if (word_in(base, {"tensor", "zeros", "uns", "aleatorio"})) return TypeKind::Tensor;
+      // C1: `l[i]` com elemento conhecido; resto e dinamico.
+      if (!base.empty()) {
+        if (auto it = elem_lista_.find(base); it != elem_lista_.end()) {
+          return it->second;
+        }
+      }
       return TypeKind::Unknown;  // indexacao e dinamica
+    }
+    case ExprKind::Slice: {
+      // C1: fatia de lista/texto mantem o tipo base.
+      if (e.lhs) {
+        const TypeKind t = infer_type(*e.lhs, types);
+        if (t == TypeKind::Lista || t == TypeKind::Texto) return t;
+      }
+      return TypeKind::Unknown;
     }
     case ExprKind::Member: {
       if (e.optional || !e.lhs) return TypeKind::Unknown;
+      // C1: literal como base (`({a: 1}).a`) resolve direto.
+      if (e.lhs->kind == ExprKind::MapLit) {
+        for (const auto& entry : e.lhs->entries) {
+          if (entry.key == e.text) {
+            return entry.value ? infer_type(*entry.value, types) : TypeKind::Unknown;
+          }
+        }
+        std::vector<std::string> campos;
+        for (const auto& entry : e.lhs->entries) campos.push_back(entry.key);
+        std::sort(campos.begin(), campos.end());
+        std::string lista;
+        for (const auto& k : campos) {
+          if (!lista.empty()) lista += ", ";
+          lista += k;
+        }
+        report(DiagCode::TypeMismatch, e.span, "mapa literal nao tem o campo '" + e.text + "'",
+               {"campos do literal: " + (lista.empty() ? std::string("(vazio)") : lista)});
+        return TypeKind::Unknown;
+      }
       const TypeKind base = infer_type(*e.lhs, types);
       if (base == TypeKind::Unknown || base == TypeKind::Entidade) return TypeKind::Unknown;
       const std::string& m = e.text;
+      // C1: variavel com forma de mapa conhecida.
+      if (base == TypeKind::Mapa && e.lhs->kind == ExprKind::Name) {
+        if (auto it = formas_mapa_.find(e.lhs->text); it != formas_mapa_.end()) {
+          if (auto ft = it->second.find(m); ft != it->second.end()) return ft->second;
+          std::vector<std::string> campos;
+          for (const auto& kv : it->second) campos.push_back(kv.first);
+          std::sort(campos.begin(), campos.end());
+          std::string lista;
+          for (const auto& k : campos) {
+            if (!lista.empty()) lista += ", ";
+            lista += k;
+          }
+          report(DiagCode::TypeMismatch, e.span,
+                 "mapa '" + e.lhs->text + "' nao tem o campo '" + m + "'",
+                 {"campos conhecidos: " + (lista.empty() ? std::string("(vazio)") : lista)});
+          return TypeKind::Unknown;
+        }
+      }
       if (base == TypeKind::Tensor) {
         if (m == "forma" || m == "dados") return TypeKind::Lista;
         if (m == "soma" || m == "media" || m == "item") return TypeKind::Decimal;
@@ -1118,8 +1175,12 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
       }
       if (e.lhs->kind != ExprKind::Name) return TypeKind::Unknown;
       const std::string& name = e.lhs->text;
-      // `funcao` do usuario sobrescreve builtin no runtime.
-      if (const Symbol* s = lookup(name); s && s->kind == "funcao") return TypeKind::Unknown;
+      // `funcao` do usuario sobrescreve builtin no runtime; com retorno
+      // conhecido (anotacao ou corpo, C1) ele e o tipo da chamada.
+      if (const Symbol* s = lookup(name); s && s->kind == "funcao") {
+        if (s->type.ret && s->type.ret->kind != TypeKind::Unknown) return s->type.ret->kind;
+        return TypeKind::Unknown;
+      }
       const BuiltinSig* sig = find_builtin_sig(name);
       if (!sig) return TypeKind::Unknown;
       // aridade minima (só onde o runtime falha com menos args)
@@ -1171,6 +1232,22 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
           }
         }
       }
+      // C1: agregacoes sobre lista de elemento conhecido refinam o retorno.
+      if ((name == "somar" || name == "min" || name == "max") && npos >= 1) {
+        const Expr* arg = first_positional_arg(e);
+        if (arg && arg->kind == ExprKind::Name) {
+          if (auto it = elem_lista_.find(arg->text); it != elem_lista_.end()) {
+            if (name == "somar") {
+              if (it->second == TypeKind::Inteiro || it->second == TypeKind::Decimal ||
+                  it->second == TypeKind::Texto) {
+                return it->second;
+              }
+            } else if (it->second != TypeKind::Unknown) {
+              return it->second;
+            }
+          }
+        }
+      }
       return sig->ret;
     }
     default:
@@ -1180,8 +1257,13 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
 
 void SemanticChecker::check_return(const Expr* value, Span span, const TypeEnv& types,
                                    const ShapeEnv& shapes) {
-  if (!current_ret_ || current_ret_->kind == sema::TypeKind::Unknown) return;
   sema::Type vt = sema::Type::scalar(value ? infer_type(*value, types) : sema::TypeKind::Nulo);
+  if (silencioso_) {
+    // Pre-passagem C1: so coleta (retornos `nulo` contam para a unanimidade).
+    if (!funcao_coleta_.empty()) retornos_coletados_.push_back(vt.kind);
+    return;
+  }
+  if (!current_ret_ || current_ret_->kind == sema::TypeKind::Unknown) return;
   // Tensores inferidos carregam a forma conhecida para comparar dimensoes.
   if (vt.kind == sema::TypeKind::Tensor && value) {
     if (auto sh = infer_shape(*value, shapes)) {
@@ -1289,6 +1371,47 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
           } else {
             types.erase(s.a->text);
           }
+          // Formas de mapas/listas (C1): literais registram campos/elemento;
+          // reatribuicao com outra coisa invalida; `y = x` propaga a forma.
+          formas_mapa_.erase(s.a->text);
+          elem_lista_.erase(s.a->text);
+          if (s.b->kind == ExprKind::MapLit) {
+            auto& forma = formas_mapa_[s.a->text];
+            for (const auto& entry : s.b->entries) {
+              if (entry.value) forma[entry.key] = infer_type(*entry.value, types);
+            }
+          } else if (s.b->kind == ExprKind::ListLit) {
+            sema::TypeKind el = sema::TypeKind::Unknown;
+            bool ok = !s.b->elems.empty();
+            for (const auto& elx : s.b->elems) {
+              if (!elx) {
+                ok = false;
+                break;
+              }
+              const sema::TypeKind k = infer_type(*elx, types);
+              if (k == sema::TypeKind::Unknown || k == sema::TypeKind::Nulo) {
+                if (k == sema::TypeKind::Unknown) {
+                  ok = false;
+                  break;
+                }
+                continue;  // Nulo nao define o elemento
+              }
+              if (el == sema::TypeKind::Unknown) {
+                el = k;
+              } else if (el != k) {
+                ok = false;  // heterogenea: sem forma
+                break;
+              }
+            }
+            if (ok && el != sema::TypeKind::Unknown) elem_lista_[s.a->text] = el;
+          } else if (s.b->kind == ExprKind::Name) {
+            if (auto it = formas_mapa_.find(s.b->text); it != formas_mapa_.end()) {
+              formas_mapa_[s.a->text] = it->second;
+            }
+            if (auto it = elem_lista_.find(s.b->text); it != elem_lista_.end()) {
+              elem_lista_[s.a->text] = it->second;
+            }
+          }
         }
       }
       if (s.a && s.a->kind == ExprKind::Name) {
@@ -1314,32 +1437,59 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       return;
     case ast::StmtKind::If: {
       if (s.a) check_expr(*s.a, scope);
+      // Formas sao fluxo-insensiveis: ramos restauram o estado anterior
+      // (sem falsos positivos; perde-se precisao dentro de ramos).
+      const MapShapes formas_salvas = formas_mapa_;
+      const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, scope, shapes, types);
       for (const auto& ei : s.elifs) {
         if (ei.cond) check_expr(*ei.cond, scope);
+        formas_mapa_ = formas_salvas;
+        elem_lista_ = elems_salvos;
         walk_stmt_block(ei.body, scope, shapes, types);
       }
-      if (s.else_body) walk_stmt_block(*s.else_body, scope, shapes, types);
+      if (s.else_body) {
+        formas_mapa_ = formas_salvas;
+        elem_lista_ = elems_salvos;
+        walk_stmt_block(*s.else_body, scope, shapes, types);
+      }
+      formas_mapa_ = formas_salvas;
+      elem_lista_ = elems_salvos;
       return;
     }
     case ast::StmtKind::ForEach: {
       if (s.a) check_expr(*s.a, scope);
       Scope inner = scope;
       if (!s.name.empty()) inner.insert(s.name);
+      const MapShapes formas_salvas = formas_mapa_;
+      const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, std::move(inner), shapes, types);
+      formas_mapa_ = formas_salvas;
+      elem_lista_ = elems_salvos;
       return;
     }
-    case ast::StmtKind::While:
+    case ast::StmtKind::While: {
       if (s.a) check_expr(*s.a, scope);
+      const MapShapes formas_salvas = formas_mapa_;
+      const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, scope, shapes, types);
+      formas_mapa_ = formas_salvas;
+      elem_lista_ = elems_salvos;
       return;
+    }
     case ast::StmtKind::Try: {
+      const MapShapes formas_salvas = formas_mapa_;
+      const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, scope, shapes, types);
       if (s.catch_body) {
         Scope inner = scope;
         if (!s.name.empty()) inner.insert(s.name);
+        formas_mapa_ = formas_salvas;
+        elem_lista_ = elems_salvos;
         walk_stmt_block(*s.catch_body, std::move(inner), shapes, types);
       }
+      formas_mapa_ = formas_salvas;
+      elem_lista_ = elems_salvos;
       return;
     }
   }
@@ -1370,6 +1520,10 @@ void SemanticChecker::walk_stmt_block(const ast::Block& block, Scope scope, Shap
 
 void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes,
                                       TypeEnv types) {
+  // Formas de mapas/listas valem por entidade (cada corpo anda com env
+  // proprio); limpa o que outras entidades ou a pre-passagem registraram.
+  formas_mapa_.clear();
+  elem_lista_.clear();
   collect_entrada_names(block, scope);
   // Anotacoes `entrada: tensor[...]` (inline ou em bloco) semeiam as formas
   // e os tipos conhecidos dos dados de entrada da entidade.
@@ -1413,6 +1567,57 @@ void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, Shap
   }
 }
 
+// Retornos de `funcao` (Marco 2 / C1): anotacao `-> T` vira contrato;
+// sem anotacao, infere-se do corpo (unanimidade dos `retornar`) numa
+// pre-passagem silenciosa (sem diagnostico duplo na passada real).
+void SemanticChecker::infer_funcao_returns() {
+  for (const auto& item : program_.items) {
+    if (!item || item->kind != ItemKind::Decl || item->key != "funcao" || !item->block) continue;
+    const std::string nome = decl_name(*item);
+    auto git = globals_.find(nome);
+    if (git == globals_.end()) continue;
+    if (item->value) {
+      if (auto t = annotation_cache_.find(item->value.get()); t != annotation_cache_.end()) {
+        if (t->second.kind != sema::TypeKind::Unknown) {
+          git->second.type.ret = std::make_shared<sema::Type>(t->second);
+          continue;
+        }
+      }
+    }
+    Scope scope;
+    ShapeEnv shapes;
+    TypeEnv types;
+    for (const auto& p : item->params) {
+      scope.insert(p.name);
+      if (auto dims = tensor_annotation_dims(p.value.get())) shapes[p.name] = *dims;
+      if (auto t = annotation_cache_.find(p.value.get()); t != annotation_cache_.end()) {
+        types[p.name] = t->second.kind;
+      }
+    }
+    silencioso_ = true;
+    funcao_coleta_ = nome;
+    retornos_coletados_.clear();
+    walk_stmt_block(*item->block, std::move(scope), std::move(shapes), std::move(types));
+    silencioso_ = false;
+    funcao_coleta_.clear();
+    sema::TypeKind unanim = sema::TypeKind::Unknown;
+    bool ha = false, ok = true;
+    for (sema::TypeKind t : retornos_coletados_) {
+      if (!ha) {
+        unanim = t;
+        ha = true;
+      } else if (t != unanim) {
+        ok = false;
+      }
+    }
+    if (ha && ok && unanim != sema::TypeKind::Unknown) {
+      sema::Type rt = sema::Type::scalar(unanim);
+      git->second.type.ret = std::make_shared<sema::Type>(std::move(rt));
+    }
+    retornos_coletados_.clear();
+  }
+}
+
 void SemanticChecker::check_bodies() {
   for (const auto& item : program_.items) {
     if (!item || item->kind != ItemKind::Decl || !item->block) continue;
@@ -1420,6 +1625,8 @@ void SemanticChecker::check_bodies() {
       Scope scope;
       ShapeEnv shapes;
       TypeEnv types;
+      formas_mapa_.clear();  // por entidade (ver scan_for_bodies)
+      elem_lista_.clear();
       for (const auto& p : item->params) {
         scope.insert(p.name);
         // Anotacao `p: tensor[...]` semeia a forma e o tipo do parametro.
