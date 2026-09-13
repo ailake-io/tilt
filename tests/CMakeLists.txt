@@ -161,6 +161,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/janela_offset)
 
 add_test(
+  NAME checkpoint_backend
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/checkpoint_backend_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/janela_offset)
+
+add_test(
   NAME tls
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tls_test.sh
           $<TARGET_FILE:tilt>

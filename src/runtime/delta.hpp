@@ -41,7 +41,12 @@ namespace tilt::rt {
 //   (version, schemaString, partitionColumns) em _delta_log; a leitura usa o
 //   checkpoint mais recente como base e repassa so os JSONs maiores que ele.
 //   Arquivos ignorados por leitores externos (delta-rs/Spark seguem pelo
-//   replay dos JSONs); o `_last_checkpoint` padrao fica para a Fase 12-5b.
+//   replay dos JSONs);
+// - checkpoint padrao (Marco 1 / A3): `_last_checkpoint` {"version": N} +
+//   `<N>.checkpoint*.parquet` no schema oficial (add/remove/metaData com
+//   partitionValues MAP) e honrado como base (usa-se o de maior versao entre
+//   padrao e tilt-native); tabelas com checkpoint de Spark/delta-rs leem
+//   rapido. A escrita do checkpoint padrao continua tilt-native.
 // - leitura aplica o log em ordem de versao (add/remove) e concatena os
 //   parquet listados. Sem transacoes concorrentes.
 void delta_write(const std::string& dir, const Value& tabela,

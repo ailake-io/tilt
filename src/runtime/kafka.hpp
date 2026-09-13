@@ -31,12 +31,11 @@ namespace tilt::rt {
 // `KAFKA_BOOTSTRAP` (default "127.0.0.1:9092").
 
 // Produz `valor` bruto (ja serializado pelo chamador) no topico/particao.
-// Opcoes de durabilidade/idempotencia (Fase 12-4): `acks` (-1 = all,
+// Opcoes de durabilidade/idempotencia (Marco 1): `acks` (-1 = all,
 // 1 = leader), `tentativas` (retries em erros retriaveis 5/6/7 com refresh
-// de metadata), `chave` ("" = NULL; quando presente permite compactacao/
-// dedup downstream e particionamento deterministico) e `idempotente` (tenta
-// InitProducerId + sequencia por particao; com broker 0.9-era faz fallback
-// para o caminho legado com acks=all+retry). Retorna o offset atribuido.
+// de metadata), `chave` ("" = NULL) e `idempotente` (InitProducerId +
+// Produce v3 com RecordBatch e sequencia por particao, com fallback legado
+// v1 quando o broker nao suporta). Retorna o offset atribuido.
 struct ProduceOptions {
   std::string chave;
   int acks = -1;

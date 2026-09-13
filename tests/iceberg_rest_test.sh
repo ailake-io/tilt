@@ -4,8 +4,9 @@
 # tilt client speaks — createTable / loadTable / transactions (requirements +
 # updates applied over an in-memory TableMetadata, materialized as
 # <location>/metadata/v<N>.metadata.json) —, then runs `tilt executar` on
-# fixtures (write+append+read roundtrip, append with schema evolution, and
-# overwrite of an existing table) with ICEBERG_CATALOG=rest + ICEBERG_URI,
+# fixtures (write+append+read roundtrip, append with schema evolution,
+# overwrite of an existing table, and row delete via apagar_iceberg) with
+# ICEBERG_CATALOG=rest + ICEBERG_URI,
 # checks the output, the mock's request log and two clear errors (missing
 # ICEBERG_URI, table not found). Finally validates the server-produced
 # metadata with pyiceberg (StaticTable) when it is installed.
@@ -16,6 +17,7 @@ FIXTURE="${2:-${0%/*}/fixtures/iceberg_roundtrip.tilt}"
 FIX_EVO="${3:-${0%/*}/fixtures/iceberg_rest_evolucao.tilt}"
 FIX_FANTASMA="${4:-${0%/*}/fixtures/iceberg_rest_fantasma.tilt}"
 FIX_SOBRESCRETA="${5:-${0%/*}/fixtures/iceberg_rest_sobrescrita.tilt}"
+FIX_APAGAR="${6:-${0%/*}/fixtures/iceberg_rest_apagar.tilt}"
 case "$FIXTURE" in
   /*) ;;
   *) FIXTURE="$(pwd)/$FIXTURE" ;;
@@ -31,6 +33,10 @@ esac
 case "$FIX_SOBRESCRETA" in
   /*) ;;
   *) FIX_SOBRESCRETA="$(pwd)/$FIX_SOBRESCRETA" ;;
+esac
+case "$FIX_APAGAR" in
+  /*) ;;
+  *) FIX_APAGAR="$(pwd)/$FIX_APAGAR" ;;
 esac
 PORT_BASE="${TILT_TEST_PORT:-8681}"
 
@@ -330,6 +336,7 @@ cd "$tmp"
 out=$(env_rest "$BIN" executar "$FIXTURE")
 out_evo=$(env_rest "$BIN" executar "$FIX_EVO")
 out_sob=$(env_rest "$BIN" executar "$FIX_SOBRESCRETA")
+out_del=$(env_rest "$BIN" executar "$FIX_APAGAR")
 
 # --- erros claros ----------------------------------------------------------------
 fail=0
@@ -340,6 +347,9 @@ echo "$out_evo" | grep -q "^3$" || { echo "evolucao: esperado '3': $out_evo"; fa
 echo "$out_evo" | grep -q "ana 40 carla" || { echo "evolucao: saida inesperada: $out_evo"; fail=1; }
 echo "$out_sob" | grep -q "^2$" || { echo "sobrescrita: esperado '2': $out_sob"; fail=1; }
 echo "$out_sob" | grep -q "duda 70" || { echo "sobrescrita: saida inesperada: $out_sob"; fail=1; }
+echo "$out_del" | grep -q "^1$" || { echo "apagar: esperado '1' (linha apagada): $out_del"; fail=1; }
+echo "$out_del" | grep -q "^2$" || { echo "apagar: esperado '2' (restantes): $out_del"; fail=1; }
+echo "$out_del" | grep -q "ana carla" || { echo "apagar: saida inesperada: $out_del"; fail=1; }
 
 # ler tabela inexistente -> nao zero + mensagem clara
 if fantasma=$(env_rest "$BIN" executar "$FIX_FANTASMA" 2>&1); then
@@ -364,6 +374,8 @@ creates_evo=$(grep -c "^CREATE tabela_evolucao$" "$tmp/log" || true)
 
 commits=$(grep -c "^COMMIT tabela_iceberg reqs=assert-current-snapshot-id$" "$tmp/log" || true)
 [ "$commits" = "2" ] || { echo "esperados 2 COMMITs, obtidos $commits"; cat "$tmp/log"; fail=1; }
+commits_del=$(grep -c "^COMMIT tabela_apagar reqs=assert-current-snapshot-id$" "$tmp/log" || true)
+[ "$commits_del" = "3" ] || { echo "esperados 3 COMMITs (apagar), obtidos $commits_del"; cat "$tmp/log"; fail=1; }
 commits_evo=$(grep -c "^COMMIT tabela_evolucao reqs=assert-current-snapshot-id$" "$tmp/log" || true)
 [ "$commits_evo" = "2" ] || { echo "esperados 2 COMMITs (evolucao), obtidos $commits_evo"; cat "$tmp/log"; fail=1; }
 commits_sob=$(grep -c "^COMMIT tabela_sobrescrita reqs=assert-current-snapshot-id$" "$tmp/log" || true)

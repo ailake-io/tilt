@@ -1049,13 +1049,16 @@ void Interpreter::janela_offset_load(WindowState& st, const std::string& pipelin
                                      const std::string& offset_file) {
   if (st.offset_loaded) return;
   st.offset_loaded = true;
-  std::ifstream in(offset_file);
-  if (!in) return;  // sem arquivo: comeca do zero e nada cria ainda
-  std::ostringstream ss;
-  ss << in.rdbuf();
+  std::string bruto;
+  try {
+    bruto = rt::checkpoint_ler(offset_file);
+  } catch (const std::exception&) {
+    return;  // backend fora do ar: segue so com offset em memoria
+  }
+  if (bruto.empty()) return;  // sem arquivo: comeca do zero e nada cria ainda
   Value parsed;
   try {
-    parsed = rt::json_parse(ss.str());
+    parsed = rt::json_parse(bruto);
   } catch (const std::exception&) {
     return;  // arquivo corrompido/incompleto: recomeca do zero
   }
@@ -1082,22 +1085,24 @@ void Interpreter::janela_offset_load(WindowState& st, const std::string& pipelin
 void Interpreter::janela_offset_save(WindowState& st, const std::string& pipeline,
                                      const std::string& offset_file, bool com_relogio) {
   Value map = Value::mapa();
-  std::ifstream in(offset_file);
-  if (in) {
-    std::ostringstream ss;
-    ss << in.rdbuf();
-    try {
-      Value parsed = rt::json_parse(ss.str());
-      if (parsed.kind == ValueKind::Mapa && parsed.map) {
-        for (const auto& [k, v] : parsed.map->items) {
-          if (k == pipeline) continue;
-          // Preserva tanto o formato legado (numero) quanto o 12-4 (mapa).
-          if (v.is_number() || v.kind == ValueKind::Mapa) map.map->set(k, v);
+  try {
+    const std::string bruto = rt::checkpoint_ler(offset_file);
+    if (!bruto.empty()) {
+      try {
+        Value parsed = rt::json_parse(bruto);
+        if (parsed.kind == ValueKind::Mapa && parsed.map) {
+          for (const auto& [k, v] : parsed.map->items) {
+            if (k == pipeline) continue;
+            // Preserva tanto o formato legado (numero) quanto o 12-4 (mapa).
+            if (v.is_number() || v.kind == ValueKind::Mapa) map.map->set(k, v);
+          }
         }
+      } catch (const std::exception&) {
+        // sobrescreve conteudo ilegivel
       }
-    } catch (const std::exception&) {
-      // sobrescreve arquivo ilegivel
     }
+  } catch (const std::exception&) {
+    // backend fora do ar na leitura: segue com o mapa local
   }
   if (com_relogio && st.ran_once) {
     Value entry = Value::mapa();
@@ -1107,15 +1112,10 @@ void Interpreter::janela_offset_save(WindowState& st, const std::string& pipelin
   } else {
     map.map->set(pipeline, Value::inteiro(static_cast<std::int64_t>(st.offset)));
   }
-  const std::string tmp = offset_file + ".tmp";
-  {
-    std::ofstream out(tmp, std::ios::trunc);
-    if (!out) return;  // sem permissao: segue so com offset em memoria
-    out << rt::json_dump(map) << "\n";
-  }
-  if (std::rename(tmp.c_str(), offset_file.c_str()) != 0) {
-    std::remove(tmp.c_str());
-    return;
+  try {
+    rt::checkpoint_gravar(offset_file, rt::json_dump(map) + "\n");
+  } catch (const std::exception&) {
+    return;  // sem permissao / backend fora do ar: segue so com offset em memoria
   }
   st.persisted_offset = st.offset;
 }
@@ -3703,6 +3703,19 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       } else {
         fail(call.span, "escrever_parquet: paginas '" + paginas->s +
                             "' invalido (use \"v1\" ou \"v2\")");
+      }
+    }
+    if (const Value* tipos = kw.find("tipos")) {
+      if (tipos->kind != ValueKind::Mapa || !tipos->map) {
+        fail(call.span,
+             "escrever_parquet: 'tipos' deve ser um mapa coluna -> tipo "
+             "(ex.: tipos: { id: \"int32\" })");
+      }
+      for (const auto& kv : tipos->map->items) {
+        if (kv.second.kind != ValueKind::Texto) {
+          fail(call.span, "escrever_parquet: tipos['" + kv.first + "'] deve ser texto");
+        }
+        opts.tipos[kv.first] = kv.second.s;
       }
     }
     try {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -23,13 +24,19 @@ namespace tilt::rt {
 //   texto -> BYTE_ARRAY (UTF8), lista de escalares -> REPEATED + LIST,
 //   mapa -> STRUCT (grupo sem anotacao, recursivo: escalares, listas de
 //   escalares e structs aninhados; struct nulo por linha vira grupo OPTIONAL,
-//   chave ausente vira campo OPTIONAL); listas aninhadas (list<list<...>>),
-//   listas de structs e elementos nulos em lista falham com erro claro;
+//   chave ausente vira campo OPTIONAL); estreitamento opt-in via
+//   ParquetWriteOpts.tipos ("col" ou "struct.campo" -> "int32"/"float", com
+//   anotacao INTEGER no INT32); listas aninhadas (list<list<...>>), listas
+//   de structs e elementos nulos em lista falham com erro claro;
 //   structs com `field_ids` explicitos (caminho Iceberg) ainda nao suportados;
 // - reader: le todos os row groups (concatena), campos REQUIRED, OPTIONAL e
 //   REPEATED (definition/repetition levels RLE), structs aninhados (grupos
 //   sem anotacao LIST; struct OPTIONAL definido com todos os campos nulos
-//   distingue-se do struct nulo pelos definition levels), paginas v1 e v2, PLAIN e
+//   distingue-se do struct nulo pelos definition levels), MAP<string,*>
+//   (partitionValues de checkpoints), fisicos INT32/INT64/FLOAT/DOUBLE/
+//   BOOLEAN/BYTE_ARRAY/FIXED_LEN_BYTE_ARRAY/INT96, logicos UTF8/STRING/
+//   INTEGER/DATE/TIME/TIMESTAMP/DECIMAL (data/hora/timestamp -> texto ISO,
+//   decimal -> decimal), paginas v1 e v2, PLAIN e
 //   DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e codecs gzip/deflate
 //   (zlib via dlopen("libz.so.1")) e snappy (codec proprio, sem dlopen).
 //
@@ -40,6 +47,10 @@ namespace tilt::rt {
 struct ParquetWriteOpts {
   int codec = 2;          // gzip por padrao
   bool paginas_v2 = false;  // DATA_PAGE v1 por padrao
+  // Estreitamento fisico opt-in (Marco 1 / B1): caminho pontilhado da folha
+  // ("col" ou "struct.campo") -> "int32" (de inteiro, com checagem de
+  // alcance) ou "float" (de decimal). Sem entrada: INT64/DOUBLE de sempre.
+  std::map<std::string, std::string> tipos;
 };
 
 void parquet_write(const std::string& path, const Value& tabela,

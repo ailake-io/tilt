@@ -46,19 +46,21 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
   por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
   RLE), **listas de escalares** (anotação LIST, elementos sempre required na
-  escrita) e **structs** (Fase 12-5a: `mapa` vira grupo STRUCT recursivo —
-  escalares, listas de escalares e structs aninhados; struct nulo por linha
-  vira grupo OPTIONAL; leitura distingue struct nulo de struct definido com
-  todos os campos nulos pelos definition levels — validado com pyarrow nos
-  dois sentidos). A leitura cobre múltiplos row groups, campos REQUIRED/OPTIONAL/
+  escrita), **structs** (Fase 12-5a) e estreitamento opt-in `tipos: {col:
+  "int32"|"float"}` (Marco 1 / B1, com anotação INTEGER). A leitura cobre
+  múltiplos row groups, campos REQUIRED/OPTIONAL/
   REPEATED (listas aninhadas de escalares, inclusive o element OPTIONAL que o
-  pyarrow grava — erro claro apenas para elemento nulo de fato), páginas v1 e
+  pyarrow grava — erro claro apenas para elemento nulo de fato), tipos
+  **INT32/INT64/FLOAT/DOUBLE/BOOLEAN/BYTE_ARRAY/FIXED_LEN_BYTE_ARRAY/INT96**,
+  lógicos **UTF8/STRING/INTEGER/DATE/TIME/TIMESTAMP/DECIMAL** (data/hora/
+  timestamp viram texto ISO, decimal vira decimal) e dictionary pages com
+  encoding PLAIN ou PLAIN_DICTIONARY, páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
   gzip/deflate (zlib via `dlopen`) e **snappy** (codec próprio, sem dlopen).
   Ainda fora do subconjunto: dictionary encoding na escrita, listas de
   listas, listas de structs, elementos nulos em listas, structs com
-  `field_ids` explícitos (caminho Iceberg) e tipos físicos fora de
-  BOOLEAN/INT64/DOUBLE/BYTE_ARRAY.
+  `field_ids` explícitos (caminho Iceberg), decimais com mais de 8 bytes e
+  UUID como tipo próprio.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
@@ -71,8 +73,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   em coluna de partição e valores com `/` não são suportados (erro claro, sem
   `__HIVE_DEFAULT_PARTITION__` nem escaping) e checkpoint tilt-native a cada
   10 versões (`<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` em
-  _delta_log, ignorados por leitores externos; sem `_last_checkpoint` padrão
-  ainda); a leitura
+  _delta_log, ignorados por leitores externos) mais leitura do checkpoint
+  padrão (`_last_checkpoint` + `<v>.checkpoint*.parquet` no schema oficial,
+  honrado como base — tabelas com checkpoint de Spark/delta-rs leem rápido);
+  a leitura
   herda o subconjunto do Parquet acima. **Evolução de schema (fase 27)**: o
   append aceita colunas a mais — toda coluna antiga presente (ordem livre),
   coluna nova entra nullable no fim do `schemaString` com `metaData` novo no
@@ -169,11 +173,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   uma conexão (com handshake `isMaster`) por chamada e payload inteiro em
   memória; banco por `MONGO_URL` (path) ou opção `banco:`.
 - Kafka (`ler_kafka`/`escrever_kafka`/`fonte tipo: kafka`): wire protocol
-  0.9-era — produce com `acks=-1` (all) + retry (3x em 5/6/7 com refresh de
-  metadata) + `chave:` + probe best-effort de `InitProducerId` (API 22, com
-  fallback legado em broker 0.9-era); RecordBatch EOS completo (Produce v3 +
-  CRC32C) e transações multi-partição ficam para a Fase 12-4b com validação
-  contra broker real. Consumer groups com rebalanceamento `"roundrobin"` real (o líder
+  com produce idempotente (Marco 1: `InitProducerId` + Produce v3 RecordBatch
+  com sequência por partição e dedup no retry; fallback v1 em broker 0.9-era)
+  + retry (3x em 5/6/7) + `chave:`; transações multi-partição
+  (`AddPartitionsToTxn/EndTxn`) ficam para depois. Consumer groups com rebalanceamento `"roundrobin"` real (o líder
   calcula o assignment e o SyncGroup o distribui; heartbeat a cada 3s em
   thread; rejoin com retomada do offset commitado em
   RebalanceInProgress/IllegalGeneration), porém a detecção de entrada/saída de
@@ -250,11 +253,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   strings); nome de coleção restrito a `[a-z0-9_]`.
 - Streaming com `janela:`: buffer fica em memoria; o offset persiste em
   `<fonte>.tilt-offset` para fonte de arquivo (csv/json) — com
-  `TILT_CHECKPOINT_DIR` o arquivo mora no diretorio compartilhado (checkpoint
-  distribuido file-based) e janelas de tempo/throttle tambem persistem
-  `last_run`; eleicao de lider por lease em arquivo (`TILT_LEADER_LEASE`,
-  `TILT_LEADER_TTL`) garante escritor unico no `--agendar` multi-replica.
-  Backends S3/Kafka de checkpoint e RecordBatch EOS ficam para a Fase 12-4b.
+  `TILT_CHECKPOINT_DIR` o arquivo mora no diretorio compartilhado, num objeto
+  `s3://` ou num topico `kafka:` (mapa inteiro por save, last-wins) e janelas
+  de tempo/throttle tambem persistem `last_run`; eleicao de lider por lease em
+  arquivo (`TILT_LEADER_LEASE`, `TILT_LEADER_TTL`) garante escritor unico no
+  `--agendar` multi-replica. Transações Kafka multi-partição ficam para
+  depois.
   Kafka, Mongo etc. sem `grupo:` nao têm checkpoint local; sem `grupo:` na fonte Kafka ela é relida do início por
   inteiro a cada tick, o que não escala para tópicos grandes (com `grupo:` o
   checkpoint é o offset commitado no broker).

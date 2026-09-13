@@ -183,7 +183,16 @@ struct Tr {  // reader
 
 // ---------------------------------------------------------------- dados
 
-enum PType : int { PT_BOOLEAN = 0, PT_INT64 = 2, PT_DOUBLE = 5, PT_BYTE_ARRAY = 6 };
+enum PType : int {
+  PT_BOOLEAN = 0,
+  PT_INT32 = 1,
+  PT_INT64 = 2,
+  PT_INT96 = 3,
+  PT_FLOAT = 4,
+  PT_DOUBLE = 5,
+  PT_BYTE_ARRAY = 6,
+  PT_FIXED = 7
+};
 enum PEncoding : int {
   E_PLAIN = 0,
   E_PLAIN_DICTIONARY = 2,
@@ -234,9 +243,13 @@ PType type_of(const Value& v) {
 const char* type_name(PType t) {
   switch (t) {
     case PT_BOOLEAN: return "BOOLEAN";
+    case PT_INT32: return "INT32";
     case PT_INT64: return "INT64";
+    case PT_INT96: return "INT96";
+    case PT_FLOAT: return "FLOAT";
     case PT_DOUBLE: return "DOUBLE";
     case PT_BYTE_ARRAY: return "BYTE_ARRAY";
+    case PT_FIXED: return "FIXED_LEN_BYTE_ARRAY";
   }
   return "?";
 }
@@ -281,9 +294,14 @@ void fill_leaf(Column& c, const std::vector<const Value*>& cells) {
         note_type(c, t);
         switch (c.type) {
           case PT_BOOLEAN: c.bools.push_back(e.b); break;
+          case PT_INT32:
           case PT_INT64:
+          case PT_FLOAT:
           case PT_DOUBLE: c.nums.push_back(e.as_number()); break;
           case PT_BYTE_ARRAY: c.strings.push_back(e.s); break;
+          case PT_INT96:
+          case PT_FIXED:
+            die("coluna '" + c.name + "': tipo de escrita nao suportado");
         }
       }
       c.cells.push_back(*cell);
@@ -300,9 +318,14 @@ void fill_leaf(Column& c, const std::vector<const Value*>& cells) {
     note_type(c, type_of(*cell));
     switch (c.type) {
       case PT_BOOLEAN: c.bools.push_back(cell->b); break;
+      case PT_INT32:
       case PT_INT64:
+      case PT_FLOAT:
       case PT_DOUBLE: c.nums.push_back(cell->as_number()); break;
       case PT_BYTE_ARRAY: c.strings.push_back(cell->s); break;
+      case PT_INT96:
+      case PT_FIXED:
+        die("coluna '" + c.name + "': tipo de escrita nao suportado");
     }
     c.defined.push_back(true);
   }
@@ -458,12 +481,35 @@ std::string plain_encode(const Column& c) {
       }
       break;
     }
+    case PT_INT32: {
+      for (double d : c.nums) {
+        const std::int64_t v = static_cast<std::int64_t>(d);
+        if (v < -2147483648LL || v > 2147483647LL) {
+          die("coluna '" + c.name + "': valor " + std::to_string(v) +
+              " fora do INT32 (use tipo int64)");
+        }
+        const std::int32_t w = static_cast<std::int32_t>(v);
+        raw(&w, 4);
+      }
+      break;
+    }
+    case PT_FLOAT: {
+      for (double d : c.nums) {
+        const float v = static_cast<float>(d);
+        raw(&v, 4);
+      }
+      break;
+    }
     case PT_DOUBLE: {
       for (double d : c.nums) {
         raw(&d, 8);
       }
       break;
     }
+    case PT_INT96:
+    case PT_FIXED:
+      die("coluna '" + c.name + "': escrita " + type_name(c.type) +
+          " nao suportada (leitura apenas)");
     case PT_BYTE_ARRAY: {
       for (const std::string& s : c.strings) {
         put32(static_cast<std::uint32_t>(s.size()));
@@ -850,9 +896,103 @@ std::string compress_payload(const std::string& payload, int codec, const std::s
 
 // Decodifica `count` valores definidos em encoding PLAIN.
 std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t avail,
-                                std::size_t count, const std::string& col) {
+                                std::size_t count, const std::string& col, int conv = 0,
+                                int dec_scale = 0, int fixed_len = 0);  // adiante
+
+// Dias desde 1970-01-01 -> (ano, mes, dia) civil (algoritmo de Hinnant).
+void civil_de_dias(std::int64_t dias, int& ano, unsigned& mes, unsigned& dia) {
+  dias += 719468;
+  const std::int64_t era = (dias >= 0 ? dias : dias - 146096) / 146097;
+  const unsigned doe = static_cast<unsigned>(dias - era * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  ano = static_cast<int>(yoe) + static_cast<int>(era) * 400;
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  dia = doy - (153 * mp + 2) / 5 + 1;
+  mes = mp + (mp < 10 ? 3 : -9);
+  ano += (mes <= 2 ? 1 : 0);
+}
+
+std::string dois(int v) {
+  char b[16];
+  std::snprintf(b, sizeof b, "%02d", v);
+  return b;
+}
+
+// DATE (dias) -> "YYYY-MM-DD".
+std::string data_iso(std::int64_t dias) {
+  int ano;
+  unsigned mes, dia;
+  civil_de_dias(dias, ano, mes, dia);
+  char b[16];
+  std::snprintf(b, sizeof b, "%04d-%s-%s", ano, dois(static_cast<int>(mes)).c_str(),
+                dois(static_cast<int>(dia)).c_str());
+  return b;
+}
+
+// Hora do dia: `t` em `por_seg` unidades (modulo 1 dia; negativo satura).
+std::string hora_iso(std::int64_t t, std::int64_t por_seg) {
+  if (por_seg <= 1) por_seg = 1000;
+  std::int64_t resto = t % (por_seg * 86400);
+  if (resto < 0) resto += por_seg * 86400;
+  const std::int64_t total_seg = resto / por_seg;
+  const std::int64_t fracao = resto % por_seg;
+  const int hh = static_cast<int>(total_seg / 3600);
+  const int mm = static_cast<int>((total_seg % 3600) / 60);
+  const int ss = static_cast<int>(total_seg % 60);
+  std::string out = dois(hh) + ":" + dois(mm) + ":" + dois(ss);
+  if (fracao > 0 && por_seg > 1) {
+    char bf[24];
+    std::snprintf(bf, sizeof bf, "%09lld",
+                  static_cast<long long>(fracao * (1000000000LL / por_seg)));
+    std::string fs = bf;
+    while (fs.size() > 1 && fs.back() == '0') fs.pop_back();
+    out += "." + fs;
+  }
+  return out;
+}
+
+// Timestamp (ms ou us desde a epoca, UTC) -> ISO. `div` = 1000 ou 1000000.
+std::string ts_iso(std::int64_t v, int div) {
+  const std::int64_t d = div <= 0 ? 1000 : div;
+  std::int64_t dias = v / (d * 86400);
+  std::int64_t resto = v % (d * 86400);
+  if (resto < 0) {
+    resto += d * 86400;
+    --dias;
+  }
+  return data_iso(dias) + "T" + hora_iso(resto, d);
+}
+
+// INT96 (nanos do dia + dia juliano) -> ISO com nanos.
+std::string int96_iso(std::uint64_t nanos, std::uint32_t juliano) {
+  const std::int64_t dias = static_cast<std::int64_t>(juliano) - 2440588;
+  return data_iso(dias) + "T" + hora_iso(static_cast<std::int64_t>(nanos), 1000000000LL);
+}
+
+// Decimal de bytes big-endian com sinal (BYTE_ARRAY/FIXED) com escala.
+double decimal_bytes(const std::uint8_t* b, std::size_t n, int escala, const std::string& col) {
+  if (n == 0 || n > 8) {
+    die("coluna '" + col + "': decimal de " + std::to_string(n) +
+        " bytes fora do suportado (1..8)");
+  }
+  std::int64_t v = (b[0] & 0x80) ? -1 : 0;  // extensao de sinal
+  for (std::size_t k = 0; k < n; ++k) v = (v << 8) | b[k];
+  double p = 1.0;
+  for (int k = 0; k < escala; ++k) p *= 10.0;
+  return static_cast<double>(v) / p;
+}
+
+std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t avail,
+                                std::size_t count, const std::string& col, int conv,
+                                int dec_scale, int fixed_len) {
   std::vector<Value> vals;
   vals.reserve(count);
+  auto pot10 = [](int s) {
+    double p = 1.0;
+    for (int k = 0; k < s; ++k) p *= 10.0;
+    return p;
+  };
   switch (t) {
     case PT_BOOLEAN: {
       if (avail * 8 < count) die("coluna '" + col + "': pagina de boolean truncada");
@@ -861,12 +1001,57 @@ std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t a
       }
       break;
     }
+    case PT_INT32: {
+      if (avail < count * 4) die("coluna '" + col + "': pagina de int32 truncada");
+      for (std::size_t k = 0; k < count; ++k) {
+        std::int32_t v;
+        std::memcpy(&v, data + k * 4, 4);
+        if (conv == 1) {
+          vals.push_back(Value::decimal(static_cast<double>(v) / pot10(dec_scale)));
+        } else if (conv == 2) {
+          vals.push_back(Value::texto(data_iso(v)));
+        } else if (conv == 4) {
+          vals.push_back(Value::texto(hora_iso(v, dec_scale <= 0 ? 1000 : dec_scale)));
+        } else {
+          vals.push_back(Value::inteiro(v));
+        }
+      }
+      break;
+    }
     case PT_INT64: {
       if (avail < count * 8) die("coluna '" + col + "': pagina de int64 truncada");
       for (std::size_t k = 0; k < count; ++k) {
         std::int64_t v;
         std::memcpy(&v, data + k * 8, 8);
-        vals.push_back(Value::inteiro(v));
+        if (conv == 1) {
+          vals.push_back(Value::decimal(static_cast<double>(v) / pot10(dec_scale)));
+        } else if (conv == 3) {
+          vals.push_back(Value::texto(ts_iso(v, dec_scale <= 0 ? 1000 : dec_scale)));
+        } else if (conv == 4) {
+          vals.push_back(Value::texto(hora_iso(v, dec_scale <= 0 ? 1000000 : dec_scale)));
+        } else {
+          vals.push_back(Value::inteiro(v));
+        }
+      }
+      break;
+    }
+    case PT_INT96: {
+      if (avail < count * 12) die("coluna '" + col + "': pagina de int96 truncada");
+      for (std::size_t k = 0; k < count; ++k) {
+        std::uint64_t nanos;
+        std::uint32_t juliano;
+        std::memcpy(&nanos, data + k * 12, 8);
+        std::memcpy(&juliano, data + k * 12 + 8, 4);
+        vals.push_back(Value::texto(int96_iso(nanos, juliano)));
+      }
+      break;
+    }
+    case PT_FLOAT: {
+      if (avail < count * 4) die("coluna '" + col + "': pagina de float truncada");
+      for (std::size_t k = 0; k < count; ++k) {
+        float v;
+        std::memcpy(&v, data + k * 4, 4);
+        vals.push_back(Value::decimal(static_cast<double>(v)));
       }
       break;
     }
@@ -879,6 +1064,23 @@ std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t a
       }
       break;
     }
+    case PT_FIXED: {
+      if (fixed_len <= 0) die("coluna '" + col + "': FIXED sem type_length");
+      if (avail < count * static_cast<std::size_t>(fixed_len)) {
+        die("coluna '" + col + "': pagina de fixed truncada");
+      }
+      for (std::size_t k = 0; k < count; ++k) {
+        const std::uint8_t* b = data + k * static_cast<std::size_t>(fixed_len);
+        if (conv == 1) {
+          vals.push_back(Value::decimal(decimal_bytes(b, static_cast<std::size_t>(fixed_len),
+                                                       dec_scale, col)));
+        } else {
+          vals.push_back(Value::texto(std::string(reinterpret_cast<const char*>(b),
+                                                   static_cast<std::size_t>(fixed_len))));
+        }
+      }
+      break;
+    }
     case PT_BYTE_ARRAY: {
       std::size_t off = 0;
       for (std::size_t k = 0; k < count; ++k) {
@@ -887,8 +1089,13 @@ std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t a
         std::memcpy(&len, data + off, 4);
         off += 4;
         if (off + len > avail) die("coluna '" + col + "': pagina de byte_array truncada");
-        vals.push_back(Value::texto(
-            std::string(reinterpret_cast<const char*>(data + off), len)));
+        if (conv == 1) {
+          vals.push_back(Value::decimal(
+              decimal_bytes(data + off, len, dec_scale, col)));
+        } else {
+          vals.push_back(Value::texto(
+              std::string(reinterpret_cast<const char*>(data + off), len)));
+        }
         off += len;
       }
       break;
@@ -918,11 +1125,21 @@ struct ColDesc {
   int max_rep = 0;
   bool repeated = false;
   bool elem_nullable = false;  // lista com element OPTIONAL (max_def 3): def max-1 = elemento nulo
+  // Mapas (Fase A3): valores Nulo viram Nulo no mapa em vez de erro.
+  bool allow_null_element = false;
   // Base de levels dos structs ancestrais + opcionalidade do proprio grupo
   // LIST: linha de lista e nula quando def <= def_base - 1 (struct ancestral
   // nulo) ou (outer_optional && def == def_base).
   int def_base = 0;
   bool outer_optional = false;
+  // Conversao logica (Marco 1 / B1): como interpretar o fisico.
+  // 0 = direto (bool/int/float/double/texto), 1 = decimal (divisor 10^escala
+  // em dec_scale), 2 = data (dias -> "YYYY-MM-DD"), 3 = timestamp UTC
+  // (divisor em dec_scale: 1000 ms / 1000000 us -> ISO), 4 = hora do dia
+  // (divisor em dec_scale -> "HH:MM:SS.frac"), 5 = INT96 (-> ISO nanos).
+  int conv = 0;
+  int dec_scale = 0;
+  int fixed_len = 0;
 };
 
 // Le um chunk de coluna (todas as paginas entre dictionary/data_page_offset)
@@ -1042,11 +1259,12 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
     if (!v2) payload = decompress_payload(payload, cm.codec, cd.name);
 
     if (page_type == PG_DICTIONARY) {
-      if (dict_enc != E_PLAIN) {
+      if (dict_enc != E_PLAIN && dict_enc != E_PLAIN_DICTIONARY) {
         die(ctx + ": dictionary page com encoding nao-PLAIN");
       }
       dict = plain_values(cd.type, reinterpret_cast<const std::uint8_t*>(payload.data()),
-                          payload.size(), static_cast<std::size_t>(page_values), cd.name);
+                          payload.size(), static_cast<std::size_t>(page_values), cd.name,
+                          cd.conv, cd.dec_scale, cd.fixed_len);
       has_dict = true;
       continue;
     }
@@ -1143,7 +1361,8 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
 
     std::vector<Value> vals;
     if (encoding == E_PLAIN) {
-      vals = plain_values(cd.type, vdata, vavail, defined_count, cd.name);
+      vals = plain_values(cd.type, vdata, vavail, defined_count, cd.name, cd.conv, cd.dec_scale,
+                          cd.fixed_len);
     } else if (encoding == E_PLAIN_DICTIONARY || encoding == E_RLE_DICTIONARY) {
       if (!has_dict) {
         die(ctx + ": pagina dictionary-encoded sem dictionary page");
@@ -1214,7 +1433,11 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       if (static_cast<int>(def) == max_def) {
         cur.list->push_back(vals[vi++]);
       } else if (cd.elem_nullable && static_cast<int>(def) == max_def - 1) {
-        die(ctx + ": elementos nulos dentro de listas ainda nao suportados");
+        if (cd.allow_null_element) {
+          cur.list->push_back(Value::nulo());  // valor Nulo em mapa
+        } else {
+          die(ctx + ": elementos nulos dentro de listas ainda nao suportados");
+        }
       }
     }
     if (have_row) flush();
@@ -1234,6 +1457,19 @@ void write_logical_string(Tw& w) {
   w.struct_begin();
   w.field(1, T_STRUCT);  // LogicalType.STRING (StringType vazio)
   w.struct_begin();
+  w.struct_end();
+  w.struct_end();
+}
+
+// Anota logica INTEGER (LogicalType.INTEGER + ConvertedType INT_*) em um
+// SchemaElement INT32/INT64. `w` ja deve ter escrito os campos de id < 10.
+void write_logical_integer(Tw& w, int bits, bool is_signed) {
+  w.field(10, T_STRUCT);  // logicalType: union LogicalType
+  w.struct_begin();
+  w.field(9, T_STRUCT);  // LogicalType.INTEGER
+  w.struct_begin();
+  w.field_i32(1, bits);
+  w.field_bool(2, is_signed);
   w.struct_end();
   w.struct_end();
 }
@@ -1266,8 +1502,7 @@ struct FidAlloc {
   }
 };
 
-void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {
-  if (c.is_struct) {
+void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {  if (c.is_struct) {
     if (is_top && fa.ids) {
       die("coluna '" + c.name + "': structs com field-ids Iceberg ainda nao suportados");
     }
@@ -1286,8 +1521,10 @@ void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {
     fw.field_i32(3, c.optional ? 1 : 0);  // 0 = REQUIRED, 1 = OPTIONAL
     fw.field_str(4, c.name);
     if (c.type == PT_BYTE_ARRAY) fw.field_i32(6, 0);  // ConvertedType.UTF8
+    if (c.type == PT_INT32) fw.field_i32(6, 17);      // ConvertedType.INT_32
     fw.field_i32(9, fid);
     if (c.type == PT_BYTE_ARRAY) write_logical_string(fw);
+    if (c.type == PT_INT32) write_logical_integer(fw, 32, true);
     fw.struct_end();
     return;
   }
@@ -1321,13 +1558,62 @@ void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {
     fw.field_i32(6, 0);  // ConvertedType.UTF8
     write_logical_string(fw);
   }
+  if (c.type == PT_INT32) {
+    fw.field_i32(6, 17);  // ConvertedType.INT_32
+    write_logical_integer(fw, 32, true);
+  }
   fw.struct_end();
+}
+
+// Estreitamento fisico opt-in (`tipos:`): "int32" (de coluna inteira, com
+// checagem de alcance na codificacao) e "float" (de decimal). Caminho
+// pontilhado ("col" ou "struct.campo"); lista usa o caminho do grupo.
+void aplicar_tipos(std::vector<Column>& cols, const std::map<std::string, std::string>& tipos) {
+  if (tipos.empty()) return;
+  std::function<void(Column&, const std::string&)> visita = [&](Column& c,
+                                                                const std::string& path) {
+    if (c.is_struct) {
+      for (Column& ch : c.children) visita(ch, path + "." + ch.name);
+      return;
+    }
+    const auto it = tipos.find(path);
+    if (it == tipos.end()) return;
+    if (it->second == "int32") {
+      if (c.type != PT_INT64) {
+        die("tipos: '" + path + "' int32 exige coluna de inteiros");
+      }
+      c.type = PT_INT32;
+    } else if (it->second == "float") {
+      if (c.type != PT_DOUBLE) {
+        die("tipos: '" + path + "' float exige coluna de decimais");
+      }
+      c.type = PT_FLOAT;
+    } else {
+      die("tipos: '" + path + "' tipo '" + it->second +
+          "' invalido (use \"int32\" ou \"float\")");
+    }
+  };
+  for (Column& c : cols) visita(c, c.name);
+  for (const auto& [path, tn] : tipos) {
+    (void)tn;
+    bool achou = false;
+    std::function<void(const Column&, const std::string&)> confere =
+        [&](const Column& c, const std::string& p) {
+          if (p == path) achou = true;
+          if (c.is_struct) {
+            for (const Column& ch : c.children) confere(ch, p + "." + ch.name);
+          }
+        };
+    for (const Column& c : cols) confere(c, c.name);
+    if (!achou) die("tipos: coluna '" + path + "' nao existe na tabela");
+  }
 }
 
 void parquet_write(const std::string& path, const Value& tabela,
                    const std::vector<int>* field_ids, const ParquetWriteOpts& opts) {
   std::vector<Column> cols;
   table_to_columns(tabela, cols);
+  aplicar_tipos(cols, opts.tipos);
   const std::size_t nrows = cols[0].rows;
   const int codec = opts.codec;
   if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY) {
@@ -1528,8 +1814,20 @@ Value parquet_read(const std::string& path) {
     std::string name;
     int type = -1;
     int rep = 0;
+    int type_length = 0;  // FIXED_LEN_BYTE_ARRAY
+    int scale = 0;        // DECIMAL (converted ou logico)
+    int precision = 0;
     int converted = -1;
     bool logical_list = false;
+    bool logical_map = false;
+    bool logical_date = false;
+    bool logical_ts_millis = false;
+    bool logical_ts_micros = false;
+    bool logical_time_micros = false;
+    bool logical_integer = false;
+    int logical_int_bits = 0;
+    bool logical_int_signed = true;
+    bool logical_decimal = false;
     int num_children = 0;
     int parent = -1;
   };
@@ -1561,6 +1859,7 @@ Value parquet_read(const std::string& path) {
                 (sh >> 4) ? static_cast<short>(slast + (sh >> 4)) : static_cast<short>(tr.zz());
             slast = sid;
             if (sid == 1 && st == T_I32) e.type = static_cast<int>(tr.zz());
+            else if (sid == 2 && st == T_I32) e.type_length = static_cast<int>(tr.zz());
             else if (sid == 3 && st == T_I32) e.rep = static_cast<int>(tr.zz());
             else if (sid == 4 && st == T_BINARY) {
               const std::uint64_t len = tr.varint();
@@ -1571,6 +1870,10 @@ Value parquet_read(const std::string& path) {
               e.num_children = static_cast<int>(tr.zz());
             } else if (sid == 6 && st == T_I32) {
               e.converted = static_cast<int>(tr.zz());
+            } else if (sid == 7 && st == T_I32) {
+              e.scale = static_cast<int>(tr.zz());
+            } else if (sid == 8 && st == T_I32) {
+              e.precision = static_cast<int>(tr.zz());
             } else if (sid == 10 && st == T_STRUCT) {  // logicalType (union)
               short llast = 0;
               while (true) {
@@ -1580,8 +1883,118 @@ Value parquet_read(const std::string& path) {
                 const short lid = (lh2 >> 4) ? static_cast<short>(llast + (lh2 >> 4))
                                              : static_cast<short>(tr.zz());
                 llast = lid;
+                bool consumido = false;
+                if (lid == 2) e.logical_map = true;    // LogicalType.MAP
                 if (lid == 3) e.logical_list = true;  // LogicalType.LIST
-                tr.skip(lt);
+                if (lid == 5 && lt == T_STRUCT) {  // LogicalType.DECIMAL
+                  Tr sub{tr.p, tr.n, tr.pos};
+                  short dlast = 0;
+                  while (true) {
+                    const std::uint8_t dh = sub.byte();
+                    const auto dt = static_cast<TType>(dh & 0xF);
+                    if (dt == T_STOP) break;
+                    const short did = (dh >> 4) ? static_cast<short>(dlast + (dh >> 4))
+                                                : static_cast<short>(sub.zz());
+                    dlast = did;
+                    if (did == 1 && dt == T_I32) e.scale = static_cast<int>(sub.zz());
+                    else if (did == 2 && dt == T_I32) e.precision = static_cast<int>(sub.zz());
+                    else sub.skip(dt);
+                  }
+                  tr.pos = sub.pos;
+                  e.logical_decimal = true;
+                } else if (lid == 6) {
+                  e.logical_date = true;  // LogicalType.DATE (struct vazio)
+                  tr.skip(lt);
+                  consumido = true;
+                } else if (lid == 7 && lt == T_STRUCT) {  // LogicalType.TIME
+                  Tr sub{tr.p, tr.n, tr.pos};
+                  short dlast = 0;
+                  // unit: I32 (antigo: 0=ms 1=us) ou union {MILLIS:1,
+                  // MICROS:2, NANOS:3} (novo).
+                  int unit = -1;
+                  while (true) {
+                    const std::uint8_t dh = sub.byte();
+                    const auto dt = static_cast<TType>(dh & 0xF);
+                    if (dt == T_STOP) break;
+                    const short did = (dh >> 4) ? static_cast<short>(dlast + (dh >> 4))
+                                                : static_cast<short>(sub.zz());
+                    dlast = did;
+                    if (did == 2 && dt == T_I32) {
+                      unit = static_cast<int>(sub.zz());
+                    } else if (did == 2 && dt == T_STRUCT) {
+                      short ulast = 0;
+                      while (true) {
+                        const std::uint8_t uh = sub.byte();
+                        const auto ut = static_cast<TType>(uh & 0xF);
+                        if (ut == T_STOP) break;
+                        const short uid = (uh >> 4) ? static_cast<short>(ulast + (uh >> 4))
+                                                    : static_cast<short>(sub.zz());
+                        ulast = uid;
+                        if (uid == 1) unit = 0;
+                        else if (uid == 2) unit = 1;
+                        else if (uid == 3) unit = 2;
+                        sub.skip(ut);
+                      }
+                    } else sub.skip(dt);
+                  }
+                  tr.pos = sub.pos;
+                  consumido = true;
+                  if (unit == 1) e.logical_time_micros = true;
+                } else if (lid == 8 && lt == T_STRUCT) {  // LogicalType.TIMESTAMP
+                  Tr sub{tr.p, tr.n, tr.pos};
+                  short dlast = 0;
+                  int unit = -1;
+                  while (true) {
+                    const std::uint8_t dh = sub.byte();
+                    const auto dt = static_cast<TType>(dh & 0xF);
+                    if (dt == T_STOP) break;
+                    const short did = (dh >> 4) ? static_cast<short>(dlast + (dh >> 4))
+                                                : static_cast<short>(sub.zz());
+                    dlast = did;
+                    if (did == 2 && dt == T_I32) {
+                      unit = static_cast<int>(sub.zz());
+                    } else if (did == 2 && dt == T_STRUCT) {
+                      short ulast = 0;
+                      while (true) {
+                        const std::uint8_t uh = sub.byte();
+                        const auto ut = static_cast<TType>(uh & 0xF);
+                        if (ut == T_STOP) break;
+                        const short uid = (uh >> 4) ? static_cast<short>(ulast + (uh >> 4))
+                                                    : static_cast<short>(sub.zz());
+                        ulast = uid;
+                        if (uid == 1) unit = 0;
+                        else if (uid == 2) unit = 1;
+                        else if (uid == 3) unit = 2;
+                        sub.skip(ut);
+                      }
+                    } else sub.skip(dt);
+                  }
+                  tr.pos = sub.pos;
+                  consumido = true;
+                  if (unit == 1) e.logical_ts_micros = true;
+                  else e.logical_ts_millis = true;
+                } else if (lid == 9 && lt == T_STRUCT) {  // LogicalType.INTEGER
+                  Tr sub{tr.p, tr.n, tr.pos};
+                  short dlast = 0;
+                  while (true) {
+                    const std::uint8_t dh = sub.byte();
+                    const auto dt = static_cast<TType>(dh & 0xF);
+                    if (dt == T_STOP) break;
+                    const short did = (dh >> 4) ? static_cast<short>(dlast + (dh >> 4))
+                                                : static_cast<short>(sub.zz());
+                    dlast = did;
+                    if (did == 1 && dt == T_BYTE) {
+                      e.logical_int_bits = sub.byte();  // i8, nao varint
+                    } else if (did == 2 && (dt == T_TRUE || dt == T_FALSE)) {
+                      e.logical_int_signed = dt == T_TRUE;
+                    } else sub.skip(dt);
+                  }
+                  tr.pos = sub.pos;
+                  e.logical_integer = true;
+                  consumido = true;
+                }
+                if (lid >= 5 && lid <= 9) consumido = true;
+                if (!consumido) tr.skip(lt);
               }
             } else tr.skip(st);
           }
@@ -1677,8 +2090,65 @@ Value parquet_read(const std::string& path) {
     return out;
   };
   auto check_leaf_type = [&](const std::string& col, int t) {
-    if (t != PT_BOOLEAN && t != PT_INT64 && t != PT_DOUBLE && t != PT_BYTE_ARRAY) {
+    if (t != PT_BOOLEAN && t != PT_INT32 && t != PT_INT64 && t != PT_INT96 &&
+        t != PT_FLOAT && t != PT_DOUBLE && t != PT_BYTE_ARRAY && t != PT_FIXED) {
       die("coluna '" + col + "': tipo fisico " + std::to_string(t) + " nao suportado");
+    }
+  };
+  // Conversao logica de uma folha a partir do schema (converted + logical):
+  // devolve (fisico, conv, escala/divisor, len fixo). Erro claro no que segue
+  // fora (ex.: FIXED gigante, decimal sem escala).
+  auto resolve_conv = [&](const std::string& col, const SchemaElem& e, PType& fisico, int& conv,
+                          int& escala, int& flen) {
+    fisico = static_cast<PType>(e.type);
+    conv = 0;
+    escala = 0;
+    flen = e.type_length;
+    const bool dec_c = e.converted == 5;
+    const bool date_c = e.converted == 6;
+    const bool tms_c = e.converted == 7;
+    const bool tus_c = e.converted == 8;
+    const bool tsms_c = e.converted == 9;
+    const bool tsus_c = e.converted == 10;
+    const bool is_dec = dec_c || e.logical_decimal;
+    const bool is_date = date_c || e.logical_date;
+    if (is_dec) {
+      if (e.scale < 0) die("coluna '" + col + "': decimal sem escala");
+      conv = 1;
+      escala = e.scale;
+      return;
+    }
+    if (is_date) {
+      if (e.type != PT_INT32) die("coluna '" + col + "': DATE fora de INT32");
+      conv = 2;
+      return;
+    }
+    if (tms_c) {
+      if (e.type != PT_INT32) die("coluna '" + col + "': TIME_MILLIS fora de INT32");
+      conv = 4;
+      escala = 1000;
+      return;
+    }
+    if (tus_c || e.logical_time_micros) {
+      if (e.type != PT_INT64) die("coluna '" + col + "': TIME_MICROS fora de INT64");
+      conv = 4;
+      escala = 1000000;
+      return;
+    }
+    if (tsms_c || e.logical_ts_millis) {
+      if (e.type != PT_INT64) die("coluna '" + col + "': TIMESTAMP_MILLIS fora de INT64");
+      conv = 3;
+      escala = 1000;
+      return;
+    }
+    if (tsus_c || e.logical_ts_micros) {
+      if (e.type != PT_INT64) die("coluna '" + col + "': TIMESTAMP_MICROS fora de INT64");
+      conv = 3;
+      escala = 1000000;
+      return;
+    }
+    if (e.type == PT_FIXED && flen <= 0) {
+      die("coluna '" + col + "': FIXED_LEN_BYTE_ARRAY sem type_length");
     }
   };
   // Arvore de campos lidos do schema (Fase 12-5a): escalares, listas e
@@ -1688,17 +2158,23 @@ Value parquet_read(const std::string& path) {
     std::string name;
     bool is_struct = false;
     bool is_list = false;
+    bool is_map = false;      // grupo MAP: key/value como listas zipadas
     bool optional = false;  // rep==1 no proprio nivel (struct) ou outer (lista)
     bool repeated = false;  // folha de lista
     bool elem_nullable = false;
+    bool allow_null_element = false;  // valores Nulo em mapa
     PType leaf_type = PT_BYTE_ARRAY;
     int max_def = 0;
     int max_rep = 0;
     int def_base = 0;       // soma dos optionals dos structs ancestrais
     bool outer_optional = false;
-    int null_level = -1;    // struct OPTIONAL: def <= null_level = struct nulo
+    int conv = 0;           // conversao logica (ver ColDesc)
+    int dec_scale = 0;      // escala (decimal) ou divisor (hora/timestamp)
+    int fixed_len = 0;      // FIXED_LEN_BYTE_ARRAY
+    int null_level = -1;    // struct/map OPTIONAL: def <= null_level = nulo
     int leaf_idx = -1;
-    std::vector<int> sub_leaves;  // folhas da subarvore (structs)
+    int value_idx = -1;  // mapa: folha dos valores (chave = leaf_idx)
+    std::vector<int> sub_leaves;  // folhas da subarvore (structs/mapas)
     std::vector<RField> children;
   };
   std::function<RField(int, int)> parse_no;
@@ -1709,9 +2185,9 @@ Value parquet_read(const std::string& path) {
     if (e.type >= 0) {  // primitivo
       if (e.rep == 2) {  // `repeated <tipo>`: lista (legado na raiz, 2-level no struct)
         check_leaf_type(e.name, e.type);
+        resolve_conv(e.name, e, f.leaf_type, f.conv, f.dec_scale, f.fixed_len);
         f.is_list = true;
         f.repeated = true;
-        f.leaf_type = static_cast<PType>(e.type);
         f.max_rep = 1;
         f.max_def = def_base + 1;
         f.def_base = def_base;
@@ -1720,7 +2196,7 @@ Value parquet_read(const std::string& path) {
       }
       if (e.rep > 1) die("coluna '" + e.name + "': repetition_type invalido");
       check_leaf_type(e.name, e.type);
-      f.leaf_type = static_cast<PType>(e.type);
+      resolve_conv(e.name, e, f.leaf_type, f.conv, f.dec_scale, f.fixed_len);
       f.optional = e.rep == 1;
       f.max_def = def_base + (e.rep == 1 ? 1 : 0);
       f.def_base = def_base;
@@ -1744,7 +2220,7 @@ Value parquet_read(const std::string& path) {
       const SchemaElem& g = selem[static_cast<std::size_t>(gk[0])];
       if (g.type >= 0) {  // 2-level: repeated <tipo> dentro do grupo LIST
         check_leaf_type(e.name, g.type);
-        f.leaf_type = static_cast<PType>(g.type);
+        resolve_conv(e.name, g, f.leaf_type, f.conv, f.dec_scale, f.fixed_len);
         f.max_def = outer + 1;
         return f;
       }
@@ -1765,9 +2241,64 @@ Value parquet_read(const std::string& path) {
             "': elementos REPEATED dentro de lista (listas aninhadas) ainda nao suportados");
       }
       check_leaf_type(e.name, el.type);
-      f.leaf_type = static_cast<PType>(el.type);
+      resolve_conv(e.name, el, f.leaf_type, f.conv, f.dec_scale, f.fixed_len);
       f.elem_nullable = el.rep == 1;  // pyarrow grava element OPTIONAL (max_def 3)
       f.max_def = outer + 1 + (f.elem_nullable ? 1 : 0);
+      return f;
+    }
+    // grupo MAP (Fase A3): `optional group m (MAP) { repeated group
+    // key_value { required <t> key; <optional|required> <t> value; } }`.
+    // Vira duas folhas-lista (chaves + valores) zipadas na remontagem.
+    if (e.converted == 1 || e.logical_map) {
+      if (e.rep > 1) die("coluna '" + e.name + "': grupo MAP com repetition_type invalido");
+      f.is_map = true;
+      f.optional = e.rep == 1;
+      f.null_level = e.rep == 1 ? def_base : -1;
+      const int obase = def_base + (e.rep == 1 ? 1 : 0);
+      const std::vector<int> gk = children_of(idx);
+      if (gk.size() != 1) {
+        die("coluna '" + e.name + "': grupo MAP com " + std::to_string(gk.size()) +
+            " filhos (esperado 1: key_value)");
+      }
+      const SchemaElem& g = selem[static_cast<std::size_t>(gk[0])];
+      if (g.type >= 0 || g.rep != 2) {
+        die("coluna '" + e.name + "': grupo interno de MAP deve ser REPEATED");
+      }
+      const std::vector<int> kk = children_of(gk[0]);
+      if (kk.size() != 2) {
+        die("coluna '" + e.name + "': key_value com " + std::to_string(kk.size()) +
+            " campos (esperados key + value)");
+      }
+      const SchemaElem& ke = selem[static_cast<std::size_t>(kk[0])];
+      const SchemaElem& ve = selem[static_cast<std::size_t>(kk[1])];
+      if (ke.type < 0 || ke.rep != 0) {
+        die("coluna '" + e.name + "': chave de mapa deve ser escalar REQUIRED");
+      }
+      if (ve.type < 0 || ve.rep > 1) {
+        die("coluna '" + e.name + "': valor de mapa deve ser escalar");
+      }
+      check_leaf_type(e.name + ".key", ke.type);
+      check_leaf_type(e.name + ".value", ve.type);
+      RField kf;
+      kf.name = ke.name;
+      kf.is_list = true;
+      kf.repeated = true;
+      kf.leaf_type = static_cast<PType>(ke.type);
+      kf.max_rep = 1;
+      kf.max_def = obase + 1;
+      kf.def_base = obase;
+      RField vf;
+      vf.name = ve.name;
+      vf.is_list = true;
+      vf.repeated = true;
+      resolve_conv(e.name + ".value", ve, vf.leaf_type, vf.conv, vf.dec_scale, vf.fixed_len);
+      vf.max_rep = 1;
+      vf.elem_nullable = ve.rep == 1;
+      vf.allow_null_element = ve.rep == 1;
+      vf.max_def = obase + 1 + (ve.rep == 1 ? 1 : 0);
+      vf.def_base = obase;
+      f.children.push_back(std::move(kf));
+      f.children.push_back(std::move(vf));
       return f;
     }
     if (e.rep > 1) die("grupo '" + e.name + "': repetition_type invalido em struct");
@@ -1792,6 +2323,16 @@ Value parquet_read(const std::string& path) {
       }
       return;
     }
+    if (f.is_map) {
+      for (RField& ch : f.children) {
+        flat_no(ch);
+        f.sub_leaves.insert(f.sub_leaves.end(), ch.sub_leaves.begin(), ch.sub_leaves.end());
+      }
+      // chave = 1a folha, valor = 2a
+      f.leaf_idx = f.children[0].leaf_idx;
+      f.value_idx = f.children[1].leaf_idx;
+      return;
+    }
     f.leaf_idx = static_cast<int>(cols_desc.size());
     f.sub_leaves.push_back(f.leaf_idx);
     ColDesc d;
@@ -1801,8 +2342,12 @@ Value parquet_read(const std::string& path) {
     d.max_rep = f.max_rep;
     d.repeated = f.repeated;
     d.elem_nullable = f.elem_nullable;
+    d.allow_null_element = f.allow_null_element;
     d.def_base = f.def_base;
     d.outer_optional = f.outer_optional;
+    d.conv = f.conv;
+    d.dec_scale = f.dec_scale;
+    d.fixed_len = f.fixed_len;
     cols_desc.push_back(std::move(d));
   };
   for (RField& t : top) flat_no(t);
@@ -1834,6 +2379,31 @@ Value parquet_read(const std::string& path) {
   // Nulo nos campos ausentes). Struct REQUIRED e sempre mapa.
   std::function<Value(const RField&, std::size_t)> build_no =
       [&](const RField& f, std::size_t r) -> Value {
+    if (f.is_map) {
+      const auto& keys =
+          columns[static_cast<std::size_t>(f.leaf_idx)];
+      const auto& vals =
+          columns[static_cast<std::size_t>(f.value_idx)];
+      const Value& k = r < keys.size() ? keys[r] : Value::nulo();
+      const Value& v = r < vals.size() ? vals[r] : Value::nulo();
+      // Mapa nulo quando as chaves sao Nulo (struct ancestral nulo ou mapa
+      // nulo: def abaixo da base em ambas as folhas).
+      if (k.kind != ValueKind::Lista || v.kind != ValueKind::Lista) {
+        return Value::nulo();
+      }
+      if (k.list->size() != v.list->size()) {
+        die("coluna '" + f.name + "': chaves e valores do mapa com tamanhos diferentes");
+      }
+      Value m = Value::mapa();
+      for (std::size_t i = 0; i < k.list->size(); ++i) {
+        const Value& key = (*k.list)[i];
+        if (key.kind != ValueKind::Texto) {
+          die("coluna '" + f.name + "': chave de mapa nao-texto");
+        }
+        m.map->set(key.s, (*v.list)[i]);
+      }
+      return m;
+    }
     if (!f.is_struct) {
       const auto& col = columns[static_cast<std::size_t>(f.leaf_idx)];
       if (r >= col.size()) die("coluna '" + f.name + "' tem menos valores que 'num_rows'");

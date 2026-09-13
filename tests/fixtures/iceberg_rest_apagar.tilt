@@ -1,0 +1,16 @@
+pipeline principal:
+  passos:
+    - t1 = [
+        { nome: "ana", idade: 30 },
+        { nome: "bruno", idade: 40 }
+      ]
+    - t2 = [
+        { nome: "carla", idade: 50 }
+      ]
+    - escrever_iceberg t1, "tabela_apagar"
+    - anexar_iceberg t2, "tabela_apagar"
+    - n = apagar_iceberg "tabela_apagar", onde: { nome: "bruno" }
+    - imprimir n
+    - resto = ler_iceberg "tabela_apagar"
+    - imprimir tamanho resto
+    - imprimir resto[0].nome, resto[1].nome

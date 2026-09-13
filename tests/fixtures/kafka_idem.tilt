@@ -1,0 +1,15 @@
+pipeline idem:
+  passos:
+    - escrever_kafka "reintento", "r-1"
+    - escrever_kafka "idem", "i-1", { chave: "k1" }
+    - escrever_kafka "idem", "i-2"
+    - escrever_kafka "idem2", "d-1"
+    - escrever_kafka "legado", "l-1", { idempotente: falso }
+    - a = ler_kafka "reintento", { max: 10 }
+    - imprimir a
+    - b = ler_kafka "idem", { max: 10 }
+    - imprimir b
+    - c = ler_kafka "idem2", { max: 10 }
+    - imprimir c
+    - d = ler_kafka "legado", { max: 10 }
+    - imprimir d

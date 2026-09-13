@@ -45,12 +45,14 @@ echo "$out3" | grep -q "sem lideranca" || {
   echo "esperado 'sem lideranca' com lease ocupado"; echo "$out3"; exit 1
 }
 
-# Backend s3 ainda nao suportado: erro claro.
-out4=$(run 1 "TILT_CHECKPOINT_DIR=s3://bucket/prefixo" 2>&1) && {
-  echo "esperado erro com backend s3"; echo "$out4"; exit 1
-} || true
-echo "$out4" | grep -qi "ainda nao suportado" || {
-  echo "erro sem mensagem de backend nao suportado"; echo "$out4"; exit 1
+# Backend s3 tem cobertura dedicada (checkpoint_backend_test.sh, com mock):
+# aqui so se verifica que a URI e aceita (sem mock o save cai para memoria,
+# mas o lote executa).
+out4=$(run 1 "TILT_CHECKPOINT_DIR=s3://bucket/prefixo" 2>&1) || {
+  echo "s3 inesperadamente fatal"; echo "$out4"; exit 1
+}
+echo "$out4" | grep -q "lote:" || {
+  echo "sem lote com backend s3"; echo "$out4"; exit 1
 }
 
 echo "leader_checkpoint: ok"

@@ -101,5 +101,75 @@ out_cp2=$(cd "$tmp" && "$BIN" executar cp_ler.tilt)
 printf '%s\n' "$out_cp2"
 echo "$out_cp2" | grep -qE "releitura: +12" || { echo "checkpoint: releitura errada"; fail=1; }
 echo "$out_cp2" | grep -qE "filtro: +2" || { echo "checkpoint: filtro errado"; fail=1; }
+
+# --- 5. checkpoint padrao via _last_checkpoint (Marco 1 / A3) --------------------
+# "Writer externo" (pyarrow) grava <v>.checkpoint.parquet no schema oficial
+# (add com partitionValues MAP + metaData) + _last_checkpoint; o tilt usa
+# como base e repassa so a cauda JSON.
+cat > "$tmp/cp_std.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - base = [{ id: 1, v: "a" }, { id: 2, v: "b" }]
+    - escrever_delta base, "std"
+    - n1 = [{ id: 3, v: "c" }]
+    - anexar_delta n1, "std"
+    - n2 = [{ id: 4, v: "d" }]
+    - anexar_delta n2, "std"
+TILTEOF
+(cd "$tmp" && "$BIN" executar cp_std.tilt) > /dev/null
+python3 - "$tmp/std" <<'PYEOF'
+import json
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+root = sys.argv[1] + "/_delta_log"
+adds = []
+for ver in ("00000000000000000000.json", "00000000000000000001.json"):
+    for line in open(root + "/" + ver):
+        line = line.strip()
+        if line:
+            d = json.loads(line)
+            if "add" in d:
+                adds.append(d["add"])
+assert len(adds) == 2, adds
+add_t = pa.struct([
+    ("path", pa.string()),
+    ("partitionValues", pa.map_(pa.string(), pa.string())),
+    ("size", pa.int64()),
+    ("modificationTime", pa.int64()),
+    ("dataChange", pa.bool_()),
+])
+meta_t = pa.struct([("id", pa.string()), ("schemaString", pa.string()),
+                    ("partitionColumns", pa.list_(pa.string()))])
+rm_t = pa.struct([("path", pa.string())])
+arr = pa.array([(a["path"], [], a["size"], a["modificationTime"], True) for a in adds],
+               type=add_t)
+md = [json.loads(l) for l in open(root + "/00000000000000000000.json")
+      if "metaData" in json.loads(l)][0]["metaData"]
+t = pa.table({"add": arr,
+              "remove": pa.array([None] * len(adds), type=rm_t),
+              "metaData": pa.array([None] * len(adds), type=meta_t)})
+t2 = pa.table({"add": pa.array([None], type=add_t),
+               "remove": pa.array([None], type=rm_t),
+               "metaData": pa.array([(md["id"], md["schemaString"], md["partitionColumns"])],
+                                    type=meta_t)})
+pq.write_table(pa.concat_tables([t, t2]), root + "/00000000000000000001.checkpoint.parquet")
+open(root + "/_last_checkpoint", "w").write(json.dumps({"version": 1, "size": 3}))
+print("checkpoint padrao v1 gravado (pyarrow)")
+PYEOF
+cat > "$tmp/cp_std_ler.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - tudo = ler_delta "std"
+    - imprimir "std_total: ", tamanho tudo
+    - so3 = ler_delta "std", onde: { id: 3 }
+    - imprimir "std_id3: ", tamanho so3
+TILTEOF
+out_std=$(cd "$tmp" && "$BIN" executar cp_std_ler.tilt)
+printf '%s\n' "$out_std"
+echo "$out_std" | grep -qE "std_total: +4" || { echo "checkpoint padrao: total errado"; fail=1; }
+echo "$out_std" | grep -qE "std_id3: +1" || { echo "checkpoint padrao: filtro errado"; fail=1; }
+
 [ "$fail" = 0 ] && echo "delta_test ok"
 exit "$fail"

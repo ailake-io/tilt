@@ -2983,26 +2983,31 @@ Value project_row(const ActiveEntry& f, const Value& row, const TableMeta& meta)
 // `ler_iceberg ... onde:`): escreve um delete file + novo snapshot
 // (operation "delete"). `igualdade` = false -> position deletes
 // ({file_path, pos}); true -> equality deletes (linhas completas projetadas).
-// Devolve o numero de linhas apagadas (0 = sem commit).
-std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igualdade) {
-  if (rest_cfg().ativo) {
-    die("apagar_iceberg ainda nao suportado no modo REST (use o catalogo Hadoop local)");
-  }
-  const std::string location = abs_path(dir);
-  TableMeta meta;
-  latest_metadata_path(location, meta);
+// Nucleo compartilhado entre Hadoop local e REST (como AppendCore).
+struct DeleteAlvo {
+  std::string path;  // file:// do data file
+  std::int64_t pos;
+  Value row;   // projetada (modo igualdade)
+  Value part;  // record `partition` do data file (para a entrada do manifest)
+};
+
+struct DeleteCore {
+  Snapshot snap;
+  std::int64_t version = 0;
+  std::string json;
+  std::int64_t apagadas = 0;
+};
+
+DeleteCore delete_core(const std::string& location, const std::string& dir_display,
+                       const TableMeta& meta, const Value& onde, bool igualdade) {
+  (void)dir_display;  // mensagens usam `location` (absoluto, como no delete)
+  DeleteCore dc;
   const OndeFilter filtro = split_onde(&onde, meta.spec);
   const ResolvedFiles resolvidos = resolve_files(meta);
   // Deletes ja commitados: nao reapaga o ja apagado.
   const LoadedDeletes vigentes = load_deletes(resolvidos.deletes);
 
-  struct Alvo {
-    std::string path;  // file:// do data file
-    std::int64_t pos;
-    Value row;     // projetada (modo igualdade)
-    Value part;    // record `partition` do data file (para a entrada do manifest)
-  };
-  std::vector<Alvo> alvos;
+  std::vector<DeleteAlvo> alvos;
   for (const ActiveEntry& f : resolvidos.data) {
     if (!filtro.prune.empty() && !passa_pruning(f, filtro.prune, meta.spec)) continue;
     const std::string path = strip_scheme(f.path);
@@ -3021,7 +3026,7 @@ std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igua
       ++pos;
     }
   }
-  if (alvos.empty()) return 0;
+  if (alvos.empty()) return dc;  // sem commit
 
   // Um delete file por particao dos data files atingidos (com o record
   // `partition` correspondente na entrada do manifest): readers que casam
@@ -3043,10 +3048,10 @@ std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igua
   };
   struct GrupoDel {
     Value part;
-    std::vector<const Alvo*> itens;
+    std::vector<const DeleteAlvo*> itens;
   };
   std::vector<GrupoDel> grupos_del;
-  for (const Alvo& a : alvos) {
+  for (const DeleteAlvo& a : alvos) {
     const std::string k = part_chave(a.part);
     auto it = std::find_if(grupos_del.begin(), grupos_del.end(), [&](const GrupoDel& g) {
       return part_chave(g.part) == k;
@@ -3060,18 +3065,17 @@ std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igua
   mkdir_if_missing(location + "/data");
   std::vector<std::pair<int, std::string>> del_changes;
   std::vector<FileInfo> del_infos;
-  int del_idx = 0;
   for (const GrupoDel& g : grupos_del) {
     Value del_table = Value::tabela();
     if (!igualdade) {
-      for (const Alvo* a : g.itens) {
+      for (const DeleteAlvo* a : g.itens) {
         Value r = Value::mapa();
         r.map->set("file_path", Value::texto(a->path));
         r.map->set("pos", Value::inteiro(a->pos));
         del_table.list->push_back(std::move(r));
       }
     } else {
-      for (const Alvo* a : g.itens) del_table.list->push_back(a->row);
+      for (const DeleteAlvo* a : g.itens) del_table.list->push_back(a->row);
     }
     const std::string del_name = std::string("00000-1-") + new_uuid() +
                                  (igualdade ? ".eq-deletes.parquet" : ".pos-deletes.parquet");
@@ -3087,7 +3091,6 @@ std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igua
     dinfo.part_map = g.part;
     del_changes.emplace_back(1, dinfo.path);
     del_infos.push_back(std::move(dinfo));
-    ++del_idx;
   }
 
   const std::string meta_dir = location + "/metadata";
@@ -3122,23 +3125,64 @@ std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igua
       meta_dir, manifest_name, snapshot_id, static_cast<int>(del_changes.size()),
       static_cast<int>(resolvidos.data.size()), 0, del_rows, existing_rows, infos, meta.spec, 1);
 
-  Snapshot snap;
-  snap.id = snapshot_id;
-  snap.ts = ts;
-  snap.operation = "delete";
-  snap.manifest_list = list_path;
-  snap.parent = meta.current_snapshot;
-  snap.has_parent = meta.current_snapshot >= 0;
+  dc.snap.id = snapshot_id;
+  dc.snap.ts = ts;
+  dc.snap.operation = "delete";
+  dc.snap.manifest_list = list_path;
+  dc.snap.parent = meta.current_snapshot;
+  dc.snap.has_parent = meta.current_snapshot >= 0;
   std::vector<Snapshot> snapshots = meta.snapshots;
-  snapshots.push_back(snap);
+  snapshots.push_back(dc.snap);
   std::vector<std::pair<std::int64_t, std::int64_t>> log = meta.snapshot_log;
   log.emplace_back(ts, snapshot_id);
-  const std::int64_t version = meta.version < 0 ? 0 : meta.version + 1;
-  commit_metadata(location, version,
-                  build_metadata_json(location, meta.uuid.empty() ? new_uuid() : meta.uuid,
-                                      meta.schemas, meta.current_schema_id, meta.last_column_id,
-                                      meta.spec, snapshots, log, snapshot_id, ts));
-  return static_cast<std::int64_t>(alvos.size());
+  dc.version = meta.version < 0 ? 0 : meta.version + 1;
+  dc.json = build_metadata_json(location, meta.uuid.empty() ? new_uuid() : meta.uuid,
+                                meta.schemas, meta.current_schema_id, meta.last_column_id,
+                                meta.spec, snapshots, log, snapshot_id, ts);
+  dc.apagadas = static_cast<std::int64_t>(alvos.size());
+  return dc;
+}
+
+void iceberg_delete_rest(const RestCfg& rc, const std::string& dir, const Value& onde,
+                         bool igualdade, std::int64_t& apagadas) {
+  const std::string location = abs_path(dir);
+  const std::string tabela_nome = table_name(location);
+
+  Value resp;
+  const int st = rest_load_table(rc, tabela_nome, resp, /*falhar=*/false);
+  if (st == 404) {
+    die("tabela '" + tabela_nome + "' nao existe no catalogo REST '" + rc.uri +
+        "' (use escrever_iceberg para criar)");
+  }
+  TableMeta meta;
+  parse_metadata(fetch_metadata_path(map_find(resp, "metadata-location")->s), meta);
+
+  const DeleteCore dc = delete_core(location, dir, meta, onde, igualdade);
+  apagadas = dc.apagadas;
+  if (dc.apagadas == 0) return;  // sem match: sem commit
+  commit_metadata(location, dc.version, dc.json);
+
+  std::vector<std::string> upds;
+  upds.push_back(upd_add_snapshot(dc.snap, meta.current_schema_id));
+  upds.push_back(upd_set_snapshot_ref(dc.snap.id));
+  rest_commit(rc, tabela_nome, "[" + req_assert_current_snapshot(meta.current_snapshot) + "]",
+              "[" + join_updates(upds) + "]");
+}
+
+std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igualdade) {
+  const RestCfg rc = rest_cfg();
+  if (rc.ativo) {
+    std::int64_t apagadas = 0;
+    iceberg_delete_rest(rc, dir, onde, igualdade, apagadas);
+    return apagadas;
+  }
+  const std::string location = abs_path(dir);
+  TableMeta meta;
+  latest_metadata_path(location, meta);
+  const DeleteCore dc = delete_core(location, dir, meta, onde, igualdade);
+  if (dc.apagadas == 0) return 0;
+  commit_metadata(location, dc.version, dc.json);
+  return dc.apagadas;
 }
 
 Value iceberg_read(const std::string& dir, const Value* onde) {

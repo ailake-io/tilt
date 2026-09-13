@@ -132,6 +132,47 @@ def rd_bytes(body, pos):
     return body[pos:pos + n], pos + n
 
 
+# --- EOS: varint/CRC32C para o Produce v3 (RecordBatch) -----------------------
+_crc32c_tab = []
+for _i in range(256):
+    _c = _i
+    for _k in range(8):
+        _c = (0x82F63B78 ^ (_c >> 1)) if (_c & 1) else (_c >> 1)
+    _crc32c_tab.append(_c)
+
+
+def crc32c(data):
+    crc = 0xFFFFFFFF
+    for b in data:
+        crc = (crc >> 8) ^ _crc32c_tab[(crc ^ b) & 0xFF]
+    return crc ^ 0xFFFFFFFF
+
+
+def rd_uvarint(body, pos):
+    v = 0
+    shift = 0
+    while True:
+        b = body[pos]
+        pos += 1
+        v |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return v, pos
+        shift += 7
+
+
+def rd_varint(body, pos):
+    u, pos = rd_uvarint(body, pos)
+    return (u >> 1) ^ -(u & 1), pos
+
+
+# chaves (pid, topico, particao, seq) ja armazenadas: dedup idempotente
+seen_seq = set()
+# pid por conexao InitProducerId (incremental, como brokers reais)
+next_pid = [100]
+# topicos com falha programada na 1a tentativa (cenarios de retry)
+falha_uma_vez = {"reintento", "idem2"}
+
+
 def p8(v):
     return struct.pack(">b", v)
 
@@ -210,14 +251,18 @@ class Broker(socketserver.BaseRequestHandler):
             conn.sendall(p32(len(resp)) + resp)
 
     def despachar(self, payload):
-        (api, _vers, corr) = struct.unpack_from(">hhi", payload, 0)
+        (api, vers, corr) = struct.unpack_from(">hhi", payload, 0)
         pos = 8
         clen = struct.unpack_from(">h", payload, pos)[0]
         pos += 2 + clen  # pula client_id
         if api == 3:
             return p32(corr) + self.metadata(payload[pos:])
         if api == 0:
+            if vers >= 3:
+                return p32(corr) + self.produce_v3(payload[pos:])
             return p32(corr) + self.produce(payload[pos:])
+        if api == 22:
+            return p32(corr) + self.init_producer_id(payload[pos:])
         if api == 1:
             return p32(corr) + self.fetch(payload[pos:])
         if api == 10:
@@ -443,6 +488,111 @@ class Broker(socketserver.BaseRequestHandler):
                 out += p32(particao) + p16(erro) + p64(offset)
         return out
 
+    def init_producer_id(self, body):
+        # transactional_id NULL (int16 -1) + timeout; devolve pid incremental
+        pid = next_pid[0]
+        next_pid[0] += 1
+        log.write("INITPID %d\n" % pid)
+        log.flush()
+        return p32(0) + p16(0) + p64(pid) + p16(0)  # throttle, erro, pid, epoch
+
+    def produce_v3(self, body):
+        pos = 2  # transactional_id NULL (int16 -1)
+        (acks,) = struct.unpack_from(">h", body, pos)
+        pos += 2
+        if acks != -1:
+            raise Exception("produce v3 sem acks=-1: %d" % acks)
+        pos += 4  # timeout
+        nt = struct.unpack_from(">i", body, pos)[0]
+        pos += 4
+        respostas = []
+        for _ in range(nt):
+            tlen = struct.unpack_from(">h", body, pos)[0]
+            pos += 2
+            topico = body[pos:pos + tlen].decode()
+            pos += tlen
+            np_ = struct.unpack_from(">i", body, pos)[0]
+            pos += 4
+            partes = []
+            for _ in range(np_):
+                (particao, mssz) = struct.unpack_from(">ii", body, pos)
+                pos += 8
+                batch = body[pos:pos + mssz]
+                pos += mssz
+                (base_off, _blen, _epoch, magic) = struct.unpack_from(">qiib", batch, 0)
+                if magic != 2:
+                    raise Exception("RecordBatch sem magic 2")
+                (crc,) = struct.unpack_from(">I", batch, 8 + 4 + 4 + 1)
+                if crc != crc32c(batch[8 + 4 + 4 + 1 + 4:]):
+                    raise Exception("CRC32C do RecordBatch diverge")
+                bpos = 8 + 4 + 4 + 1 + 4
+                (_attrs,) = struct.unpack_from(">h", batch, bpos)
+                bpos += 2
+                (_last,) = struct.unpack_from(">i", batch, bpos)
+                bpos += 4
+                (_fts, _mts, pid, _ep, seq, cnt) = struct.unpack_from(">qqqhiI", batch,
+                                                                      bpos)
+                bpos += 8 + 8 + 8 + 2 + 4 + 4
+                valores = []
+                for _ in range(cnt):
+                    _rlen, bpos = rd_varint(batch, bpos)
+                    bpos += 1  # attributes int8
+                    _, bpos = rd_varint(batch, bpos)  # timestampDelta
+                    _, bpos = rd_varint(batch, bpos)  # offsetDelta
+                    klen, bpos = rd_varint(batch, bpos)
+                    if klen >= 0:
+                        chave = batch[bpos:bpos + klen]
+                        bpos += klen
+                        if topico == "idem":
+                            log.write("CHAVE %s\n" % chave.decode())
+                    vlen, bpos = rd_varint(batch, bpos)
+                    valores.append(batch[bpos:bpos + vlen])
+                    bpos += vlen
+                    _h, bpos = rd_varint(batch, bpos)  # headers (-1)
+                chave_seq = (pid, topico, particao, seq)
+                # falha programada 1x: reintento perde antes de gravar (erro 6),
+                # idem2 grava mas "perde" a resposta (erro 7) -> retry dedup
+                if topico in falha_uma_vez:
+                    falha_uma_vez.discard(topico)
+                    if topico == "reintento":
+                        log.write("PRODUCE-ERRO %s %d 6\n" % (topico, particao))
+                        log.flush()
+                        partes.append((particao, 6, -1))
+                        continue
+                    fila = store.setdefault((topico, particao), [])
+                    base = len(fila)
+                    for valor in valores:
+                        fila.append(valor)
+                    seen_seq.add(chave_seq)
+                    log.write("PRODUCE %s %d %d\n" % (topico, particao, len(valores)))
+                    log.write("PRODUCE-ERRO %s %d 7\n" % (topico, particao))
+                    log.flush()
+                    partes.append((particao, 7, -1))
+                    continue
+                if chave_seq in seen_seq:
+                    fila = store.get((topico, particao), [])
+                    log.write("PRODUCE-DEDUP %s %d seq=%d\n" % (topico, particao, seq))
+                    log.flush()
+                    partes.append((particao, 0, 0))
+                    continue
+                seen_seq.add(chave_seq)
+                fila = store.setdefault((topico, particao), [])
+                base = len(fila)
+                for valor in valores:
+                    fila.append(valor)
+                log.write("PRODUCE %s %d %d\n" % (topico, particao, len(fila) - base))
+                log.flush()
+                partes.append((particao, 0, base))
+                _ = base_off
+            respostas.append((topico, partes))
+        out = p32(0)  # throttle
+        out += p32(len(respostas))
+        for topico, partes in respostas:
+            out += pstr(topico) + p32(len(partes))
+            for particao, erro, offset in partes:
+                out += p32(particao) + p16(erro) + p64(offset) + p64(-1) + p64(0)
+        return out
+
     def fetch(self, body):
         pos = 12  # replica_id + max_wait + min_bytes
         nt = struct.unpack_from(">i", body, pos)[0]
@@ -524,6 +674,15 @@ out2=$(
     "$BIN" executar "${0%/*}/fixtures/kafka_grupo.tilt"
 )
 
+# --- idempotencia EOS: retry + dedup + chave + legado (Marco 1) ------------------
+# reintento: 1a tentativa erro 6 (retry, mesma seq); idem2: grava + erro 7
+# (retry com a mesma seq -> dedup, 1 copia); idem usa chave; legado usa v1.
+out_idem=$(
+  env KAFKA_BOOTSTRAP="127.0.0.1:$PORTA" \
+    "$BIN" executar "${0%/*}/fixtures/kafka_idem.tilt"
+) || { echo "kafka_idem falhou: $out_idem"; fail=1; }
+printf '%s\n' "$out_idem"
+
 # --- 2 consumidores no mesmo grupo (rebalanceamento roundrobin) -------------------
 # 4 produces no topico "vendas" (2 particoes): v-1a/v-1b na p0, v-2a/v-2b na p1.
 env KAFKA_BOOTSTRAP="127.0.0.1:$PORTA" \
@@ -593,11 +752,28 @@ echo "$out2" | grep -q "k-2" || { echo "fonte kafka: saida sem 'k-2': $out2"; fa
 
 produces=$(grep -c "^PRODUCE " "$tmp/log" || true)
 fetches=$(grep -c "^FETCH " "$tmp/log" || true)
-# 7 produces dos fixtures originais + 4 do cenario de 2 particoes
-[ "$produces" = "11" ] || { echo "esperado 11 PRODUCE, obtido $produces"; cat "$tmp/log"; fail=1; }
+# 7 produces dos fixtures originais + 4 do cenario de 2 particoes + 5 do
+# cenario idempotente (reintento, idem x2, idem2, legado)
+[ "$produces" = "16" ] || { echo "esperado 16 PRODUCE, obtido $produces"; cat "$tmp/log"; fail=1; }
+# EOS: InitProducerId por processo tilt (roundtrip, grupo, idem, vendas, A, B)
+n_init=$(grep -c "^INITPID " "$tmp/log" || true)
+[ "$n_init" -ge 3 ] || { echo "esperado >= 3 INITPID, obtido $n_init"; cat "$tmp/log"; fail=1; }
+# retry com a mesma seq (erro 6) + dedup de batch repetido (erro 7)
+grep -q "^PRODUCE-ERRO reintento 0 6$" "$tmp/log" || {
+  echo "retry (erro 6) ausente"; cat "$tmp/log"; fail=1; }
+grep -q "^PRODUCE-ERRO idem2 0 7$" "$tmp/log" || {
+  echo "resposta perdida (erro 7) ausente"; cat "$tmp/log"; fail=1; }
+grep -q "^PRODUCE-DEDUP idem2 0 seq=" "$tmp/log" || {
+  echo "dedup idempotente ausente"; cat "$tmp/log"; fail=1; }
+grep -q "^CHAVE k1$" "$tmp/log" || { echo "chave k1 ausente"; cat "$tmp/log"; fail=1; }
+# leituras do cenario idempotente: sem duplicatas apesar dos retries
+echo "$out_idem" | grep -q "^\[r-1\]$" || { echo "reintento errado: $out_idem"; fail=1; }
+echo "$out_idem" | grep -q "^\[i-1, i-2\]$" || { echo "idem errado: $out_idem"; fail=1; }
+echo "$out_idem" | grep -q "^\[d-1\]$" || { echo "idem2 duplicado?: $out_idem"; fail=1; }
+echo "$out_idem" | grep -q "^\[l-1\]$" || { echo "legado errado: $out_idem"; fail=1; }
 # 4 fetches dos fixtures originais + 1 por consumidor (cada um so busca a sua
-# particao) no cenario de rebalanceamento
-[ "$fetches" = "6" ] || { echo "esperado 6 FETCH, obtido $fetches"; cat "$tmp/log"; fail=1; }
+# particao) no cenario de rebalanceamento + 4 do cenario idempotente
+[ "$fetches" = "10" ] || { echo "esperado 10 FETCH, obtido $fetches"; cat "$tmp/log"; fail=1; }
 
 # coordenacao do consumer group g1: 2 chamadas no fixture kafka_grupo
 for ev in JOINGROUP SYNCGROUP OFFSETFETCH OFFSETCOMMIT LEAVEGROUP; do

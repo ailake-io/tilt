@@ -8,7 +8,9 @@
 #include <cstdio>
 #include <cstdint>
 #include <fstream>
+#include <optional>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -672,6 +674,132 @@ void delta_maybe_checkpoint(const std::string& dir, const std::string& log_dir, 
   if (::rename(tmp_meta.c_str(), final_meta.c_str()) != 0) std::remove(tmp_meta.c_str());
 }
 
+// Checkpoint padrao Delta (Marco 1 / A3): `_delta_log/_last_checkpoint`
+// {"version": N} + `<20-digit>.checkpoint*.parquet` no schema oficial
+// (colunas add/remove/metaData/protocol como structs; partitionValues como
+// MAP<STRING,STRING>). Lido como base (adds menos removes + metaData) com
+// replay apenas dos JSONs maiores que N — tabelas escritas por Spark/
+// delta-rs com checkpoint passam a ler rapido. Coexiste com o sidecar
+// tilt-native (usa-se o de maior versao; empate: o padrao).
+long long last_checkpoint_version(const std::string& log_dir) {
+  std::ifstream in(log_dir + "/_last_checkpoint");
+  if (!in) return -1;
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  try {
+    Value v = json_parse(ss.str());
+    if (v.kind == ValueKind::Mapa && v.map) {
+      if (const Value* n = v.map->find("version"); n && n->is_number()) {
+        return static_cast<long long>(n->as_number());
+      }
+    }
+  } catch (const std::exception&) {
+  }
+  return -1;
+}
+
+// Arquivos `<versao>.checkpoint*.parquet` do log (padrao ou tilt-native).
+std::vector<std::string> checkpoint_files(const std::string& log_dir, long long versao) {
+  char prefix[32];
+  std::snprintf(prefix, sizeof prefix, "%020lld.checkpoint", versao);
+  const std::string pre = prefix;
+  std::vector<std::string> entries;
+  std::vector<std::string> out;
+  if (!tilt_listdir(log_dir, entries)) return out;
+  for (const std::string& n : entries) {
+    if (n.size() >= pre.size() + 8 && n.compare(0, pre.size(), pre) == 0 &&
+        n.compare(n.size() - 8, 8, ".parquet") == 0) {
+      out.push_back(log_dir + "/" + n);
+    }
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+struct StdCheckpoint {
+  long long version = -1;
+  std::vector<CpAdd> adds;  // estado (adds menos removes) na versao
+  std::string schema_string;
+  std::vector<std::string> part_cols;
+};
+
+// Carrega o checkpoint padrao da versao V (nullopt se ilegivel/ausente).
+// Reaproveita o parquet_read (structs + MAP) e interpreta add/remove/metaData.
+std::optional<StdCheckpoint> load_standard_checkpoint(const std::string& log_dir, long long v) {
+  const std::vector<std::string> files = checkpoint_files(log_dir, v);
+  if (files.empty()) return std::nullopt;
+  try {
+    StdCheckpoint cp;
+    cp.version = v;
+    std::vector<CpAdd> ativos;
+    for (const std::string& f : files) {
+      Value t = parquet_read(f);
+      if (t.kind != ValueKind::Tabela && t.kind != ValueKind::Lista) continue;
+      // Tilt-native (coluna "caminho") nao e padrao: ignora aqui.
+      bool tilt_native = false;
+      if (!t.list->empty() && (*t.list)[0].kind == ValueKind::Mapa &&
+          (*t.list)[0].map->find("caminho")) {
+        tilt_native = true;
+      }
+      if (tilt_native) continue;
+      for (const Value& row : *t.list) {
+        if (row.kind != ValueKind::Mapa || !row.map) continue;
+        if (const Value* add = row.map->find("add");
+            add && add->kind == ValueKind::Mapa && add->map) {
+          const Value* p = add->map->find("path");
+          if (!p || p->kind != ValueKind::Texto) continue;
+          CpAdd a;
+          a.path = p->s;
+          if (const Value* pv = add->map->find("partitionValues");
+              pv && pv->kind == ValueKind::Mapa && pv->map) {
+            Value cpi = Value::mapa();
+            for (const auto& kv : pv->map->items) {
+              if (kv.second.kind == ValueKind::Texto) cpi.map->set(kv.first, kv.second);
+            }
+            a.part_json = json_compact(cpi);
+          } else {
+            a.part_json = "{}";
+          }
+          if (const Value* s = add->map->find("size"); s && s->is_number()) {
+            a.size = static_cast<std::int64_t>(s->as_number());
+          }
+          if (const Value* m = add->map->find("modificationTime"); m && m->is_number()) {
+            a.mtime = static_cast<std::int64_t>(m->as_number());
+          }
+          ativos.push_back(std::move(a));
+        }
+        if (const Value* rem = row.map->find("remove");
+            rem && rem->kind == ValueKind::Mapa && rem->map) {
+          const Value* p = rem->map->find("path");
+          if (p && p->kind == ValueKind::Texto) {
+            ativos.erase(std::remove_if(ativos.begin(), ativos.end(),
+                                        [&](const CpAdd& a) { return a.path == p->s; }),
+                         ativos.end());
+          }
+        }
+        if (const Value* md = row.map->find("metaData");
+            md && md->kind == ValueKind::Mapa && md->map) {
+          if (const Value* s = md->map->find("schemaString");
+              s && s->kind == ValueKind::Texto) {
+            cp.schema_string = s->s;
+          }
+          if (const Value* pc = md->map->find("partitionColumns");
+              pc && pc->kind == ValueKind::Lista && pc->list) {
+            cp.part_cols.clear();
+            for (const Value& c : *pc->list) {
+              if (c.kind == ValueKind::Texto) cp.part_cols.push_back(c.s);
+            }
+          }
+        }
+      }
+    }
+    cp.adds = std::move(ativos);
+    return cp;
+  } catch (const std::exception&) {
+    return std::nullopt;  // checkpoint ilegivel: replay completo dos JSONs
+  }
+}
+
 }  // namespace
 
 void delta_write(const std::string& dir, const Value& tabela,
@@ -944,9 +1072,10 @@ Value delta_read(const std::string& dir, const Value* onde) {
     std::vector<std::pair<std::string, Value>> partvals;
   };
   std::vector<ActiveFile> active;  // em ordem de add
-  // Base do checkpoint tilt-native (se existir): evita repassar JSONs
-  // antigos; a cauda (> versao do checkpoint) e replayada abaixo.
+  // Base de checkpoint (evita repassar JSONs antigos; a cauda e replayada
+  // abaixo): padrao (`_last_checkpoint`) ou tilt-native, o de maior versao.
   const long long cp_ver = checkpoint_versao(log_dir);
+  const long long std_ver = last_checkpoint_version(log_dir);
   auto passa_prune = [&](const std::vector<std::pair<std::string, Value>>& partvals) {
     for (const auto& [col, val] : prune_preds) {
       auto pv = std::find_if(partvals.begin(), partvals.end(),
@@ -957,37 +1086,54 @@ Value delta_read(const std::string& dir, const Value* onde) {
     }
     return true;
   };
-  if (cp_ver >= 0) {
+  auto semeia = [&](const std::vector<CpAdd>& adds) {
+    for (const CpAdd& a : adds) {
+      ActiveFile f;
+      f.path = a.path;
+      try {
+        Value pv = json_parse(a.part_json);
+        if (pv.kind == ValueKind::Mapa && pv.map) {
+          for (const auto& kv : pv.map->items) {
+            if (kv.second.kind == ValueKind::Texto) f.partvals.emplace_back(kv.first, kv.second);
+          }
+        }
+      } catch (const std::exception&) {
+      }
+      if (passa_prune(f.partvals)) active.push_back(std::move(f));
+    }
+  };
+  long long base_ver = -1;
+  if (std_ver >= 0 && std_ver >= cp_ver) {
+    if (const auto scp = load_standard_checkpoint(log_dir, std_ver)) {
+      semeia(scp->adds);
+      base_ver = std_ver;
+    }
+  }
+  if (base_ver < 0 && cp_ver >= 0) {
     try {
       Value base = parquet_read(log_dir + "/" + checkpoint_nome(cp_ver));
       if (base.kind == ValueKind::Tabela || base.kind == ValueKind::Lista) {
+        std::vector<CpAdd> adds;
         for (const Value& row : *base.list) {
           if (row.kind != ValueKind::Mapa || !row.map) continue;
           const Value* c = row.map->find("caminho");
           const Value* pj = row.map->find("particao_json");
           if (!c || c->kind != ValueKind::Texto) continue;
-          ActiveFile f;
-          f.path = c->s;
-          if (pj && pj->kind == ValueKind::Texto) {
-            try {
-              Value pv = json_parse(pj->s);
-              if (pv.kind == ValueKind::Mapa && pv.map) {
-                for (const auto& kv : pv.map->items) {
-                  if (kv.second.kind == ValueKind::Texto) f.partvals.emplace_back(kv.first, kv.second);
-                }
-              }
-            } catch (const std::exception&) {
-            }
-          }
-          if (passa_prune(f.partvals)) active.push_back(std::move(f));
+          CpAdd a;
+          a.path = c->s;
+          a.part_json =
+              (pj && pj->kind == ValueKind::Texto) ? pj->s : std::string("{}");
+          adds.push_back(std::move(a));
         }
+        semeia(adds);
+        base_ver = cp_ver;
       }
     } catch (const std::exception&) {
       active.clear();  // checkpoint ilegivel: volta ao replay completo
     }
   }
   for (const std::string& path : versions) {
-    if (cp_ver >= 0 && versao_de_json(path) <= cp_ver) continue;  // ja coberto pelo checkpoint
+    if (base_ver >= 0 && versao_de_json(path) <= base_ver) continue;  // coberto pelo checkpoint
     std::ifstream in(path);
     if (!in) die("nao foi possivel abrir '" + path + "'");
     std::string line_text;

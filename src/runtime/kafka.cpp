@@ -9,6 +9,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -273,6 +274,14 @@ std::string roundtrip(Conn& conn, std::int16_t api_key, std::int16_t api_version
       die(contexto + " falhou: UnknownMemberId (kafka codigo 25)");
     case 27:
       die(contexto + " falhou: RebalanceInProgress (kafka codigo 27)");
+    case 35:
+      die(contexto + " falhou: UnsupportedVersion (kafka codigo 35)");
+    case 45:
+      die(contexto + " falhou: OutOfOrderSequence (kafka codigo 45)");
+    case 47:
+      die(contexto + " falhou: UnknownProducerId (kafka codigo 47)");
+    case 48:
+      die(contexto + " falhou: InvalidProducerEpoch (kafka codigo 48)");
     default:
       die(contexto + " falhou (kafka codigo " + std::to_string(code) + ")");
   }
@@ -469,6 +478,125 @@ std::vector<std::pair<std::int64_t, std::string>> fetch_msgs(Conn& conn, const s
 
 }  // namespace
 
+// ------------------------------------------------------------------ EOS (Marco 1 / Fase 12-4b)
+//
+// Caminho idempotente: InitProducerId (api 22) + Produce v3 com RecordBatch
+// (magic 2, producerId/epoch/baseSequence, CRC32C). Sequencia por
+// (topico, particao) em memoria com mutex; em broker 0.9-era (sem api 22)
+// ha fallback para o caminho legado v1 com acks+retry.
+
+namespace {
+
+// CRC32C (Castagnoli, polinomio refletido 0x82F63B78).
+const std::array<std::uint32_t, 256>& crc32c_table() {
+  static const std::array<std::uint32_t, 256> table = [] {
+    std::array<std::uint32_t, 256> t{};
+    for (std::uint32_t i = 0; i < 256; ++i) {
+      std::uint32_t c = i;
+      for (int k = 0; k < 8; ++k) c = (c & 1u) ? (0x82F63B78u ^ (c >> 1)) : (c >> 1);
+      t[i] = c;
+    }
+    return t;
+  }();
+  return table;
+}
+
+std::uint32_t crc32c(const std::string& data) {
+  std::uint32_t crc = 0xFFFFFFFFu;
+  const auto& t = crc32c_table();
+  for (const unsigned char c : data) crc = (crc >> 8) ^ t[(crc ^ c) & 0xFFu];
+  return crc ^ 0xFFFFFFFFu;
+}
+
+void put_uvarint(std::string& out, std::uint64_t v) {
+  while (v >= 0x80) {
+    out.push_back(static_cast<char>((v & 0x7F) | 0x80));
+    v >>= 7;
+  }
+  out.push_back(static_cast<char>(v));
+}
+
+void put_varint(std::string& out, std::int64_t v) {
+  put_uvarint(out, (static_cast<std::uint64_t>(v) << 1) ^ static_cast<std::uint64_t>(v >> 63));
+}
+
+std::int64_t now_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+// Um record (chave opcional, valor, sem headers) com frame de tamanho.
+std::string encode_record(const std::string& valor, const std::string& chave) {
+  std::string rec;
+  put_i8(rec, 0);      // attributes
+  put_varint(rec, 0);  // timestampDelta
+  put_varint(rec, 0);  // offsetDelta
+  if (chave.empty()) {
+    put_varint(rec, -1);  // key = null
+  } else {
+    put_varint(rec, static_cast<std::int64_t>(chave.size()));
+    rec += chave;
+  }
+  put_varint(rec, static_cast<std::int64_t>(valor.size()));
+  rec += valor;
+  put_varint(rec, -1);  // headers = null
+  std::string out;
+  put_varint(out, static_cast<std::int64_t>(rec.size()));
+  out += rec;
+  return out;
+}
+
+// RecordBatch (message format v2) com 1 record. baseOffset 0: o broker
+// reatribui offsets no append; a deduplicacao usa (producerId, sequence).
+std::string build_record_batch(const std::string& valor, const std::string& chave,
+                               std::int64_t pid, std::int16_t epoch, std::int32_t seq) {
+  const std::int64_t now = now_ms();
+  std::string body;
+  put_i16(body, 0);      // attributes (sem compressao, nao transacional)
+  put_i32(body, 0);      // lastOffsetDelta
+  put_i64(body, now);    // firstTimestamp
+  put_i64(body, now);    // maxTimestamp
+  put_i64(body, pid);    // producerId
+  put_i16(body, epoch);  // producerEpoch
+  put_i32(body, seq);    // baseSequence
+  put_i32(body, 1);      // [records]
+  body += encode_record(valor, chave);
+
+  std::string batch;
+  put_i64(batch, 0);  // baseOffset (reatribuido pelo broker)
+  // batchLength = leaderEpoch(4) + magic(1) + crc(4) + body
+  put_i32(batch, static_cast<std::int32_t>(body.size() + 9));
+  put_i32(batch, -1);  // partitionLeaderEpoch (desconhecido)
+  put_i8(batch, 2);    // magic
+  put_i32(batch, static_cast<std::int32_t>(crc32c(body)));
+  batch += body;
+  return batch;
+}
+
+struct PidState {
+  std::int64_t pid = -1;
+  std::int16_t epoch = 0;
+};
+
+std::mutex& eos_mu() {
+  static std::mutex m;
+  return m;
+}
+std::map<std::string, PidState>& eos_pids() {
+  static std::map<std::string, PidState> p;
+  return p;
+}
+std::map<std::string, std::int32_t>& eos_seqs() {
+  static std::map<std::string, std::int32_t> s;
+  return s;
+}
+std::string seq_key(const std::string& topico, std::int32_t particao) {
+  return topico + '\0' + std::to_string(particao);
+}
+
+}  // namespace
+
 std::int64_t kafka_produzir_uma(const std::string& topico, const std::string& valor,
                                  std::int32_t particao, const ProduceOptions& opt, bool tls,
                                  const BrokerAddr& bootstrap, Metadata& md) {
@@ -515,12 +643,8 @@ bool erro_retriavel_produce(const std::string& what) {
          what.find("(kafka codigo 7)") != std::string::npos;
 }
 
-// InitProducerId (api 22, v0) best-effort para o caminho idempotente
-// (Fase 12-4): devolve {producer_id, epoch} quando o broker suporta;
-// nullopt quando o broker e 0.9-era (mock/testes) ou rejeita. O RecordBatch
-// EOS completo (Produce v3 + CRC32C) fica para a Fase 12-4b com validacao
-// contra broker real; aqui o PID serve como probe de capacidade + base da
-// sequencia por particao.
+// InitProducerId (api 22, v0): devolve {producer_id, epoch} ou nullopt
+// quando o broker nao suporta (0.9-era fecha a conexao) ou rejeita.
 std::optional<std::pair<std::int64_t, std::int16_t>> init_producer_id(const BrokerAddr& addr,
                                                                       bool tls) {
   try {
@@ -542,32 +666,140 @@ std::optional<std::pair<std::int64_t, std::int16_t>> init_producer_id(const Brok
   }
 }
 
+// Produce v3 (RecordBatch idempotente). Devolve o base offset atribuido.
+std::int64_t kafka_produzir_v3(const std::string& topico, const std::string& valor,
+                               const std::string& chave, std::int32_t particao, int acks,
+                               std::int64_t pid, std::int16_t epoch, std::int32_t seq,
+                               bool tls) {
+  Metadata md;
+  const BrokerAddr addr = lider_addr(topico, particao, md, tls);
+  Conn conn(addr.host, addr.port, tls);
+
+  const std::string batch = build_record_batch(valor, chave, pid, epoch, seq);
+
+  std::string payload;
+  put_i16(payload, -1);  // transactional_id = NULL
+  put_i16(payload, static_cast<std::int16_t>(acks));
+  put_i32(payload, 5000);  // timeout ms
+  put_i32(payload, 1);     // [topic_data]
+  put_str(payload, topico);
+  put_i32(payload, 1);  // [data]
+  put_i32(payload, particao);
+  put_i32(payload, static_cast<std::int32_t>(batch.size()));
+  payload += batch;
+
+  const std::string resp = roundtrip(conn, 0, 3, kClientIdCorrBase + 2, payload);
+  Reader r{resp};
+  r.i32();  // throttle_ms
+  const std::int32_t nresp = r.i32();
+  for (std::int32_t i = 0; i < nresp; ++i) {
+    const std::string nome = r.str();
+    const std::int32_t np = r.i32();
+    for (std::int32_t p = 0; p < np; ++p) {
+      const std::int32_t part = r.i32();
+      const std::int16_t erro = r.i16();
+      const std::int64_t offset = r.i64();  // base_offset
+      r.i64();                              // log_append_time_ms
+      r.i64();                              // log_start_offset
+      if (nome == topico && part == particao) {
+        if (erro != 0) die_code("produce no topico '" + topico + "'", erro);
+        return offset;
+      }
+    }
+  }
+  die("resposta de produce sem a particao " + std::to_string(particao));
+}
+
+// PID em cache por bootstrap (evita 1 RTT por produce).
+PidState pid_cached(const std::string& boot_key, const BrokerAddr& bootstrap, bool tls,
+                    const std::string& topico) {
+  {
+    std::lock_guard<std::mutex> lk(eos_mu());
+    const auto it = eos_pids().find(boot_key);
+    if (it != eos_pids().end()) return it->second;
+  }
+  Metadata md = metadata(topico, bootstrap, tls);
+  if (md.brokers.empty()) die("sem brokers no metadata");
+  const BrokerInfo& b = md.brokers.front();
+  const BrokerAddr baddr{b.host, std::to_string(b.port)};
+  const auto pid = init_producer_id(baddr, tls);
+  if (!pid) die("broker sem InitProducerId");
+  {
+    std::lock_guard<std::mutex> lk(eos_mu());
+    eos_pids()[boot_key] = PidState{pid->first, pid->second};
+    return eos_pids()[boot_key];
+  }
+}
+
+void pid_reset(const std::string& boot_key, const std::string& topico, std::int32_t particao) {
+  std::lock_guard<std::mutex> lk(eos_mu());
+  eos_pids().erase(boot_key);
+  eos_seqs().erase(seq_key(topico, particao));
+}
+
+bool erro_pid_invalido(const std::string& what) {
+  return what.find("(kafka codigo 47)") != std::string::npos ||  // UnknownProducerId
+         what.find("(kafka codigo 48)") != std::string::npos ||  // InvalidProducerEpoch
+         what.find("(kafka codigo 45)") != std::string::npos;    // OutOfOrderSequence
+}
+
+bool erro_nao_suportado(const std::string& what) {
+  return what.find("resposta incompleta") != std::string::npos ||
+         what.find("correlation_id") != std::string::npos ||
+         what.find("resposta malformada") != std::string::npos ||
+         what.find("(kafka codigo 35)") != std::string::npos;  // UnsupportedVersion
+}
+
 std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
                             std::int32_t particao, const ProduceOptions& opt, bool tls) {
   if (particao < 0) die("particao deve ser >= 0");
   const int tentativas = opt.tentativas < 1 ? 1 : opt.tentativas;
+  const BrokerAddr bootstrap = bootstrap_addr();
+  const std::string boot_key = bootstrap.host + ":" + bootstrap.port;
 
-  // Probe idempotente (nao fatal se o broker nao suportar).
-  if (opt.idempotente) {
-    try {
-      Metadata md0;
-      const BrokerAddr b0 = bootstrap_addr();
-      md0 = metadata(topico, b0, tls);
-      const BrokerAddr l0 = lider_addr_md(topico, particao, md0);
-      (void)init_producer_id(l0, tls);
-    } catch (const std::exception&) {
-      // Segue para o caminho legado com retry.
+  // Caminho idempotente (RecordBatch + sequencia). Sem suporte no broker,
+  // cai para o legado v1 com acks+retry.
+  bool tenta_eos = opt.idempotente;
+  if (tenta_eos) {
+    std::string ultimo_erro;
+    for (int t = 0; t < tentativas; ++t) {
+      try {
+        const PidState ps = pid_cached(boot_key, bootstrap, tls, topico);
+        std::int32_t seq;
+        {
+          std::lock_guard<std::mutex> lk(eos_mu());
+          seq = eos_seqs()[seq_key(topico, particao)];  // 0 na 1a vez
+        }
+        const std::int64_t off =
+            kafka_produzir_v3(topico, valor, opt.chave, particao, opt.acks, ps.pid, ps.epoch,
+                              seq, tls);
+        {
+          std::lock_guard<std::mutex> lk(eos_mu());
+          eos_seqs()[seq_key(topico, particao)] = seq + 1;
+        }
+        return off;
+      } catch (const std::exception& e) {
+        ultimo_erro = e.what();
+        if (erro_nao_suportado(ultimo_erro)) {
+          tenta_eos = false;  // broker 0.9-era: legado
+          break;
+        }
+        if (erro_pid_invalido(ultimo_erro)) {
+          pid_reset(boot_key, topico, particao);  // novo PID + seq 0
+          continue;
+        }
+        if (t + 1 >= tentativas || !erro_retriavel_produce(ultimo_erro)) throw;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 * (t + 1)));
+      }
     }
+    if (tenta_eos) die(ultimo_erro.empty() ? "falha ao produzir" : ultimo_erro);
   }
 
-  const BrokerAddr bootstrap = bootstrap_addr();
+  // Caminho legado v1 (MessageSet) com acks+retry.
   std::string ultimo_erro;
   for (int t = 0; t < tentativas; ++t) {
     try {
       Metadata md;
-      // Primeiro refresh via bootstrap; nas retentativas o lider_addr refaz
-      // o metadata (novo lider apos eleicao).
-      (void)bootstrap;
       return kafka_produzir_uma(topico, valor, particao, opt, tls, bootstrap, md);
     } catch (const std::exception& e) {
       ultimo_erro = e.what();

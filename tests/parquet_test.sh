@@ -74,7 +74,7 @@ printf '%s\n' "$out"
 
 fail=0
 confere() {
-  printf '%s\n' "$out" | grep -qF "$1" || { echo "saida sem '$1'"; fail=1; }
+  printf '%s\n' "$out" | grep -qF -- "$1" || { echo "saida sem '$1'"; fail=1; }
 }
 confere "linhas: 23"
 confere "0 cliente-0 0 falso"
@@ -288,6 +288,68 @@ out=$(cd "$tmp" && "$BIN" executar leitura_struct.tilt)
 printf '%s\n' "$out"
 confere "10"
 confere "nulo"
+
+# --- 9. tipos fisicos e logicos (Marco 1 / B1) ----------------------------------
+python3 - "$tmp/py_tipos.parquet" <<'PYEOF'
+import datetime
+import decimal
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+tabela = pa.table({
+    "i32": pa.array([1, -2, None], type=pa.int32()),
+    "f32": pa.array([1.5, None, 3.25], type=pa.float32()),
+    "dcm": pa.array([decimal.Decimal("10.50"), None, decimal.Decimal("-3.14")],
+                    type=pa.decimal128(10, 2)),
+    "dt": pa.array([datetime.date(2024, 2, 29), None, datetime.date(1970, 1, 1)],
+                   type=pa.date32()),
+    "ts": pa.array([datetime.datetime(2024, 1, 2, 3, 4, 5, 123000), None,
+                    datetime.datetime(1970, 1, 1)], type=pa.timestamp("us")),
+})
+pq.write_table(tabela, sys.argv[1])
+print("pyarrow: py_tipos.parquet gerado (int32/float/decimal/date/ts)")
+PYEOF
+
+cat > "$tmp/leitura_tipos.tilt" <<'TILTEOF'
+pipeline leitura_tipos:
+  passos:
+    - dados = ler_parquet "py_tipos.parquet"
+    - imprimir tamanho dados
+    - imprimir dados[0].i32, dados[0].f32, dados[0].dcm
+    - imprimir dados[0].dt, dados[0].ts
+    - imprimir dados[1].i32, dados[2].f32, dados[1].f32
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_tipos.tilt)
+printf '%s\n' "$out"
+confere "1 1.5 10.5"
+confere "2024-02-29 2024-01-02T03:04:05.123"
+confere "-2 3.25 nulo"
+
+# escrita int32/float opt-in + volta pelo tilt e pelo pyarrow
+cat > "$tmp/escrita_tipos.tilt" <<'TILTEOF'
+pipeline escrita_tipos:
+  passos:
+    - t = [{ id: 1, x: 1.5 }, { id: -2, x: 2.25 }]
+    - escrever_parquet t, "saida_tipos.parquet", tipos: { id: "int32", x: "float" }
+    - volta = ler_parquet "saida_tipos.parquet"
+    - imprimir tamanho volta
+    - imprimir volta[0].id, volta[0].x
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_tipos.tilt)
+printf '%s\n' "$out"
+confere "1 1.5"
+
+python3 - "$tmp/saida_tipos.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+
+t = pq.read_table(sys.argv[1])
+tipos = [str(t.schema.field(k).type) for k in range(t.num_columns)]
+assert tipos == ["int32", "float"], tipos
+assert t.to_pylist() == [{"id": 1, "x": 1.5}, {"id": -2, "x": 2.25}], t.to_pylist()
+print("pyarrow: int32/float escritos pelo tilt validados")
+PYEOF
 
 [ "$fail" = 0 ] && echo "parquet_test ok"
 exit "$fail"

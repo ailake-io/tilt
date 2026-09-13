@@ -108,12 +108,17 @@ voltar ao comportamento antigo (só memória, sem arquivo — útil para testes 
 pipelines efêmeros). Fonte Kafka com `grupo:` não usa arquivo: o checkpoint é
 o commit de offsets do grupo no broker.
 
-**Checkpoint distribuído (Fase 12-4)**: com `TILT_CHECKPOINT_DIR=<dir
+**Checkpoint distribuído (Marco 1)**: com `TILT_CHECKPOINT_DIR=<dir
 compartilhado>` (NFS/EFS), o `.tilt-offset` mora nesse diretório (mesmo
 basename) em vez do lado da fonte — réplicas diferentes passam a compartilhar
-o offset. Combine com a eleição de líder abaixo para ter escritor único.
-`TILT_CHECKPOINT_DIR=s3://...` ou `kafka:...` falham com erro claro (backends
-S3/Kafka ficam para a Fase 12-4b).
+o offset. Com `TILT_CHECKPOINT_DIR=s3://<bucket>/<prefixo>`, o mapa vai como
+um objeto `s3://<bucket>/<prefixo>/<basename>` (PUT/GET pelo cliente S3).
+Com `TILT_CHECKPOINT_DIR=kafka:<topico>` (bootstrap via `KAFKA_BOOTSTRAP`), o
+mapa inteiro vai como 1 record por save (leitura junta com last-wins, até 500
+records; use tópico com compactação para históricos longos). S3 e Kafka
+reaproveitam os conectores existentes. Combine com a eleição de líder abaixo
+para ter escritor único (leituras concorrentes são seguras; escritas
+concorrentes sem líder usam last-writer-wins).
 
 **Eleição de líder (Fase 12-4)**: com `TILT_LEADER_LEASE=<path do lease>` (em
 filesystem compartilhado) + `TILT_LEADER_TTL=<segundos, default 15>`, cada tick
@@ -194,6 +199,9 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   `texto`→BYTE_ARRAY com anotação **UTF8** (lê como `string` no pyarrow);
   **listas de escalares** (`["a", "b"]`) viram campos REPEATED com anotação
   LIST (`list<string>`, `list<int64>`, `list<double>`, `list<bool>`);
+  **mapas** viram grupos STRUCT recursivos (ver structs abaixo);
+  estreitamento opt-in `tipos: { id: "int32", x: "float" }` grava
+  INT32 (com anotação INTEGER, checagem de alcance) e FLOAT;
 - **nulos**: coluna com `nulo` vira **OPTIONAL** (definition levels RLE,
   valores nulos omitidos das páginas); coluna sem nulos segue REQUIRED.
   Uma coluna só de nulos (ou só de listas vazias) gera erro — o tipo não pode
@@ -210,9 +218,13 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;
 - leitura: **todos os row groups** (concatenados), campos REQUIRED, OPTIONAL
-  e REPEATED, páginas **PLAIN** e **DICTIONARY** (`PLAIN_DICTIONARY`/
-  `RLE_DICTIONARY`) e compressão **gzip/deflate** e **snappy**. Listas de
-  listas, structs e elementos nulos dentro de lista seguem com erro claro.
+  e REPEATED, tipos físicos **INT32/INT64/FLOAT/DOUBLE/BOOLEAN/BYTE_ARRAY/
+  FIXED_LEN_BYTE_ARRAY/INT96**, lógicos **UTF8/STRING/INTEGER/DATE/TIME/
+  TIMESTAMP/DECIMAL** (data/hora/timestamp viram texto ISO, decimal vira
+  decimal, dictionary pages PLAIN ou PLAIN_DICTIONARY), páginas **PLAIN** e
+  **DICTIONARY** (`PLAIN_DICTIONARY`/`RLE_DICTIONARY`) e compressão
+  **gzip/deflate** e **snappy**. Listas de
+  listas, listas de structs e elementos nulos dentro de lista seguem com erro claro.
 
 Exemplo de interoperabilidade com Python (arquivos de outras ferramentas —
 dictionary, gzip/snappy, v2 e listas — são lidos diretamente):
@@ -282,8 +294,10 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   12-5a)**: a cada 10 versões o append materializa
   `_delta_log/<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` e a leitura
   usa o checkpoint mais recente como base (só os JSONs maiores são
-  repassados); arquivos ignorados por delta-rs/Spark. O `_last_checkpoint`
-  padrão fica para a Fase 12-5b.
+  repassados); arquivos ignorados por delta-rs/Spark. **Checkpoint padrão
+  (Marco 1)**: `_last_checkpoint` + `<v>.checkpoint*.parquet` no schema
+  oficial (add/remove/metaData, partitionValues MAP) é honrado como base —
+  usa-se o de maior versão entre padrão e tilt-native.
 
 ## Iceberg (catálogo Hadoop)
 
@@ -387,8 +401,8 @@ os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
 - limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
   local, sem JDBC), lê o que o tilt escreve (sem garantia de tabelas de
   outros escritores além do subconjunto validado) e single-writer (sem locks
-  nem optimistic concurrency). Sem escrita de equality deletes pelo REST e
-  sem `apagar_iceberg` no modo REST.
+  nem optimistic concurrency). No modo REST, `apagar_iceberg` commita via
+  `transactions` (add-snapshot + set-snapshot-ref) como o append.
 
 ### Iceberg REST catalog (opt-in, fase 29)
 
@@ -772,10 +786,12 @@ pipeline eventos:
   (default 3 tentativas em erros retriáveis 5/6/7 com refresh de metadata);
   `texto` vai bruto, demais valores são serializados com `json_dump`.
   `particao` é opcional (default 0); `chave:` (default vazio = NULL) envia a
-  chave do message set (compactação/dedup downstream). `idempotente:` (default
-  verdadeiro) faz probe de `InitProducerId` (API 22) como base da sequência por
-  partição, com fallback legado quando o broker é 0.9-era — o RecordBatch EOS
-  completo (Produce v3 + CRC32C + transações) fica para a Fase 12-4b. O cliente
+  chave do record (compactação/dedup downstream). `idempotente:` (default
+  verdadeiro) usa `InitProducerId` + Produce v3 com RecordBatch (magic 2,
+  `producerId/epoch/sequence`, CRC32C) e sequência por partição: retry repete
+  a mesma sequência e o broker deduplica (sem duplicatas em timeout/reenivo);
+  `UnknownProducerId/OutOfOrderSequence` reinicializam o PID; sem suporte no
+  broker (0.9-era) há fallback para MessageSet v1 com acks+retry. O cliente
   resolve o líder da partição via metadata e conecta nele. `{tls: verdadeiro}`
   liga TLS (todas as conexões da chamada: metadata, produce/fetch e coordenação
   de grupo; ver nota de TLS na seção Redis).
