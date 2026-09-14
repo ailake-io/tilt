@@ -1,7 +1,10 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "runtime/sql_params.hpp"
 #include "runtime/value.hpp"
 
 namespace tilt::rt {
@@ -20,5 +23,16 @@ Value sqlite_query(const std::string& db_path, const std::string& sql);
 // arquivo do banco quando nao existe. Aceita um unico comando por chamada.
 // Lanca std::runtime_error com a mensagem do SQLite em qualquer falha.
 void sqlite_exec(const std::string& db_path, const std::string& sql);
+
+// Idem, com `?` posicionais ligados por tipo (Marco 3 / D1). A contagem tem
+// que bater (erro claro); tipos: inteiro, decimal, texto, logico, nulo.
+void sqlite_exec_params(const std::string& db_path, const std::string& sql,
+                        const std::vector<SqlParam>& params);
+
+// Transacao numa unica conexao (Marco 3 / D1): BEGIN, passos em ordem,
+// COMMIT; qualquer falha faz ROLLBACK e relanca com o indice do passo
+// ("passo N: ..."). Lista vazia = BEGIN+COMMIT imediatos.
+void sqlite_transact(const std::string& db_path,
+                     const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos);
 
 }  // namespace tilt::rt

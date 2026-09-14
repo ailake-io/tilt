@@ -61,6 +61,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pg_roundtrip.tilt)
 
 add_test(
+  NAME sqlite
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sqlite_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sqlite_params.tilt)
+
+add_test(
   NAME parquet
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/parquet_test.sh
           $<TARGET_FILE:tilt>

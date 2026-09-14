@@ -1,7 +1,10 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "runtime/sql_params.hpp"
 #include "runtime/value.hpp"
 
 namespace tilt::rt {
@@ -27,5 +30,16 @@ Value clickhouse_query(const std::string& url, const std::string& sql);
 // Executa um comando SQL sem resultado (INSERT/DDL/ALTER...). Mesmo POST
 // HTTP, sem FORMAT anexado; o corpo da resposta e ignorado. Erros como acima.
 void clickhouse_exec(const std::string& url, const std::string& sql);
+
+// Idem, com `?` ligados como query params `{pN:Tipo}` (Marco 3 / D1):
+// inteiro->Int64, decimal->Float64, texto->String, logico->UInt8,
+// nulo->NULL inline.
+void clickhouse_exec_params(const std::string& url, const std::string& sql,
+                            const std::vector<SqlParam>& params);
+
+// Transacoes multi-comando nao existem no ClickHouse via HTTP: erro claro.
+void clickhouse_transact(
+    const std::string& url,
+    const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos);
 
 }  // namespace tilt::rt

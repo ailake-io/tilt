@@ -658,7 +658,10 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       {"incorporar", 1, {TypeKind::Texto}, {}, TypeKind::Tensor, "incorporar \"modelo\", \"texto\""},
       {"checar_tilt", 1, {TypeKind::Texto}, {}, TypeKind::Mapa, nullptr},
       // conectores
-      {"executar_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown, nullptr},
+      {"executar_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown,
+       "executar_sql \"<url>\", \"<sql>\" [, params]"},
+      {"transacao", 2, {TypeKind::Texto}, {TypeKind::Lista}, TypeKind::Nulo,
+       "transacao \"<url>\", [{ sql:, params:? }]"},
       {"spark_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Tabela,
        "spark_sql \"http://localhost:8998\", \"select * from vendas\""},
       {"spark_executar", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Texto,
@@ -1374,6 +1377,28 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
       };
       check_arg(0, sig->arg0, "um primeiro argumento");
       check_arg(1, sig->arg1, "um segundo argumento");
+      // Marco 3 / D1: 'params' de executar_sql deve ser lista [v1, v2, ...].
+      if (name == "executar_sql" && npos >= 3) {
+        int seen = -1;
+        const Expr* arg = nullptr;
+        for (const auto& ar : e.args) {
+          if (ar.name.empty()) {
+            ++seen;
+            if (seen == 2) arg = ar.value.get();
+          }
+        }
+        if (arg) {
+          const TypeKind t = infer_type(*arg, types);
+          if (t != TypeKind::Unknown && t != TypeKind::Lista) {
+            report(DiagCode::TypeMismatch, arg->span,
+                   "'executar_sql' espera uma lista de parametros como terceiro argumento, "
+                   "encontrou '" +
+                       type_kind_name(t) + "'",
+                   {sig->usage ? "uso: " + std::string(sig->usage)
+                               : "passe os valores como lista: [1, \"ana\"]"});
+          }
+        }
+      }
       // validacao especifica: tamanho/contar so aceitam colecoes e texto
       if ((name == "tamanho" || name == "contar") && npos >= 1) {
         const Expr* arg = first_positional_arg(e);

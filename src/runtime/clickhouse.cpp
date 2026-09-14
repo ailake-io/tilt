@@ -1,12 +1,14 @@
 #include "runtime/clickhouse.hpp"
 
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
 
 #include "runtime/http_client.hpp"
 #include "runtime/json.hpp"
+#include "runtime/sql_params.hpp"
 
 namespace tilt::rt {
 
@@ -227,6 +229,71 @@ void clickhouse_exec(const std::string& url, const std::string& sql) {
   const ClickHouseUrl u = parse_url(url);
   const HttpClientResponse r = post_sql(u, sql);
   if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
+}
+
+// Liga `?` como query params `{pN:Tipo}` (Marco 3 / D1): seguro por
+// construcao (valores vao em param_pN, nunca interpolados). Tipos:
+// inteiro->Int64, decimal->Float64, texto->String, logico->UInt8,
+// nulo->NULL inline (parametro Nullable vazio nao e NULL).
+void clickhouse_exec_params(const std::string& url, const std::string& sql,
+                            const std::vector<SqlParam>& params) {
+  const ClickHouseUrl u = parse_url(url);
+  std::vector<std::pair<std::string, std::string>> query_params;
+  std::size_t nq = 0;
+  std::string reescrito;
+  varrer_sql(sql,
+             [&](std::string& o) {
+               if (nq >= params.size()) {
+                 throw std::runtime_error("faltam parametros: o SQL tem mais '?' que valores");
+               }
+               const SqlParam& p = params[nq++];
+               switch (p.tipo) {
+                 case SqlParam::Tipo::Nulo:
+                   o += "NULL";
+                   break;
+                 case SqlParam::Tipo::Inteiro:
+                   o += "{p" + std::to_string(nq - 1) + ":Int64}";
+                   query_params.emplace_back("param_p" + std::to_string(nq - 1),
+                                             std::to_string(p.i));
+                   break;
+                 case SqlParam::Tipo::Decimal: {
+                   char buf[32];
+                   std::snprintf(buf, sizeof buf, "%.17g", p.d);
+                   o += "{p" + std::to_string(nq - 1) + ":Float64}";
+                   query_params.emplace_back("param_p" + std::to_string(nq - 1), buf);
+                   break;
+                 }
+                 case SqlParam::Tipo::Texto:
+                   o += "{p" + std::to_string(nq - 1) + ":String}";
+                   query_params.emplace_back("param_p" + std::to_string(nq - 1), p.s);
+                   break;
+                 case SqlParam::Tipo::Logico:
+                   o += "{p" + std::to_string(nq - 1) + ":UInt8}";
+                   query_params.emplace_back("param_p" + std::to_string(nq - 1),
+                                             p.b ? "1" : "0");
+                   break;
+               }
+             },
+             reescrito);
+  if (nq != params.size()) {
+    die("esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
+        std::to_string(nq) + " '?'");
+  }
+  std::string destino = monta_url(u, reescrito);
+  for (const auto& [k, v] : query_params) destino += "&" + k + "=" + uri_encode(v);
+  const HttpClientResponse r = http_request("POST", destino, {}, "", 60);
+  if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
+}
+
+void clickhouse_transact(
+    const std::string& url,
+    const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos) {
+  (void)url;
+  (void)passos;
+  // HTTP sem estado: sem BEGIN/COMMIT entre requests. Emular sequencia seria
+  // mentir atomicidade — erro claro em vez disso.
+  die("transacao: clickhouse nao tem transacoes multi-comando via HTTP; execute "
+      "os comandos com executar_sql um a um");
 }
 
 }  // namespace tilt::rt

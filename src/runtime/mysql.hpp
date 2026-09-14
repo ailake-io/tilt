@@ -1,7 +1,10 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "runtime/sql_params.hpp"
 #include "runtime/value.hpp"
 
 namespace tilt::rt {
@@ -24,5 +27,18 @@ Value mysql_query(const std::string& url, const std::string& sql);
 // um unico comando por chamada. Lanca std::runtime_error com a mensagem do
 // servidor em qualquer falha.
 void mysql_exec(const std::string& url, const std::string& sql);
+
+// Idem, com `?` interpolados apos escape pela conexao (Marco 3 / D1):
+// texto com mysql_real_escape_string (charset da conexao), numeros crus,
+// Nulo como NULL. Prepared server-side (mysql_stmt_*) fica para quando
+// houver cobertura com servidor (o layout de MYSQL_BIND difere entre
+// MySQL/MariaDB).
+void mysql_exec_params(const std::string& url, const std::string& sql,
+                       const std::vector<SqlParam>& params);
+
+// Transacao numa unica conexao (Marco 3 / D1): START TRANSACTION, passos,
+// COMMIT; falha faz ROLLBACK e relanca com o indice do passo.
+void mysql_transact(const std::string& url,
+                    const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos);
 
 }  // namespace tilt::rt

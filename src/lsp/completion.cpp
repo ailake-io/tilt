@@ -38,12 +38,12 @@ const std::array<std::string_view, 20> kDeclKeywords = {
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 62> kBuiltins = {
+const std::array<std::string_view, 63> kBuiltins = {
     "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
     "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
     "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
     "incorporar", "dividir_texto", "responder", "tensor",   "zeros",   "checar_tilt",
-    "executar_sql", "spark_sql", "spark_executar",
+    "executar_sql", "transacao", "spark_sql", "spark_executar",
     "ler_parquet", "escrever_parquet", "ler_delta", "escrever_delta", "anexar_delta",
     "ler_iceberg", "escrever_iceberg", "anexar_iceberg", "apagar_iceberg",
     "ler_redis", "escrever_redis", "redis_executar", "redis_lote", "ler_kafka",
@@ -204,6 +204,8 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Valida a sintaxe de um arquivo .tilt.", nullptr},
       {"executar_sql", "executar_sql(conexao, consulta)", "conexao,consulta",
        "Executa uma consulta SQL em uma conexao.", nullptr},
+      {"transacao", "transacao(conexao, passos)", "conexao,passos",
+       "Executa passos SQL atomicamente (BEGIN/COMMIT; ROLLBACK em falha).", nullptr},
       {"es_buscar", "es_buscar(url, dsl)", "url,dsl",
        "Busca no Elasticsearch/OpenSearch (DSL JSON) e devolve {total, hits}.", nullptr},
       {"es_executar", "es_executar(url, metodo, caminho, [corpo])", "url,metodo,caminho,corpo",

@@ -88,5 +88,27 @@ tbl=$("$PSQL" "postgres://postgres@127.0.0.1:$PORTA/postgres" \
   -tAc "select count(*) from clientes")
 [ "$tbl" = "2" ] || { echo "psql: esperado 2 linhas em clientes, obtido '$tbl'"; fail=1; }
 
+# --- params `?` + transacao com ROLLBACK (Marco 3 / D1) --------------------------
+FIX_PARAMS="${3:-${0%/*}/fixtures/postgres_params.tilt}"
+case "$FIX_PARAMS" in
+  /*) ;;
+  *) FIX_PARAMS="$(pwd)/$FIX_PARAMS" ;;
+esac
+out_p=$(cd "$tmp" && env SQL_URL="$PG_URL" "$BIN" executar "$FIX_PARAMS")
+printf '%s\n' "$out_p"
+echo "$out_p" | grep -q "linha: 1 o'brien 10.5" || {
+  echo "params: sem 'linha: 1 o'brien 10.5': $out_p"; fail=1; }
+echo "$out_p" | grep -q "linha: 2 bé nulo" || {
+  echo "params: sem 'linha: 2 bé nulo': $out_p"; fail=1; }
+echo "$out_p" | grep -q "linha: 3 carla 8" || {
+  echo "params: sem 'linha: 3 carla 8': $out_p"; fail=1; }
+echo "$out_p" | grep -q "rollback:" || {
+  echo "params: sem 'rollback:' (transacao com PK duplicada): $out_p"; fail=1; }
+echo "$out_p" | grep -q "linha: 4" && {
+  echo "params: ROLLBACK falhou (id 4 presente): $out_p"; fail=1; }
+tbl_p=$("$PSQL" "postgres://postgres@127.0.0.1:$PORTA/postgres" \
+  -tAc "select count(*) from parametros")
+[ "$tbl_p" = "3" ] || { echo "psql: esperado 3 linhas em parametros, obtido '$tbl_p'"; fail=1; }
+
 [ "$fail" = 0 ] && echo "pg_test ok"
 exit "$fail"

@@ -163,5 +163,20 @@ echo "$cnt" | grep -q "^2" || {
   echo "esperado 2 linhas em eventos, obtido: $cnt"; exit 1;
 }
 
+# 4) params `?` + erro claro de transacao (Marco 3 / D1)
+FIX_PARAMS="${0%/*}/fixtures/clickhouse_params.tilt"
+case "$FIX_PARAMS" in
+  /*) ;;
+  *) FIX_PARAMS="$(pwd)/$FIX_PARAMS" ;;
+esac
+out_p=$(env CLICKHOUSE_URL="clickhouse://default@127.0.0.1:$PORTA/default" SQL_URL="clickhouse://default@127.0.0.1:$PORTA/default" "$BIN" executar "$FIX_PARAMS")
+printf '%s\n' "$out_p"
+echo "$out_p" | grep -q "linha: 1 o'brien 9.5" || {
+  echo "params: sem 'linha: 1 o'brien 9.5': $out_p"; exit 1; }
+echo "$out_p" | grep -q "linha: 2 bé 0" || {
+  echo "params: sem 'linha: 2 bé 0': $out_p"; exit 1; }
+echo "$out_p" | grep -q "sem-transacao:.*transacoes" || {
+  echo "params: sem erro claro de transacao: $out_p"; exit 1; }
+
 echo "clickhouse_test ok"
 exit 0

@@ -1,6 +1,7 @@
 #include "runtime/sqlite.hpp"
 
 #include "runtime/compat.hpp"
+#include "runtime/sql_params.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -39,6 +40,12 @@ struct SqliteApi {
   int (*finalize)(void*) = nullptr;
   int (*close)(void*) = nullptr;
   const char* (*errmsg)(void*) = nullptr;
+  // Ligacao de parametros (Marco 3 / D1): `?` posicionais.
+  int (*bind_int64)(void*, int, long long) = nullptr;
+  int (*bind_double)(void*, int, double) = nullptr;
+  int (*bind_text)(void*, int, const char*, int, void (*)(void*)) = nullptr;
+  int (*bind_null)(void*, int) = nullptr;
+  int (*bind_count)(void*) = nullptr;
 };
 
 template <typename F>
@@ -74,7 +81,12 @@ const SqliteApi& api() {
                     bind_sym(a.lib, a.column_bytes, "sqlite3_column_bytes") &&
                     bind_sym(a.lib, a.finalize, "sqlite3_finalize") &&
                     bind_sym(a.lib, a.close, "sqlite3_close") &&
-                    bind_sym(a.lib, a.errmsg, "sqlite3_errmsg");
+                    bind_sym(a.lib, a.errmsg, "sqlite3_errmsg") &&
+                    bind_sym(a.lib, a.bind_int64, "sqlite3_bind_int64") &&
+                    bind_sym(a.lib, a.bind_double, "sqlite3_bind_double") &&
+                    bind_sym(a.lib, a.bind_text, "sqlite3_bind_text") &&
+                    bind_sym(a.lib, a.bind_null, "sqlite3_bind_null") &&
+                    bind_sym(a.lib, a.bind_count, "sqlite3_bind_parameter_count");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = SqliteApi{};
@@ -206,6 +218,115 @@ void sqlite_exec(const std::string& db_path, const std::string& sql) {
   if (step_rc != kSqliteDone && step_rc != kSqliteRow) {
     die("falha ao executar comando: " + msg);
   }
+}
+
+// Executa um comando ja preparado numa conexao aberta, com `?` ligados por
+// posicao (1-based). Falhas de contagem e de tipo viram erro claro.
+void exec_um(const SqliteApi& db, void* conn, const std::string& sql,
+             const std::vector<SqlParam>& params, const std::string& passo) {
+  void* stmt = nullptr;
+  const int rc = db.prepare_v2(conn, sql.c_str(), static_cast<int>(sql.size()) + 1, &stmt, nullptr);
+  if (rc != kSqliteOk || stmt == nullptr) {
+    const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
+    die(passo + "falha ao preparar comando: " + msg);
+  }
+  const int nq = db.bind_count(stmt);
+  if (nq != static_cast<int>(params.size())) {
+    db.finalize(stmt);
+    die(passo + "esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
+        std::to_string(nq) + " '?'");
+  }
+  // SQLITE_TRANSIENT: copia os bytes na ligacao.
+  void (*transiente)(void*) = reinterpret_cast<void (*)(void*)>(-1);
+  for (std::size_t k = 0; k < params.size(); ++k) {
+    const int idx = static_cast<int>(k + 1);
+    const SqlParam& p = params[k];
+    int brc = kSqliteOk;
+    switch (p.tipo) {
+      case SqlParam::Tipo::Nulo: brc = db.bind_null(stmt, idx); break;
+      case SqlParam::Tipo::Inteiro: brc = db.bind_int64(stmt, idx, p.i); break;
+      case SqlParam::Tipo::Decimal: brc = db.bind_double(stmt, idx, p.d); break;
+      case SqlParam::Tipo::Texto:
+        brc = db.bind_text(stmt, idx, p.s.c_str(), static_cast<int>(p.s.size()), transiente);
+        break;
+      case SqlParam::Tipo::Logico: brc = db.bind_int64(stmt, idx, p.b ? 1 : 0); break;
+    }
+    if (brc != kSqliteOk) {
+      const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
+      db.finalize(stmt);
+      die(passo + "falha ao ligar parametro " + std::to_string(idx) + ": " + msg);
+    }
+  }
+  const int step_rc = db.step(stmt);
+  const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
+  db.finalize(stmt);
+  if (step_rc != kSqliteDone && step_rc != kSqliteRow) {
+    die(passo + "falha ao executar comando: " + msg);
+  }
+  // SELECT acidental num passo: consome as linhas para nao travar a conexao.
+  // (O valor e descartado; leitura e via fonte/ler.)
+}
+
+void sqlite_exec_params(const std::string& db_path, const std::string& sql,
+                        const std::vector<SqlParam>& params) {
+  const SqliteApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("sqlite3.dll nao encontrada; instale o SQLite para Windows");
+#else
+    die("libsqlite3.so.0 nao encontrada; instale o pacote libsqlite3");
+#endif
+  }
+  void* conn = nullptr;
+  const int flags = kSqliteOpenReadwrite | kSqliteOpenCreate;
+  if (db.open_v2(db_path.c_str(), &conn, flags, nullptr) != kSqliteOk) {
+    die("nao foi possivel abrir o banco '" + db_path + "'");
+  }
+  try {
+    exec_um(db, conn, sql, params, "");
+  } catch (...) {
+    db.close(conn);
+    throw;
+  }
+  db.close(conn);
+}
+
+void sqlite_transact(const std::string& db_path,
+                     const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos) {
+  const SqliteApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("sqlite3.dll nao encontrada; instale o SQLite para Windows");
+#else
+    die("libsqlite3.so.0 nao encontrada; instale o pacote libsqlite3");
+#endif
+  }
+  void* conn = nullptr;
+  const int flags = kSqliteOpenReadwrite | kSqliteOpenCreate;
+  if (db.open_v2(db_path.c_str(), &conn, flags, nullptr) != kSqliteOk) {
+    die("nao foi possivel abrir o banco '" + db_path + "'");
+  }
+  try {
+    exec_um(db, conn, "BEGIN", {}, "");
+    for (std::size_t k = 0; k < passos.size(); ++k) {
+      try {
+        exec_um(db, conn, passos[k].first, passos[k].second,
+                "passo " + std::to_string(k + 1) + ": ");
+      } catch (...) {
+        try {
+          exec_um(db, conn, "ROLLBACK", {}, "");
+        } catch (...) {
+          // Mantem o erro original do passo.
+        }
+        throw;
+      }
+    }
+    exec_um(db, conn, "COMMIT", {}, "");
+  } catch (...) {
+    db.close(conn);
+    throw;
+  }
+  db.close(conn);
 }
 
 }  // namespace tilt::rt

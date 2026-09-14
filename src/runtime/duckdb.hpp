@@ -1,7 +1,10 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "runtime/sql_params.hpp"
 #include "runtime/value.hpp"
 
 namespace tilt::rt {
@@ -22,5 +25,15 @@ Value duckdb_query(const std::string& db_path, const std::string& sql);
 // arquivo do banco quando nao existe. Aceita um unico comando por chamada.
 // Lanca std::runtime_error com a mensagem do DuckDB em qualquer falha.
 void duckdb_exec(const std::string& db_path, const std::string& sql);
+
+// Idem, com `?` posicionais ligados por tipo via prepared statements
+// (Marco 3 / D1).
+void duckdb_exec_params(const std::string& db_path, const std::string& sql,
+                        const std::vector<SqlParam>& params);
+
+// Transacao numa unica conexao (Marco 3 / D1): BEGIN, passos, COMMIT;
+// falha faz ROLLBACK e relanca com o indice do passo.
+void duckdb_transact(const std::string& db_path,
+                     const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos);
 
 }  // namespace tilt::rt

@@ -1,6 +1,7 @@
 #include "runtime/duckdb.hpp"
 
 #include "runtime/compat.hpp"
+#include "runtime/sql_params.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -49,6 +50,21 @@ struct DuckdbApi {
   void (*free_value)(void*) = nullptr;
   void (*disconnect)(void**) = nullptr;
   void (*close)(void**) = nullptr;
+  // Statements preparados (Marco 3 / D1): `?` posicionais (1-based).
+  // Opcional: libs antigas sem esses simbolos mantem o caminho legado
+  // (prepared_ok == false; exec_params/transact falham com mensagem clara).
+  bool prepared_ok = false;
+  int (*prepare)(void*, const char*, void**) = nullptr;
+  void (*destroy_prepare)(void**) = nullptr;
+  const char* (*prepare_error)(void*) = nullptr;
+  int (*nparams)(void*, std::uint64_t*) = nullptr;
+  int (*bind_boolean)(void*, std::uint64_t, bool) = nullptr;
+  int (*bind_int8)(void*, std::uint64_t, std::int8_t) = nullptr;
+  int (*bind_int64)(void*, std::uint64_t, std::int64_t) = nullptr;
+  int (*bind_double)(void*, std::uint64_t, double) = nullptr;
+  int (*bind_varchar)(void*, std::uint64_t, const char*) = nullptr;
+  int (*bind_null)(void*, std::uint64_t) = nullptr;
+  int (*execute_prepared)(void*, void*) = nullptr;
 };
 
 template <typename F>
@@ -87,6 +103,18 @@ const DuckdbApi& api() {
                     bind_sym(a.lib, a.free_value, "duckdb_free") &&
                     bind_sym(a.lib, a.disconnect, "duckdb_disconnect") &&
                     bind_sym(a.lib, a.close, "duckdb_close");
+    // Prepared opcional (nao derruba o legado se a lib for antiga).
+    a.prepared_ok = bind_sym(a.lib, a.prepare, "duckdb_prepare") &&
+                    bind_sym(a.lib, a.destroy_prepare, "duckdb_destroy_prepare") &&
+                    bind_sym(a.lib, a.prepare_error, "duckdb_prepare_error") &&
+                    bind_sym(a.lib, a.nparams, "duckdb_nparams") &&
+                    bind_sym(a.lib, a.bind_boolean, "duckdb_bind_boolean") &&
+                    bind_sym(a.lib, a.bind_int8, "duckdb_bind_int8") &&
+                    bind_sym(a.lib, a.bind_int64, "duckdb_bind_int64") &&
+                    bind_sym(a.lib, a.bind_double, "duckdb_bind_double") &&
+                    bind_sym(a.lib, a.bind_varchar, "duckdb_bind_varchar") &&
+                    bind_sym(a.lib, a.bind_null, "duckdb_bind_null") &&
+                    bind_sym(a.lib, a.execute_prepared, "duckdb_execute_prepared");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = DuckdbApi{};
@@ -252,6 +280,107 @@ void duckdb_exec(const std::string& db_path, const std::string& sql) {
     die("falha ao executar comando: " + msg);
   }
   db.destroy_result(&result);
+}
+
+// Executa um prepared numa conexao aberta, com `?` ligados por posicao
+// (1-based). DuckDB PreparedStatement e um ponteiro opaco alocado por
+// duckdb_prepare e liberado por duckdb_destroy_prepare.
+void exec_um(const DuckdbApi& db, void* conn, const std::string& sql,
+             const std::vector<SqlParam>& params, const std::string& passo) {
+  if (!db.prepared_ok) {
+    die(passo +
+        "parametros exigem prepared statements (libduckdb sem duckdb_prepare; atualize a lib)");
+  }  void* prep = nullptr;
+  if (db.prepare(conn, sql.c_str(), &prep) != kDuckdbSuccess || prep == nullptr) {
+    const char* err = db.prepare_error(prep);
+    std::string msg = err ? err : "erro desconhecido";
+    if (prep) db.destroy_prepare(&prep);
+    die(passo + "falha ao preparar comando: " + msg);
+  }
+  std::uint64_t nq = 0;
+  if (db.nparams(prep, &nq) != kDuckdbSuccess) {
+    db.destroy_prepare(&prep);
+    die(passo + "falha ao inspecionar parametros");
+  }
+  if (nq != params.size()) {
+    db.destroy_prepare(&prep);
+    die(passo + "esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
+        std::to_string(nq) + " '?'");
+  }
+  for (std::size_t k = 0; k < params.size(); ++k) {
+    const std::uint64_t idx = static_cast<std::uint64_t>(k + 1);
+    const SqlParam& p = params[k];
+    int brc = kDuckdbSuccess;
+    switch (p.tipo) {
+      case SqlParam::Tipo::Nulo: brc = db.bind_null(prep, idx); break;
+      case SqlParam::Tipo::Inteiro: brc = db.bind_int64(prep, idx, p.i); break;
+      case SqlParam::Tipo::Decimal: brc = db.bind_double(prep, idx, p.d); break;
+      case SqlParam::Tipo::Texto: brc = db.bind_varchar(prep, idx, p.s.c_str()); break;
+      case SqlParam::Tipo::Logico: brc = db.bind_boolean(prep, idx, p.b); break;
+    }
+    if (brc != kDuckdbSuccess) {
+      const char* err = db.prepare_error(prep);
+      std::string msg = err ? err : "erro desconhecido";
+      db.destroy_prepare(&prep);
+      die(passo + "falha ao ligar parametro " + std::to_string(idx) + ": " + msg);
+    }
+  }
+  DuckdbResult result;
+  const int rc = db.execute_prepared(prep, &result);
+  const std::string msg = rc != kDuckdbSuccess ? result_error(db, &result) : "";
+  db.destroy_result(&result);
+  db.destroy_prepare(&prep);
+  if (rc != kDuckdbSuccess) {
+    die(passo + "falha ao executar comando: " + msg);
+  }
+}
+
+void duckdb_exec_params(const std::string& db_path, const std::string& sql,
+                        const std::vector<SqlParam>& params) {
+  const DuckdbApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("libduckdb nao encontrada: instale o pacote duckdb (duckdb.dll no PATH)");
+#else
+    die("libduckdb nao encontrada: instale o pacote duckdb");
+#endif
+  }
+  Conn conn(db, db_path);
+  exec_um(db, conn.connection, sql, params, "");
+}
+
+void duckdb_transact(const std::string& db_path,
+                     const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos) {
+  const DuckdbApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("libduckdb nao encontrada: instale o pacote duckdb (duckdb.dll no PATH)");
+#else
+    die("libduckdb nao encontrada: instale o pacote duckdb");
+#endif
+  }
+  auto simples = [&](void* conn, const char* sql) {
+    DuckdbResult result;
+    const int rc = db.query(conn, sql, &result);
+    const std::string msg = rc != kDuckdbSuccess ? result_error(db, &result) : "";
+    db.destroy_result(&result);
+    if (rc != kDuckdbSuccess) die(std::string("falha em ") + sql + ": " + msg);
+  };
+  Conn conn(db, db_path);
+  simples(conn.connection, "BEGIN TRANSACTION");
+  for (std::size_t k = 0; k < passos.size(); ++k) {
+    try {
+      exec_um(db, conn.connection, passos[k].first, passos[k].second,
+              "passo " + std::to_string(k + 1) + ": ");
+    } catch (...) {
+      try {
+        simples(conn.connection, "ROLLBACK");
+      } catch (...) {
+      }
+      throw;
+    }
+  }
+  simples(conn.connection, "COMMIT");
 }
 
 }  // namespace tilt::rt

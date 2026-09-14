@@ -38,7 +38,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   o subconjunto evidente — operadores aritméticos/comparação com ambos os
   lados de tipo conhecido (rejeita `lista + 1`, `"a" - 1`, `"a" < 1`, mas
   aceita `texto + numero` e `"a" < "b"`, que o runtime suporta), builtins com
-  aridade e 1º/2º argumento tipados (ex.: `tamanho 42`, `ler_csv 123`),
+  aridade e 1º/2º argumento tipados (ex.: `tamanho 42`, `ler_csv 123`;
+  `executar_sql` valida ainda o 3º (`params` deve ser lista) e `transacao`
+  exige `(texto, lista)`),
   métodos/campos de receiver conhecido (ex.: `"abc".matmul`, `t.filtrar` em
   tensor, `5.maiusculas`), retorno de `funcao` (anotado `-> T` ou inferido do
   corpo por unanimidade dos `retornar`), campos de mapas (literais e
@@ -214,12 +216,19 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `S3_ENDPOINT`.
 - Bancos relacionais: `fonte tipo: sqlite/postgres/duckdb/mysql/clickhouse`
   é somente leitura (consultas SELECT); gravação via `executar_sql`
-  (INSERT/UPDATE/DELETE/DDL, um comando por chamada, sem prepared statements
-  nem transações explícitas); Postgres carrega `libpq.so.5`, SQLite
+  (INSERT/UPDATE/DELETE/DDL, um comando por chamada, com `?` posicionais via
+  lista `params` opcional) e `transacao` (BEGIN/COMMIT numa única conexão,
+  ROLLBACK com o índice do passo; ClickHouse sem transações — erro claro);
+  Postgres carrega `libpq.so.5`, SQLite
   `libsqlite3.so.0`, DuckDB `libduckdb.so` e MySQL/MariaDB `libmariadb.so.3`
   ou `libmysqlclient.so*` via `dlopen` — precisam estar instalados no sistema.
-  No MySQL/MariaDB: sem prepared statements (escaping é responsabilidade do
-  autor do SQL), sem TLS explícito (o canal seguro depende da lib cliente
+  Ligação: postgres `PQexecParams` (`?`→`$N`), sqlite `sqlite3_bind_*`,
+  duckdb prepared (`duckdb_prepare`; lib antiga sem os símbolos falha com erro
+  claro em vez do caminho legado), clickhouse `{pN:Tipo}` via query params
+  (nulo→`NULL` inline). No MySQL/MariaDB: sem prepared server-side
+  (`mysql_stmt_*` fica para depois — o layout de `MYSQL_BIND` difere entre
+  MySQL/MariaDB; a interpolação usa `mysql_real_escape_string` da conexão),
+  sem TLS explícito (o canal seguro depende da lib cliente
   carregada — contra servidores 8.0+ com `caching_sha2_password`, prefira
   usuário `mysql_native_password` ou SSL fora do escopo), consulta por
   conexão. No ClickHouse: HTTP nativo pelo cliente genérico (sem `dlopen`),

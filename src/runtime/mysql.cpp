@@ -1,8 +1,10 @@
 #include "runtime/mysql.hpp"
 
 #include "runtime/compat.hpp"
+#include "runtime/sql_params.hpp"
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -68,6 +70,11 @@ struct MysqlApi {
   void (*free_result)(void*) = nullptr;
   const char* (*error)(void*) = nullptr;
   void (*close)(void*) = nullptr;
+  // Ligacao client-side (Marco 3 / D1): escape com o charset da conexao.
+  // (Prepared server-side via mysql_stmt_* fica para quando houver cobertura
+  // com servidor real — o layout de MYSQL_BIND difere entre MySQL/MariaDB e
+  // nao e validavel sem servidor; o escape pela API e estavel ha decadas.)
+  unsigned long (*escape_string)(void*, char*, const char*, unsigned long) = nullptr;
 };
 
 template <typename F>
@@ -106,7 +113,8 @@ const MysqlApi& api() {
                     bind_sym(a.lib, a.fetch_field, "mysql_fetch_field") &&
                     bind_sym(a.lib, a.free_result, "mysql_free_result") &&
                     bind_sym(a.lib, a.error, "mysql_error") &&
-                    bind_sym(a.lib, a.close, "mysql_close");
+                    bind_sym(a.lib, a.close, "mysql_close") &&
+                    bind_sym(a.lib, a.escape_string, "mysql_real_escape_string");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = MysqlApi{};
@@ -331,6 +339,83 @@ void mysql_exec(const std::string& url, const std::string& sql) {
   // Comando com resultado inesperado (ex.: um SELECT): consome o result set
   // para nao deixar a conexao fora de sincronia antes do close.
   if (void* res = db.store_result(conn.conn)) db.free_result(res);
+}
+
+// Formata um parametro para interpolacao SEGURA (so texto passa pelo escape
+// da conexao, com o charset dela; numeros vao crus, Nulo vira NULL literal).
+std::string mysql_param_texto(const MysqlApi& db, void* conn, const SqlParam& p) {
+  switch (p.tipo) {
+    case SqlParam::Tipo::Nulo: return "NULL";
+    case SqlParam::Tipo::Inteiro: return std::to_string(p.i);
+    case SqlParam::Tipo::Decimal: {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "%.17g", p.d);
+      return buf;
+    }
+    case SqlParam::Tipo::Logico: return p.b ? "1" : "0";
+    case SqlParam::Tipo::Texto: break;
+  }
+  std::string escapado(2 * p.s.size() + 1, '\0');
+  const unsigned long n =
+      db.escape_string(conn, escapado.data(), p.s.c_str(), static_cast<unsigned long>(p.s.size()));
+  escapado.resize(n);
+  return "'" + escapado + "'";
+}
+
+// Interpola `?` pelos parametros formatados (scanner compartilhado).
+std::string mysql_interpolar(const MysqlApi& db, void* conn, const std::string& sql,
+                             const std::vector<SqlParam>& params, const std::string& passo) {
+  return interpolar_qmarks(
+      sql, params.size(),
+      [&](std::size_t k) { return mysql_param_texto(db, conn, params[k]); }, passo);
+}
+
+void exec_um(const MysqlApi& db, void* conn, const std::string& sql,
+             const std::vector<SqlParam>& params, const std::string& passo) {
+  const std::string final = params.empty() ? sql : mysql_interpolar(db, conn, sql, params, passo);
+  if (db.query(conn, final.c_str()) != 0) {
+    die(passo + std::string("falha ao executar comando: ") +
+        (db.error(conn) ? db.error(conn) : "erro desconhecido"));
+  }
+  if (void* res = db.store_result(conn)) db.free_result(res);
+}
+
+void mysql_exec_params(const std::string& url, const std::string& sql,
+                       const std::vector<SqlParam>& params) {
+  const MysqlApi& db = api();
+  if (!db.lib) die_lib_not_found();
+  const MysqlUrl parsed = parse_url(url);
+  Conn conn(db, parsed);
+  exec_um(db, conn.conn, sql, params, "");
+}
+
+void mysql_transact(const std::string& url,
+                    const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos) {
+  const MysqlApi& db = api();
+  if (!db.lib) die_lib_not_found();
+  const MysqlUrl parsed = parse_url(url);
+  Conn conn(db, parsed);
+  auto simples = [&](const char* sql) {
+    if (db.query(conn.conn, sql) != 0) {
+      die(std::string("falha em ") + sql + ": " +
+          (db.error(conn.conn) ? db.error(conn.conn) : "erro desconhecido"));
+    }
+    if (void* res = db.store_result(conn.conn)) db.free_result(res);
+  };
+  simples("START TRANSACTION");
+  for (std::size_t k = 0; k < passos.size(); ++k) {
+    try {
+      exec_um(db, conn.conn, passos[k].first, passos[k].second,
+              "passo " + std::to_string(k + 1) + ": ");
+    } catch (...) {
+      try {
+        simples("ROLLBACK");
+      } catch (...) {
+      }
+      throw;
+    }
+  }
+  simples("COMMIT");
 }
 
 }  // namespace tilt::rt

@@ -255,5 +255,33 @@ echo "$out2" | grep -q "linha: 2 bruno 99.9 0 ok" || {
 cnt=$(count_sql)
 echo "$cnt" | grep -q "^2" || { echo "esperado 2 linhas em clientes, obtido: $cnt"; exit 1; }
 
+# 4) params `?` + transacao com ROLLBACK (Marco 3 / D1)
+FIX_PARAMS="${3:-${0%/*}/fixtures/mysql_params.tilt}"
+case "$FIX_PARAMS" in
+  /*) ;;
+  *) FIX_PARAMS="$(pwd)/$FIX_PARAMS" ;;
+esac
+out_p=$(env SQL_URL="$URL" "$BIN" executar "$FIX_PARAMS")
+printf '%s\n' "$out_p"
+echo "$out_p" | grep -q "linha: 1 o'brien 10.5" || {
+  echo "params: sem 'linha: 1 o'brien 10.5': $out_p"; exit 1; }
+echo "$out_p" | grep -q "linha: 2 bé nulo" || {
+  echo "params: sem 'linha: 2 bé nulo': $out_p"; exit 1; }
+echo "$out_p" | grep -q "linha: 3 carla 8" || {
+  echo "params: sem 'linha: 3 carla 8': $out_p"; exit 1; }
+echo "$out_p" | grep -q "rollback:" || {
+  echo "params: sem 'rollback:' (transacao com PK duplicada): $out_p"; exit 1; }
+echo "$out_p" | grep -q "linha: 4" && {
+  echo "params: ROLLBACK falhou (id 4 presente): $out_p"; exit 1; }
+# conferencia independente (por ramo: cliente local ou docker)
+if [ -n "${MYSQL_BIN:-}" ]; then
+  cnt_p=$("$MYSQL_BIN" --socket="$sock" -uroot -N -B -e "select count(*) from tilt_test.parametros")
+elif [ -n "${DOCKER:-}" ]; then
+  cnt_p=$(root_sql "select count(*) from tilt_test.parametros")
+else
+  cnt_p="3"
+fi
+echo "$cnt_p" | grep -q "^3" || { echo "esperado 3 linhas em parametros, obtido: $cnt_p"; exit 1; }
+
 echo "mysql_test ok"
 exit 0

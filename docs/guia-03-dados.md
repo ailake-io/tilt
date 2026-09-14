@@ -536,12 +536,28 @@ ausentes); o ClickHouse fala HTTP nativo pelo cliente genérico do runtime
 (subprocesso `curl`, mesmo padrão do s3/qdrant/iceberg REST).
 
 Para comandos sem resultado — `INSERT`, `UPDATE`, `DELETE`, DDL — use o
-builtin `executar_sql url, sql`, que aceita URL `postgres://` (ou
+builtin `executar_sql url, sql [, params]`, que aceita URL `postgres://` (ou
 `postgresql://`), `sqlite://`, `duckdb://`, `mysql://` (ou `mariadb://`) e
 `clickhouse://` (SQLite/DuckDB: o SQL roda direto no arquivo; o banco é criado
 quando não existe). Retorna `nulo`; em caso de erro (ex.: violação de
 constraint) lança a mensagem do servidor, capturável com `tentar`/`capturar`.
 Um comando por chamada.
+
+Valores nunca vão interpolados no SQL: passe `?` como placeholder e os valores
+numa lista `[v1, v2, ...]` (inteiro, decimal, texto, logico ou nulo). O `?`
+dentro de literais (`'...'`, `"..."`) e comentários (`--`, `/* */`) é
+ignorado. Ligação por backend: postgres via `PQexecParams` (`?` vira `$N`),
+sqlite por `sqlite3_bind_*`, duckdb por prepared statements (`duckdb_prepare`;
+lib antiga sem esses símbolos falha com erro claro), clickhouse como query
+params `{pN:Tipo}` (nulo vira `NULL` inline) e mysql por interpolação com
+escape da conexão (`mysql_real_escape_string`). Contagem divergente (`?` a
+mais ou a menos) é erro claro antes da rede.
+
+Para passos atômicos use `transacao url, [{ sql:, params:? }]`: abre uma
+conexão, roda `BEGIN`, executa os passos em ordem e faz `COMMIT`; qualquer
+falha faz `ROLLBACK` e relança com o índice do passo (`passo 2: ...`).
+ClickHouse não tem transações multi-comando via HTTP — `transacao` nele é erro
+claro (execute os comandos com `executar_sql` um a um).
 
 ```tilt
 fonte clientes:
@@ -579,6 +595,12 @@ pipeline etl:
         "update pedidos set status = 'enviado' where id = 42"
     - executar_sql "clickhouse://default@localhost:8123/meubanco",
         "insert into eventos (dia) values ('2024-03-01')"
+    - executar_sql "postgres://localhost:5432/app",
+        "insert into clientes (nome, idade) values (?, ?)", ["o'brien", 30]
+    - transacao "postgres://localhost:5432/app", [
+        { sql: "insert into clientes (nome) values (?)", params: ["ana"] },
+        { sql: "update clientes set idade = idade + ? where nome = ?", params: [1, "ana"] },
+      ]
     - novos = ler clientes
     - local = ler metricas
     - por_regiao = ler analitico

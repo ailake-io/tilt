@@ -57,5 +57,24 @@ echo "$out" | grep -q "erro-sql:.*syntax error" || {
   echo "saida sem erro de SQL invalido capturado: $out"; fail=1;
 }
 
+# --- params `?` + transacao com ROLLBACK (Marco 3 / D1) --------------------------
+FIX_PARAMS="${3:-${0%/*}/fixtures/duckdb_params.tilt}"
+case "$FIX_PARAMS" in
+  /*) ;;
+  *) FIX_PARAMS="$(pwd)/$FIX_PARAMS" ;;
+esac
+out_p=$(env SQL_URL="$DUCKDB_URL" "$BIN" executar "$FIX_PARAMS")
+printf '%s\n' "$out_p"
+echo "$out_p" | grep -q "linha: 1 o'brien 10.5" || {
+  echo "params: sem 'linha: 1 o'brien 10.5': $out_p"; fail=1; }
+echo "$out_p" | grep -q "linha: 2 bé nulo" || {
+  echo "params: sem 'linha: 2 bé nulo': $out_p"; fail=1; }
+echo "$out_p" | grep -q "linha: 3 carla 8" || {
+  echo "params: sem 'linha: 3 carla 8': $out_p"; fail=1; }
+echo "$out_p" | grep -q "rollback:" || {
+  echo "params: sem 'rollback:' (transacao com PK duplicada): $out_p"; fail=1; }
+echo "$out_p" | grep -q "linha: 4" && {
+  echo "params: ROLLBACK falhou (id 4 presente): $out_p"; fail=1; }
+
 [ "$fail" = 0 ] && echo "duckdb_test ok"
 exit "$fail"

@@ -1,7 +1,10 @@
 #pragma once
 
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "runtime/sql_params.hpp"
 #include "runtime/value.hpp"
 
 namespace tilt::rt {
@@ -22,5 +25,14 @@ Value postgres_query(const std::string& url, const std::string& sql);
 // Nao verifica o tipo de comando; erro do servidor vira excecao com a
 // mensagem do Postgres. Para SELECT use postgres_query().
 void postgres_exec(const std::string& url, const std::string& sql);
+
+// Idem, com `?` posicionais ligados em texto via PQexecParams (Marco 3 / D1).
+void postgres_exec_params(const std::string& url, const std::string& sql,
+                          const std::vector<SqlParam>& params);
+
+// Transacao numa unica conexao (Marco 3 / D1): BEGIN, passos, COMMIT;
+// falha faz ROLLBACK e relanca com o indice do passo.
+void postgres_transact(const std::string& url,
+                       const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos);
 
 }  // namespace tilt::rt

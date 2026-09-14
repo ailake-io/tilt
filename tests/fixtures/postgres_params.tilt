@@ -1,0 +1,26 @@
+# Params `?` + transacao com ROLLBACK (Marco 3 / D1). URL vem de SQL_URL.
+fonte parametros:
+  tipo: postgres
+  url: env "SQL_URL"
+  consulta: "select id, nome, nota from parametros order by id"
+
+pipeline params:
+  passos:
+    - url = env "SQL_URL"
+    - executar_sql url, "create table parametros (id integer primary key, nome text not null, nota decimal)"
+    - executar_sql url, "insert into parametros values (?, ?, ?)", [1, "o'brien", 9.5]
+    - executar_sql url, "insert into parametros values (?, ?, ?)", [2, "bé", nulo]
+    - transacao url, [
+        { sql: "insert into parametros values (?, ?, ?)", params: [3, "carla", 7.0] },
+        { sql: "update parametros set nota = nota + ?", params: [1.0] },
+      ]
+    - tentar:
+        transacao url, [
+          { sql: "insert into parametros values (?, ?, ?)", params: [4, "duda", 5.0] },
+          { sql: "insert into parametros values (?, ?, ?)", params: [1, "choque", 0.0] },
+        ]
+    capturar erro:
+      imprimir "rollback:", erro
+    - linhas = ler parametros
+    - para cada l em linhas:
+        imprimir "linha:", l.id, l.nome, l.nota

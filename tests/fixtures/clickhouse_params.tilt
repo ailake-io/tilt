@@ -1,0 +1,20 @@
+# Params `?` no ClickHouse (Marco 3 / D1): Memory engine (sem MergeTree).
+# Transacao nao existe via HTTP: erro claro e capturado.
+fonte eventos:
+  tipo: clickhouse
+  url: env "SQL_URL"
+  consulta: "select id, nome, nota from params_ch order by id"
+
+pipeline params_ch:
+  passos:
+    - url = env "SQL_URL"
+    - executar_sql url, "create table params_ch (id Int64, nome String, nota Float64) engine = Memory"
+    - executar_sql url, "insert into params_ch values (?, ?, ?)", [1, "o'brien", 9.5]
+    - executar_sql url, "insert into params_ch values (?, ?, ?)", [2, "bé", nulo]
+    - tentar:
+        transacao url, [{ sql: "insert into params_ch values (3, 'x', 1.0)" }]
+    capturar erro:
+      imprimir "sem-transacao:", erro
+    - linhas = ler eventos
+    - para cada l em linhas:
+        imprimir "linha:", l.id, l.nome, l.nota

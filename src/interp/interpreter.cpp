@@ -3927,24 +3927,118 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     auto a = args();
     if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
       fail(call.span,
-           "executar_sql espera (url, sql), ex.: executar_sql "
-           "\"postgres://localhost:5432/app\", \"insert into t (nome) values ('ana')\"");
+           "executar_sql espera (url, sql [, params]), ex.: executar_sql "
+           "\"postgres://localhost:5432/app\", \"insert into t (nome) values ($1)\", [\"ana\"] "
+           "— use '?' como placeholder (vira $N no postgres e {pN} no clickhouse)");
     }
     const std::string& url = a[0].s;
+    // Params opcionais (3o arg, lista de escalares; Marco 3 / D1).
+    std::vector<rt::SqlParam> params;
+    bool com_params = false;
+    if (a.size() >= 3) {
+      if (a[2].kind != ValueKind::Lista || !a[2].list) {
+        fail(call.span, "executar_sql: 'params' deve ser uma lista [v1, v2, ...]");
+      }
+      com_params = true;
+      for (const Value& v : *a[2].list) {
+        try {
+          params.push_back(rt::param_de_valor(v, "executar_sql"));
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
+    }
     try {
       if (url.rfind("postgres://", 0) == 0 || url.rfind("postgresql://", 0) == 0) {
-        rt::postgres_exec(url, a[1].s);
+        if (com_params) {
+          rt::postgres_exec_params(url, a[1].s, params);
+        } else {
+          rt::postgres_exec(url, a[1].s);
+        }
       } else if (url.rfind("sqlite://", 0) == 0) {
-        rt::sqlite_exec(url.substr(9), a[1].s);
+        if (com_params) {
+          rt::sqlite_exec_params(url.substr(9), a[1].s, params);
+        } else {
+          rt::sqlite_exec(url.substr(9), a[1].s);
+        }
       } else if (url.rfind("duckdb://", 0) == 0) {
-        rt::duckdb_exec(url.substr(9), a[1].s);
+        if (com_params) {
+          rt::duckdb_exec_params(url.substr(9), a[1].s, params);
+        } else {
+          rt::duckdb_exec(url.substr(9), a[1].s);
+        }
       } else if (url.rfind("mysql://", 0) == 0 || url.rfind("mariadb://", 0) == 0) {
-        rt::mysql_exec(url, a[1].s);
+        if (com_params) {
+          rt::mysql_exec_params(url, a[1].s, params);
+        } else {
+          rt::mysql_exec(url, a[1].s);
+        }
       } else if (url.rfind("clickhouse://", 0) == 0) {
-        rt::clickhouse_exec(url, a[1].s);
+        if (com_params) {
+          rt::clickhouse_exec_params(url, a[1].s, params);
+        } else {
+          rt::clickhouse_exec(url, a[1].s);
+        }
       } else {
         fail(call.span,
              "executar_sql: url '" + url +
+                 "' invalida (use postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://)");
+      }
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "transacao") {
+    // Marco 3 / D1: passos atomicos numa unica conexao (BEGIN/COMMIT de
+    // verdade; ROLLBACK com o indice do passo em caso de falha).
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Lista ||
+        !a[1].list) {
+      fail(call.span,
+           "transacao espera (url, passos), ex.: transacao \"postgres://h/db\", "
+           "[{ sql: \"insert ... values (?, ?)\", params: [1, \"ana\"] }] "
+           "(clickhouse nao tem transacoes: erro claro)");
+    }
+    const std::string& url = a[0].s;
+    std::vector<std::pair<std::string, std::vector<rt::SqlParam>>> passos;
+    for (const Value& item : *a[1].list) {
+      if (item.kind != ValueKind::Mapa || !item.map) {
+        fail(call.span, "transacao: cada passo deve ser um mapa { sql:, params:? }");
+      }
+      const Value* sql = item.map->find("sql");
+      if (!sql || sql->kind != ValueKind::Texto) {
+        fail(call.span, "transacao: cada passo precisa de 'sql' texto");
+      }
+      std::vector<rt::SqlParam> ps;
+      if (const Value* pv = item.map->find("params")) {
+        if (pv->kind != ValueKind::Lista || !pv->list) {
+          fail(call.span, "transacao: 'params' deve ser uma lista [v1, v2, ...]");
+        }
+        for (const Value& v : *pv->list) {
+          try {
+            ps.push_back(rt::param_de_valor(v, "transacao"));
+          } catch (const std::exception& e) {
+            fail(call.span, std::string(e.what()));
+          }
+        }
+      }
+      passos.emplace_back(sql->s, std::move(ps));
+    }
+    try {
+      if (url.rfind("postgres://", 0) == 0 || url.rfind("postgresql://", 0) == 0) {
+        rt::postgres_transact(url, passos);
+      } else if (url.rfind("sqlite://", 0) == 0) {
+        rt::sqlite_transact(url.substr(9), passos);
+      } else if (url.rfind("duckdb://", 0) == 0) {
+        rt::duckdb_transact(url.substr(9), passos);
+      } else if (url.rfind("mysql://", 0) == 0 || url.rfind("mariadb://", 0) == 0) {
+        rt::mysql_transact(url, passos);
+      } else if (url.rfind("clickhouse://", 0) == 0) {
+        rt::clickhouse_transact(url, passos);
+      } else {
+        fail(call.span,
+             "transacao: url '" + url +
                  "' invalida (use postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://)");
       }
     } catch (const std::exception& e) {
