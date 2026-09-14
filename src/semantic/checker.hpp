@@ -68,6 +68,7 @@ class SemanticChecker {
   // (solver nao infere atraves de chamadas de funcao, condicionais etc.).
   std::optional<TensorShape> infer_shape(const ast::Expr& expr, const ShapeEnv& shapes);
   std::optional<TensorShape> check_conv2d(const ast::Expr& call, const ShapeEnv& shapes);
+  std::optional<TensorShape> check_atencao(const ast::Expr& call, const ShapeEnv& shapes);
   std::optional<TensorShape> check_reshape(Span span, std::optional<TensorShape> in,
                                            const TensorShape& to);
 

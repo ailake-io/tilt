@@ -1,0 +1,9 @@
+erro[T012]: atencao: dimensao de atencao incompativel (q encerra em [7], k encerra em [8])
+  --> input.tilt:11:14
+    |
+ 11 |     - sbad = atencao qa, k, v, 1.0
+    |              ^^^^^^^
+    |
+   = q [..., Sq, D] e k [..., Sk, D] precisam do mesmo D
+
+1 erro(s) em input.tilt

@@ -1,0 +1,11 @@
+funcao atencao q, k, v, escala:
+  retornar v
+
+pipeline p:
+  passos:
+    - q = uns [2, 5, 8]
+    - k = uns [2, 6, 8]
+    - v = uns [2, 6, 4]
+    - s = atencao q, k, v, 1.0
+    - qa = uns [2, 5, 7]
+    - sbad = atencao qa, k, v, 1.0

@@ -24,10 +24,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `funcao`/`pipeline`/`servico`, operações de tensor com formas literais ou
   anotadas: `conv2d` (rank 4, canais, núcleo vs. entrada, `passo:`),
   `norma_lote` (rank >= 2), `softmax`/ativações/`norma_camada` (preservadas),
-  `reformar` (n. de elementos), `transposta` (2D) e `matmul` 2D. Fora do
-  solver: formas através de chamadas de `funcao` ou condicionais, dimensões
-  `_`/não literais, broadcast parcial e `conv2d` com formas dinâmicas —
-  nesses casos a validação de dimensão continua acontecendo em runtime.
+  `reformar` (n. de elementos, com `_` inferido), `transposta` (2D),
+  `matmul` (2D e batched ND), broadcast elementwise (NumPy: 1 expande) e
+  `atencao(q, k, v, escala)` (bare ou `nn.atencao`). Dimensões `_`
+  (simbólicas, `-1`) são compatíveis com tudo e se propagam; incompatível
+  evidente continua sem veredito (runtime decide). Fora do
+  solver: formas através de chamadas de `funcao` genéricas ou condicionais,
+  e `conv2d` com formas dinâmicas (não literais fora de `_`) —
+  nesses casos a validação de dimensão continua acontecendo em runtime. No
+  runtime, `_` em forma avaliada falha com mensagem própria, exceto em
+  `reformar([...])` (inferido) e anotação/`checar`.
 - Não há inferência completa de tipos: o que `checar` cobre hoje (`T011`) é
   o subconjunto evidente — operadores aritméticos/comparação com ambos os
   lados de tipo conhecido (rejeita `lista + 1`, `"a" - 1`, `"a" < 1`, mas
@@ -40,8 +46,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   elemento homogêneo e agregações (`somar`/`min`/`max` refinam pelo elemento;
   `media` é decimal). Fluxo-insensível a ramos (o estado anterior é
   restaurado) e por entidade — fora daí o tipo vira "desconhecido" e segue
-  sem verificação: campos de `tipo` Registro, campos dinâmicos de tabelas,
-  `verificar`/`ao_falhar` e broadcast parcial.
+  sem verificação: campos de `tipo` Registro, campos dinâmicos de tabelas e
+  `verificar`/`ao_falhar`.
 
 ## Dados
 

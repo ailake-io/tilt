@@ -3084,6 +3084,13 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
     case ExprKind::NullLit:
       return Value::nulo();
     case ExprKind::Name: {
+      if (expr.text == "_") {
+        // C2: curinga de dimensao simbolica — so vale em anotacao/checagem
+        // (`tensor[f32, _, N]`, `reformar [_, N]`); aqui virou valor.
+        fail(expr.span,
+             "'_' e dimensao simbolica (vale em anotacao e no `tilt checar`); "
+             "informe o tamanho aqui ou use `reformar` com um '_' inferido pela contagem");
+      }
       if (Value* v = env.lookup(expr.text)) return *v;
       if (auto mit = modules_.find(expr.text); mit != modules_.end()) {
         fail(expr.span, "'" + expr.text + "' e um modulo; chame " + expr.text + ".<funcao>(...)");
@@ -4930,10 +4937,45 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         return Value::tensor_de(rt::layer_norm_last(t));
       }
       if (method == "reformar") {
-        auto a = eval_args(call, env);
+        // C2: um unico '_' e inferido pela contagem (espelha o solver).
+        // Detecta na AST antes de avaliar (avaliar '_' puro falha de proposito).
+        int ncuringa = 0;
+        const ast::Expr* lista_ast = nullptr;
+        if (!call.args.empty() && call.args[0].value &&
+            call.args[0].value->kind == ExprKind::ListLit) {
+          lista_ast = call.args[0].value.get();
+          for (const auto& el : lista_ast->elems) {
+            if (el && el->kind == ExprKind::Name && el->text == "_") ++ncuringa;
+          }
+        }
+        if (ncuringa > 1) {
+          fail(call.span, "reformar: no maximo um '_' (inferido pela contagem)");
+        }
         std::vector<std::int64_t> shape;
-        if (!a.empty() && a[0].kind == ValueKind::Lista && a[0].list) {
-          for (const Value& e : *a[0].list) shape.push_back(static_cast<std::int64_t>(e.as_number()));
+        if (ncuringa == 1 && lista_ast) {
+          std::int64_t conhecidos = 1;
+          for (const auto& el : lista_ast->elems) {
+            if (el && el->kind == ExprKind::Name && el->text == "_") continue;
+            conhecidos *= static_cast<std::int64_t>(eval(*el, env).as_number());
+          }
+          const std::int64_t total = static_cast<std::int64_t>(t.size());
+          if (conhecidos <= 0 || total % conhecidos != 0) {
+            fail(call.span, "reformar: '_' nao deduzivel (contagem incompatível)");
+          }
+          for (const auto& el : lista_ast->elems) {
+            if (el && el->kind == ExprKind::Name && el->text == "_") {
+              shape.push_back(total / conhecidos);
+            } else {
+              shape.push_back(static_cast<std::int64_t>(eval(*el, env).as_number()));
+            }
+          }
+        } else {
+          auto a = eval_args(call, env);
+          if (!a.empty() && a[0].kind == ValueKind::Lista && a[0].list) {
+            for (const Value& e : *a[0].list) {
+              shape.push_back(static_cast<std::int64_t>(e.as_number()));
+            }
+          }
         }
         return Value::tensor_de(rt::reshape(t, shape));
       }

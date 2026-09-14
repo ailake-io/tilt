@@ -514,8 +514,14 @@ std::optional<TensorShape> tensor_annotation_dims(const Expr* e) {  if (!e || e-
   TensorShape dims;
   for (std::size_t i = start; i < e->elems.size(); ++i) {
     const Expr* d = e->elems[i].get();
-    if (!d || d->kind != ExprKind::IntLit) return std::nullopt;
-    dims.push_back(std::stoll(d->text));
+    if (!d) return std::nullopt;
+    if (d->kind == ExprKind::IntLit) {
+      dims.push_back(std::stoll(d->text));
+    } else if (d->kind == ExprKind::Name && d->text == "_") {
+      dims.push_back(-1);  // C2: dimensao simbolica
+    } else {
+      return std::nullopt;
+    }
   }
   return dims.empty() ? std::nullopt : std::optional<TensorShape>(dims);
 }
@@ -533,10 +539,14 @@ std::string shape_str(const TensorShape& s) {
   std::string out = "[";
   for (std::size_t i = 0; i < s.size(); ++i) {
     if (i) out += ", ";
-    out += std::to_string(s[i]);
+    out += s[i] < 0 ? "_" : std::to_string(s[i]);
   }
   return out + "]";
 }
+
+// C2: dims simbolicas (`_` = -1). Compativeis quando iguais ou quando uma
+// e desconhecida; aritmetica propaga -1.
+bool dim_compat(std::int64_t a, std::int64_t b) { return a < 0 || b < 0 || a == b; }
 
 bool is_scalar_lit(const Expr& e) { return e.kind == ExprKind::IntLit || e.kind == ExprKind::DecimalLit; }
 
@@ -765,6 +775,25 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::check_reshape(
              "reformar: numero de elementos difere (entrada tem " + std::to_string(a) +
                  ", destino tem " + std::to_string(b) + ")",
              {"ajuste as dimensoes para totalizar " + std::to_string(a) + " elementos"});
+      return to;
+    }
+    // C2: um unico '_' no destino e inferido pela contagem conhecida.
+    TensorShape resolvida = to;
+    std::size_t ncuringa = 0;
+    for (auto d : resolvida) {
+      if (d < 0) ++ncuringa;
+    }
+    if (ncuringa == 1 && a > 0) {
+      std::int64_t conhecidos = 1;
+      for (auto d : resolvida) {
+        if (d >= 0) conhecidos *= d;
+      }
+      if (conhecidos > 0 && a % conhecidos == 0) {
+        for (auto& d : resolvida) {
+          if (d < 0) d = a / conhecidos;
+        }
+        return resolvida;
+      }
     }
     return to;
   }
@@ -804,24 +833,86 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::check_conv2d(const 
     return std::nullopt;
   }
   const std::int64_t cin = (*in)[1], h = (*in)[2], w = (*in)[3];
-  if ((*k)[1] != cin) {
+  auto dstr = [](std::int64_t v) { return v < 0 ? std::string("_") : std::to_string(v); };
+  if (!dim_compat((*k)[1], cin)) {
     report(DiagCode::TensorShapeMismatch, k_span,
-           "conv2d: nucleo tem " + std::to_string((*k)[1]) +
-               " canais de entrada, mas a entrada tem " + std::to_string(cin),
-           {"ajuste o eixo C_in do nucleo para " + std::to_string(cin) + " (ex.: uns [" +
-                std::to_string((*k)[0]) + ", " + std::to_string(cin) + ", " +
-                std::to_string((*k)[2]) + ", " + std::to_string((*k)[3]) + "])"});
+           "conv2d: nucleo tem " + dstr((*k)[1]) + " canais de entrada, mas a entrada tem " +
+               dstr(cin),
+           {"ajuste o eixo C_in do nucleo para " + dstr(cin) + " (ex.: uns [" + dstr((*k)[0]) +
+                ", " + dstr(cin) + ", " + dstr((*k)[2]) + ", " + dstr((*k)[3]) + "])"});
     return std::nullopt;
   }
   const std::int64_t kh = (*k)[2], kw = (*k)[3];
-  if (kh > h || kw > w) {
+  if ((kh >= 0 && h >= 0 && kh > h) || (kw >= 0 && w >= 0 && kw > w)) {
     report(DiagCode::TensorShapeMismatch, k_span,
-           "conv2d: nucleo " + std::to_string(kh) + "x" + std::to_string(kw) +
-               " maior que a entrada " + std::to_string(h) + "x" + std::to_string(w),
+           "conv2d: nucleo " + dstr(kh) + "x" + dstr(kw) + " maior que a entrada " + dstr(h) +
+               "x" + dstr(w),
            {"reduza o nucleo ou aumente a entrada (padding ainda nao suportado)"});
     return std::nullopt;
   }
-  return TensorShape{(*in)[0], (*k)[0], (h - kh) / passo + 1, (w - kw) / passo + 1};
+  const std::int64_t oh = (h < 0 || kh < 0) ? -1 : (h - kh) / passo + 1;
+  const std::int64_t ow = (w < 0 || kw < 0) ? -1 : (w - kw) / passo + 1;
+  return TensorShape{(*in)[0], (*k)[0], oh, ow};
+}
+
+// C2: `atencao(q, k, v, escala)` (stdlib nn, bare ou `nn.atencao`):
+// q [..., Sq, D], k [..., Sk, D], v [..., Sk, Dv] -> [..., Sq, Dv].
+// Lote com broadcast; D e Sk incompativeis conhecidos reportam.
+std::optional<SemanticChecker::TensorShape> SemanticChecker::check_atencao(
+    const Expr& call, const ShapeEnv& shapes) {
+  std::vector<const Expr*> pos;
+  for (const auto& a : call.args) {
+    if (a.name.empty() && a.value) pos.push_back(a.value.get());
+  }
+  if (pos.size() < 3) return std::nullopt;
+  auto sq = infer_shape(*pos[0], shapes);
+  auto sk = infer_shape(*pos[1], shapes);
+  auto sv = infer_shape(*pos[2], shapes);
+  if (!sq || !sk || !sv) return std::nullopt;
+  const std::size_t n = sq->size();
+  if (n < 2 || sk->size() != n || sv->size() != n) {
+    report(DiagCode::TensorShapeMismatch, call.span,
+           "atencao espera q, k, v com mesmo rank >= 2, mas tem formas " + shape_str(*sq) + ", " +
+               shape_str(*sk) + ", " + shape_str(*sv),
+           {"use tensores [lote, seq, dim] com o mesmo numero de eixos"});
+    return std::nullopt;
+  }
+  if (!dim_compat((*sq)[n - 1], (*sk)[n - 1])) {
+    report(DiagCode::TensorShapeMismatch, call.span,
+           "atencao: dimensao de atencao incompativel (q encerra em " +
+               shape_str(TensorShape{(*sq)[n - 1]}) + ", k encerra em " +
+               shape_str(TensorShape{(*sk)[n - 1]}) + ")",
+           {"q [..., Sq, D] e k [..., Sk, D] precisam do mesmo D"});
+    return std::nullopt;
+  }
+  if (!dim_compat((*sk)[n - 2], (*sv)[n - 2])) {
+    report(DiagCode::TensorShapeMismatch, call.span,
+           "atencao: sequencia de k e v incompativel (" + shape_str(TensorShape{(*sk)[n - 2]}) +
+               " vs " + shape_str(TensorShape{(*sv)[n - 2]}) + ")",
+           {"k [..., Sk, D] e v [..., Sk, Dv] precisam do mesmo Sk"});
+    return std::nullopt;
+  }
+  TensorShape out;
+  // Lote: consenso par-a-par entre q/k/v (igual ao matmul: 1 expande,
+  // '_' com conhecido segue desconhecido, divergencia -> sem veredito).
+  auto consenso = [](std::int64_t a, std::int64_t b, bool& ok) -> std::int64_t {
+    if (a == b) return a;
+    if (a == 1) return b;
+    if (b == 1) return a;
+    if (a < 0 || b < 0) return -1;
+    ok = false;
+    return -1;
+  };
+  for (std::size_t i = 0; i < n - 2; ++i) {
+    bool ok = true;
+    std::int64_t d = consenso((*sq)[i], (*sk)[i], ok);
+    if (ok) d = consenso(d, (*sv)[i], ok);
+    if (!ok) return std::nullopt;
+    out.push_back(d);
+  }
+  out.push_back((*sq)[n - 2]);
+  out.push_back((*sv)[n - 1]);
+  return out;
 }
 
 std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const Expr& e,
@@ -838,8 +929,14 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const E
       if (word_in(base, {"uns", "zeros", "aleatorio"})) {
         TensorShape s;
         for (const auto& el : e.elems) {
-          if (!el || el->kind != ExprKind::IntLit) return std::nullopt;
-          s.push_back(std::stoll(el->text));
+          if (!el) return std::nullopt;
+          if (el->kind == ExprKind::IntLit) {
+            s.push_back(std::stoll(el->text));
+          } else if (el->kind == ExprKind::Name && el->text == "_") {
+            s.push_back(-1);  // C2: `uns [_, 10]`
+          } else {
+            return std::nullopt;
+          }
         }
         return s;
       }
@@ -866,8 +963,18 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const E
       return std::nullopt;
     }
     case ExprKind::Call: {
-      if (!e.lhs || e.lhs->kind != ExprKind::Member || !e.lhs->lhs) return std::nullopt;
+      if (!e.lhs) return std::nullopt;
+      // C2: `atencao(q, k, v, escala)` bare ou `nn.atencao(...)` — regra
+      // propria, sem depender do receiver.
+      if (e.lhs->kind == ExprKind::Name && e.lhs->text == "atencao") {
+        return check_atencao(e, shapes);
+      }
+      if (e.lhs->kind == ExprKind::Name && e.lhs->text == "atencao_causal") {
+        return check_atencao(e, shapes);
+      }
+      if (e.lhs->kind != ExprKind::Member || !e.lhs->lhs) return std::nullopt;
       const std::string& m = e.lhs->text;
+      if (m == "atencao" || m == "atencao_causal") return check_atencao(e, shapes);
       if (m == "conv2d") return check_conv2d(e, shapes);
       if (m == "norma_lote") {
         auto in = infer_shape(*e.lhs->lhs, shapes);
@@ -883,17 +990,36 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const E
         auto a = infer_shape(*e.lhs->lhs, shapes);
         const Expr* arg = first_positional_arg(e);
         auto b = arg ? infer_shape(*arg, shapes) : std::nullopt;
-        if (a && b && a->size() == 2 && b->size() == 2) {
-          if ((*a)[1] != (*b)[0]) {
-            report(DiagCode::TensorShapeMismatch, e.span,
-                   "matmul: dimensao interna incompativel (" + shape_str(*a) + " x " +
-                       shape_str(*b) + ")",
-                   {"ajuste para que o ultimo eixo de um coincida com o primeiro do outro"});
-            return std::nullopt;
-          }
-          return TensorShape{(*a)[0], (*b)[1]};
+        if (!a || !b || a->size() != b->size() || a->size() < 2) return std::nullopt;
+        // C2: 2D ou batched ND (lote com broadcast); '_' compativel com tudo.
+        const std::size_t n = a->size();
+        const std::int64_t ka = (*a)[n - 1], kb = (*b)[n - 2];
+        if (!dim_compat(ka, kb)) {
+          report(DiagCode::TensorShapeMismatch, e.span,
+                 "matmul: dimensao interna incompativel (" + shape_str(*a) + " x " +
+                     shape_str(*b) + ")",
+                 {"ajuste para que o ultimo eixo de um coincida com o primeiro do outro"});
+          return std::nullopt;
         }
-        return std::nullopt;
+        TensorShape lote;
+        for (std::size_t i = 0; i < n - 2; ++i) {
+          const std::int64_t x = (*a)[i], y = (*b)[i];
+          if (x == y) {
+            lote.push_back(x);
+          } else if (x == 1) {
+            lote.push_back(y);
+          } else if (y == 1) {
+            lote.push_back(x);
+          } else if (x < 0 || y < 0) {
+            lote.push_back(-1);  // desconhecido com conhecido: segue desconhecido
+          } else {
+            return std::nullopt;  // lote incompativel: sem veredito (runtime decide)
+          }
+        }
+        TensorShape out = std::move(lote);
+        out.push_back((*a)[n - 2]);
+        out.push_back((*b)[n - 1]);
+        return out;
       }
       if (m == "reformar") {
         // `x.reformar([d, ...])` (forma de chamada).
@@ -902,8 +1028,14 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const E
         auto in = infer_shape(*e.lhs->lhs, shapes);
         TensorShape to;
         for (const auto& el : arg->elems) {
-          if (!el || el->kind != ExprKind::IntLit) return std::nullopt;
-          to.push_back(std::stoll(el->text));
+          if (!el) return std::nullopt;
+          if (el->kind == ExprKind::IntLit) {
+            to.push_back(std::stoll(el->text));
+          } else if (el->kind == ExprKind::Name && el->text == "_") {
+            to.push_back(-1);  // C2: inferido pela contagem em check_reshape
+          } else {
+            return std::nullopt;
+          }
         }
         return check_reshape(e.span, std::move(in), to);
       }
@@ -911,12 +1043,35 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const E
     }
     case ExprKind::Binary: {
       // Operacoes elementwise: forma preservada entre tensor e escalar, ou
-      // entre tensores de mesma forma. Broadcast parcial fica fora do
-      // subconjunto (forma desconhecida).
+      // broadcast (NumPy: alinha a direita; 1 expande; '_' propaga).
+      // Incompativel evidente continua sem veredito (runtime decide).
       if (!word_in(e.text, {"+", "-", "*", "/"})) return std::nullopt;
       auto a = e.lhs ? infer_shape(*e.lhs, shapes) : std::nullopt;
       auto b = e.rhs ? infer_shape(*e.rhs, shapes) : std::nullopt;
-      if (a && b) return *a == *b ? a : std::nullopt;
+      if (a && b) {
+        // C2: broadcast parcial.
+        const std::size_t n = std::max(a->size(), b->size());
+        TensorShape out(n, 1);
+        bool ok = true;
+        for (std::size_t i = 0; i < n; ++i) {
+          const std::int64_t da = i < n - a->size() ? 1 : (*a)[a->size() - n + i];
+          const std::int64_t db = i < n - b->size() ? 1 : (*b)[b->size() - n + i];
+          if (da == db) {
+            out[i] = da;
+          } else if (da == 1) {
+            out[i] = db;
+          } else if (db == 1) {
+            out[i] = da;
+          } else if (da < 0 || db < 0) {
+            out[i] = -1;
+          } else {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) return out;
+        return std::nullopt;
+      }
       if (a && e.rhs && is_scalar_lit(*e.rhs)) return a;
       if (b && e.lhs && is_scalar_lit(*e.lhs)) return b;
       return std::nullopt;
@@ -1284,6 +1439,8 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
   switch (e.kind) {
     case ExprKind::Name: {
       const std::string& w = e.text;
+      // C2: '_' e curinga de dimensao simbolica (nunca um nome a resolver).
+      if (w == "_") return;
       if (scope.count(w) || globals_.count(w) || is_builtin_name(w) || is_magic_name(w)) return;
       report(DiagCode::UndefinedName, e.span, "nome '" + w + "' nao definido");
       return;
