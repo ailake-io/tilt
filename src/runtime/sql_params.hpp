@@ -117,30 +117,9 @@ inline std::pair<std::string, std::size_t> rewrite_qmarks(const std::string& sql
       o += "{p" + std::to_string(n - 1) + "}";
     } else {
       o += "?";
-    }
+     }
   }, out);
   return {out, n};
-}
-
-// Interpola `?` (fora de literais/comentarios) chamando `formata(i)` para o
-// i-esimo placeholder (0-based, texto ja seguro). Usado pelo MySQL (escape
-// da conexao). Erro claro em contagem divergente.
-template <typename F>
-inline std::string interpolar_qmarks(const std::string& sql, std::size_t n_params, F formata,
-                                     const std::string& passo) {
-  std::string out;
-  std::size_t nq = 0;
-  varrer_sql(sql, [&](std::string& o) {
-    if (nq >= n_params) {
-      throw std::runtime_error(passo + "faltam parametros: o SQL tem mais '?' que valores");
-    }
-    o += formata(nq++);
-  }, out);
-  if (nq != n_params) {
-    throw std::runtime_error(passo + "esperava " + std::to_string(n_params) +
-                             " parametro(s), mas o SQL tem " + std::to_string(nq) + " '?'");
-  }
-  return out;
 }
 
 }  // namespace tilt::rt

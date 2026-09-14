@@ -225,11 +225,11 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ou `libmysqlclient.so*` via `dlopen` — precisam estar instalados no sistema.
   Ligação: postgres `PQexecParams` (`?`→`$N`), sqlite `sqlite3_bind_*`,
   duckdb prepared (`duckdb_prepare`; lib antiga sem os símbolos falha com erro
-  claro em vez do caminho legado), clickhouse `{pN:Tipo}` via query params
-  (nulo→`NULL` inline). No MySQL/MariaDB: sem prepared server-side
-  (`mysql_stmt_*` fica para depois — o layout de `MYSQL_BIND` difere entre
-  MySQL/MariaDB; a interpolação usa `mysql_real_escape_string` da conexão),
-  sem TLS explícito (o canal seguro depende da lib cliente
+  claro em vez do caminho legado), mysql prepared server-side (`mysql_stmt_*`
+  com `MYSQL_BIND` espelhado — layout comum a libmysqlclient e libmariadb,
+  validado contra as duas; tudo ligado como texto com coerção no servidor,
+  leitura como bytes com `fetch_column` em truncamento), clickhouse `{pN:Tipo}` via query params
+  (nulo→`NULL` inline). No MySQL/MariaDB: sem TLS explícito (o canal seguro depende da lib cliente
   carregada — contra servidores 8.0+ com `caching_sha2_password`, prefira
   usuário `mysql_native_password` ou SSL fora do escopo), consulta por
   conexão. No ClickHouse: HTTP nativo pelo cliente genérico (sem `dlopen`),

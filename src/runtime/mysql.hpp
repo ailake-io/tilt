@@ -32,11 +32,9 @@ Value mysql_query_params(const std::string& url, const std::string& sql,
 // servidor em qualquer falha.
 void mysql_exec(const std::string& url, const std::string& sql);
 
-// Idem, com `?` interpolados apos escape pela conexao (Marco 3 / D1):
-// texto com mysql_real_escape_string (charset da conexao), numeros crus,
-// Nulo como NULL. Prepared server-side (mysql_stmt_*) fica para quando
-// houver cobertura com servidor (o layout de MYSQL_BIND difere entre
-// MySQL/MariaDB).
+// Idem, com `?` via prepared server-side (Marco 3 / D2): mysql_stmt_* com
+// MYSQL_BIND espelhado (layout comum as duas libs; tudo ligado como texto e
+// coagido pelo servidor, nulo pelo indicador). Sem escape nem interpolacao.
 void mysql_exec_params(const std::string& url, const std::string& sql,
                        const std::vector<SqlParam>& params);
 

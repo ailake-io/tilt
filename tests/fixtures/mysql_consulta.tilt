@@ -2,7 +2,7 @@
 pipeline consulta:
   passos:
     - url = env "SQL_URL"
-    - executar_sql url, "create table pessoas_consulta (id integer primary key, nome text not null, nota decimal)"
+    - executar_sql url, "create table pessoas_consulta (id integer primary key, nome text not null, nota decimal(10,2))"
     - executar_sql url, "insert into pessoas_consulta values (?, ?, ?)", [1, "o'brien", 9.5]
     - executar_sql url, "insert into pessoas_consulta values (?, ?, ?)", [2, "bé", nulo]
     - executar_sql url, "insert into pessoas_consulta values (?, ?, ?)", [3, "carla", 7.0]

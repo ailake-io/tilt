@@ -102,8 +102,9 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
   atômica nos 5 relacionais (postgres/sqlite/duckdb/mysql/clickhouse).
 - Feito: **SELECT com `?`** (`consultar_sql url, sql [, params]` → tabela;
   mesma ligação do D1; sem `params` equivale à `consulta:` da `fonte`).
-- Próximo: **prepared server-side no MySQL** (`mysql_stmt_*`; hoje é
-  interpolação com escape — única mancha de segurança no D1).
+- Feito: **prepared server-side no MySQL** (`mysql_stmt_*` com `MYSQL_BIND`
+  espelhado; layout comum a libmysqlclient e libmariadb validado contra as
+  duas com servidor MariaDB 11; interpolação com escape removida).
 
 ## Priorização sugerida
 

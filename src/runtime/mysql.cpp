@@ -70,11 +70,23 @@ struct MysqlApi {
   void (*free_result)(void*) = nullptr;
   const char* (*error)(void*) = nullptr;
   void (*close)(void*) = nullptr;
-  // Ligacao client-side (Marco 3 / D1): escape com o charset da conexao.
-  // (Prepared server-side via mysql_stmt_* fica para quando houver cobertura
-  // com servidor real — o layout de MYSQL_BIND difere entre MySQL/MariaDB e
-  // nao e validavel sem servidor; o escape pela API e estavel ha decadas.)
-  unsigned long (*escape_string)(void*, char*, const char*, unsigned long) = nullptr;
+  // Prepared server-side (Marco 3 / D2): mysql_stmt_*. Retornos my_bool/bool
+  // (1 byte nos dois) vao em unsigned char; fetch: 0 = linha, 1 = erro,
+  // 100 = sem dados, 101 = truncado (MYSQL_NO_DATA/DATA_TRUNCATED).
+  void* (*stmt_init)(void*) = nullptr;
+  int (*stmt_prepare)(void*, const char*, unsigned long) = nullptr;
+  unsigned long (*stmt_param_count)(void*) = nullptr;
+  unsigned char (*stmt_bind_param)(void*, void*) = nullptr;
+  int (*stmt_execute)(void*) = nullptr;
+  unsigned int (*stmt_field_count)(void*) = nullptr;
+  int (*stmt_store_result)(void*) = nullptr;
+  void* (*stmt_result_metadata)(void*) = nullptr;
+  unsigned char (*stmt_bind_result)(void*, void*) = nullptr;
+  int (*stmt_fetch)(void*) = nullptr;
+  int (*stmt_fetch_column)(void*, void*, unsigned int, unsigned long) = nullptr;
+  unsigned char (*stmt_free_result)(void*) = nullptr;
+  unsigned char (*stmt_close)(void*) = nullptr;
+  const char* (*stmt_error)(void*) = nullptr;
 };
 
 template <typename F>
@@ -114,7 +126,20 @@ const MysqlApi& api() {
                     bind_sym(a.lib, a.free_result, "mysql_free_result") &&
                     bind_sym(a.lib, a.error, "mysql_error") &&
                     bind_sym(a.lib, a.close, "mysql_close") &&
-                    bind_sym(a.lib, a.escape_string, "mysql_real_escape_string");
+                    bind_sym(a.lib, a.stmt_init, "mysql_stmt_init") &&
+                    bind_sym(a.lib, a.stmt_prepare, "mysql_stmt_prepare") &&
+                    bind_sym(a.lib, a.stmt_param_count, "mysql_stmt_param_count") &&
+                    bind_sym(a.lib, a.stmt_bind_param, "mysql_stmt_bind_param") &&
+                    bind_sym(a.lib, a.stmt_execute, "mysql_stmt_execute") &&
+                    bind_sym(a.lib, a.stmt_field_count, "mysql_stmt_field_count") &&
+                    bind_sym(a.lib, a.stmt_store_result, "mysql_stmt_store_result") &&
+                    bind_sym(a.lib, a.stmt_result_metadata, "mysql_stmt_result_metadata") &&
+                    bind_sym(a.lib, a.stmt_bind_result, "mysql_stmt_bind_result") &&
+                    bind_sym(a.lib, a.stmt_fetch, "mysql_stmt_fetch") &&
+                    bind_sym(a.lib, a.stmt_fetch_column, "mysql_stmt_fetch_column") &&
+                    bind_sym(a.lib, a.stmt_free_result, "mysql_stmt_free_result") &&
+                    bind_sym(a.lib, a.stmt_close, "mysql_stmt_close") &&
+                    bind_sym(a.lib, a.stmt_error, "mysql_stmt_error");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = MysqlApi{};
@@ -344,11 +369,70 @@ void mysql_exec(const std::string& url, const std::string& sql) {
   if (void* res = db.store_result(conn.conn)) db.free_result(res);
 }
 
-// Formata um parametro para interpolacao SEGURA (so texto passa pelo escape
-// da conexao, com o charset dela; numeros vao crus, Nulo vira NULL literal).
-std::string mysql_param_texto(const MysqlApi& db, void* conn, const SqlParam& p) {
+// Espelho de MYSQL_BIND (Marco 3 / D2): so os campos que usamos, com os
+// mesmos tipos dos dois headers (ponteiros/unsigned long/unsigned int/int;
+// indicadores de 1 byte como unsigned char). libmysqlclient usa bool e
+// libmariadb usa my_bool (char) — ambos 1 byte, 0/1 identicos; `param_number`
+// (MySQL) e `flags` (MariaDB) ocupam o mesmo offset/tamanho e ficam zerados.
+// Verificado contra mysql.h 8.4 e mariadb_stmt.h (master).
+struct MysqlBind {
+  unsigned long* length = nullptr;
+  unsigned char* is_null = nullptr;
+  void* buffer = nullptr;
+  unsigned char* error = nullptr;
+  void* row_ptr = nullptr;
+  void* store_param_func = nullptr;
+  void* fetch_result = nullptr;
+  void* skip_result = nullptr;
+  unsigned long buffer_length = 0;
+  unsigned long offset = 0;
+  unsigned long length_value = 0;
+  unsigned int param_number = 0;
+  unsigned int pack_length = 0;
+  int buffer_type = 0;
+  unsigned char error_value = 0;
+  unsigned char is_unsigned = 0;
+  unsigned char long_data_used = 0;
+  unsigned char is_null_value = 0;
+  void* extension = nullptr;
+};
+
+// Códigos de tipo do protocolo (iguais nas duas libs): STRING/VAR_STRING
+// para ligar tudo como texto (o servidor coage para o tipo da coluna),
+// BLOB para ler qualquer coluna como bytes.
+constexpr int kStmtString = 254;
+constexpr int kStmtBlob = 252;
+// Retornos de mysql_stmt_fetch: 0 = linha, 1 = erro, 100 = sem mais dados,
+// 101 = valor truncado (buscar o resto com fetch_column).
+constexpr int kFetchOk = 0;
+constexpr int kFetchNoData = 100;
+constexpr int kFetchTruncated = 101;
+
+// Statement com RAII (fecha no fim; reset implicito pelo close).
+struct Stmt {
+  const MysqlApi& db;
+  void* st = nullptr;
+  explicit Stmt(const MysqlApi& d, void* conn) : db(d) {
+    st = db.stmt_init(conn);
+    if (!st) die("falha de memoria ao iniciar prepared statement");
+  }
+  ~Stmt() {
+    if (st) db.stmt_close(st);
+  }
+  Stmt(const Stmt&) = delete;
+  Stmt& operator=(const Stmt&) = delete;
+  const char* erro() const {
+    const char* m = st ? db.stmt_error(st) : nullptr;
+    return m && *m ? m : "erro desconhecido";
+  }
+};
+
+// Formata um parametro como texto (o servidor coage para o tipo da coluna);
+// nulo e sinalizado pelo indicador (buffer vazio, ignorado).
+std::string mysql_param_texto(const SqlParam& p, unsigned char& nulo) {
+  nulo = 0;
   switch (p.tipo) {
-    case SqlParam::Tipo::Nulo: return "NULL";
+    case SqlParam::Tipo::Nulo: nulo = 1; return "";
     case SqlParam::Tipo::Inteiro: return std::to_string(p.i);
     case SqlParam::Tipo::Decimal: {
       char buf[32];
@@ -356,31 +440,66 @@ std::string mysql_param_texto(const MysqlApi& db, void* conn, const SqlParam& p)
       return buf;
     }
     case SqlParam::Tipo::Logico: return p.b ? "1" : "0";
-    case SqlParam::Tipo::Texto: break;
+    case SqlParam::Tipo::Texto: return p.s;
   }
-  std::string escapado(2 * p.s.size() + 1, '\0');
-  const unsigned long n =
-      db.escape_string(conn, escapado.data(), p.s.c_str(), static_cast<unsigned long>(p.s.size()));
-  escapado.resize(n);
-  return "'" + escapado + "'";
+  return "";
 }
 
-// Interpola `?` pelos parametros formatados (scanner compartilhado).
-std::string mysql_interpolar(const MysqlApi& db, void* conn, const std::string& sql,
-                             const std::vector<SqlParam>& params, const std::string& passo) {
-  return interpolar_qmarks(
-      sql, params.size(),
-      [&](std::size_t k) { return mysql_param_texto(db, conn, params[k]); }, passo);
+// Prepara `sql` e liga `params` como texto (binary protocol, sem escape e
+// sem interpolacao). `acao` e "comando" ou "consulta", so para mensagens.
+void prepara_e_liga(const MysqlApi& db, Stmt& st, const std::string& sql,
+                    const std::vector<SqlParam>& params, const std::string& passo,
+                    const std::string& acao,
+                    std::vector<std::string>& textos, std::vector<unsigned long>& lens,
+                    std::vector<unsigned char>& nulos, std::vector<MysqlBind>& binds) {
+  if (db.stmt_prepare(st.st, sql.c_str(), static_cast<unsigned long>(sql.size())) != 0) {
+    die(passo + std::string("falha ao preparar ") + acao + ": " + st.erro());
+  }
+  const unsigned long nq = db.stmt_param_count(st.st);
+  if (nq != params.size()) {
+    die(passo + "esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
+        std::to_string(nq) + " '?'");
+  }
+  textos.clear();
+  textos.reserve(params.size());
+  lens.assign(params.size(), 0);
+  nulos.assign(params.size(), 0);
+  binds.assign(params.size(), MysqlBind{});
+  for (std::size_t k = 0; k < params.size(); ++k) {
+    textos.push_back(mysql_param_texto(params[k], nulos[k]));
+    lens[k] = static_cast<unsigned long>(textos.back().size());
+  }
+  // So depois de todos os push_back (sem mais realocacao): os ponteiros de
+  // buffer ficam estaveis ate o fim do execute.
+  for (std::size_t k = 0; k < params.size(); ++k) {
+    MysqlBind& b = binds[k];
+    b.buffer_type = kStmtString;
+    b.buffer = textos[k].data();
+    b.buffer_length = lens[k];
+    b.length = &lens[k];
+    b.is_null = &nulos[k];
+  }
+  if (!binds.empty() && db.stmt_bind_param(st.st, binds.data()) != 0) {
+    die(passo + std::string("falha ao ligar parametros: ") + st.erro());
+  }
 }
 
 void exec_um(const MysqlApi& db, void* conn, const std::string& sql,
              const std::vector<SqlParam>& params, const std::string& passo) {
-  const std::string final = params.empty() ? sql : mysql_interpolar(db, conn, sql, params, passo);
-  if (db.query(conn, final.c_str()) != 0) {
-    die(passo + std::string("falha ao executar comando: ") +
-        (db.error(conn) ? db.error(conn) : "erro desconhecido"));
+  Stmt st(db, conn);
+  std::vector<std::string> textos;
+  std::vector<unsigned long> lens;
+  std::vector<unsigned char> nulos;
+  std::vector<MysqlBind> binds;
+  prepara_e_liga(db, st, sql, params, passo, "comando", textos, lens, nulos, binds);
+  if (db.stmt_execute(st.st) != 0) {
+    die(passo + std::string("falha ao executar comando: ") + st.erro());
   }
-  if (void* res = db.store_result(conn)) db.free_result(res);
+  // SELECT acidental num passo: consome o result set para nao deixar a
+  // conexao fora de sincronia (o valor e descartado; leitura e via ler).
+  if (db.stmt_field_count(st.st) > 0) {
+    if (db.stmt_store_result(st.st) == 0) db.stmt_free_result(st.st);
+  }
 }
 
 void mysql_exec_params(const std::string& url, const std::string& sql,
@@ -392,8 +511,10 @@ void mysql_exec_params(const std::string& url, const std::string& sql,
   exec_um(db, conn.conn, sql, params, "");
 }
 
-// Consulta com `?` interpolados apos escape pela conexao (mesmo padrao do
-// executar_sql com params; prepared server-side troca os dois juntos).
+// Consulta com `?` via prepared server-side (SELECT com params): executa o
+// statement, le todas as colunas como bytes (BLOB) e converte pelos tipos do
+// metadata — mesmo mapeamento do caminho textual. Truncacao (buffer inicial
+// de 256B) e resolvida por coluna com fetch_column.
 Value mysql_query_params(const std::string& url, const std::string& sql,
                          const std::vector<SqlParam>& params) {
   const MysqlApi& db = api();
@@ -403,8 +524,117 @@ Value mysql_query_params(const std::string& url, const std::string& sql,
     die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
   }
   Conn conn(db, parsed);
-  const std::string final = params.empty() ? sql : mysql_interpolar(db, conn.conn, sql, params, "");
-  return executa_select(db, conn.conn, final);
+  Stmt st(db, conn.conn);
+  std::vector<std::string> textos;
+  std::vector<unsigned long> lens;
+  std::vector<unsigned char> nulos;
+  std::vector<MysqlBind> binds;
+  prepara_e_liga(db, st, sql, params, "", "consulta", textos, lens, nulos, binds);
+  if (db.stmt_execute(st.st) != 0) {
+    die(std::string("falha ao executar consulta: ") + st.erro());
+  }
+  if (db.stmt_field_count(st.st) == 0) {
+    die("apenas consultas SELECT sao suportadas nesta versao");
+  }
+  if (db.stmt_store_result(st.st) != 0) {
+    die(std::string("falha ao obter resultado: ") + st.erro());
+  }
+  void* meta = db.stmt_result_metadata(st.st);
+  if (!meta) {
+    db.stmt_free_result(st.st);
+    die(std::string("falha ao obter resultado: ") + st.erro());
+  }
+  const unsigned int ncols = db.num_fields(meta);
+  std::vector<std::string> names;
+  std::vector<int> types;
+  names.reserve(ncols);
+  types.reserve(ncols);
+  for (unsigned int c = 0; c < ncols; ++c) {
+    const MysqlField* f = db.fetch_field(meta);
+    names.emplace_back(f && f->name && *f->name ? f->name : ("coluna" + std::to_string(c + 1)));
+    types.push_back(f ? f->type : -1);
+  }
+
+  struct Coluna {
+    std::vector<char> buf = std::vector<char>(256);
+    unsigned long len = 0;
+    unsigned char nulo = 0;
+    unsigned char erro = 0;
+  };
+  std::vector<Coluna> cols(ncols);
+  std::vector<MysqlBind> saidas(ncols);
+  for (unsigned int c = 0; c < ncols; ++c) {
+    MysqlBind& b = saidas[c];
+    b.buffer_type = kStmtBlob;
+    b.buffer = cols[c].buf.data();
+    b.buffer_length = static_cast<unsigned long>(cols[c].buf.size());
+    b.length = &cols[c].len;
+    b.is_null = &cols[c].nulo;
+    b.error = &cols[c].erro;
+  }
+  if (db.stmt_bind_result(st.st, saidas.data()) != 0) {
+    db.free_result(meta);
+    db.stmt_free_result(st.st);
+    die(std::string("falha ao ligar resultado: ") + st.erro());
+  }
+
+  auto monta_linha = [&]() {
+    Value row = Value::mapa();
+    for (unsigned int c = 0; c < ncols; ++c) {
+      const std::string& col = names[c];
+      if (cols[c].nulo) {
+        row.map->set(col, Value::nulo());
+        continue;
+      }
+      const char* val = cols[c].buf.data();
+      const std::size_t n = static_cast<std::size_t>(cols[c].len);
+      if (is_integer_type(types[c])) {
+        // Buffer BLOB nao e NUL-terminado: copia antes de converter.
+        row.map->set(col, Value::inteiro(std::strtoll(std::string(val, n).c_str(), nullptr, 10)));
+      } else if (is_decimal_type(types[c])) {
+        row.map->set(col, Value::decimal(std::strtod(std::string(val, n).c_str(), nullptr)));
+      } else {
+        row.map->set(col, Value::texto(std::string(val, n)));
+      }
+    }
+    return row;
+  };
+
+  ValueList rows;
+  while (true) {
+    const int rc = db.stmt_fetch(st.st);
+    if (rc == kFetchNoData) break;
+    if (rc != kFetchOk && rc != kFetchTruncated) {
+      db.free_result(meta);
+      db.stmt_free_result(st.st);
+      die(std::string("falha ao ler linha: ") + st.erro());
+    }
+    // Coluna maior que o buffer: refaz com o tamanho real e religa o buffer
+    // (o length real vem no proprio indicador, mesmo truncado).
+    for (unsigned int c = 0; c < ncols; ++c) {
+      if (!cols[c].erro || cols[c].nulo) continue;
+      cols[c].buf.assign(static_cast<std::size_t>(cols[c].len), '\0');
+      MysqlBind unico{};
+      unico.buffer_type = kStmtBlob;
+      unico.buffer = cols[c].buf.data();
+      unico.buffer_length = static_cast<unsigned long>(cols[c].buf.size());
+      unico.length = &cols[c].len;
+      unico.is_null = &cols[c].nulo;
+      if (db.stmt_fetch_column(st.st, &unico, c, 0) != 0) {
+        db.free_result(meta);
+        db.stmt_free_result(st.st);
+        die(std::string("falha ao ler coluna truncada: ") + st.erro());
+      }
+      cols[c].erro = 0;
+      saidas[c].buffer = cols[c].buf.data();
+      saidas[c].buffer_length = static_cast<unsigned long>(cols[c].buf.size());
+    }
+    rows.push_back(monta_linha());
+  }
+
+  db.free_result(meta);
+  db.stmt_free_result(st.st);
+  return Value::tabela(std::move(rows));
 }
 
 void mysql_transact(const std::string& url,

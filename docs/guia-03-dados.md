@@ -548,10 +548,9 @@ numa lista `[v1, v2, ...]` (inteiro, decimal, texto, logico ou nulo). O `?`
 dentro de literais (`'...'`, `"..."`) e comentários (`--`, `/* */`) é
 ignorado. Ligação por backend: postgres via `PQexecParams` (`?` vira `$N`),
 sqlite por `sqlite3_bind_*`, duckdb por prepared statements (`duckdb_prepare`;
-lib antiga sem esses símbolos falha com erro claro), clickhouse como query
-params `{pN:Tipo}` (nulo vira `NULL` inline) e mysql por interpolação com
-escape da conexão (`mysql_real_escape_string`). Contagem divergente (`?` a
-mais ou a menos) é erro claro antes da rede.
+lib antiga sem esses símbolos falha com erro claro), mysql por prepared
+server-side (`mysql_stmt_*`, tudo ligado como texto e coagido pelo servidor)
+e clickhouse como query params `{pN:Tipo}` (nulo vira `NULL` inline).
 
 Para passos atômicos use `transacao url, [{ sql:, params:? }]`: abre uma
 conexão, roda `BEGIN`, executa os passos em ordem e faz `COMMIT`; qualquer
