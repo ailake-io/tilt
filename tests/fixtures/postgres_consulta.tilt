@@ -1,0 +1,24 @@
+# SELECT com `?` (consultar_sql). URL vem de SQL_URL.
+pipeline consulta:
+  passos:
+    - url = env "SQL_URL"
+    - executar_sql url, "create table pessoas_consulta (id integer primary key, nome text not null, nota decimal)"
+    - executar_sql url, "insert into pessoas_consulta values (?, ?, ?)", [1, "o'brien", 9.5]
+    - executar_sql url, "insert into pessoas_consulta values (?, ?, ?)", [2, "bé", nulo]
+    - executar_sql url, "insert into pessoas_consulta values (?, ?, ?)", [3, "carla", 7.0]
+    - so_be = consultar_sql url, "select id, nome, nota from pessoas_consulta where nome = ?", ["bé"]
+    - para cada l em so_be:
+        imprimir "filtro:", l.id, l.nome, l.nota
+    - sem_nota = consultar_sql url, "select id from pessoas_consulta where nota is ?", [nulo]
+    - para cada l em sem_nota:
+        imprimir "sem-nota:", l.id
+    - tentar:
+        consultar_sql url, "select id from pessoas_consulta where id = ? and nome = ?", [1]
+    capturar erro:
+      imprimir "contagem:", erro
+    - total = consultar_sql url, "select count(*) as total from pessoas_consulta"
+    - para cada t em total:
+        imprimir "total:", t.total
+    - todas = consultar_sql url, "select id, nome, nota from pessoas_consulta order by id"
+    - para cada l em todas:
+        imprimir "linha:", l.id, l.nome, l.nota

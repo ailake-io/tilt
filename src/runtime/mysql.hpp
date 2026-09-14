@@ -23,6 +23,10 @@ namespace tilt::rt {
 // Lanca std::runtime_error com mensagem acionavel em qualquer falha.
 Value mysql_query(const std::string& url, const std::string& sql);
 
+// Idem, com `?` interpolados apos escape pela conexao (SELECT com params).
+Value mysql_query_params(const std::string& url, const std::string& sql,
+                         const std::vector<SqlParam>& params);
+
 // Executa um comando SQL sem resultado (INSERT/UPDATE/DELETE/DDL). Aceita
 // um unico comando por chamada. Lanca std::runtime_error com a mensagem do
 // servidor em qualquer falha.

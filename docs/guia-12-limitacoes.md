@@ -217,7 +217,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Bancos relacionais: `fonte tipo: sqlite/postgres/duckdb/mysql/clickhouse`
   é somente leitura (consultas SELECT); gravação via `executar_sql`
   (INSERT/UPDATE/DELETE/DDL, um comando por chamada, com `?` posicionais via
-  lista `params` opcional) e `transacao` (BEGIN/COMMIT numa única conexão,
+  lista `params` opcional), leitura parametrizada via `consultar_sql`
+  (mesma ligação, devolve tabela) e `transacao` (BEGIN/COMMIT numa única conexão,
   ROLLBACK com o índice do passo; ClickHouse sem transações — erro claro);
   Postgres carrega `libpq.so.5`, SQLite
   `libsqlite3.so.0`, DuckDB `libduckdb.so` e MySQL/MariaDB `libmariadb.so.3`

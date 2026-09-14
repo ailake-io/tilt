@@ -27,6 +27,10 @@ namespace tilt::rt {
 // ("clickhouse: <corpo truncado>").
 Value clickhouse_query(const std::string& url, const std::string& sql);
 
+// Idem, com `?` ligados como `{pN:Tipo}` (SELECT com params).
+Value clickhouse_query_params(const std::string& url, const std::string& sql,
+                              const std::vector<SqlParam>& params);
+
 // Executa um comando SQL sem resultado (INSERT/DDL/ALTER...). Mesmo POST
 // HTTP, sem FORMAT anexado; o corpo da resposta e ignorado. Erros como acima.
 void clickhouse_exec(const std::string& url, const std::string& sql);

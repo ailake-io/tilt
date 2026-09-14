@@ -43,6 +43,7 @@ BUILTINS
   http_get_json http_post_json  (HTTP generico JSON; ver guia 03)
   ler <fonte> carregador
   executar_sql "<url>" "<sql>" [params]   (postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://; "?" vira $N/{pN}; transacao "<url>" [{sql:, params:?}])
+  consultar_sql "<url>" "<sql>" [params]   (SELECT com "?", devolve tabela; mesma ligacao do executar_sql)
   spark_sql "<url-livy>" "<sql>" / spark_executar "<url-livy>" "<codigo>"  ([lingua: "scala"|"pyspark", conf: {...}]; sessao Livy reusada, nao fechada)
   es_buscar "<url>" "<dsl>" / es_executar "<url>" "<metodo>" "<caminho>" [corpo]  (elasticsearch://; busca DSL e REST generico)
   perguntar perguntar_em_fluxo incorporar dividir_texto  (TILT_LLM=mock offline)

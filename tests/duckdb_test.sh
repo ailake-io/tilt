@@ -76,5 +76,24 @@ echo "$out_p" | grep -q "rollback:" || {
 echo "$out_p" | grep -q "linha: 4" && {
   echo "params: ROLLBACK falhou (id 4 presente): $out_p"; fail=1; }
 
+# --- SELECT com `?` (consultar_sql; contraparte de leitura do D1) ----------------
+FIX_CONSULTA="${0%/*}/fixtures/duckdb_consulta.tilt"
+case "$FIX_CONSULTA" in
+  /*) ;;
+  *) FIX_CONSULTA="$(pwd)/$FIX_CONSULTA" ;;
+esac
+out_q=$(env SQL_URL="$DUCKDB_URL" "$BIN" executar "$FIX_CONSULTA")
+printf '%s\n' "$out_q"
+echo "$out_q" | grep -q "filtro: 2 bé nulo" || {
+  echo "consulta: sem 'filtro: 2 bé nulo': $out_q"; fail=1; }
+echo "$out_q" | grep -q "sem-nota: 2" || {
+  echo "consulta: sem 'sem-nota: 2': $out_q"; fail=1; }
+echo "$out_q" | grep -q "contagem:" || {
+  echo "consulta: sem 'contagem:' (erro de aridade): $out_q"; fail=1; }
+echo "$out_q" | grep -q "total: 3" || {
+  echo "consulta: sem 'total: 3': $out_q"; fail=1; }
+echo "$out_q" | grep -q "linha: 1 o'brien 9.5" || {
+  echo "consulta: sem 'linha: 1 o'brien 9.5': $out_q"; fail=1; }
+
 [ "$fail" = 0 ] && echo "duckdb_test ok"
 exit "$fail"

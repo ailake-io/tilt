@@ -107,34 +107,8 @@ void* connect_or_die(const PqApi& pq, const std::string& url) {
   return conn;
 }
 
-}  // namespace
-
-Value postgres_query(const std::string& url, const std::string& sql) {
-  const PqApi& pq = api();
-  if (!pq.lib) {
-#if defined(_WIN32)
-    die("libpq.dll nao encontrada; instale o PostgreSQL client para Windows");
-#else
-    die("libpq.so.5 nao encontrada; instale o pacote libpq5");
-#endif
-  }
-
-  void* conn = connect_or_die(pq, url);
-
-  void* res = pq.exec(conn, sql.c_str());
-  if (!res) {
-    const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
-    pq.finish(conn);
-    die("falha ao executar consulta: " + msg);
-  }
-  if (pq.result_status(res) != kPgTuplesOk) {
-    const char* err = pq.error_message(conn);
-    const std::string detail = (err && *err) ? ": " + std::string(err) : "";
-    pq.clear(res);
-    pq.finish(conn);
-    die("apenas consultas SELECT sao suportadas nesta versao" + detail);
-  }
-
+// Materializa um PGresult de tuplas em tabela (tipos por OID do catalogo).
+Value materializa_pg(const PqApi& pq, void* res) {
   const int nrows = pq.ntuples(res);
   const int ncols = pq.nfields(res);
   ValueList rows;
@@ -171,10 +145,41 @@ Value postgres_query(const std::string& url, const std::string& sql) {
     }
     rows.push_back(std::move(row));
   }
+  return Value::tabela(std::move(rows));
+}
 
+}  // namespace
+
+Value postgres_query(const std::string& url, const std::string& sql) {
+  const PqApi& pq = api();
+  if (!pq.lib) {
+#if defined(_WIN32)
+    die("libpq.dll nao encontrada; instale o PostgreSQL client para Windows");
+#else
+    die("libpq.so.5 nao encontrada; instale o pacote libpq5");
+#endif
+  }
+
+  void* conn = connect_or_die(pq, url);
+
+  void* res = pq.exec(conn, sql.c_str());
+  if (!res) {
+    const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
+    pq.finish(conn);
+    die("falha ao executar consulta: " + msg);
+  }
+  if (pq.result_status(res) != kPgTuplesOk) {
+    const char* err = pq.error_message(conn);
+    const std::string detail = (err && *err) ? ": " + std::string(err) : "";
+    pq.clear(res);
+    pq.finish(conn);
+    die("apenas consultas SELECT sao suportadas nesta versao" + detail);
+  }
+
+  Value out = materializa_pg(pq, res);
   pq.clear(res);
   pq.finish(conn);
-  return Value::tabela(std::move(rows));
+  return out;
 }
 
 void postgres_exec(const std::string& url, const std::string& sql) {
@@ -271,6 +276,55 @@ void postgres_exec_params(const std::string& url, const std::string& sql,
     throw;
   }
   pq.finish(conn);
+}
+
+// Consulta com `?` ligados em texto via PQexecParams (SELECT com params).
+Value postgres_query_params(const std::string& url, const std::string& sql,
+                            const std::vector<SqlParam>& params) {
+  const PqApi& pq = api();
+  if (!pq.lib) {
+#if defined(_WIN32)
+    die("libpq.dll nao encontrada; instale o PostgreSQL client para Windows");
+#else
+    die("libpq.so.5 nao encontrada; instale o pacote libpq5");
+#endif
+  }
+  const auto [reescrito, nq] = rewrite_qmarks(sql, "dolar");
+  if (nq != params.size()) {
+    die("esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
+        std::to_string(nq) + " '?'");
+  }
+  std::vector<std::string> textos;
+  std::vector<const char*> valores;
+  textos.reserve(params.size());
+  valores.reserve(params.size());
+  for (const SqlParam& p : params) {
+    if (p.tipo == SqlParam::Tipo::Nulo) {
+      valores.push_back(nullptr);
+    } else {
+      textos.push_back(pg_param_texto(p));
+      valores.push_back(textos.back().c_str());
+    }
+  }
+  void* conn = connect_or_die(pq, url);
+  void* res = pq.exec_params(conn, reescrito.c_str(), static_cast<int>(params.size()), nullptr,
+                             valores.data(), nullptr, nullptr, 0);
+  if (!res) {
+    const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
+    pq.finish(conn);
+    die("falha ao executar consulta: " + msg);
+  }
+  if (pq.result_status(res) != kPgTuplesOk) {
+    const char* err = pq.error_message(conn);
+    const std::string detail = (err && *err) ? ": " + std::string(err) : "";
+    pq.clear(res);
+    pq.finish(conn);
+    die("apenas consultas SELECT sao suportadas nesta versao" + detail);
+  }
+  Value out = materializa_pg(pq, res);
+  pq.clear(res);
+  pq.finish(conn);
+  return out;
 }
 
 void postgres_transact(const std::string& url,

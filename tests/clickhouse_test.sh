@@ -178,5 +178,22 @@ echo "$out_p" | grep -q "linha: 2 bé 0" || {
 echo "$out_p" | grep -q "sem-transacao:.*transacoes" || {
   echo "params: sem erro claro de transacao: $out_p"; exit 1; }
 
+# 5) SELECT com `?` (consultar_sql; contraparte de leitura do D1)
+FIX_CONSULTA="${0%/*}/fixtures/clickhouse_consulta.tilt"
+case "$FIX_CONSULTA" in
+  /*) ;;
+  *) FIX_CONSULTA="$(pwd)/$FIX_CONSULTA" ;;
+esac
+out_q=$(env CLICKHOUSE_URL="clickhouse://default@127.0.0.1:$PORTA/default" SQL_URL="clickhouse://default@127.0.0.1:$PORTA/default" "$BIN" executar "$FIX_CONSULTA")
+printf '%s\n' "$out_q"
+echo "$out_q" | grep -q "filtro: 2 bé 0" || {
+  echo "consulta: sem 'filtro: 2 bé 0': $out_q"; exit 1; }
+echo "$out_q" | grep -q "contagem:" || {
+  echo "consulta: sem 'contagem:' (erro de aridade): $out_q"; exit 1; }
+echo "$out_q" | grep -q "total: 3" || {
+  echo "consulta: sem 'total: 3': $out_q"; exit 1; }
+echo "$out_q" | grep -q "linha: 1 o'brien 9.5" || {
+  echo "consulta: sem 'linha: 1 o'brien 9.5': $out_q"; exit 1; }
+
 echo "clickhouse_test ok"
 exit 0

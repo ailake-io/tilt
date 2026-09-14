@@ -1,0 +1,21 @@
+# SELECT com `?` no ClickHouse (consultar_sql): Memory engine.
+pipeline consulta_ch:
+  passos:
+    - url = env "SQL_URL"
+    - executar_sql url, "create table consulta_ch (id Int64, nome String, nota Float64) engine = Memory"
+    - executar_sql url, "insert into consulta_ch values (?, ?, ?)", [1, "o'brien", 9.5]
+    - executar_sql url, "insert into consulta_ch values (?, ?, ?)", [2, "bé", 0.0]
+    - executar_sql url, "insert into consulta_ch values (?, ?, ?)", [3, "carla", 7.0]
+    - so_be = consultar_sql url, "select id, nome, nota from consulta_ch where nome = ?", ["bé"]
+    - para cada l em so_be:
+        imprimir "filtro:", l.id, l.nome, l.nota
+    - tentar:
+        consultar_sql url, "select id from consulta_ch where id = ? and nome = ?", [1]
+    capturar erro:
+      imprimir "contagem:", erro
+    - total = consultar_sql url, "select count() as total from consulta_ch"
+    - para cada t em total:
+        imprimir "total:", t.total
+    - todas = consultar_sql url, "select id, nome, nota from consulta_ch order by id"
+    - para cada l em todas:
+        imprimir "linha:", l.id, l.nome, l.nota

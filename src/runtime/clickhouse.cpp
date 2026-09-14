@@ -186,6 +186,9 @@ HttpClientResponse post_sql(const ClickHouseUrl& u, const std::string& sql) {
 
 }  // namespace
 
+// Definido abaixo (parse do NDJSON compartilhado entre query e query_params).
+Value parse_json_each_row(const std::string& body);
+
 Value clickhouse_query(const std::string& url, const std::string& sql) {
   const ClickHouseUrl u = parse_url(url);
   std::string final = sql;
@@ -193,36 +196,7 @@ Value clickhouse_query(const std::string& url, const std::string& sql) {
   const HttpClientResponse r = post_sql(u, final);
   if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
 
-  ValueList rows;
-  std::size_t pos = 0;
-  while (pos < r.body.size()) {
-    const std::size_t fim = r.body.find('\n', pos);
-    std::string linha = r.body.substr(pos, fim == std::string::npos ? std::string::npos
-                                                                    : fim - pos);
-    pos = fim == std::string::npos ? r.body.size() : fim + 1;
-    while (!linha.empty() && (linha.back() == '\r' || linha.back() == ' ' ||
-                              linha.back() == '\t')) {
-      linha.pop_back();
-    }
-    if (linha.empty()) continue;
-    Value j;
-    try {
-      j = json_parse(linha);
-    } catch (const std::exception&) {
-      die("resposta nao e JSONEachRow (linha invalida); remova o FORMAT do SQL "
-          "ou use FORMAT JSONEachRow");
-    }
-    if (j.kind != ValueKind::Mapa || !j.map) {
-      die("resposta nao e JSONEachRow (linha sem objeto); remova o FORMAT do SQL "
-          "ou use FORMAT JSONEachRow");
-    }
-    Value row = Value::mapa();
-    for (const auto& [chave, valor] : j.map->items) {
-      row.map->set(chave, valor_de_json(valor));
-    }
-    rows.push_back(std::move(row));
-  }
-  return Value::tabela(std::move(rows));
+  return parse_json_each_row(r.body);
 }
 
 void clickhouse_exec(const std::string& url, const std::string& sql) {
@@ -231,13 +205,12 @@ void clickhouse_exec(const std::string& url, const std::string& sql) {
   if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
 }
 
-// Liga `?` como query params `{pN:Tipo}` (Marco 3 / D1): seguro por
-// construcao (valores vao em param_pN, nunca interpolados). Tipos:
-// inteiro->Int64, decimal->Float64, texto->String, logico->UInt8,
+// Reescreve `?` como `{pN:Tipo}` e devolve (sql_reescrito, query_params).
+// Seguro por construcao: valores vao em param_pN, nunca interpolados.
+// Tipos: inteiro->Int64, decimal->Float64, texto->String, logico->UInt8,
 // nulo->NULL inline (parametro Nullable vazio nao e NULL).
-void clickhouse_exec_params(const std::string& url, const std::string& sql,
-                            const std::vector<SqlParam>& params) {
-  const ClickHouseUrl u = parse_url(url);
+std::pair<std::string, std::vector<std::pair<std::string, std::string>>> reescreve_params(
+    const std::string& sql, const std::vector<SqlParam>& params) {
   std::vector<std::pair<std::string, std::string>> query_params;
   std::size_t nq = 0;
   std::string reescrito;
@@ -279,10 +252,70 @@ void clickhouse_exec_params(const std::string& url, const std::string& sql,
     die("esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
         std::to_string(nq) + " '?'");
   }
+  return {reescrito, query_params};
+}
+
+// Parse do corpo NDJSON (uma linha = um objeto) em tabela.
+Value parse_json_each_row(const std::string& body) {
+  ValueList rows;
+  std::size_t pos = 0;
+  while (pos < body.size()) {
+    const std::size_t fim = body.find('\n', pos);
+    std::string linha =
+        body.substr(pos, fim == std::string::npos ? std::string::npos : fim - pos);
+    pos = fim == std::string::npos ? body.size() : fim + 1;
+    while (!linha.empty() &&
+           (linha.back() == '\r' || linha.back() == ' ' || linha.back() == '\t')) {
+      linha.pop_back();
+    }
+    if (linha.empty()) continue;
+    Value j;
+    try {
+      j = json_parse(linha);
+    } catch (const std::exception&) {
+      die("resposta nao e JSONEachRow (linha invalida); remova o FORMAT do SQL "
+          "ou use FORMAT JSONEachRow");
+    }
+    if (j.kind != ValueKind::Mapa || !j.map) {
+      die("resposta nao e JSONEachRow (linha sem objeto); remova o FORMAT do SQL "
+          "ou use FORMAT JSONEachRow");
+    }
+    Value row = Value::mapa();
+    for (const auto& [chave, valor] : j.map->items) {
+      row.map->set(chave, valor_de_json(valor));
+    }
+    rows.push_back(std::move(row));
+  }
+  return Value::tabela(std::move(rows));
+}
+
+// Liga `?` como query params `{pN:Tipo}` (Marco 3 / D1): seguro por
+// construcao (valores vao em param_pN, nunca interpolados). Tipos:
+// inteiro->Int64, decimal->Float64, texto->String, logico->UInt8,
+// nulo->NULL inline (parametro Nullable vazio nao e NULL).
+void clickhouse_exec_params(const std::string& url, const std::string& sql,
+                            const std::vector<SqlParam>& params) {
+  const ClickHouseUrl u = parse_url(url);
+  const auto [reescrito, query_params] = reescreve_params(sql, params);
   std::string destino = monta_url(u, reescrito);
   for (const auto& [k, v] : query_params) destino += "&" + k + "=" + uri_encode(v);
   const HttpClientResponse r = http_request("POST", destino, {}, "", 60);
   if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
+}
+
+// Consulta com `?` ligados como `{pN:Tipo}` (SELECT com params): mesmo
+// rewrite do exec_params, com FORMAT JSONEachRow anexado quando ausente.
+Value clickhouse_query_params(const std::string& url, const std::string& sql,
+                              const std::vector<SqlParam>& params) {
+  const ClickHouseUrl u = parse_url(url);
+  const auto [reescrito, query_params] = reescreve_params(sql, params);
+  std::string final = reescrito;
+  if (!tem_format(final)) final += "\nFORMAT JSONEachRow";
+  std::string destino = monta_url(u, final);
+  for (const auto& [k, v] : query_params) destino += "&" + k + "=" + uri_encode(v);
+  const HttpClientResponse r = http_request("POST", destino, {}, "", 60);
+  if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
+  return parse_json_each_row(r.body);
 }
 
 void clickhouse_transact(

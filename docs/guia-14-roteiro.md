@@ -100,10 +100,10 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 
 - Feito (Marco 3/D1): `executar_sql` com placeholders `?` + `transacao`
   atômica nos 5 relacionais (postgres/sqlite/duckdb/mysql/clickhouse).
-- Próximos: **SELECT com `?`** (`fonte`/`ler` parametrizados — a
-  contraparte de leitura do D1) e **prepared server-side no MySQL**
-  (`mysql_stmt_*`; hoje é interpolação com escape — única mancha de
-  segurança no D1).
+- Feito: **SELECT com `?`** (`consultar_sql url, sql [, params]` → tabela;
+  mesma ligação do D1; sem `params` equivale à `consulta:` da `fonte`).
+- Próximo: **prepared server-side no MySQL** (`mysql_stmt_*`; hoje é
+  interpolação com escape — única mancha de segurança no D1).
 
 ## Priorização sugerida
 

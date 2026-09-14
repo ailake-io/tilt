@@ -187,6 +187,51 @@ std::string result_error(const DuckdbApi& db, void* result) {
 
 }  // namespace
 
+// Materializa as linhas de um resultado ja executado. Exige colunas
+// (o chamador verifica ncols == 0 e falha como nao-SELECT antes).
+ValueList materializa_duckdb(const DuckdbApi& db, DuckdbResult* result) {
+  const auto ncols = db.column_count(result);
+  const auto nrows = db.row_count(result);
+
+  ValueList rows;
+  rows.reserve(static_cast<std::size_t>(nrows));
+  for (std::uint64_t r = 0; r < nrows; ++r) {
+    Value row = Value::mapa();
+    for (std::uint64_t c = 0; c < ncols; ++c) {
+      const char* name = db.column_name(result, c);
+      const std::string col = (name && *name) ? name : ("coluna" + std::to_string(c + 1));
+      if (db.value_is_null(result, c, r)) {
+        row.map->set(col, Value::nulo());
+        continue;
+      }
+      switch (db.column_type(result, c)) {
+        case kDuckdbBoolean:
+        case kDuckdbTinyint:
+        case kDuckdbSmallint:
+        case kDuckdbInteger:
+        case kDuckdbBigint:
+          row.map->set(col, Value::inteiro(db.value_int64(result, c, r)));
+          break;
+        case kDuckdbFloat:
+        case kDuckdbDouble:
+          row.map->set(col, Value::decimal(db.value_double(result, c, r)));
+          break;
+        case kDuckdbVarchar:
+        default: {
+          // VARCHAR e demais tipos (DATE, TIMESTAMP, DECIMAL, UUID, BLOB...)
+          // chegam como texto; o valor precisa ser liberado com duckdb_free.
+          char* txt = db.value_varchar(result, c, r);
+          row.map->set(col, Value::texto(txt ? txt : ""));
+          if (txt) db.free_value(txt);
+          break;
+        }
+      }
+    }
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
 Value duckdb_query(const std::string& db_path, const std::string& sql) {
   const DuckdbApi& db = api();
   if (!db.lib) {
@@ -216,44 +261,8 @@ Value duckdb_query(const std::string& db_path, const std::string& sql) {
     db.destroy_result(&result);
     die("apenas consultas SELECT sao suportadas nesta versao");
   }
-  const auto nrows = db.row_count(&result);
 
-  ValueList rows;
-  rows.reserve(static_cast<std::size_t>(nrows));
-  for (std::uint64_t r = 0; r < nrows; ++r) {
-    Value row = Value::mapa();
-    for (std::uint64_t c = 0; c < ncols; ++c) {
-      const char* name = db.column_name(&result, c);
-      const std::string col = (name && *name) ? name : ("coluna" + std::to_string(c + 1));
-      if (db.value_is_null(&result, c, r)) {
-        row.map->set(col, Value::nulo());
-        continue;
-      }
-      switch (db.column_type(&result, c)) {
-        case kDuckdbBoolean:
-        case kDuckdbTinyint:
-        case kDuckdbSmallint:
-        case kDuckdbInteger:
-        case kDuckdbBigint:
-          row.map->set(col, Value::inteiro(db.value_int64(&result, c, r)));
-          break;
-        case kDuckdbFloat:
-        case kDuckdbDouble:
-          row.map->set(col, Value::decimal(db.value_double(&result, c, r)));
-          break;
-        case kDuckdbVarchar:
-        default: {
-          // VARCHAR e demais tipos (DATE, TIMESTAMP, DECIMAL, UUID, BLOB...)
-          // chegam como texto; o valor precisa ser liberado com duckdb_free.
-          char* txt = db.value_varchar(&result, c, r);
-          row.map->set(col, Value::texto(txt ? txt : ""));
-          if (txt) db.free_value(txt);
-          break;
-        }
-      }
-    }
-    rows.push_back(std::move(row));
-  }
+  ValueList rows = materializa_duckdb(db, &result);
 
   db.destroy_result(&result);
   return Value::tabela(std::move(rows));
@@ -282,20 +291,22 @@ void duckdb_exec(const std::string& db_path, const std::string& sql) {
   db.destroy_result(&result);
 }
 
-// Executa um prepared numa conexao aberta, com `?` ligados por posicao
-// (1-based). DuckDB PreparedStatement e um ponteiro opaco alocado por
-// duckdb_prepare e liberado por duckdb_destroy_prepare.
-void exec_um(const DuckdbApi& db, void* conn, const std::string& sql,
-             const std::vector<SqlParam>& params, const std::string& passo) {
+// Prepara `sql` e liga `params` por posicao (1-based) num prepared novo.
+// DuckDB PreparedStatement e um ponteiro opaco alocado por duckdb_prepare e
+// liberado por duckdb_destroy_prepare. `acao` e "comando" ou "consulta".
+void* prepara_e_liga(const DuckdbApi& db, void* conn, const std::string& sql,
+                     const std::vector<SqlParam>& params, const std::string& passo,
+                     const std::string& acao) {
   if (!db.prepared_ok) {
     die(passo +
         "parametros exigem prepared statements (libduckdb sem duckdb_prepare; atualize a lib)");
-  }  void* prep = nullptr;
+  }
+  void* prep = nullptr;
   if (db.prepare(conn, sql.c_str(), &prep) != kDuckdbSuccess || prep == nullptr) {
     const char* err = db.prepare_error(prep);
     std::string msg = err ? err : "erro desconhecido";
     if (prep) db.destroy_prepare(&prep);
-    die(passo + "falha ao preparar comando: " + msg);
+    die(passo + "falha ao preparar " + acao + ": " + msg);
   }
   std::uint64_t nq = 0;
   if (db.nparams(prep, &nq) != kDuckdbSuccess) {
@@ -325,6 +336,14 @@ void exec_um(const DuckdbApi& db, void* conn, const std::string& sql,
       die(passo + "falha ao ligar parametro " + std::to_string(idx) + ": " + msg);
     }
   }
+  return prep;
+}
+
+// Executa um prepared numa conexao aberta, com `?` ligados por posicao
+// (1-based).
+void exec_um(const DuckdbApi& db, void* conn, const std::string& sql,
+             const std::vector<SqlParam>& params, const std::string& passo) {
+  void* prep = prepara_e_liga(db, conn, sql, params, passo, "comando");
   DuckdbResult result;
   const int rc = db.execute_prepared(prep, &result);
   const std::string msg = rc != kDuckdbSuccess ? result_error(db, &result) : "";
@@ -347,6 +366,43 @@ void duckdb_exec_params(const std::string& db_path, const std::string& sql,
   }
   Conn conn(db, db_path);
   exec_um(db, conn.connection, sql, params, "");
+}
+
+Value duckdb_query_params(const std::string& db_path, const std::string& sql,
+                          const std::vector<SqlParam>& params) {
+  const DuckdbApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("libduckdb nao encontrada: instale o pacote duckdb (duckdb.dll no PATH)");
+#else
+    die("libduckdb nao encontrada: instale o pacote duckdb");
+#endif
+  }
+  if (db_path != ":memory:" && !tilt_file_exists(db_path)) {
+    die("banco '" + db_path + "' nao encontrado");
+  }
+  if (!returns_rows(sql)) {
+    die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
+  }
+  Conn conn(db, db_path);
+  void* prep = prepara_e_liga(db, conn.connection, sql, params, "", "consulta");
+  DuckdbResult result;
+  const int rc = db.execute_prepared(prep, &result);
+  if (rc != kDuckdbSuccess) {
+    const std::string msg = result_error(db, &result);
+    db.destroy_result(&result);
+    db.destroy_prepare(&prep);
+    die("falha ao executar consulta: " + msg);
+  }
+  if (db.column_count(&result) == 0) {
+    db.destroy_result(&result);
+    db.destroy_prepare(&prep);
+    die("apenas consultas SELECT sao suportadas nesta versao");
+  }
+  ValueList rows = materializa_duckdb(db, &result);
+  db.destroy_result(&result);
+  db.destroy_prepare(&prep);
+  return Value::tabela(std::move(rows));
 }
 
 void duckdb_transact(const std::string& db_path,

@@ -559,6 +559,23 @@ falha faz `ROLLBACK` e relança com o índice do passo (`passo 2: ...`).
 ClickHouse não tem transações multi-comando via HTTP — `transacao` nele é erro
 claro (execute os comandos com `executar_sql` um a um).
 
+Para leituras parametrizadas use `consultar_sql url, sql [, params]`, a
+contraparte de leitura: aceita as mesmas URLs, os mesmos placeholders `?` com
+a mesma ligação por backend e devolve `tabela` (não precisa declarar `fonte`):
+
+```tilt
+pipeline consulta:
+  passos:
+    - url = env "SQL_URL"
+    - ativos = consultar_sql url, "select nome, idade from clientes where ativo = ? and idade >= ?", [verdadeiro, 18]
+    - para cada c em ativos:
+        imprimir c.nome, c.idade
+```
+
+Sem `params`, `consultar_sql url, sql` equivale à `consulta:` da `fonte`
+(útil para SQL montado em runtime). Contagem divergente de `?` e SQL
+não-SELECT (`INSERT` etc.) são erro claro.
+
 ```tilt
 fonte clientes:
   tipo: postgres

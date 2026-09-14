@@ -283,5 +283,24 @@ else
 fi
 echo "$cnt_p" | grep -q "^3" || { echo "esperado 3 linhas em parametros, obtido: $cnt_p"; exit 1; }
 
+# 5) SELECT com `?` (consultar_sql; contraparte de leitura do D1)
+FIX_CONSULTA="${0%/*}/fixtures/mysql_consulta.tilt"
+case "$FIX_CONSULTA" in
+  /*) ;;
+  *) FIX_CONSULTA="$(pwd)/$FIX_CONSULTA" ;;
+esac
+out_q=$(env SQL_URL="$URL" "$BIN" executar "$FIX_CONSULTA")
+printf '%s\n' "$out_q"
+echo "$out_q" | grep -q "filtro: 2 bé nulo" || {
+  echo "consulta: sem 'filtro: 2 bé nulo': $out_q"; exit 1; }
+echo "$out_q" | grep -q "por-id: 3 carla" || {
+  echo "consulta: sem 'por-id: 3 carla': $out_q"; exit 1; }
+echo "$out_q" | grep -q "contagem:" || {
+  echo "consulta: sem 'contagem:' (erro de aridade): $out_q"; exit 1; }
+echo "$out_q" | grep -q "total: 3" || {
+  echo "consulta: sem 'total: 3': $out_q"; exit 1; }
+echo "$out_q" | grep -q "linha: 1 o'brien 9.5" || {
+  echo "consulta: sem 'linha: 1 o'brien 9.5': $out_q"; exit 1; }
+
 echo "mysql_test ok"
 exit 0

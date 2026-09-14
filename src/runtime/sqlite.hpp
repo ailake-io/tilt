@@ -19,6 +19,10 @@ namespace tilt::rt {
 // Lanca std::runtime_error com mensagem acionavel em qualquer falha.
 Value sqlite_query(const std::string& db_path, const std::string& sql);
 
+// Idem, com `?` posicionais ligados por tipo (SELECT com params).
+Value sqlite_query_params(const std::string& db_path, const std::string& sql,
+                          const std::vector<SqlParam>& params);
+
 // Executa um comando SQL sem resultado (INSERT/UPDATE/DELETE/DDL). Cria o
 // arquivo do banco quando nao existe. Aceita um unico comando por chamada.
 // Lanca std::runtime_error com a mensagem do SQLite em qualquer falha.

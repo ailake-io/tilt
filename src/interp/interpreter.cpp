@@ -3989,6 +3989,61 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "consultar_sql") {
+    // SELECT com params (contraparte de leitura do executar_sql com `?`):
+    // consultar_sql url, "select ... where id = ?", [42] -> tabela.
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "consultar_sql espera (url, sql [, params]), ex.: consultar_sql "
+           "\"postgres://localhost:5432/app\", \"select * from t where id = ?\", [42] "
+           "— use '?' como placeholder (mesma ligacao do executar_sql)");
+    }
+    const std::string& url = a[0].s;
+    std::vector<rt::SqlParam> params;
+    bool com_params = false;
+    if (a.size() >= 3) {
+      if (a[2].kind != ValueKind::Lista || !a[2].list) {
+        fail(call.span, "consultar_sql: 'params' deve ser uma lista [v1, v2, ...]");
+      }
+      com_params = true;
+      for (const Value& v : *a[2].list) {
+        try {
+          params.push_back(rt::param_de_valor(v, "consultar_sql"));
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
+    }
+    try {
+      if (url.rfind("postgres://", 0) == 0 || url.rfind("postgresql://", 0) == 0) {
+        if (com_params) return rt::postgres_query_params(url, a[1].s, params);
+        return rt::postgres_query(url, a[1].s);
+      }
+      if (url.rfind("sqlite://", 0) == 0) {
+        if (com_params) return rt::sqlite_query_params(url.substr(9), a[1].s, params);
+        return rt::sqlite_query(url.substr(9), a[1].s);
+      }
+      if (url.rfind("duckdb://", 0) == 0) {
+        if (com_params) return rt::duckdb_query_params(url.substr(9), a[1].s, params);
+        return rt::duckdb_query(url.substr(9), a[1].s);
+      }
+      if (url.rfind("mysql://", 0) == 0 || url.rfind("mariadb://", 0) == 0) {
+        if (com_params) return rt::mysql_query_params(url, a[1].s, params);
+        return rt::mysql_query(url, a[1].s);
+      }
+      if (url.rfind("clickhouse://", 0) == 0) {
+        if (com_params) return rt::clickhouse_query_params(url, a[1].s, params);
+        return rt::clickhouse_query(url, a[1].s);
+      }
+      fail(call.span,
+           "consultar_sql: url '" + url +
+               "' invalida (use postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://)");
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
   if (name == "transacao") {
     // Marco 3 / D1: passos atomicos numa unica conexao (BEGIN/COMMIT de
     // verdade; ROLLBACK com o indice do passo em caso de falha).

@@ -660,6 +660,8 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       // conectores
       {"executar_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Unknown,
        "executar_sql \"<url>\", \"<sql>\" [, params]"},
+      {"consultar_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Tabela,
+       "consultar_sql \"<url>\", \"<sql>\" [, params]"},
       {"transacao", 2, {TypeKind::Texto}, {TypeKind::Lista}, TypeKind::Nulo,
        "transacao \"<url>\", [{ sql:, params:? }]"},
       {"spark_sql", 2, {TypeKind::Texto}, {TypeKind::Texto}, TypeKind::Tabela,
@@ -1377,8 +1379,8 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
       };
       check_arg(0, sig->arg0, "um primeiro argumento");
       check_arg(1, sig->arg1, "um segundo argumento");
-      // Marco 3 / D1: 'params' de executar_sql deve ser lista [v1, v2, ...].
-      if (name == "executar_sql" && npos >= 3) {
+      // Marco 3 / D1+D2: 'params' de executar_sql/consultar_sql e lista.
+      if ((name == "executar_sql" || name == "consultar_sql") && npos >= 3) {
         int seen = -1;
         const Expr* arg = nullptr;
         for (const auto& ar : e.args) {
@@ -1391,7 +1393,7 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
           const TypeKind t = infer_type(*arg, types);
           if (t != TypeKind::Unknown && t != TypeKind::Lista) {
             report(DiagCode::TypeMismatch, arg->span,
-                   "'executar_sql' espera uma lista de parametros como terceiro argumento, "
+                   "'" + name + "' espera uma lista de parametros como terceiro argumento, "
                    "encontrou '" +
                        type_kind_name(t) + "'",
                    {sig->usage ? "uso: " + std::string(sig->usage)

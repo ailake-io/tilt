@@ -264,23 +264,15 @@ bool is_decimal_type(int t) {
 
 }  // namespace
 
-Value mysql_query(const std::string& url, const std::string& sql) {
-  const MysqlApi& db = api();
-  if (!db.lib) die_lib_not_found();
-  const MysqlUrl parsed = parse_url(url);
-  if (!returns_rows(sql)) {
-    die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
-  }
-
-  Conn conn(db, parsed);
-  if (db.query(conn.conn, sql.c_str()) != 0) {
+Value executa_select(const MysqlApi& db, void* conn, const std::string& final_sql) {
+  if (db.query(conn, final_sql.c_str()) != 0) {
     die(std::string("falha ao executar consulta: ") +
-        (db.error(conn.conn) ? db.error(conn.conn) : "erro desconhecido"));
+        (db.error(conn) ? db.error(conn) : "erro desconhecido"));
   }
-  void* res = db.store_result(conn.conn);
+  void* res = db.store_result(conn);
   if (!res) {
     die(std::string("falha ao obter resultado: ") +
-        (db.error(conn.conn) ? db.error(conn.conn) : "consulta nao retornou linhas"));
+        (db.error(conn) ? db.error(conn) : "consulta nao retornou linhas"));
   }
 
   const unsigned int ncols = db.num_fields(res);
@@ -324,6 +316,17 @@ Value mysql_query(const std::string& url, const std::string& sql) {
 
   db.free_result(res);
   return Value::tabela(std::move(rows));
+}
+
+Value mysql_query(const std::string& url, const std::string& sql) {
+  const MysqlApi& db = api();
+  if (!db.lib) die_lib_not_found();
+  const MysqlUrl parsed = parse_url(url);
+  if (!returns_rows(sql)) {
+    die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
+  }
+  Conn conn(db, parsed);
+  return executa_select(db, conn.conn, sql);
 }
 
 void mysql_exec(const std::string& url, const std::string& sql) {
@@ -387,6 +390,21 @@ void mysql_exec_params(const std::string& url, const std::string& sql,
   const MysqlUrl parsed = parse_url(url);
   Conn conn(db, parsed);
   exec_um(db, conn.conn, sql, params, "");
+}
+
+// Consulta com `?` interpolados apos escape pela conexao (mesmo padrao do
+// executar_sql com params; prepared server-side troca os dois juntos).
+Value mysql_query_params(const std::string& url, const std::string& sql,
+                         const std::vector<SqlParam>& params) {
+  const MysqlApi& db = api();
+  if (!db.lib) die_lib_not_found();
+  const MysqlUrl parsed = parse_url(url);
+  if (!returns_rows(sql)) {
+    die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
+  }
+  Conn conn(db, parsed);
+  const std::string final = params.empty() ? sql : mysql_interpolar(db, conn.conn, sql, params, "");
+  return executa_select(db, conn.conn, final);
 }
 
 void mysql_transact(const std::string& url,

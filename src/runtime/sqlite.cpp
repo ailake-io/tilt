@@ -220,15 +220,17 @@ void sqlite_exec(const std::string& db_path, const std::string& sql) {
   }
 }
 
-// Executa um comando ja preparado numa conexao aberta, com `?` ligados por
-// posicao (1-based). Falhas de contagem e de tipo viram erro claro.
-void exec_um(const SqliteApi& db, void* conn, const std::string& sql,
-             const std::vector<SqlParam>& params, const std::string& passo) {
+// Prepara `sql` e liga `params` por posicao (1-based) num stmt novo.
+// `acao` e "comando" (escrita) ou "consulta" (leitura), so para mensagens.
+// Falhas de preparo, contagem e ligacao viram erro claro (stmt finalizado).
+void* prepara_e_liga(const SqliteApi& db, void* conn, const std::string& sql,
+                     const std::vector<SqlParam>& params, const std::string& passo,
+                     const std::string& acao) {
   void* stmt = nullptr;
   const int rc = db.prepare_v2(conn, sql.c_str(), static_cast<int>(sql.size()) + 1, &stmt, nullptr);
   if (rc != kSqliteOk || stmt == nullptr) {
     const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
-    die(passo + "falha ao preparar comando: " + msg);
+    die(passo + "falha ao preparar " + acao + ": " + msg);
   }
   const int nq = db.bind_count(stmt);
   if (nq != static_cast<int>(params.size())) {
@@ -257,6 +259,57 @@ void exec_um(const SqliteApi& db, void* conn, const std::string& sql,
       die(passo + "falha ao ligar parametro " + std::to_string(idx) + ": " + msg);
     }
   }
+  return stmt;
+}
+
+// Consome todas as linhas de um SELECT ja preparado (stmt segue do chamador,
+// que finaliza). Erro no passo vira "falha ao executar consulta".
+ValueList consome_select(const SqliteApi& db, void* conn, void* stmt, int ncols) {
+  ValueList rows;
+  while (true) {
+    const int step_rc = db.step(stmt);
+    if (step_rc == kSqliteRow) {
+      Value row = Value::mapa();
+      for (int c = 0; c < ncols; ++c) {
+        const char* name = db.column_name(stmt, c);
+        const std::string col = name ? name : ("coluna" + std::to_string(c + 1));
+        switch (db.column_type(stmt, c)) {
+          case kSqliteInteger:
+            row.map->set(col, Value::inteiro(static_cast<std::int64_t>(db.column_int64(stmt, c))));
+            break;
+          case kSqliteFloat:
+            row.map->set(col, Value::decimal(db.column_double(stmt, c)));
+            break;
+          case kSqliteText: {
+            const auto* txt = db.column_text(stmt, c);
+            row.map->set(col, Value::texto(txt ? reinterpret_cast<const char*>(txt) : ""));
+            break;
+          }
+          case kSqliteBlob:
+            row.map->set(col, Value::texto(blob_hex(db.column_blob(stmt, c), db.column_bytes(stmt, c))));
+            break;
+          case kSqliteNull:
+          default:
+            row.map->set(col, Value::nulo());
+            break;
+        }
+      }
+      rows.push_back(std::move(row));
+      continue;
+    }
+    if (step_rc == kSqliteDone) break;
+    const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
+    db.finalize(stmt);
+    die("falha ao executar consulta: " + msg);
+  }
+  return rows;
+}
+
+// Executa um comando ja preparado numa conexao aberta, com `?` ligados por
+// posicao (1-based). Falhas de contagem e de tipo viram erro claro.
+void exec_um(const SqliteApi& db, void* conn, const std::string& sql,
+             const std::vector<SqlParam>& params, const std::string& passo) {
+  void* stmt = prepara_e_liga(db, conn, sql, params, passo, "comando");
   const int step_rc = db.step(stmt);
   const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
   db.finalize(stmt);
@@ -289,6 +342,43 @@ void sqlite_exec_params(const std::string& db_path, const std::string& sql,
     throw;
   }
   db.close(conn);
+}
+
+// Consulta com `?` posicionais ligados por tipo (SELECT com params).
+Value sqlite_query_params(const std::string& db_path, const std::string& sql,
+                          const std::vector<SqlParam>& params) {
+  const SqliteApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("sqlite3.dll nao encontrada; instale o SQLite para Windows");
+#else
+    die("libsqlite3.so.0 nao encontrada; instale o pacote libsqlite3");
+#endif
+  }
+  if (!tilt_file_exists(db_path)) {
+    die("banco '" + db_path + "' nao encontrado");
+  }
+  void* conn = nullptr;
+  if (db.open_v2(db_path.c_str(), &conn, kSqliteOpenReadwrite, nullptr) != kSqliteOk) {
+    die("nao foi possivel abrir o banco '" + db_path + "'");
+  }
+  Value out;
+  try {
+    void* stmt = prepara_e_liga(db, conn, sql, params, "", "consulta");
+    const int ncols = db.column_count(stmt);
+    if (ncols == 0) {
+      db.finalize(stmt);
+      die("apenas consultas SELECT sao suportadas nesta versao");
+    }
+    ValueList rows = consome_select(db, conn, stmt, ncols);
+    db.finalize(stmt);
+    out = Value::tabela(std::move(rows));
+  } catch (...) {
+    db.close(conn);
+    throw;
+  }
+  db.close(conn);
+  return out;
 }
 
 void sqlite_transact(const std::string& db_path,
