@@ -377,6 +377,10 @@ llm gpt:
   temperatura: 0.2
   max_tokens: 1024
   chave: env "ANTHROPIC_API_KEY"
+  tempo_limite: 60               # segundos por tentativa
+  tentativas: 3                  # retry em transporte/429/5xx
+  teto_tokens: 0                 # 0 = sem teto (ver guia 05)
+  reserva: [gpt_barato]          # fallback: outro 'llm' (ver guia 05)
 ```
 
 ### 8.2 Chamada e prompts

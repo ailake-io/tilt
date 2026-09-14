@@ -324,6 +324,14 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## LLM / RAG
 
 - Sem `TILT_LLM`, a chamada real depende do `curl` no `PATH`.
+- Robustez do cliente (guia 05): `tempo_limite:` (segundos por tentativa,
+  default 60, via `--max-time`), `tentativas:` (default 3, retry com backoff
+  1s/2s/4s… teto 15s em erro de transporte, 429 e 5xx; 4xx falha rápido),
+  `reserva: [outro_llm]` (fallback em ordem, sem cadeia) e `teto_tokens:`
+  (barreira no acumulado entrada+saída por `llm` antes de cada chamada).
+  `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` (tokens do
+  `usage` da API; no mock, heurística chars/4). Sem `Retry-After`,
+  sem cache e sem streaming com retry (timeout vale para o SSE inteiro).
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
   `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e

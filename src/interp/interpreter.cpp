@@ -2986,13 +2986,63 @@ rt::LlmConfig Interpreter::llm_config(const std::string& name, Span span) {
   }
   const ast::Block& b = *it->second->block;
   rt::LlmConfig cfg;
-  cfg.provider = field_word(b, "provedor", "anthropic");
+  cfg.nome = name;
+  // 'provedor:' aceita palavra ou texto (a doc usa "openai" entre aspas;
+  // field_word so le Name, entao lemos aqui).
+  if (const Item* fp = find_field(b, "provedor"); fp && fp->value) {
+    if (fp->value->kind == ExprKind::Name || fp->value->kind == ExprKind::TextLit) {
+      cfg.provider = fp->value->text;
+    }
+  }
+  if (cfg.provider != "anthropic" && cfg.provider != "openai" && cfg.provider != "local" &&
+      cfg.provider != "vllm") {
+    fail(span, "llm '" + name + "': provedor '" + cfg.provider +
+                   "' desconhecido (use anthropic | openai | local | vllm)");
+  }
   cfg.model = field_str(b, "modelo");
   cfg.api_key = field_env_or_text(b, "chave");
   cfg.base_url = field_env_or_text(b, "base_url");
   cfg.temperature = field_num(b, "temperatura", 0.2);
   cfg.max_tokens = field_int(b, "max_tokens", 1024);
+  cfg.tempo_limite = field_int(b, "tempo_limite", 60);
+  if (cfg.tempo_limite <= 0) {
+    fail(span, "llm '" + name + "': 'tempo_limite' deve ser > 0 segundos");
+  }
+  cfg.tentativas = field_int(b, "tentativas", 3);
+  if (cfg.tentativas < 1) fail(span, "llm '" + name + "': 'tentativas' deve ser >= 1");
+  cfg.teto_tokens = field_int(b, "teto_tokens", 0);
+  if (cfg.teto_tokens < 0) fail(span, "llm '" + name + "': 'teto_tokens' deve ser >= 0");
+  if (const Item* fr = find_field(b, "reserva"); fr && fr->value) {
+    if (fr->value->kind != ExprKind::ListLit) {
+      fail(fr->value->span, "llm '" + name + "': 'reserva' deve ser lista [outro_llm, ...]");
+    }
+    for (const auto& el : fr->value->elems) {
+      if (!el || (el->kind != ExprKind::Name && el->kind != ExprKind::TextLit)) {
+        fail(fr->value->span, "llm '" + name + "': 'reserva' espera nomes de llm ([eco2, ...])");
+      }
+      cfg.reserva.push_back(el->text);
+    }
+  }
   return cfg;
+}
+
+// Cadeia primario + reservas (um nivel: reserva de reserva nao e seguida;
+// nomes repetidos ou inexistentes falham claro aqui, antes da rede).
+std::vector<rt::LlmConfig> Interpreter::cadeia_llm(const std::string& name, Span span) {
+  std::vector<rt::LlmConfig> out;
+  out.push_back(llm_config(name, span));
+  for (const std::string& r : out[0].reserva) {
+    if (r == name) fail(span, "llm '" + name + "': 'reserva' nao pode conter a si mesmo");
+    auto it = entities_.find(r);
+    if (it == entities_.end() || it->second->key != "llm") {
+      fail(span, "llm '" + name + "': reserva '" + r + "' nao e um 'llm' declarado");
+    }
+    for (const auto& c : out) {
+      if (c.nome == r) fail(span, "llm '" + name + "': reserva '" + r + "' repetida");
+    }
+    out.push_back(llm_config(r, span));
+  }
+  return out;
 }
 
 rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env) {
@@ -3018,19 +3068,24 @@ rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env) {
   if (user.empty()) user = text_of(kw.find("prompt"));
 
   rt::LlmConfig cfg = llm_config(llm_name, call.span);
-  std::string raw;
+  rt::RespostaLLM resp;
   try {
-    raw = rt::llm_chat(cfg, system, user);
+    resp = rt::llm_chat_cadeia(cadeia_llm(llm_name, call.span), system, user);
   } catch (const std::exception& e) {
     fail(call.span, std::string("LLM: ") + e.what());
   }
+  const std::string& raw = resp.texto;
 
   if (const Value* fmt = kw.find("formato"); fmt && fmt->kind == ValueKind::Texto) {
     return structured_from_tipo(fmt->s, raw, call.span);
   }
   Value out = Value::mapa();
   out.map->set("texto", Value::texto(raw));
-  out.map->set("modelo", Value::texto(cfg.model));
+  out.map->set("modelo", Value::texto(resp.modelo.empty() ? cfg.model : resp.modelo));
+  Value toks = Value::mapa();
+  toks.map->set("entrada", Value::inteiro(resp.tok_entrada));
+  toks.map->set("saida", Value::inteiro(resp.tok_saida));
+  out.map->set("tokens", toks);
   return out;
 }
 
@@ -3458,12 +3513,12 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
     }
     answer = "[sem llm] " + message;
   } else {
-    rt::LlmConfig lc = llm_config(llm_name, call.span);
+    const std::vector<rt::LlmConfig> cadeia = cadeia_llm(llm_name, call.span);
     std::string system = papel;
 
     if (tools.empty()) {
       try {
-        answer = rt::llm_chat(lc, system, prompt);
+        answer = rt::llm_chat_cadeia(cadeia, system, prompt).texto;
       } catch (const std::exception& e) {
         fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
       }
@@ -3489,7 +3544,7 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         if (!observations.empty()) user += "\nObservacoes ate agora:\n" + observations;
         std::string raw;
         try {
-          raw = rt::llm_chat(lc, system, user);
+          raw = rt::llm_chat_cadeia(cadeia, system, user).texto;
         } catch (const std::exception& e) {
           fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
         }
@@ -3522,9 +3577,11 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         try {
           const std::string user = "Pedido do usuario: " + prompt + "\n\nObservacoes ate agora:\n" +
                                    observations;
-          const std::string raw = rt::llm_chat(
-              lc, system + "\n\nLimite de passos atingido. Responda agora no formato responder: <sintese>.",
-              user);
+          const std::string raw = rt::llm_chat_cadeia(
+                  cadeia,
+                  system + "\n\nLimite de passos atingido. Responda agora no formato responder: <sintese>.",
+                  user)
+                                              .texto;
           const PlannerAction action = parse_planner_action(raw);
           answer = action.kind == PlannerAction::Answer
                        ? action.answer
@@ -3582,7 +3639,7 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
     }
     const std::string objetivo = field_str(cfg, "objetivo");
     const int max_passos = field_int(cfg, "max_passos", 6);
-    rt::LlmConfig lc = llm_config(sup_name, call.span);
+    const std::vector<rt::LlmConfig> cadeia = cadeia_llm(sup_name, call.span);
 
     std::string system = objetivo;
     system += "\n\nAgentes disponiveis:\n";
@@ -3608,7 +3665,7 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
       if (!history.empty()) user += "\nResultados ate agora:\n" + history;
       std::string raw;
       try {
-        raw = rt::llm_chat(lc, system, user);
+        raw = rt::llm_chat_cadeia(cadeia, system, user).texto;
       } catch (const std::exception& e) {
         fail(call.span, std::string("equipe '") + team_name + "': supervisor: " + e.what());
       }

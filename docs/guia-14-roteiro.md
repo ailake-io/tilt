@@ -59,7 +59,11 @@ cruzada/quadrática, autograd manual.
 
 Funciona: cliente real anthropic/openai via curl, saída estruturada via
 JSON Schema derivado de `tipo`, streaming SSE, embeddings, 6 backends
-vetoriais.
+vetoriais. Robustez entregue (1ª passada): `tempo_limite`, `tentativas`
+com backoff, `reserva:`, `teto_tokens:` e `tokens:` na resposta.
+
+- **Resta de robustez**: `Retry-After` em 429, cache de respostas e
+  retry em streaming.
 
 - **Robustez**: sem retry com backoff em 429/5xx, timeout configurável,
   fallback entre modelos, cache de respostas, teto de custo/tokens por
@@ -110,7 +114,12 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 ## Priorização sugerida
 
 1. ~~`experimento` executável~~ feito (1ª passada; ver acima).
-2. Robustez LLM (retry/backoff/timeout/fallback + tokens/custo).
+2. ~~Robustez LLM~~ feito (1ª passada: `tempo_limite` + `tentativas` com
+   backoff em transporte/429/5xx, `reserva:` com fallback, `teto_tokens:`
+   e `tokens: {entrada, saida}` na resposta; coberto por
+   `tests/llm_retry_test.sh`; sem Retry-After/cache).
+3. Operação de pipelines (timeout por passo, backoff, quarentena,
+   `/saude` + `/metricas`).
 3. Operação de pipelines (timeout por passo, backoff, quarentena,
    `/saude` + `/metricas`).
 4. `exportar: onnx`.

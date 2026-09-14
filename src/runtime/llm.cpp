@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -9,9 +10,15 @@
 #include <cstring>
 #include <fstream>
 #include <initializer_list>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
+#if !defined(_WIN32)
+#include <sys/wait.h>
+#endif
 
 #include "runtime/compat.hpp"
 #include "runtime/json.hpp"
@@ -52,16 +59,31 @@ std::string run(const std::string& cmd) {
   std::size_t n;
   while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
   int rc = tilt_pclose(pipe);
-  if (rc != 0) {
-    throw std::runtime_error("curl retornou codigo " + std::to_string(rc) +
+#if defined(_WIN32)
+  const int codigo = rc;
+#else
+  // pclose devolve wait-status (codigo << 8); extrai a saida real (28 =
+  // timeout do --max-time, 6 = DNS, 7 = conexao recusada).
+  const int codigo = WIFEXITED(rc) ? WEXITSTATUS(rc) : rc;
+#endif
+  if (codigo != 0) {
+    throw std::runtime_error("curl retornou codigo " + std::to_string(codigo) +
                              " (verifique rede/chave/URL)");
   }
   return out;
 }
 
-// Writes `body` to a temp file and POSTs it with curl; returns the response body.
-std::string http_post_json(const std::string& url, const std::vector<std::string>& headers,
-                           const std::string& body) {
+// Writes `body` to a temp file and POSTs it with curl; returns {status, body}.
+// Sem --fail: 4xx/5xx voltam com o corpo para decidir retry (429/5xx) ou
+// falha rapida (demais 4xx). Erro de transporte (DNS, conexao, timeout)
+// joga runtime_error com o codigo do curl.
+struct HttpResult {
+  long status = 0;
+  std::string body;
+};
+
+HttpResult http_post_status(const std::string& url, const std::vector<std::string>& headers,
+                            const std::string& body, int timeout_s) {
   std::string body_file;
   const int fd = tilt_tempfile("llm", body_file);
   if (fd < 0) throw std::runtime_error("nao foi possivel criar arquivo temporario");
@@ -75,19 +97,62 @@ std::string http_post_json(const std::string& url, const std::vector<std::string
     }
   }
 
-  std::string cmd = "curl -sS --fail-with-body -X POST -H 'content-type: application/json'";
+  std::string cmd = "curl -sS -X POST -H 'content-type: application/json'";
   for (const std::string& h : headers) cmd += " -H " + shell_quote(h);
-  cmd += " --data @" + body_file + " " + shell_quote(url);
+  if (timeout_s > 0) cmd += " --max-time " + std::to_string(timeout_s);
+  cmd += " --data @" + body_file + " -w '\n%{http_code}' " + shell_quote(url);
 
   std::string resp;
   try {
     resp = run(cmd);
-  } catch (...) {
+  } catch (const std::exception& e) {
     std::remove(body_file.c_str());
-    throw;
+    throw std::runtime_error(std::string("falha de transporte: ") + e.what());
   }
   std::remove(body_file.c_str());
-  return resp;
+  // Ultima linha = codigo HTTP; o resto = corpo (pode conter \n).
+  std::size_t nl = resp.rfind('\n');
+  long status = 0;
+  std::string corpo = resp;
+  if (nl != std::string::npos) {
+    try {
+      status = std::stol(resp.substr(nl + 1));
+    } catch (...) {
+      status = 0;
+    }
+    corpo = resp.substr(0, nl);
+    if (!corpo.empty() && corpo.back() == '\r') corpo.pop_back();
+  }
+  return {status, corpo};
+}
+
+// Contabilidade de tokens por llm (processo; protege rotas paralelas).
+std::mutex g_uso_mu;
+std::map<std::string, std::pair<long long, long long>> g_uso;  // nome -> {entrada, saida}
+
+void soma_uso(const std::string& nome, long long entrada, long long saida) {
+  std::lock_guard<std::mutex> lk(g_uso_mu);
+  auto& u = g_uso[nome];
+  u.first += entrada;
+  u.second += saida;
+}
+
+long long uso_total(const std::string& nome) {
+  std::lock_guard<std::mutex> lk(g_uso_mu);
+  auto it = g_uso.find(nome);
+  return it == g_uso.end() ? 0 : it->second.first + it->second.second;
+}
+
+// Heuristica de tokens p/ o mock (chars/4 por lado; deterministica).
+long long mock_tokens(const std::string& s) {
+  return static_cast<long long>((s.size() + 3) / 4);
+}
+
+// Dorme entre tentativas: 1s, 2s, 4s... teto 15s (sem jitter: deterministico).
+void espera_retry(int tentativa) {
+  long espera = 1L << (tentativa - 1);
+  if (espera > 15) espera = 15;
+  std::this_thread::sleep_for(std::chrono::seconds(espera));
 }
 
 const Value* dig(const Value& v, std::initializer_list<const char*> path) {
@@ -187,21 +252,46 @@ std::string mock_chat(const std::string& system, const std::string& user) {
   return "[mock] resposta para: " + truncate(user, 200);
 }
 
-std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std::string& user) {
-  if (llm_is_mock()) {
-    return mock_chat(system, user);
+struct PedidoLLM {
+  std::string url;
+  std::vector<std::string> headers;
+  std::string corpo;
+  // Extrai (texto, tok_entrada, tok_saida) da resposta por provedor.
+  std::string texto_de(const Value& resp, long long& tok_in, long long& tok_out) const {
+    if (const Value* u = dig(resp, {"usage", "input_tokens"})) {
+      if (u->kind == ValueKind::Inteiro) tok_in = u->i;
+    }
+    if (const Value* u = dig(resp, {"usage", "output_tokens"})) {
+      if (u->kind == ValueKind::Inteiro) tok_out = u->i;
+    }
+    if (const Value* u = dig(resp, {"usage", "prompt_tokens"})) {
+      if (u->kind == ValueKind::Inteiro) tok_in = u->i;
+    }
+    if (const Value* u = dig(resp, {"usage", "completion_tokens"})) {
+      if (u->kind == ValueKind::Inteiro) tok_out = u->i;
+    }
+    if (const Value* t = dig(resp, {"content", "0", "text"})) {
+      if (t->kind == ValueKind::Texto) return t->s;
+    }
+    if (const Value* t = dig(resp, {"choices", "0", "message", "content"})) {
+      if (t->kind == ValueKind::Texto) return t->s;
+    }
+    throw std::runtime_error("resposta do LLM em formato inesperado");
   }
+};
 
+PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std::string& user) {
+  PedidoLLM p;
   Value body = Value::mapa();
   body.map->set("model", Value::texto(cfg.model));
   body.map->set("temperature", Value::decimal(cfg.temperature));
 
-  std::string url;
-  std::vector<std::string> headers;
-
   if (cfg.provider == "anthropic") {
-    url = "https://api.anthropic.com/v1/messages";
-    headers = {"x-api-key: " + cfg.api_key, "anthropic-version: 2023-06-01"};
+    // Sem base_url: API da Anthropic; com base_url: endpoint compativel
+    // (mock local nos testes) mantendo path e corpo Anthropic.
+    p.url = cfg.base_url.empty() ? "https://api.anthropic.com/v1/messages"
+                                 : cfg.base_url + "/v1/messages";
+    p.headers = {"x-api-key: " + cfg.api_key, "anthropic-version: 2023-06-01"};
     body.map->set("max_tokens", Value::inteiro(cfg.max_tokens));
     if (!system.empty()) body.map->set("system", Value::texto(system));
     Value msg = Value::mapa();
@@ -209,9 +299,11 @@ std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std:
     msg.map->set("content", Value::texto(user));
     body.map->set("messages", Value::lista({msg}));
   } else {
-    url = cfg.base_url.empty() ? "https://api.openai.com/v1/chat/completions"
-                              : cfg.base_url + "/chat/completions";
-    headers = {"Authorization: Bearer " + cfg.api_key};
+    // openai | local | vllm. Sem base_url: API da OpenAI; com base_url:
+    // "<base>/chat/completions" (compativel OpenAI, como local/vllm).
+    p.url = cfg.base_url.empty() ? "https://api.openai.com/v1/chat/completions"
+                                 : cfg.base_url + "/chat/completions";
+    p.headers = {"Authorization: Bearer " + cfg.api_key};
     Value msgs = Value::lista();
     if (!system.empty()) {
       Value s = Value::mapa();
@@ -225,17 +317,84 @@ std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std:
     msgs.list->push_back(u);
     body.map->set("messages", msgs);
   }
+  p.corpo = json_dump(body);
+  return p;
+}
 
-  const std::string raw = http_post_json(url, headers, json_dump(body));
-  Value resp = json_parse(raw);
+// Uma config, com retry/backoff/timeout/teto. Devolve texto + tokens.
+RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std::string& user) {
+  if (llm_is_mock()) {
+    if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+      throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
+                               cfg.nome + "' (mock)");
+    }
+    const std::string t = mock_chat(system, user);
+    const long long tin = mock_tokens(system + user);
+    const long long tout = mock_tokens(t);
+    soma_uso(cfg.nome, tin, tout);
+    return {t, tin, tout, cfg.model};
+  }
 
-  if (const Value* t = dig(resp, {"content", "0", "text"})) {
-    if (t->kind == ValueKind::Texto) return t->s;
+  if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+    throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
+                             cfg.nome + "' (acumulado " + std::to_string(uso_total(cfg.nome)) + ")");
   }
-  if (const Value* t = dig(resp, {"choices", "0", "message", "content"})) {
-    if (t->kind == ValueKind::Texto) return t->s;
+  const PedidoLLM ped = monta_chat(cfg, system, user);
+  const int tents = cfg.tentativas < 1 ? 1 : cfg.tentativas;
+  std::string ultimo_erro;
+  for (int t = 1; t <= tents; ++t) {
+    HttpResult r;
+    try {
+      r = http_post_status(ped.url, ped.headers, ped.corpo, cfg.tempo_limite);
+    } catch (const std::exception& e) {
+      ultimo_erro = e.what();
+      if (t < tents) {
+        espera_retry(t);
+        continue;
+      }
+      throw std::runtime_error(std::string(ultimo_erro) + " apos " + std::to_string(tents) +
+                               " tentativa(s) (ajuste tempo_limite:/tentativas: em '" + cfg.nome +
+                               "')");
+    }
+    if (r.status >= 200 && r.status < 300) {
+      Value resp = json_parse(r.body);
+      long long tin = 0, tout = 0;
+      const std::string texto = ped.texto_de(resp, tin, tout);
+      soma_uso(cfg.nome, tin, tout);
+      return {texto, tin, tout, cfg.model};
+    }
+    if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
+      ultimo_erro = "HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 200);
+      if (t < tents) {
+        espera_retry(t);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
+                               " tentativa(s) (ajuste tentativas:/reserva: em '" + cfg.nome + "')");
+    }
+    // 4xx (menos 429): erro do pedido, retry nao adianta.
+    throw std::runtime_error("HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 300));
   }
-  throw std::runtime_error("resposta do LLM em formato inesperado");
+  throw std::runtime_error(ultimo_erro);
+}
+
+RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
+                             const std::string& user) {
+  if (cadeia.empty()) throw std::runtime_error("cadeia de LLMs vazia");
+  std::string erros;
+  for (std::size_t k = 0; k < cadeia.size(); ++k) {
+    try {
+      return chat_uma(cadeia[k], system, user);
+    } catch (const std::exception& e) {
+      if (!erros.empty()) erros += "; ";
+      erros += "'" + cadeia[k].nome + "': " + e.what();
+    }
+  }
+  throw std::runtime_error(erros);
+}
+
+std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std::string& user) {
+  return llm_chat_cadeia({cfg}, system, user).texto;
 }
 
 std::vector<float> llm_embed(const std::string& model, const std::string& text) {
@@ -273,12 +432,39 @@ std::vector<float> llm_embed(const std::string& model, const std::string& text) 
   Value body = Value::mapa();
   body.map->set("model", Value::texto(model));
   body.map->set("input", Value::texto(text));
-  const std::string raw =
-      http_post_json("https://api.openai.com/v1/embeddings",
-                     {"Authorization: Bearer " + std::string(std::getenv("OPENAI_API_KEY")
-                                                                 ? std::getenv("OPENAI_API_KEY")
-                                                                 : "")},
-                     json_dump(body));
+  const std::string payload = json_dump(body);
+  const std::vector<std::string> headers = {
+      "Authorization: Bearer " +
+      std::string(std::getenv("OPENAI_API_KEY") ? std::getenv("OPENAI_API_KEY") : "")};
+  // Mesmo transporte do chat (timeout 60s, 3 tentativas em 429/5xx/transporte).
+  std::string raw;
+  std::string ultimo_erro;
+  for (int t = 1; t <= 3; ++t) {
+    HttpResult r;
+    try {
+      r = http_post_status("https://api.openai.com/v1/embeddings", headers, payload, 60);
+    } catch (const std::exception& e) {
+      ultimo_erro = e.what();
+      if (t < 3) {
+        espera_retry(t);
+        continue;
+      }
+      throw std::runtime_error(std::string(ultimo_erro) + " apos 3 tentativa(s)");
+    }
+    if (r.status >= 200 && r.status < 300) {
+      raw = r.body;
+      break;
+    }
+    if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
+      ultimo_erro = "HTTP " + std::to_string(r.status);
+      if (t < 3) {
+        espera_retry(t);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos 3 tentativa(s): " + truncate(r.body, 200));
+    }
+    throw std::runtime_error("HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 300));
+  }
   Value resp = json_parse(raw);
   std::vector<float> out;
   if (const Value* arr = dig(resp, {"data", "0", "embedding"});

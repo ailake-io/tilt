@@ -196,6 +196,8 @@ class Interpreter {
 
   // LLM + RAG.
   rt::LlmConfig llm_config(const std::string& name, Span span);
+  // Primario + reservas (fallback em ordem).
+  std::vector<rt::LlmConfig> cadeia_llm(const std::string& name, Span span);
   rt::Value eval_perguntar(const ast::Expr& call, Env& env);
   rt::Value structured_from_tipo(const std::string& tipo_name, const std::string& raw, Span span);
   rt::Value eval_indice_method(const std::string& indice_name, const std::string& method,

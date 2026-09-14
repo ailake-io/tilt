@@ -11,6 +11,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 add_test(
+  NAME llm_robusto
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/llm_retry_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
+
+add_test(
   NAME http
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/http_test.sh
           $<TARGET_FILE:tilt>

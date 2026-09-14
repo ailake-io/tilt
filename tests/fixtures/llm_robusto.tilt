@@ -1,0 +1,72 @@
+# Robustez do cliente LLM: retry/backoff, fallback, teto de tokens e timeout.
+# Cada 'llm' abaixo aponta para o mock local (base_url com @PORTA@); o mock
+# decide o comportamento pelo campo "model" do corpo.
+
+llm instavel:
+  provedor: "anthropic"
+  modelo: "instavel"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+  tentativas: 5
+
+llm ok:
+  provedor: "openai"
+  modelo: "ok"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+
+llm quebrado:
+  provedor: "openai"
+  modelo: "quebrado"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+  tentativas: 2
+  reserva: [ok]
+
+llm limitado:
+  provedor: "openai"
+  modelo: "ok"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+  teto_tokens: 15
+
+llm lento:
+  provedor: "openai"
+  modelo: "lento"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+  tempo_limite: 2
+  tentativas: 2
+
+pipeline retry_tokens:
+  passos:
+    # O mock devolve 429 nas 2 primeiras e 200 na 3a (usage 7+3).
+    - r = perguntar instavel, usuario: "oi"
+    - imprimir "texto:", r.texto
+    - imprimir "tokens:", r.tokens.entrada, r.tokens.saida
+    - imprimir "modelo:", r.modelo
+
+pipeline fallback:
+  passos:
+    # 'quebrado' da 500 sempre; a reserva 'ok' responde no lugar.
+    - r = perguntar quebrado, usuario: "oi"
+    - imprimir "texto:", r.texto
+    - imprimir "modelo:", r.modelo
+
+pipeline teto:
+  passos:
+    # Cada resposta 'ok' usa 15 tokens; o teto (15) barra a 2a chamada.
+    - r1 = perguntar limitado, usuario: "oi"
+    - imprimir "uso1:", r1.tokens.entrada + r1.tokens.saida
+    - tentar:
+        r2 = perguntar limitado, usuario: "oi de novo"
+    capturar erro:
+      imprimir "teto:", erro
+
+pipeline timeout:
+  passos:
+    # O mock dorme 5s; tempo_limite: 2 aborta cada tentativa (2 tentativas).
+    - tentar:
+        r = perguntar lento, usuario: "oi"
+    capturar erro:
+      imprimir "timeout:", erro

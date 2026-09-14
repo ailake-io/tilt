@@ -10,11 +10,50 @@ llm gpt:
   max_tokens: 1024
   chave: env "ANTHROPIC_API_KEY"    # segredo literal -> T020
   base_url: env "LLM_URL"           # para local/vllm (compatível OpenAI)
+  tempo_limite: 60                  # segundos por tentativa (default 60)
+  tentativas: 3                     # retry em transporte/429/5xx (default 3)
+  teto_tokens: 0                    # 0 = sem teto; >0 barra antes de estourar
+  reserva: [gpt_barato]             # fallback: outro 'llm' se este falhar
 
 pipeline declara:
   passos:
     - imprimir "llm declarado"
 ```
+
+## Robustez: retry, fallback, teto e tokens
+
+- `tempo_limite:` aborta a tentativa (`curl --max-time`); `tentativas:`
+  repete com backoff 1s → 2s → 4s… (teto 15s) em erro de transporte
+  (inclui timeout), HTTP 429 e 5xx. Outros 4xx falham rápido, sem retry.
+- `reserva: [b, c]` tenta outro `llm` declarado quando o primeiro esgota
+  as tentativas (um nível, sem cadeia; repetido ou inexistente é erro
+  claro antes da rede). Vale para `perguntar`, agentes e supervisor.
+- `teto_tokens:` soma entrada+saída acumulados do `llm` no processo e
+  falha **antes** da chamada que estouraria (erro `teto_tokens ...`).
+- `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` —
+  `modelo` é o que respondeu (útil com `reserva:`), tokens vêm do `usage`
+  da API (Anthropic `input/output_tokens`, OpenAI `prompt/completion_tokens`;
+  no mock, heurística chars/4 por lado).
+
+```tilt run
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+  tentativas: 3
+  teto_tokens: 1000000
+
+pipeline robusto:
+  passos:
+    # Com TILT_LLM=mock, tokens são chars/4 (determinístico) e o teto vale.
+    - r = perguntar gpt, usuario: "oi"
+    - imprimir r.texto
+    - imprimir r.tokens.entrada, r.tokens.saida
+    - imprimir r.modelo
+```
+
+Cobertura com HTTP de verdade em `tests/llm_retry_test.sh` (mock local com
+429/500/timeout: retry, fallback, teto e `tempo_limite`).
 
 ## Transporte
 
