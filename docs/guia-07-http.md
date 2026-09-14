@@ -25,6 +25,29 @@ servico Loja:
             status: "ok"
 ```
 
+## Observabilidade: `saude:` e `metricas:`
+
+```tilt check
+# Rotas implícitas (só GET); rota do usuário com mesmo método+caminho vence.
+# Roda sob 'tilt servir' — aqui checamos.
+servico Ops:
+  porta: 8080
+  saude: verdadeiro      # GET /saude -> {"status": "ok", "servico", "rotas"}
+  metricas: verdadeiro   # GET /metricas -> contadores (ver abaixo)
+  rota post "/eco":
+    passos:
+      - responder:
+          dados:
+            ok: verdadeiro
+```
+
+- `GET /saude` → `200 {"status": "ok", "servico": "<nome>", "rotas": N}`.
+- `GET /metricas` → `200 {"inicio": "<UTC>", "requisicoes": T,
+  "erros": E, "por_rota": {"METODO /caminho": {"total": T, "erros": E}}}` —
+  `erros` conta respostas 5xx (404 entra no total, não nos erros).
+- As duas são excluídas da própria contagem. Sem os campos, os caminhos
+  voltam a ser 404 como qualquer rota inexistente.
+
 - `rota <metodo> "/caminho":` — casa método (`get`/`post`/...) e caminho exatos.
 - O corpo JSON da requisição vira a variável `entrada` no escopo dos `passos:`.
 - Se a rota declara `entrada: <Tipo>`, campos ausentes → `400 { "erro": "campo 'x' ausente" }`.

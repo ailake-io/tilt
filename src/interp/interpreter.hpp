@@ -95,6 +95,14 @@ class Interpreter {
   int serve(int port_override, int max_requests, int threads);
 
  private:
+  // Estado da quarentena: caminho do JSONL + contador (com mutex, pois
+  // passos com timeout podem anexar de threads destacadas).
+  struct QuarentenaState {
+    std::string caminho;
+    std::size_t n = 0;
+    std::mutex mu;
+  };
+
   struct Env {
     std::unordered_map<std::string, rt::Value> vars;
     // Tabela de funcoes do modulo dono deste escopo (scope de Module), para
@@ -102,6 +110,10 @@ class Interpreter {
     // modulo.
     const std::unordered_map<std::string, const ast::Item*>* funcs = nullptr;
     Env* parent = nullptr;
+    // Quarentena (dead-letter) herdada pela cadeia: `para cada` desvia a
+    // linha que falha para o arquivo em vez de abortar. Compartilhado
+    // (também entre tentativas e threads de timeout).
+    std::shared_ptr<QuarentenaState> quarentena;
 
     rt::Value* lookup(const std::string& name);
     void set(const std::string& name, rt::Value value);
@@ -146,7 +158,16 @@ class Interpreter {
   bool run_janela(const ast::Item& janela, const ast::Item& pipeline, std::time_t now,
                   std::vector<rt::Value>& batch);
   void run_verificar(const ast::Item& field, Env& env);
-  void exec_block(const ast::Block& block, Env& env);
+  // Deadline por passo de topo (`tempo_limite:` do pipeline): quando `prazo`
+  // é dado, cada item do bloco roda numa thread com esse teto (T901 ao
+  // estourar; a thread segue destacada). Chamadas internas passam nulo.
+  // `dono` mantém o Env vivo para a thread destacada (vazamento deliberado
+  // e limitado, via lista estática de zumbis).
+  struct PrazoPasso {
+    std::time_t segundos = 0;
+    std::shared_ptr<Env> dono;
+  };
+  void exec_block(const ast::Block& block, Env& env, const PrazoPasso* prazo = nullptr);
   void exec_item(const ast::Item& item, Env& env);
   void exec_stmt(const ast::Stmt& stmt, Env& env);
 
@@ -226,6 +247,10 @@ class Interpreter {
   std::unordered_map<std::string, std::vector<Layer>> model_cache_;
   std::unordered_map<std::string, ExpModel> experimentos_;
   std::mutex experimentos_mutex_;
+  // Envs de passos estourados (timeout): a thread destacada segue com o Env
+  // vivo até terminar ou até o fim do processo.
+  static std::mutex zumbis_mu_;
+  static std::vector<std::shared_ptr<Env>> zumbis_;
   std::unordered_map<const ast::Item*, std::shared_ptr<vm::Chunk>> vm_chunks_;  // null = not compilable
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
@@ -267,6 +292,17 @@ class Interpreter {
   // ele parear um 'senao:' solto (item de campo em 'passos:') com o 'se'
   // anterior. Fora desse par, 'senao' executa incondicionalmente (legado).
   // Estado por thread: rotas paralelas nao podem interferir uma na outra.
+
+  // Metricas do servir (`metricas: verdadeiro`): contadores por rota,
+  // protegidos por mutex (workers concorrentes).
+  struct MetricasServico {
+    std::string inicio;
+    long long requisicoes = 0;
+    long long erros = 0;
+    std::map<std::string, std::pair<long long, long long>> por_rota;  // rota -> {total, erros}
+  };
+  MetricasServico metricas_;
+  std::mutex metricas_mutex_;
 
   bool schedule_mode_ = false;
 };

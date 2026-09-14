@@ -133,6 +133,48 @@ Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
 (a janela "fecha" na primeira execução). Durações aceitas: `"Ns"`, `"Nmin"`,
 `"Nh"` com `N` inteiro positivo.
 
+## Operação: retry, timeout, quarentena
+
+Três campos de `pipeline` para produção (combináveis):
+
+```tilt run
+importar io
+
+pipeline instavel:
+  # 1a tentativa: sem o marcador, falha e espera 1s; 2a: recupera.
+  ao_falhar: repetir 2, espera: "1s", backoff: 2
+  passos:
+    - se io.existe_arquivo "tentativa.txt":
+        imprimir "recuperado na retentativa"
+    senao:
+        vazio = [{ n: 1 }]
+        escrever_csv vazio, "tentativa.txt"
+        x = ler_csv "sempre_ausente.csv"
+```
+
+- `ao_falhar: repetir N[, espera: "5s"][, backoff: F]`: reexecuta os passos
+  do zero até N vezes com escopo limpo. Sem `espera:`, retenta de imediato;
+  com `espera:`, dorme `espera × F^tentativa` (F default 1 = fixo).
+- `tempo_limite: "30s"`: cada passo de topo tem esse teto; ao estourar, o
+  passo falha (`passo K excedeu tempo_limite de 30s`) e o `ao_falhar` decide.
+  A thread do passo segue destacada (o `Env` sobrevive), então use para
+  passos que terminam sozinhos (I/O com timeout próprio) — laço infinito
+  vaza thread até o fim do processo.
+- `quarentena: "quarentena.jsonl"`: linhas do `para cada` que falham vão
+  para o arquivo (JSONL `{"linha": ..., "erro": "..."}`) em vez de abortar;
+  no fim imprime `quarentena: N linha(s) desviadas para ...`. Sem o campo,
+  a primeira linha que falha aborta tudo (comportamento de sempre).
+
+```tilt run
+pipeline limpa:
+  quarentena: "quarentena.jsonl"
+  passos:
+    - linhas = [{ v: 1 }, { v: 0 }, { v: 2 }]
+    - para cada l em linhas:
+        r = ler_csv "sempre_ausente.csv"   # falha nas 3: todas desviadas
+    - imprimir "fim"   # o pipeline continua
+```
+
 ## Leitura e escrita
 
 | Builtin | Efeito |

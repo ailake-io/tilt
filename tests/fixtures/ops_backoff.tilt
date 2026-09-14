@@ -1,0 +1,6 @@
+# Backoff no ao_falhar: 2 retries com espera 1s x2 (total ~3s).
+pipeline instavel:
+  ao_falhar: repetir 2, espera: "1s", backoff: 2
+  passos:
+    - x = ler_csv "sempre_ausente.csv"
+    - imprimir "nunca"

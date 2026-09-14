@@ -1,0 +1,13 @@
+# Servico com observabilidade: /saude e /metricas implicitos.
+servico Ops:
+  porta: 8479
+  saude: verdadeiro
+  metricas: verdadeiro
+  rota post "/eco":
+    passos:
+      - responder:
+          dados:
+            ok: verdadeiro
+  rota get "/falha":
+    passos:
+      - x = ler_csv "sempre_ausente.csv"

@@ -17,6 +17,18 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME pipeline_ops
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/pipeline_ops_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
+
+add_test(
+  NAME servico_ops
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/servico_ops_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ops_servico.tilt)
+
+add_test(
   NAME http
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/http_test.sh
           $<TARGET_FILE:tilt>

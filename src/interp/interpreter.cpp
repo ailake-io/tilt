@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <initializer_list>
 #include <memory>
 #include <ostream>
@@ -187,6 +188,9 @@ void Interpreter::Env::set(const std::string& name, Value value) {
 }
 
 // ------------------------------------------------------------------ setup
+
+std::mutex Interpreter::zumbis_mu_;
+std::vector<std::shared_ptr<Interpreter::Env>> Interpreter::zumbis_;
 
 Interpreter::Interpreter(const ast::Program& program, DiagnosticEngine& diag, std::ostream& out)
     : program_(program), diag_(diag), out_(out) {}
@@ -436,6 +440,39 @@ JanelaSpec parse_janela(const Item& field) {
     return spec;
   }
   return rejeita("valor invalido; use um inteiro (contagem) ou duracao \"30s\", \"5min\", \"1h\"");
+}
+
+// Especificacao completa de `ao_falhar: repetir N[, espera: "5s"][, backoff: 2]`:
+// tentativas extras, espera base entre elas e fator multiplicativo (1 = fixo).
+// Valida duracao e fator; joga runtime_error com mensagem acionavel.
+struct RetrySpec {
+  int tentativas = 0;
+  std::time_t espera = 0;
+  long backoff = 1;
+};
+
+RetrySpec retry_spec(const Item& pipeline) {
+  RetrySpec spec;
+  spec.tentativas = retry_count(pipeline);
+  if (spec.tentativas <= 0) return spec;
+  const Item* f = find_field(*pipeline.block, "ao_falhar");
+  const Expr* v = f && f->value ? f->value.get() : nullptr;
+  if (!v || v->kind != ExprKind::Call) return spec;
+  for (const auto& a : v->args) {
+    if (!a.value || a.name.empty()) continue;
+    if (a.name == "espera") {
+      if (a.value->kind != ExprKind::TextLit || !parse_duracao(a.value->text, spec.espera)) {
+        throw std::runtime_error(
+            "ao_falhar: 'espera' deve ser duracao (\"5s\", \"2min\", \"1h\")");
+      }
+    } else if (a.name == "backoff") {
+      if (a.value->kind != ExprKind::IntLit ||
+          (spec.backoff = std::strtol(a.value->text.c_str(), nullptr, 10)) < 1) {
+        throw std::runtime_error("ao_falhar: 'backoff' deve ser inteiro >= 1 (1 = espera fixa)");
+      }
+    }
+  }
+  return spec;
 }
 
 // ------------------------------------------------------------------ cron
@@ -814,18 +851,73 @@ void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
     }
   }
 
-  const int retries = retry_count(pipeline);
+  RetrySpec retry;
+  try {
+    retry = retry_spec(pipeline);
+  } catch (const std::exception& e) {
+    fail(pipeline.span, std::string(e.what()));
+  }
+  // Timeout por passo (`tempo_limite: "30s"`): cada item de `passos:` com
+  // deadline propria; sem o campo, execucao direta sem thread.
+  PrazoPasso prazo;
+  bool com_prazo = false;
+  if (const Item* tl = find_field(*pipeline.block, "tempo_limite")) {
+    if (!tl->value || tl->value->kind != ExprKind::TextLit ||
+        !parse_duracao(tl->value->text, prazo.segundos)) {
+      fail(tl->span, "tempo_limite: espera duracao (\"30s\", \"5min\", \"1h\")");
+    }
+    com_prazo = true;
+  }
+  const int retries = retry.tentativas;
+  // Quarentena (`quarentena: "arq.jsonl"`): linhas do `para cada` que
+  // falham sao desviadas para o arquivo em vez de abortar.
+  std::shared_ptr<QuarentenaState> qst;
+  if (const Item* qf = find_field(*pipeline.block, "quarentena")) {
+    if (!qf->value || qf->value->kind != ExprKind::TextLit || qf->value->text.empty()) {
+      fail(qf->span, "quarentena: espera um caminho (\"quarentena.jsonl\")");
+    }
+    qst = std::make_shared<QuarentenaState>();
+    qst->caminho = qf->value->text;
+  }
   for (int attempt = 0; attempt <= retries; ++attempt) {
     try {
-      Env env;
-      env.parent = &root_;
-      if (janela) env.vars["linhas"] = Value::lista(janela_lotes);
-      exec_block(*passos->block, env);
+      if (com_prazo) {
+        auto senv = std::make_shared<Env>();
+        senv->parent = &root_;
+        if (janela) senv->vars["linhas"] = Value::lista(janela_lotes);
+        senv->quarentena = qst;
+        prazo.dono = senv;
+        exec_block(*passos->block, *senv, &prazo);
+      } else {
+        Env env;
+        env.parent = &root_;
+        if (janela) env.vars["linhas"] = Value::lista(janela_lotes);
+        env.quarentena = qst;
+        exec_block(*passos->block, env);
+      }
+      if (qst && qst->n > 0) {
+        out_ << "quarentena: " << qst->n << " linha(s) desviadas para " << qst->caminho << "\n";
+      }
       return;
     } catch (const RuntimeAbort& a) {
       if (attempt >= retries) throw;
-      out_ << "[retry] passo falhou (" << a.message << "); tentativa " << (attempt + 2) << "/"
-           << (retries + 1) << "\n";
+      // Espera com backoff: espera * backoff^attempt, teto de 5min.
+      long espera = retry.espera;
+      for (int k = 0; k < attempt; ++k) {
+        espera *= retry.backoff;
+        if (espera > 300) {
+          espera = 300;
+          break;
+        }
+      }
+      if (espera > 0) {
+        out_ << "[retry] passo falhou (" << a.message << "); nova tentativa em " << espera
+             << "s (" << (attempt + 2) << "/" << (retries + 1) << ")\n";
+        std::this_thread::sleep_for(std::chrono::seconds(espera));
+      } else {
+        out_ << "[retry] passo falhou (" << a.message << "); tentativa " << (attempt + 2) << "/"
+             << (retries + 1) << "\n";
+      }
     }
   }
 }
@@ -3805,6 +3897,21 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
 
   int port = port_override > 0 ? port_override : field_int(*svc->block, "porta", 8080);
   const std::vector<Route> routes = collect_routes(*svc->block);
+  // Observabilidade opt-in: GET /saude e GET /metricas implicitos (rotas do
+  // usuario com o mesmo metodo+caminho vencem).
+  auto campo_ligado = [&](const char* nome) {
+    const Item* f = find_field(*svc->block, nome);
+    return f && f->value && f->value->kind == ExprKind::BoolLit && f->value->boolean;
+  };
+  const bool tem_saude = campo_ligado("saude");
+  const bool tem_metricas = campo_ligado("metricas");
+  {
+    const std::time_t agora = std::time(nullptr);
+    char iso[32];
+    std::strftime(iso, sizeof iso, "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&agora));
+    std::lock_guard<std::mutex> lk(metricas_mutex_);
+    metricas_.inicio = iso;
+  }
   // Middleware: todos os blocos `meio:` do servico, em ordem de declaracao.
   // Cada um roda (no Env da rota casada) antes dos `passos:`; se algum
   // executar `responder:`, a resposta dele vale e a rota nao executa.
@@ -3844,7 +3951,33 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
           }
         }
 
-        if (!match) {
+        // Rotas implicitas de observabilidade (so GET; rota do usuario vence).
+        if (!match && req.method == "GET" && req.path == "/saude" && tem_saude) {
+          Value corpo = Value::mapa();
+          corpo.map->set("status", Value::texto("ok"));
+          corpo.map->set("servico", Value::texto(decl_name(*svc)));
+          corpo.map->set("rotas", Value::inteiro(static_cast<std::int64_t>(routes.size())));
+          resp.status = 200;
+          resp.body = json_dump(corpo);
+        } else if (!match && req.method == "GET" && req.path == "/metricas" && tem_metricas) {
+          Value corpo = Value::mapa();
+          Value rotas = Value::mapa();
+          {
+            std::lock_guard<std::mutex> lk(metricas_mutex_);
+            corpo.map->set("inicio", Value::texto(metricas_.inicio));
+            corpo.map->set("requisicoes", Value::inteiro(metricas_.requisicoes));
+            corpo.map->set("erros", Value::inteiro(metricas_.erros));
+            for (const auto& kv : metricas_.por_rota) {
+              Value m = Value::mapa();
+              m.map->set("total", Value::inteiro(kv.second.first));
+              m.map->set("erros", Value::inteiro(kv.second.second));
+              rotas.map->set(kv.first, m);
+            }
+          }
+          corpo.map->set("por_rota", rotas);
+          resp.status = 200;
+          resp.body = json_dump(corpo);
+        } else if (!match) {
           resp.status = 404;
           resp.body = R"({"erro":"rota nao encontrada"})";
         } else {
@@ -3909,6 +4042,18 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
           std::lock_guard<std::mutex> lk(log_mutex_);
           out_ << req.method << " " << req.path << " -> " << resp.status << "\n" << std::flush;
         }
+        // Contabilidade (menos as implicitas, para nao poluir).
+        if (!((req.method == "GET" && req.path == "/saude" && tem_saude) ||
+              (req.method == "GET" && req.path == "/metricas" && tem_metricas))) {
+          std::lock_guard<std::mutex> lk(metricas_mutex_);
+          metricas_.requisicoes += 1;
+          auto& par = metricas_.por_rota[req.method + " " + req.path];
+          par.first += 1;
+          if (resp.status >= 500) {
+            metricas_.erros += 1;
+            par.second += 1;
+          }
+        }
         return resp;
       },
       max_requests, threads);
@@ -3917,7 +4062,35 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
 
 // ------------------------------------------------------------------ statements
 
-void Interpreter::exec_block(const ast::Block& block, Env& env) {
+void Interpreter::exec_block(const ast::Block& block, Env& env, const PrazoPasso* prazo) {
+  // Roda um item de topo com deadline (timeout por passo): worker thread +
+  // espera limitada; ao estourar, a thread é destacada (segue sozinha) e o
+  // passo falha com T901. Sem prazo, execucao direta.
+  auto com_prazo = [&](const Item& it, std::size_t passo) {
+    if (!prazo || prazo->segundos <= 0) {
+      exec_item(it, env);
+      return;
+    }
+    std::packaged_task<void()> tarefa([&] { exec_item(it, env); });
+    std::future<void> fut = tarefa.get_future();
+    std::thread th(std::move(tarefa));
+    if (fut.wait_for(std::chrono::seconds(prazo->segundos)) == std::future_status::ready) {
+      th.join();
+      fut.get();  // relança RuntimeAbort do passo
+      return;
+    }
+    // Estourou: o Env passa para a lista de zumbis (vive enquanto a thread
+    // destacada precisar) e o passo falha para o retry la de cima.
+    if (prazo->dono) {
+      std::lock_guard<std::mutex> lk(zumbis_mu_);
+      zumbis_.push_back(prazo->dono);
+    }
+    th.detach();
+    throw RuntimeAbort{it.span,
+                       "passo " + std::to_string(passo) + " excedeu tempo_limite de " +
+                           std::to_string(prazo->segundos) + "s",
+                       DiagCode::RuntimeError, {}};
+  };
   // Desembrulha item de lista (`- x`) ate o conteudo.
   auto unwrap = [](const Item* it) -> const Item* {
     while (it && it->kind == ItemKind::ListEntry) {
@@ -3955,7 +4128,7 @@ void Interpreter::exec_block(const ast::Block& block, Env& env) {
       }
       continue;
     }
-    exec_item(*it, env);
+    com_prazo(*it, k + 1);
   }
 }
 
@@ -4055,12 +4228,35 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
       if (seq.kind != ValueKind::Lista && seq.kind != ValueKind::Tabela) {
         fail(stmt.span, std::string("'para cada' espera uma lista, recebeu ") + seq.type_name());
       }
+      // Quarentena (dead-letter): herdada pela cadeia de envs; a linha que
+      // falha vai para o JSONL em vez de abortar o pipeline.
+      std::shared_ptr<QuarentenaState> qst;
+      for (Env* e = &env; e; e = e->parent) {
+        if (e->quarentena) {
+          qst = e->quarentena;
+          break;
+        }
+      }
       if (seq.list) {
         for (const Value& element : *seq.list) {
           Env inner;
           inner.parent = &env;
           inner.vars[stmt.name] = element;
-          exec_block(stmt.body, inner);
+          if (!qst) {
+            exec_block(stmt.body, inner);
+            continue;
+          }
+          try {
+            exec_block(stmt.body, inner);
+          } catch (const RuntimeAbort& a) {
+            Value doc = Value::mapa();
+            doc.map->set("linha", element);
+            doc.map->set("erro", Value::texto(a.message));
+            std::lock_guard<std::mutex> lk(qst->mu);
+            std::ofstream out(qst->caminho, std::ios::app);
+            if (out) out << rt::json_dump(doc) << "\n";
+            qst->n += 1;
+          }
         }
       }
       return;

@@ -1,0 +1,8 @@
+# Quarentena: linhas do 'para cada' que falham vao para o JSONL.
+pipeline limpa:
+  quarentena: "quarentena.jsonl"
+  passos:
+    - linhas = [{ v: 1 }, { v: 0 }, { v: 2 }]
+    - para cada l em linhas:
+        r = ler_csv "sempre_ausente.csv"
+    - imprimir "fim"

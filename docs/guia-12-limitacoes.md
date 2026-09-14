@@ -363,6 +363,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   workers; `--threads N` ajusta, `--threads 1` volta ao serial). Rotas que
   tocam o **mesmo** `indice` em memória se serializam por um mutex global do
   índice — para alta concorrência, use Qdrant/pgvector como armazenamento.
+- Observabilidade opt-in no `servico`: `saude: verdadeiro` (GET /saude) e
+  `metricas: verdadeiro` (GET /metricas com totais/erros por rota; sem
+  latências por enquanto, e sem `/metricas` em formato Prometheus).
 - No Linux: epoll + keep-alive + arena por requisição + pool de rotas com
   ordenação por sequência por conexão (M10.2 + paralelismo entregues).
   Em outros sistemas, o servidor é bloqueante, uma conexão por vez,

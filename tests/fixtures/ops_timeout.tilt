@@ -1,0 +1,11 @@
+# Timeout por passo: o laco (~11s de trabalho) cai com 3s de teto.
+pipeline lento:
+  tempo_limite: "3s"
+  passos:
+    - a = 0
+    - enquanto a < 20:
+        b = 0
+        enquanto b < 2000000:
+          b = b + 1
+        a = a + 1
+    - imprimir "terminou", a

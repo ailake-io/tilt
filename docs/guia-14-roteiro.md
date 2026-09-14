@@ -10,13 +10,12 @@ machine learning, deep learning, LLM, LLMOps e MLOps. Estado: pós-Marco 3/D1
 Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 `verificar`, `janela`, `--agendar` com checkpoint e eleição de líder.
 
-- **Orquestração de verdade**: `ao_falhar: repetir N` existe, mas sem
-  retries com backoff/jitter, timeout por passo, callbacks
-  `on_success`/`on_failure`, SLA com alerta. Sem isso, pipeline em
-  produção é cego.
-- **Observabilidade**: sem endpoint `/saude` ou `/metricas`, sem log
-  estruturado (JSON) com `trace_id` por execução, sem dead-letter (linhas
-  que falham somem ou abortam tudo).
+- **Orquestração de verdade**: `ao_falhar: repetir N` com `espera:` e
+  `backoff:` e `tempo_limite:` por passo existem; restam callbacks
+  `on_success`/`on_failure`, SLA com alerta e jitter no backoff.
+- **Observabilidade**: `saude:`/`metricas:` no `servico` existem; restam
+  log estruturado (JSON) com `trace_id` por execução e latências no
+  `/metricas`. Dead-letter existe via `quarentena:` no `para cada`.
 - **Incremental/backfill**: `janela` + offset cobrem streaming simples, mas
   falta carga incremental por cursor (`desde: <coluna>`, watermark) e
   reprocessamento de intervalo (backfill) — o pão com manteiga de DE.
@@ -114,12 +113,12 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 ## Priorização sugerida
 
 1. ~~`experimento` executável~~ feito (1ª passada; ver acima).
-2. ~~Robustez LLM~~ feito (1ª passada: `tempo_limite` + `tentativas` com
-   backoff em transporte/429/5xx, `reserva:` com fallback, `teto_tokens:`
-   e `tokens: {entrada, saida}` na resposta; coberto por
-   `tests/llm_retry_test.sh`; sem Retry-After/cache).
-3. Operação de pipelines (timeout por passo, backoff, quarentena,
-   `/saude` + `/metricas`).
+2. ~~Robustez LLM~~ feito (1ª passada; ver acima).
+3. ~~Operação de pipelines~~ feito (1ª passada: `ao_falhar` com
+   `espera:`/`backoff:`, `tempo_limite:` por passo, `quarentena:` no
+   `para cada`, `saude:`/`metricas:` no `servico`; sem latências no
+   `/metricas`, sem Retry-After/cache no LLM).
+4. `exportar: onnx`.
 3. Operação de pipelines (timeout por passo, backoff, quarentena,
    `/saude` + `/metricas`).
 4. `exportar: onnx`.
