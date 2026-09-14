@@ -4,6 +4,6 @@ erro[T033]: tipo desconhecido 'ClienteNaoExiste'
  2 |   cliente: ClienteNaoExiste
    |            ^^^^^^^^^^^^^^^^
    |
-   = tipos base: texto, inteiro, decimal, logico, tabela, tensor[...], lista[...]
+   = tipos base: texto, inteiro, decimal, logico, tabela, mapa, tensor[...], lista[...]
 
 1 erro(s) em input.tilt

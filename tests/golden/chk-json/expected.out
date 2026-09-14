@@ -19,7 +19,7 @@
       "coluna": 6,
       "mensagem": "tipo desconhecido 'Desconhecido'",
       "notas": [
-        "tipos base: texto, inteiro, decimal, logico, tabela, tensor[...], lista[...]"
+        "tipos base: texto, inteiro, decimal, logico, tabela, mapa, tensor[...], lista[...]"
       ]
     },
     {

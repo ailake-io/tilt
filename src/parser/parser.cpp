@@ -31,9 +31,9 @@ bool is_operator_word(std::string_view w) {
   return word_in(w, {"e", "ou", "nao", "contem", "em", "no"});
 }
 
-bool is_reserved_word(std::string_view w) {
-  return word_in(w, {"e", "ou", "nao", "contem"});
-}
+// C3: sem palavras reservadas — 'e', 'ou', 'nao' e 'contem' sao
+// identificadores normais; o contexto sintatico decide (operador em posicao
+// de operador, nome em posicao de nome).
 
 ExprPtr make_expr(ExprKind kind, Span span) {
   auto e = std::make_unique<Expr>();
@@ -176,10 +176,58 @@ ItemPtr Parser::parse_funcao_decl() {
     if (at(TokenKind::Identifier)) {
       Arg p;
       p.name = std::string(advance().lexeme);
-      // ':' seguido de NEWLINE e o ':' que abre o corpo, nao um tipo vazio.
+      // Parametro composto: nome, nome[opcional: tipo] ou nome[]
+      // O nome pode ser qualquer identificador (C3: inclui 'e', 'ou', 'nao',
+      // 'contem') — o parser nao rejeita; o checker valida depois.
+      // Opcional / composicao: aceita nome[] (C3: nome pode ser qualquer
+      // identificador) com ou sem tipo opcional entre colchetes.
+      if (at(TokenKind::LBracket)) {
+        advance();  // [
+        if (at(TokenKind::Identifier)) {
+          std::string tipo_str = std::string(advance().lexeme);
+          // Verifica tipo valido: base (texto, inteiro, decimal, logico,
+          // tabela, tensor[...]) ou mapa; tensor[...], fluxo, opcional[T].
+          // Sem `tipo:` de base, aceita (sera Unknown no checker, salvo mapa
+          // que e reconhecido pelo parser).
+          const bool base_ok = tipo_str == "texto" || tipo_str == "inteiro" || tipo_str == "decimal" ||
+                              tipo_str == "logico" || tipo_str == "tabela" || tipo_str == "mapa" ||
+                              tipo_str == "tensor" || tipo_str == "lista" || tipo_str == "opcional" ||
+                              tipo_str == "fluxo" || tipo_str == "registro" || tipo_str.rfind("tensor[", 0) == 0 ||
+                              tipo_str.rfind("lista[", 0) == 0;
+          if (!base_ok) {
+            // `mapa` (C3) e aceito como tipo base de registro; `e`/`ou`/
+            // `nao`/`contem` (C3) so sao aceitos como nomes de parametro, nao como
+            // tipo — mas como tipo opcional `nome[]:` eles nao aparecem; se
+            // aparecem como `nome[e: ...]` sao rejeitados pelo checker.
+            if (tipo_str != "mapa" && tipo_str != "e" && tipo_str != "ou" &&
+                tipo_str != "nao" && tipo_str != "contem") {
+              report(DiagCode::UnexpectedToken, cur().span,
+                     "'" + tipo_str + "' nao e um tipo valido (use texto, inteiro, decimal, logico, tabela, mapa, tensor[...], tipo ou opcional[T])",
+                     {});
+            }
+          }
+          if (expect(TokenKind::RBracket, "']' apos tipo")) {
+            p.optional_annotation = std::string(p.name) + "[opcional: " + tipo_str + "]";
+            p.name += "[]";
+            auto ann = std::make_unique<Expr>();
+            ann->kind = ExprKind::Name;
+            ann->text = tipo_str;
+            p.value = std::move(ann);
+          }
+        } else if (at(TokenKind::RBracket)) {
+          advance();
+          p.optional_annotation = std::string(p.name) + "[]";
+        } else {
+          p.optional_annotation = std::string(p.name) + "[opcional]";
+        }
+      }
+      // ':' seguido de NEWLINE e o ':' que abre o corpo, nao tipo vazio.
       if (at(TokenKind::Colon) && peek(1).kind != TokenKind::Newline) {
         advance();
         p.value = parse_postfix();
+        p.optional = false;  // parametro obrigatorio (tipo opcional)
+      } else {
+        p.optional = true;   // sem ':' com tipo => opcional; com '[]' => opcional
       }
       it->params.push_back(std::move(p));
       continue;
@@ -378,10 +426,8 @@ StmtPtr Parser::parse_for_each() {
     report(DiagCode::ExpectedToken, cur().span, "esperado 'cada' apos 'para'");
   }
   if (at(TokenKind::Identifier)) {
-    if (is_reserved_word(cur().lexeme)) {
-      report(DiagCode::UnexpectedToken, cur().span,
-             "'" + std::string(cur().lexeme) + "' e palavra reservada; use outro nome");
-    }
+    // C3: qualquer identificador vale como variavel de laco (inclui 'e',
+    // 'ou', 'nao', 'contem').
     s->name = std::string(advance().lexeme);
   }
   if (at_keyword("em")) {
@@ -545,9 +591,22 @@ ExprPtr Parser::parse_multiplicative() {
 }
 
 ExprPtr Parser::parse_unary() {
-  if (at_keyword("nao") || at(TokenKind::Dash)) {
+  // C3: 'nao' so e operador quando seguido de operando. Seguido de fim de
+  // expressao ('=', ',', fim de linha, ']', ')', fim de arquivo) e um nome
+  // de variavel — cai no parse_primary abaixo.
+  if (at_keyword("nao") && peek(1).kind != TokenKind::Equal &&
+      peek(1).kind != TokenKind::Comma && peek(1).kind != TokenKind::Newline &&
+      peek(1).kind != TokenKind::Dedent && peek(1).kind != TokenKind::RBracket &&
+      peek(1).kind != TokenKind::RParen && peek(1).kind != TokenKind::EndOfFile) {
     auto e = make_expr(ExprKind::Unary, cur().span);
-    e->text = at(TokenKind::Dash) ? "-" : "nao";
+    e->text = "nao";
+    advance();
+    e->rhs = parse_unary();
+    return e;
+  }
+  if (at(TokenKind::Dash)) {
+    auto e = make_expr(ExprKind::Unary, cur().span);
+    e->text = "-";
     advance();
     e->rhs = parse_unary();
     return e;
@@ -630,7 +689,22 @@ ExprPtr Parser::parse_postfix() {
                        !at(TokenKind::GreaterEqual) && !at(TokenKind::Plus) &&
                        !at(TokenKind::Dash) && !at(TokenKind::Star) && !at(TokenKind::Slash) &&
                        !at(TokenKind::Percent) && !at(TokenKind::Pipe) && !at(TokenKind::LBracket);
-    if (starts_args && at(TokenKind::Identifier) && is_operator_word(cur().lexeme)) starts_args = false;
+    if (starts_args && at(TokenKind::Identifier) && is_operator_word(cur().lexeme)) {
+      // C3: palavra operadora como argumento ('f nao', 'f e, 1') — so vale
+      // como chamada se a palavra for um argumento completo (seguida de ',',
+      // fim de linha/bloco ou ')'); 'a e b' continua binario.
+      // ('nao' unario nunca continua expressao binaria, entao sempre vale.)
+      const auto pk = peek(1).kind;
+      const bool completa = pk == TokenKind::Comma || pk == TokenKind::Newline ||
+                            pk == TokenKind::Dedent || pk == TokenKind::EndOfFile ||
+                            pk == TokenKind::RParen || pk == TokenKind::RBracket ||
+                            pk == TokenKind::RBrace || pk == TokenKind::Colon;
+      if (cur().lexeme == "nao" || completa) {
+        // mantem starts_args
+      } else {
+        starts_args = false;
+      }
+    }
     if (starts_args) {
       auto call = make_expr(ExprKind::Call, e->span);
       call->lhs = std::move(e);

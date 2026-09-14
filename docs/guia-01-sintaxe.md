@@ -76,7 +76,9 @@ funcao faixa n -> texto:
 ```
 
 - Parâmetros: `nome` ou `nome: <tipo>`, separados por espaço ou vírgula.
-- Tipo de retorno opcional após `->`.
+  Parâmetro opcional/composto: `nome[]` (sem tipo) ou `nome[]: <tipo>`
+  (ex.: `limite[]: texto`).
+- Tipo de retorno opcional após `->` (inclui `mapa` como tipo base).
 - `retornar <expr>` (ou `retornar` sem valor → `nulo`).
 - Chamada: `f(a, b)` (forma não ambígua) **ou** `f a, b` (estilo declarativo).
 
@@ -105,7 +107,9 @@ capturar erro:
   registrar "falha:", erro
 ```
 
-- `para cada <var> em <lista|tabela>` — `<var>` não pode ser `e`/`ou`/`nao`/`contem` (reservadas).
+- `para cada <var> em <lista|tabela>` — `<var>` aceita qualquer
+  identificador, incluindo `e`/`ou`/`nao`/`contem` (não há palavras
+  reservadas: o contexto sintático decide entre operador e nome).
 - `enquanto` tem guarda de 5 milhões de iterações (aborta com `T901`).
 - `tentar/capturar` captura `T9xx` de execução; a variável do `capturar` recebe a mensagem.
 

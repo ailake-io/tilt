@@ -5,10 +5,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## Sintaxe / parser
 
-- `e` / `ou` / `nao` / `contem` são reservadas — não servem como nome de
-  variável, parâmetro ou loop var.
-- Assinatura de `funcao` com parâmetros compostos é reconhecida de forma
-  simples; casos exóticos podem se perder.
+- Sem palavras reservadas (Marco 3 / C3): `e` / `ou` / `nao` / `contem` valem
+  como nomes de variável, parâmetro e loop var — o contexto decide (operador
+  em posição de operador, nome em posição de nome).
+- Parâmetros compostos em `funcao` (Marco 3 / C3): `nome[]` ou
+  `nome[]: <tipo>` (opcional), `mapa` como tipo base; `Arg.optional` é
+  metadado do parser (aridade de `funcao` de usuário segue sem validação).
 
 ## Semântica
 

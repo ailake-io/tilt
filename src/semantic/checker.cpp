@@ -176,13 +176,14 @@ Type SemanticChecker::resolve_type_expr(const Expr& e) {
       if (w == "logico") return Type::scalar(TypeKind::Logico);
       if (w == "nulo") return Type::scalar(TypeKind::Nulo);
       if (w == "tabela") return Type::scalar(TypeKind::Tabela);
+      if (w == "mapa") return Type::scalar(TypeKind::Mapa);
       if (w == "_") return Type::scalar(TypeKind::Unknown);
       if (const Symbol* s = lookup(w)) {
         if (s->kind == "tipo" || s->kind == "modulo") return s->type;
         return s->type;  // entity used as a type annotation — tolerated
       }
       report(DiagCode::UnknownType, e.span, "tipo desconhecido '" + w + "'",
-             {"tipos base: texto, inteiro, decimal, logico, tabela, tensor[...], lista[...]"});
+             {"tipos base: texto, inteiro, decimal, logico, tabela, mapa, tensor[...], lista[...]"});
       return Type::scalar(TypeKind::Unknown);
     }
     case ExprKind::TextLit: {

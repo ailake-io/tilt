@@ -1,0 +1,10 @@
+funcao soma e, ou:
+  retornar e + ou
+
+pipeline principal:
+  passos:
+    - nao = 10
+    - contem = [1, 2]
+    - x = soma nao, 5
+    - para cada ou em contem:
+        - imprimir ou

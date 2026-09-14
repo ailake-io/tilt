@@ -42,8 +42,10 @@ enum class ExprKind {
 };
 
 struct Arg {
-  std::string name;  // empty => positional
-  ExprPtr value;
+  std::string name;              // vazio => posicional; [] => opcional/composicao
+  ExprPtr value;                 // anotacao de tipo opcional (ex.: texto, tensor)
+  std::string optional_annotation; // "[]" quando marcado como [opcional: tipo] ou []
+  bool optional = false;         // marcado via [] (sem tipo) ou [opcional: tipo]
 };
 
 struct MapEntry {

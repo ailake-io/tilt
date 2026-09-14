@@ -1,0 +1,10 @@
+funcao processar dado: mapa, porta: inteiro, limite[]: texto:
+  retornar dado
+
+funcao calcular a: inteiro, b[]: texto:
+  retornar a + 1
+
+pipeline principal:
+  passos:
+    - x = processar { nome: "a" }, 80, ["x"]
+    - y = calcular 5, ["x", "y"]
