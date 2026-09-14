@@ -37,11 +37,13 @@ viés `[N]` no último eixo) e entre tensor e escalar.
 | `.argmax` | índice do maior no último eixo |
 | `.item` | escalar de um tensor de 1 elemento |
 
-```tilt
-- x = tensor [0.2, 0.5, 0.1, 0.9]
-- imprimir x.forma, (x * 2).soma
-- m = tensor [[1, 2], [3, 4]]
-- imprimir m.matmul(m).forma
+```tilt run
+pipeline tensores:
+  passos:
+    - x = tensor [0.2, 0.5, 0.1, 0.9]
+    - imprimir x.forma, (x * 2).soma   # [4] 4.4
+    - m = tensor [[1, 2], [3, 4]]
+    - imprimir m.matmul(m).forma        # [2, 2]
 ```
 
 ### Shape solver (`tilt checar`)
@@ -74,12 +76,15 @@ parcial (viés `[N]` no último eixo) e pesos vindos de arquivo.
 `[N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]`. Sem dilation nem padding
 explícito por ora.
 
-```tilt
-- x = tensor [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]]  # [1,1,3,3]
-- k = tensor [[[[1.0, 0.0], [0.0, 1.0]]]]                            # [1,1,2,2]
-- y = x.conv2d k                                                      # [1,1,2,2]
-- imprimir y.dados                                                    # [6, 8, 12, 14]
-- y2 = x.conv2d k, passo: 2                                           # stride 2
+```tilt run
+pipeline conv:
+  passos:
+    - x = tensor [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]]  # [1,1,3,3]
+    - k = tensor [[[[1.0, 0.0], [0.0, 1.0]]]]                            # [1,1,2,2]
+    - y = x.conv2d k                                                      # [1,1,2,2]
+    - imprimir y.dados                                                    # [6, 8, 12, 14]
+    - y2 = x.conv2d k, passo: 2                                           # stride 2 -> [1,1,1,1]
+    - imprimir y2.forma
 ```
 
 `norma_lote` normaliza por canal sobre `[N, C, ...]`:
@@ -89,11 +94,14 @@ passe `media`/`variancia` dos lotes de treino; com `em_treino: verdadeiro`
 elas são calculadas do próprio lote (variância populacional) e podem ser
 omitidas. `eps:` default `0.00001`.
 
-```tilt
-- xb = tensor [[[1.0, 4.0], [3.0, 8.0]]]     # [N=1, C=2, 2]
-- nb = xb.norma_lote uns [2], zeros [2], tensor [2.0, 6.0], tensor [0.25, 4.0]
-- imprimir nb.dados                           # [-2, 4, -1.5, 1]
-- nt = xb.norma_lote uns [2], zeros [2], em_treino: verdadeiro
+```tilt run
+pipeline normab:
+  passos:
+    - xb = tensor [[[1.0, 4.0], [3.0, 8.0]]]     # [N=1, C=2, 2]
+    - nb = xb.norma_lote uns [2], zeros [2], tensor [2.0, 6.0], tensor [0.25, 4.0]
+    - imprimir nb.dados                           # [-2, 4, -1.5, 1]
+    - nt = xb.norma_lote uns [2], zeros [2], em_treino: verdadeiro
+    - imprimir nt.forma                           # [1, 2, 2]
 ```
 
 ## `experimento` (ML clássico)
@@ -102,9 +110,14 @@ omitidas. `eps:` default `0.00001`.
 métricas no teste. Roda antes dos `pipeline`s (como `treino`), então
 `prever` funciona em qualquer passo, rota ou outro experimento.
 
-```tilt
+```tilt run
 experimento prever_churn:
-  dados: [{ uso: 10, plano: "a", churn: 1 }, { uso: 1, plano: "b", churn: 0 }]
+  dados: [
+    { uso: 10, plano: "a", churn: 1 },
+    { uso: 9, plano: "b", churn: 1 },
+    { uso: 2, plano: "a", churn: 0 },
+    { uso: 1, plano: "b", churn: 0 }
+  ]
   alvo: "churn"
   atributos: [uso, plano]        # default: todas as colunas menos o alvo
   pre_processar:
@@ -120,7 +133,7 @@ experimento prever_churn:
 pipeline usa:
   passos:
     - p = experimento prever_churn.prever { uso: 9, plano: "a" }
-    - responder: { risco_churn: p.probabilidade }   # p.classe também existe
+    - imprimir p.classe, p.probabilidade
 ```
 
 Modelos: `regressao_linear` (equações normais + crista 1e-8; prevê
@@ -141,7 +154,7 @@ ou o valor de `ler_*`.
 
 ## `modelo`
 
-```tilt
+```tilt run
 modelo Classificador:
   dispositivo: auto                 # auto | cpu | gpu | "cuda:N"
   camadas:
@@ -150,7 +163,14 @@ modelo Classificador:
     - abandono: 0.1                  # identidade na inferência
     - linear: [8, 3]
     - softmax
-  pesos: "modelos/clf.pesos"         # carregados se existirem; ausente -> Xavier + nota
+
+pipeline classifica:
+  passos:
+    # Vetor de 4 uns atravessa a rede e sai com 3 classes.
+    - entrada = uns [4]
+    - probs = modelo Classificador.executar entrada
+    - imprimir probs.forma         # [3]
+    - imprimir probs.argmax
 ```
 
 Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmoide|tanh`,
@@ -166,18 +186,37 @@ no `modelo` produzem erro claro em vez de serem ignoradas silenciosamente.
 incompatível com o modelo → erro `T901` mostrando o esperado vs. o encontrado;
 arquivo ausente → init Xavier com `[nota]`.
 
-```tilt
-- modelo Classificador.salvar_pesos "modelos/clf.pesos"
+```tilt run
+modelo Mini:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 2
+    - softmax
+
+pipeline pesos:
+  passos:
+    # Salva no formato tilt-pesos (JSON); 'pesos:' do modelo carrega de volta.
+    - modelo Mini.salvar_pesos "mini.pesos"
+    - imprimir "ok"
 ```
 
 ### Inferência
 
-```tilt
-- entrada = tensor [0.2, 0.5, 0.1, 0.9]
-- probs = modelo Classificador.executar entrada        # ou .para_frente
-- imprimir probs.forma, probs.argmax
-- lote = tensor [[0.1, 0.2, 0.3, 0.4], [0.9, 0.8, 0.7, 0.6]]
-- imprimir modelo Classificador.executar(lote).forma   # [2, 3]
+```tilt run
+modelo Mini2:
+  entrada: tensor[f32, 4]
+  camadas:
+    - densa: 3
+    - softmax
+
+pipeline infere:
+  passos:
+    - entrada = tensor [0.2, 0.5, 0.1, 0.9]
+    - probs = modelo Mini2.executar entrada        # ou .para_frente
+    - imprimir probs.forma, probs.argmax           # [3] <classe>
+    - lote = tensor [[0.1, 0.2, 0.3, 0.4], [0.9, 0.8, 0.7, 0.6]]
+    - lote_probs = modelo Mini2.executar lote
+    - imprimir lote_probs.forma   # [2, 3]
 ```
 
 Init dos pesos: Xavier-uniforme com semente fixa → resultados reproduzíveis
@@ -187,15 +226,21 @@ sem arquivo de pesos.
 
 `treino X` treina o `modelo X` de mesmo nome.
 
-```tilt
-treino Classificador:
-  dados: carregador "flores.csv", alvo: "especie"
+```tilt run
+# XOR em 4 amostras, tudo inline (sem arquivos).
+modelo Xor:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 2
+    - softmax
+
+treino Xor:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
   perda: entropia_cruzada           # exige `softmax` na última camada
   # perda: quadratica              # regressão escalar: saída largura 1, sem softmax
   otimizador: adam                  # sgd | adam
   taxa: 0.05                         # ou taxa_aprendizado:
-  epocas: 150
-  verboso: verdadeiro               # imprime a perda a cada ~epocas/10
+  epocas: 3
 ```
 
 Perdas: `entropia_cruzada` (classificação, exige `softmax` final) e
@@ -205,11 +250,12 @@ ativações (derivada exata da mesma aproximação da forward — inclusive `gel
 e `norma_camada` (sem affine). Resumo determinístico:
 
 ```
-treino Classificador: perda caiu sim | acuracia 90/90
+treino Xor: perda caiu sim | acuracia 2/4
 ```
 
 Pós-treino os pesos ficam no `modelo` — chamadas seguintes de
-`modelo Classificador.executar` usam o modelo treinado.
+`modelo Xor.executar` usam o modelo treinado. (`verboso: verdadeiro`
+imprime a perda a cada ~epocas/10.)
 
 ## GPU
 
@@ -231,7 +277,7 @@ instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolvida automaticamente
 por `importar`) traz camadas compostas em tilt puro — legíveis, testáveis e
 copiáveis para o projeto:
 
-```tilt
+```tilt run
 importar nn
 
 funcao principal:
@@ -251,5 +297,5 @@ funcao principal:
 `escala` é `1 / raiz(d_k)` — a linguagem ainda não tem `sqrt`, então quem
 chama passa a escala (use `1.0` para ignorar). É forward-only: para treinar,
 use `modelo`/`treino`. O módulo `io` (guia 03) cobre caminhos, existência e
-JSON seguro; `rede` é um stub documentado (guia 12) até o runtime ganhar um
-cliente HTTP genérico.
+JSON seguro; `rede` traz `get_json`/`post_json` reais sobre o HTTP genérico
+(ver guia 03).

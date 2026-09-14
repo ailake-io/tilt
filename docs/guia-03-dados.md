@@ -2,7 +2,7 @@
 
 ## `fonte` — conector de arquivo local
 
-```tilt
+```tilt run
 fonte produtos:
   tipo: json          # csv | json | parquet | delta | sqlite | postgres | duckdb | mysql | clickhouse | elasticsearch | opensearch | kafka
   caminho: "dados/produtos.json"   # ou arquivo: / url:  ; aceita  env "VAR"
@@ -15,15 +15,18 @@ apontando o marco. `fonte tipo: kafka` exige `topico:` (ver seção Kafka).
 
 ## `pipeline`
 
-```tilt
+```tilt run
 pipeline etl:
   agenda: "0 * * * *"              # cron de 5 campos; ver --agendar abaixo
   ao_falhar: repetir 3             # reexecuta os passos ate 3x com escopo limpo
   passos:
+    - cru = [{ email: "ana@x.com", valor: 10 }, { email: "ruim", valor: 5 }]
+    - escrever_csv cru, "clientes.csv"   # grava para o 'ler_csv' abaixo ler
     - bruto = ler_csv "clientes.csv"
     - limpo = bruto.filtrar linha.email contem "@"
-    - agg = limpo.agrupar_por "dominio", { total: contar, receita: somar "valor" }
+    - agg = limpo.agrupar_por "email", { total: contar, receita: somar "valor" }
     - escrever_parquet agg, "saida.parquet"
+    - imprimir tamanho agg   # 1
 ```
 
 `tilt executar` roda **todo** `pipeline` de topo, na ordem do arquivo. Sem
@@ -41,9 +44,9 @@ tempo sozinho.
 
 `janela:` é um campo de `pipeline` (ao lado de `agenda:`/`passos:`) que
 controla **quando** os passos rodam dentro do loop de `--agendar`. Há três
-formas:
+formas (o exemplo checa sem servidor; roda sob `tilt executar --agendar`):
 
-```tilt
+```tilt check
 fonte eventos:
   tipo: csv
   caminho: "eventos.csv"
@@ -313,14 +316,22 @@ Parquet nativo para os data files. Os blocos OCF são gravados com codec
 (`null`/`deflate`/`snappy`) sobrescreve o codec de escrita — a leitura aceita
 os três (snappy com trailer CRC32, conforme a spec Avro), independente da env:
 
-```tilt
-- escrever_iceberg vendas, "tabela_iceberg"                    # cria/sobrescreve (metadata v0)
-- escrever_iceberg vendas, "tabela_iceberg", particionar_por: "estado"
-- escrever_iceberg vendas, "tabela_iceberg", particionar_por: ["estado", "ano"]  # composta
-- anexar_iceberg novas, "tabela_iceberg"                       # append transacional (metadata v1, ...)
-- anexar_iceberg novas, "tabela_iceberg", particionar_por: "estado"
-- tabela = ler_iceberg "tabela_iceberg"                        # concatena os data files ativos
-- so_sp = ler_iceberg "tabela_iceberg", onde: { estado: "sp", ano: 2024 }  # pruning
+```tilt run
+pipeline iceberg_demo:
+  passos:
+    # Vendas inline; cada chamada abaixo roda de verdade no diretório local.
+    - vendas = [
+        { estado: "sp", ano: 2024, cidade: "santos", valor: 10 },
+        { estado: "rj", ano: 2024, cidade: "niteroi", valor: 20 }
+      ]
+    - novas = [{ estado: "sp", ano: 2025, cidade: "campinas", valor: 30 }]
+    - escrever_iceberg vendas, "tabela_iceberg"                    # cria/sobrescreve (metadata v0)
+    - escrever_iceberg vendas, "tabela_iceberg", particionar_por: ["estado", "ano"]  # composta
+    - anexar_iceberg novas, "tabela_iceberg"                       # append transacional (metadata v1, ...)
+    - tabela = ler_iceberg "tabela_iceberg"                        # concatena os data files ativos
+    - imprimir tamanho tabela   # 3
+    - so_sp = ler_iceberg "tabela_iceberg", onde: { estado: "sp", ano: 2024 }  # pruning
+    - imprimir tamanho so_sp    # 1
 ```
 
 - layout: `<dir>/data/<uuid>.parquet` (tabela sem partição) ou
@@ -419,10 +430,17 @@ manifests e metadata localmente nesse diretório e envia a `location` como
 `file://<caminho absoluto>` no `createTable`; o **nome da tabela no catálogo**
 é o basename desse caminho, no namespace `default`:
 
-```tilt
-- escrever_iceberg vendas, "tabela_iceberg"   # mesmo código dos dois modos
-- anexar_iceberg novas, "tabela_iceberg"
-- total = ler_iceberg "tabela_iceberg"
+```tilt check
+# Mesmo código nos dois modos; com ICEBERG_CATALOG=rest + ICEBERG_URI o
+# commit vai pelo REST (precisa do catálogo no ar para executar).
+pipeline iceberg_rest_demo:
+  passos:
+    - vendas = [{ estado: "sp", valor: 10 }]
+    - novas = [{ estado: "rj", valor: 20 }]
+    - escrever_iceberg vendas, "tabela_iceberg"   # mesmo código dos dois modos
+    - anexar_iceberg novas, "tabela_iceberg"
+    - total = ler_iceberg "tabela_iceberg"
+    - imprimir tamanho total
 ```
 
 Subconjunto implementado (prefixo `v1`, namespace `default` — endpoints fora
@@ -562,20 +580,26 @@ Para leituras parametrizadas use `consultar_sql url, sql [, params]`, a
 contraparte de leitura: aceita as mesmas URLs, os mesmos placeholders `?` com
 a mesma ligação por backend e devolve `tabela` (não precisa declarar `fonte`):
 
-```tilt
+```tilt run
 pipeline consulta:
   passos:
-    - url = env "SQL_URL"
+    # Banco local (sqlite cria o arquivo); mesma forma vale para
+    # postgres://, mysql://, duckdb:// e clickhouse:// com servidor real.
+    - url = "sqlite://banco.db"
+    - executar_sql url, "create table clientes (nome text, idade integer, ativo integer)"
+    - executar_sql url, "insert into clientes values (?, ?, ?)", ["ana", 30, verdadeiro]
+    - executar_sql url, "insert into clientes values (?, ?, ?)", ["bob", 15, falso]
     - ativos = consultar_sql url, "select nome, idade from clientes where ativo = ? and idade >= ?", [verdadeiro, 18]
     - para cada c em ativos:
-        imprimir c.nome, c.idade
+        imprimir c.nome, c.idade   # ana 30
 ```
 
 Sem `params`, `consultar_sql url, sql` equivale à `consulta:` da `fonte`
 (útil para SQL montado em runtime). Contagem divergente de `?` e SQL
 não-SELECT (`INSERT` etc.) são erro claro.
 
-```tilt
+```tilt check
+# Fontes relacionais (precisam do servidor para executar; aqui checamos).
 fonte clientes:
   tipo: postgres
   url: "host=localhost port=5432 dbname=app user=app"
@@ -603,16 +627,11 @@ fonte eventos:
 
 pipeline etl:
   passos:
-    - executar_sql "postgres://localhost:5432/app",
-        "insert into clientes (nome, idade) values ('ana', 30)"
-    - executar_sql "duckdb://analise.duckdb",
-        "create table vendas (regiao varchar, venda double)"
-    - executar_sql "mysql://app:senha@localhost:3306/loja",
-        "update pedidos set status = 'enviado' where id = 42"
-    - executar_sql "clickhouse://default@localhost:8123/meubanco",
-        "insert into eventos (dia) values ('2024-03-01')"
-    - executar_sql "postgres://localhost:5432/app",
-        "insert into clientes (nome, idade) values (?, ?)", ["o'brien", 30]
+    - executar_sql "postgres://localhost:5432/app", "insert into clientes (nome, idade) values ('ana', 30)"
+    - executar_sql "duckdb://analise.duckdb", "create table vendas (regiao varchar, venda double)"
+    - executar_sql "mysql://app:senha@localhost:3306/loja", "update pedidos set status = 'enviado' where id = 42"
+    - executar_sql "clickhouse://default@localhost:8123/meubanco", "insert into eventos (dia) values ('2024-03-01')"
+    - executar_sql "postgres://localhost:5432/app", "insert into clientes (nome, idade) values (?, ?)", ["o'brien", 30]
     - transacao "postgres://localhost:5432/app", [
         { sql: "insert into clientes (nome) values (?)", params: ["ana"] },
         { sql: "update clientes set idade = idade + ? where nome = ?", params: [1, "ana"] },
@@ -669,7 +688,8 @@ com cada hit achatado um nível: `_id` mais os campos de `_source`. Agregações
 Elasticsearch quanto contra OpenSearch (REST/JSON puro, sem dependências de
 link — só o binário `curl`).
 
-```tilt
+```tilt check
+# Precisa do Elasticsearch/OpenSearch no ar para executar; aqui checamos.
 fonte documentos:
   tipo: elasticsearch
   url: "elasticsearch://elastic:senha@localhost:9200/artigos"   # opensearch:// tambem vale
@@ -681,8 +701,7 @@ pipeline busca:
     - imprimir "total:", resultado.total
     - para cada hit em resultado.hits:
         imprimir hit._id, hit.titulo, hit.autor
-    - por_autor = es_buscar "elasticsearch://localhost:9200/artigos",
-        {size: 0, aggs: {por_autor: {terms: {field: "autor"}}}}
+    - por_autor = es_buscar "elasticsearch://localhost:9200/artigos", {size: 0, aggs: {por_autor: {terms: {field: "autor"}}}}
     - para cada b em por_autor.agregacoes.por_autor.buckets:
         imprimir b.key, b.doc_count
 ```
@@ -711,7 +730,8 @@ pipeline busca:
 
 Sem dependências: cliente RESP próprio sobre socket TCP (sem hiredis).
 
-```tilt
+```tilt check
+# Precisa do Redis no ar (localhost:6379) para executar; aqui checamos.
 pipeline cache:
   passos:
     - escrever_redis "redis://localhost:6379", "perfil:1", { nome: "ana", idade: 30 }
@@ -756,7 +776,8 @@ Sem dependências: SHA-256/HMAC implementados em C++ (FIPS 180-4 / RFC 2104)
 e a assinatura AWS SigV4 calculada no próprio runtime; o HTTP sai pelo binário
 `curl`, mesmo padrão do Qdrant/LLM.
 
-```tilt
+```tilt check
+# Precisa de credenciais AWS (ou MinIO via S3_ENDPOINT) para executar.
 pipeline arquivos:
   passos:
     - escrever_s3 "s3://meu-bucket/relatorios/vendas.txt", "ola s3"
@@ -813,7 +834,8 @@ leave_group api 13, sync_group api 14, offset_fetch api 9, offset_commit
 api 8, v1). O broker vem da variável de ambiente `KAFKA_BOOTSTRAP`
 (default `127.0.0.1:9092`) ou da opção `broker:`/`campo broker:`.
 
-```tilt
+```tilt check
+# Precisa do broker (KAFKA_BOOTSTRAP, default 127.0.0.1:9092) para executar.
 pipeline eventos:
   passos:
     - escrever_kafka "pedidos", "msg-1"
@@ -861,7 +883,8 @@ pipeline eventos:
   com `janela:` e `agenda:`, a fonte **com** `grupo:` faz a janela acumular
   só mensagens novas a cada tick, porque o offset fica commitado no broker:
 
-```tilt
+```tilt check
+# Janela sobre Kafka com grupo (checkpoint no broker); roda com --agendar.
 fonte pedidos_kafka:
   tipo: kafka
   topico: "pedidos"
@@ -892,13 +915,14 @@ o banco default (`mongodb://host:porta/banco`). O esquema
 `mongodb+srv://host:porta/banco` liga **TLS** (mesma camada do Redis; sem
 lookup DNS SRV nesta fase — o host é usado como em `mongodb://`).
 
-```tilt
+```tilt check
+# Precisa do MongoDB (MONGO_URL, default 127.0.0.1:27017) para executar.
 pipeline pedidos:
   passos:
     - mongo_inserir "pedidos", {cliente: "ana", valor: 200}
     - achados = mongo_buscar "pedidos", {filtro: {cliente: "ana"}}
     - imprimir tamanho achados, achados[0].valor
-    - mods = mongo_atualizar "pedidos", {cliente: "ana"}, {$set: {valor: 999}, $inc: {acessos: 1}}
+    - mods = mongo_atualizar "pedidos", {cliente: "ana"}, {"$set": {valor: 999}, "$inc": {acessos: 1}}
     - imprimir mods                              # nModified (inteiro)
     - resumo = mongo_buscar "pedidos", {somente: ["cliente", "valor"]}
     - imprimir resumo                            # só os campos pedidos
@@ -906,7 +930,7 @@ pipeline pedidos:
     - imprimir deletados                         # n deletados (inteiro)
     - nome = mongo_criar_indice "pedidos", {campos: ["cliente"]}
     - imprimir nome                              # "cliente_1"
-    - totais = mongo_agregar "pedidos", [{$group: {_id: "$cliente", total: {$sum: "$valor"}}}]
+    - totais = mongo_agregar "pedidos", [{"$group": {"_id": "$cliente", "total": {"$sum": "$valor"}}}]
     - imprimir totais                            # lista de mapas (firstBatch)
 ```
 
@@ -941,9 +965,9 @@ pipeline pedidos:
 - `mongo_agregar colecao, [etapas], {banco:}`: roda o **pipeline de
   aggregation** e devolve o `cursor.firstBatch` como `lista` de `mapas`
   (mesma conversão BSON→tilt de `mongo_buscar`). As etapas são mapas tilt
-  traduzidos **1:1** para BSON — chaves como `"$group"`/`"$gte"` passam como
-  operadores normalmente e os valores usam o mesmo mapeamento do
-  `mongo_inserir`. Uso típico: `$match` (igualdade e `$eq`/`$gt`/`$gte`/
+  traduzidos **1:1** para BSON — chaves com `$` precisam ser **texto entre
+  aspas** (`{"$group": ...}`), pois `$` cru não é válido na sintaxe tilt.
+  Uso típico: `$match` (igualdade e `$eq`/`$gt`/`$gte`/
   `$lt`/`$lte`/`$ne`/`$in`, combinados por `$and`/`$or`), `$project`
   (`1`/`verdadeiro` inclui, `0`/`falso` exclui), `$group` (`_id: "$campo"`
   com acumuladores `$sum` (`1` ou `"$campo"`, também usado para `$count`),
@@ -973,7 +997,8 @@ sessão (`POST /sessions` com `{kind, conf}`), listagem (`GET /sessions`),
 statements (`POST /sessions/{id}/statements`) e polling de estado
 (`GET /sessions/{id}/statements/{st}` até `available`/`error`, timeout ~120s).
 
-```tilt
+```tilt check
+# Precisa do Livy (http://host:8998) com Spark para executar.
 fonte vendas:
   tipo: spark
   url: "http://localhost:8998"
@@ -1031,7 +1056,8 @@ testes). O id tilt (texto) é mapeado para UUID determinístico, pois o Qdrant
 só aceita inteiro ou UUID. `inserir` cria a coleção automaticamente na
 primeira chamada (distância Cosine).
 
-```tilt
+```tilt check
+# Precisa do Qdrant (localhost:6333) para executar; aqui checamos.
 indice docs:
   embeddings: "meu-modelo"
   armazenamento: "qdrant://localhost:6333/docs"
@@ -1058,7 +1084,8 @@ Autenticação opcional via env `WEAVIATE_API_KEY`
 (`Authorization: Bearer <chave>`); sem a env, anônimo. Coberto por
 `tests/weaviate_test.sh` (mock REST em python3 + embeddings em modo `mock`).
 
-```tilt
+```tilt check
+# Precisa do Weaviate (localhost:8080) para executar; aqui checamos.
 indice docs:
   embeddings: "meu-modelo"
   armazenamento: "weaviate://localhost:8080/Documentos"
@@ -1084,7 +1111,8 @@ na conta: criar índice é control plane e fica fora de escopo. Coberto por
 `tests/pinecone_test.sh` (mock REST sobre TLS com cert auto-assinado +
 embeddings em modo `mock`).
 
-```tilt
+```tilt check
+# Precisa do Pinecone (índice existente + PINECONE_API_KEY) para executar.
 indice docs:
   embeddings: "meu-modelo"
   armazenamento: "pinecone://meu-indice-abc.svc.us-east1-gcp.pinecone.io/ns1"
@@ -1111,7 +1139,8 @@ testes). A coleção é get-or-create (`POST /api/v1/collections`,
 `documents[]`). Coberto por `tests/chroma_test.sh` (mock REST em python3 +
 embeddings em modo `mock`).
 
-```tilt
+```tilt check
+# Precisa do Chroma (localhost:8000) para executar; aqui checamos.
 indice docs:
   embeddings: "meu-modelo"
   armazenamento: "chroma://localhost:8000/docs"
@@ -1138,26 +1167,40 @@ Operam sobre `tabela` e `lista` de mapas. `linha` é a variável implícita da l
 | `.distinto` / `.distinto "col"` | remove duplicatas |
 | `.tamanho` | número de linhas |
 
-```tilt
-- vendas = ler_csv "vendas.csv"
-- top = vendas.filtrar linha.valor >= 50
-             .agrupar_por "regiao", { receita: somar "valor", n: contar }
-             .ordenar_por "receita", desc: verdadeiro
-             .limite 3
-- para cada r em top:
-    imprimir r.regiao, r.receita, r.n
+```tilt run
+pipeline metodos:
+  passos:
+    # Métodos encadeiam por atribuição (um por passo).
+    - vendas = [
+        { regiao: "sul", valor: 30 },
+        { regiao: "sul", valor: 80 },
+        { regiao: "norte", valor: 120 }
+      ]
+    - top = vendas.filtrar linha.valor >= 50
+    - agg = top.agrupar_por "regiao", { receita: somar "valor", n: contar }
+    - ord = agg.ordenar_por "receita", desc: verdadeiro
+    - top3 = ord.limite 3
+    - para cada r em top3:
+        imprimir r.regiao, r.receita, r.n
 ```
 
 ## `verificar` — qualidade de dados
 
 Passo dentro de `passos:` que valida uma tabela já no escopo:
 
-```tilt
-- verificar vendas:
-    - nao_nulo: [regiao, valor]        # coluna ausente ou nula
-    - unico: id                         # valor repetido
-    - intervalo: linha.valor >= 0       # condição avaliada por linha
-    ao_violar: abortar                  # abortar (T910) | avisar (segue)
+```tilt run
+pipeline checa_vendas:
+  passos:
+    - vendas = [
+        { id: 1, regiao: "sul", valor: 30 },
+        { id: 2, regiao: "norte", valor: 120 }
+      ]
+    - verificar vendas:
+        - nao_nulo: [regiao, valor]        # coluna ausente ou nula
+        - unico: id                         # valor repetido
+        - intervalo: linha.valor >= 0       # condição avaliada por linha
+        ao_violar: abortar                  # abortar (T910) | avisar (segue)
+    - imprimir "vendas ok"
 ```
 
 Com `ao_violar: avisar` imprime `[aviso] verificar ...` e continua; com

@@ -90,7 +90,7 @@ máquina ARM).
 
 ### Exemplo
 
-```tilt
+```tilt run
 funcao fib n -> inteiro:
   se n < 2:
     retornar n

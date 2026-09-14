@@ -10,25 +10,32 @@ indentada com o outro estilo (ou um prefixo misturando tab e espaços) é erro
 linha indentada aceita qualquer estilo. Blocos são abertos por `:` no fim da
 linha e delimitados pela indentação — não há `{ }` nem `end`.
 
-```tilt
+```tilt run
+# Indentação de 2 espaços por nível.
 pipeline exemplo:
   passos:
     - x = 1
+    - imprimir x   # 1
 ```
 
-```tilt
+```tilt run
+# O mesmo programa com 1 tab por nível (não misture os dois no mesmo arquivo).
 pipeline exemplo:
 	passos:
 		- x = 1
+		- imprimir x   # 1
 ```
 
 ## Comentários
 
 `#` até o fim da linha. Linhas só com comentário ou em branco são ignoradas.
 
-```tilt
-# isto é um comentário
-x = 1  # comentário no fim da linha
+```tilt run
+pipeline comentarios:
+  passos:
+    # isto é um comentário (linha inteira)
+    - x = 1  # comentário no fim da linha
+    - imprimir x   # 1
 ```
 
 ## Literais
@@ -44,35 +51,62 @@ x = 1  # comentário no fim da linha
 Interpolação em texto: `"Olá {{nome}}"` substitui `nome` pelo valor no escopo
 (nos textos executados; em anotações de tipo o texto fica literal).
 
+```tilt run
+pipeline literais:
+  passos:
+    - nome = "mundo"
+    - imprimir "Olá {{nome}}"   # interpolação: Olá mundo
+    - imprimir 42               # inteiro
+    - imprimir 3.14             # decimal
+    - imprimir verdadeiro       # logico
+    - imprimir nulo             # nulo
+```
+
 ## Variáveis
 
-No nível de topo:
+No nível de topo, `seja` é opcional e `constante` não pode ser reatribuída:
 
-```tilt
+```tilt run
 seja taxa = 0.001
 constante MAX_TOKENS = 4096
+
+pipeline vars:
+  passos:
+    - imprimir taxa * 2    # 0.002
+    - imprimir MAX_TOKENS  # 4096
 ```
 
 Dentro de `passos:` / `executar:` / corpo de `funcao`: basta atribuir.
 
-```tilt
-- a = 2
-- b = a + 3
+```tilt run
+pipeline atrib:
+  passos:
+    - a = 2        # cria a variável no escopo dos passos
+    - b = a + 3
+    - imprimir b   # 5
 ```
 
-Escopo é léxico e aninhado (`se`, `para cada` etc. criam um sub-escopo).
+Escopo é léxico e aninhado: `se`, `para cada` etc. criam um sub-escopo, então
+atribuir **só dentro** do ramo não vaza para fora — declare antes e atribua
+dentro (ver exemplo do `se` abaixo).
 
 ## Funções
 
-```tilt
-funcao normalizar t: tensor -> tensor:
-  media = t.media
-  retornar (t - media) / t.desvio_padrao
-
+```tilt run
+# Parâmetros com ou sem tipo; retorno opcional após '->'.
 funcao faixa n -> texto:
   se n >= 100:
     retornar "grande"
   retornar "pequena"
+
+funcao soma_texto a: texto, b: texto -> texto:
+  retornar a + b
+
+pipeline funcoes:
+  passos:
+    - imprimir faixa 42            # pequena (chamada sem parênteses)
+    - imprimir faixa 200           # grande
+    - imprimir soma_texto("x", "y")  # xy (com parênteses, sem ambiguidade)
 ```
 
 - Parâmetros: `nome` ou `nome: <tipo>`, separados por espaço ou vírgula.
@@ -87,24 +121,34 @@ automaticamente — ver [guia 09](guia-09-vm-nativo.md).
 
 ## Controle de fluxo
 
-```tilt
-se pontuacao >= 0.9:
-  rotulo = "alta"
-senao se pontuacao >= 0.5:
-  rotulo = "media"
-senao:
-  rotulo = "baixa"
-
-para cada linha em tabela:
-  imprimir linha.email
-
-enquanto tentativas < 3:
-  tentativas = tentativas + 1
-
-tentar:
-  r = perguntar gpt, usuario: pergunta
-capturar erro:
-  registrar "falha:", erro
+```tilt run
+pipeline fluxo:
+  passos:
+    # se/senao: o 'senao' alinha com o '- se' (4 espaços), o corpo indenta +2.
+    - pontuacao = 0.7
+    - rotulo = "?"          # declara antes: ramo cria sub-escopo, não vaza
+    - se pontuacao >= 0.9:
+        rotulo = "alta"
+    senao se pontuacao >= 0.5:
+        rotulo = "media"
+    senao:
+        rotulo = "baixa"
+    - imprimir rotulo       # media
+    # para cada: percorre lista ou tabela; 'linha' é a variável do item.
+    - tabela = [{ email: "a@x" }, { email: "b@x" }]
+    - para cada linha em tabela:
+        imprimir linha.email
+    # enquanto: repete até a condição falhar.
+    - tentativas = 0
+    - enquanto tentativas < 3:
+        tentativas = tentativas + 1
+    - imprimir tentativas   # 3
+    # tentar/capturar: o 'capturar' alinha com o '- tentar'; a variável
+    # recebe a mensagem do erro (só erros T9xx de execução são capturáveis).
+    - tentar:
+        r = ler_csv "nao_existe.csv"
+    capturar erro:
+      registrar "falha esperada:", erro
 ```
 
 - `para cada <var> em <lista|tabela>` — `<var>` aceita qualquer
@@ -131,13 +175,27 @@ capturar erro:
 - `e`/`ou` fazem curto-circuito no interpretador (não na VM — ver guia 09).
 - `x?.campo` retorna `nulo` se `x` não tiver o campo, em vez de erro.
 
+```tilt run
+pipeline ops:
+  passos:
+    - imprimir "a" + "b"         # ab (texto concatena)
+    - imprimir "abcd" contem "bc"  # verdadeiro
+    - imprimir([1, 2] contem 2)    # verdadeiro (parênteses: sem ambiguidade)
+    - imprimir nao falso           # verdadeiro
+    - m = { nome: "ana" }
+    - imprimir m?.idade            # nulo (campo ausente, sem erro)
+```
+
 ## Coleções
 
-```tilt
-nomes = ["ana", "bruno", "caio"]
-config = { epocas: 10, lote: 64 }
-primeiro = nomes[0]
-fatia = nomes[0..2]        # ["ana", "bruno"]
+```tilt run
+pipeline colecoes:
+  passos:
+    - nomes = ["ana", "bruno", "caio"]
+    - config = { epocas: 10, lote: 64 }
+    - imprimir nomes[0]        # ana (índice começa em 0)
+    - imprimir nomes[0..2]     # [ana, bruno] (fatia fim-exclusivo)
+    - imprimir config.epocas   # 10 (campo de mapa)
 ```
 
 > Listas e mapas literais podem ocupar várias linhas (as quebras de linha
@@ -146,9 +204,24 @@ fatia = nomes[0..2]        # ["ana", "bruno"]
 
 ## Importar
 
-```tilt
+```tilt run
+importar io
 importar rede
-de agentes importar memoria_vetorial
+
+pipeline imports:
+  passos:
+    # 'io.juntar_caminhos' vem do módulo io.tilt da stdlib.
+    - base = io.juntar_caminhos "/tmp", "a.json"
+    - imprimir base   # /tmp/a.json
+```
+
+```tilt run
+# 'de io importar X' traz o nome para o escopo principal.
+de io importar existe_arquivo
+
+pipeline imports2:
+  passos:
+    - imprimir existe_arquivo "/tmp"   # verdadeiro
 ```
 
 > `importar io` carrega o arquivo `io.tilt` e expõe as `funcao` dele como
@@ -157,6 +230,6 @@ de agentes importar memoria_vetorial
 > arquivo que importa; (2) cada diretório de `TILT_STDLIB_PATH` (separados
 > por `:`); (3) `stdlib/` ao lado do binário; (4)
 > `<binário>/../share/tilt/stdlib` (layout da instalação). Erro claro (`T901`)
-> lista onde foi procurado. A stdlib instalada com o tilt traz `io`
-> (arquivos/caminhos), `rede` (stub de HTTP) e `nn` (camadas sobre tensor) —
+> lista onde foi procurado. A stdlib traz `io` (arquivos/caminhos),
+> `rede` (HTTP JSON: `get_json`/`post_json`) e `nn` (camadas sobre tensor) —
 > ver guia 04 e guia 12.

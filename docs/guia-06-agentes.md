@@ -2,12 +2,19 @@
 
 ## `ferramenta`
 
-```tilt
+```tilt check
+# 'executar' sem '-' (corpo direto). 'base' é o índice declarado no guia 05.
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+  dimensao: 16
+  metrica: cosseno
+
 ferramenta busca_documentos:
   descricao: "Busca trechos relevantes na base."
   entrada:
     termo: texto
-    limite: inteiro = 5
+    limite: inteiro
   executar:
     vetor = incorporar "text-embedding-3-small", termo
     retornar base.buscar vetor, top_k: limite
@@ -19,14 +26,32 @@ ferramenta busca_documentos:
 
 ## `agente`
 
-```tilt
+```tilt run
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+ferramenta eco:
+  descricao: "Repete o texto de volta."
+  entrada:
+    texto: texto
+  executar:
+    retornar texto
+
 agente AssistenteTecnico:
   llm: gpt
   papel: "Especialista em análise preditiva e dados estruturados."
   ferramentas:
-    - busca_documentos
-  memoria: conversa                 # nenhuma | conversa
+    - eco
+  memoria: conversa                 # nenhuma | conversa | vetorial
   max_passos: 8
+
+pipeline pergunta:
+  passos:
+    # Com TILT_LLM=mock, o planner chama cada ferramenta uma vez, em ordem.
+    - r = AssistenteTecnico.responder "resuma tilt"
+    - imprimir r.texto
 ```
 
 `A.responder "mensagem"` (ou `A.perguntar "..."`) usa um **planner
@@ -44,9 +69,9 @@ iterativo**: a cada passo o LLM escolhe a próxima ação, até `max_passos`:
 4. sem `llm:` declarado, cada ferramenta roda uma vez com entradas
    best-effort e a resposta é local (`[sem llm] ...`).
 
-Retorna:
+Retorna (ilustração da forma; ver exemplo executável no fim do guia):
 
-```tilt
+```tilt skip
 { texto: "...",
   rastro: [ { passo: 1, ferramenta: "busca_documentos",
               argumentos: {...}, observacao: "..." } ] }
@@ -58,15 +83,46 @@ ferramenta é chamada uma vez, na ordem declarada, e depois o mock responde.
 
 ## `equipe`
 
-```tilt
+```tilt run
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+ferramenta eco:
+  descricao: "Repete o texto de volta."
+  entrada:
+    texto: texto
+  executar:
+    retornar texto
+
+agente Pesquisador:
+  llm: gpt
+  papel: "Pesquisa fontes."
+  ferramentas: [eco]
+  memoria: conversa
+  max_passos: 2
+
+agente Redator:
+  llm: gpt
+  papel: "Escreve o relatório."
+  ferramentas: [eco]
+  memoria: conversa
+  max_passos: 2
+
 equipe PesquisaEEscrita:
   agentes:
-    - pesquisador: AssistenteTecnico
-    - escritor: RedatorTecnico
+    - pesquisador: Pesquisador
+    - escritor: Redator
   estrategia: supervisor       # sequencial | paralelo | supervisor
   supervisor: gpt
   objetivo: "Produzir relatório técnico com fontes citadas."
   max_passos: 6
+
+pipeline relatorio:
+  passos:
+    - r = PesquisaEEscrita.responder "relatório sobre tilt"
+    - imprimir r.texto
 ```
 
 `E.executar "mensagem"` (ou `E.responder`):

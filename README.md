@@ -9,10 +9,15 @@ um LLM, orquestra agentes e sobe um serviço HTTP — com a mesma sintaxe: 2
 espaços de indentação, `chave: valor`, listas com `-`, sem `{ }`, `;` nem `()`
 ruidosos.
 
-```tilt
+```tilt run
 pipeline resumo_vendas:
   passos:
-    - vendas = ler_csv "vendas.csv"
+    # Dados inline (em produção: ler_csv "vendas.csv").
+    - vendas = [
+        { regiao: "sul", valor: 30 },
+        { regiao: "sul", valor: 80 },
+        { regiao: "norte", valor: 120 }
+      ]
     - grandes = vendas.filtrar linha.valor >= 50
     - por_regiao = grandes.agrupar_por "regiao", { receita: somar "valor", n: contar }
     - para cada r em por_regiao:
@@ -82,7 +87,7 @@ tag: [docs/guia-13-instalacao.md](docs/guia-13-instalacao.md).
 
 ## Primeiro programa
 
-```tilt
+```tilt run
 # ola.tilt
 funcao faixa n -> texto:
   se n >= 100:

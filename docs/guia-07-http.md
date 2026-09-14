@@ -2,7 +2,7 @@
 
 ## `servico` / `rota`
 
-```tilt
+```tilt run
 tipo NovoPedido:
   cliente: texto
   valor: decimal
@@ -36,7 +36,7 @@ servico Loja:
   visíveis nos `passos:` da rota, e um `responder:` no `meio:` aborta a
   rota (a resposta do middleware vence; caso de uso: autenticação):
 
-```tilt
+```tilt check
 servico Api:
   meio:
     - prefixo = "v1"

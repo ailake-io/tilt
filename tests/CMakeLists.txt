@@ -5,6 +5,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/golden)
 
 add_test(
+  NAME docs
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/docs_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+add_test(
   NAME http
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/http_test.sh
           $<TARGET_FILE:tilt>

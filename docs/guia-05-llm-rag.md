@@ -2,7 +2,7 @@
 
 ## `llm` — provedor
 
-```tilt
+```tilt run
 llm gpt:
   provedor: "anthropic"             # anthropic | openai | local | vllm
   modelo: "claude-sonnet-5"
@@ -10,6 +10,10 @@ llm gpt:
   max_tokens: 1024
   chave: env "ANTHROPIC_API_KEY"    # segredo literal -> T020
   base_url: env "LLM_URL"           # para local/vllm (compatível OpenAI)
+
+pipeline declara:
+  passos:
+    - imprimir "llm declarado"
 ```
 
 ## Transporte
@@ -25,15 +29,19 @@ erro de execução.
 
 ## `perguntar`
 
-```tilt
-fluxo resumir:
-  entrada:
-    documento: texto
+```tilt run
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+pipeline resumir:
   passos:
+    # Com TILT_LLM=mock, roda offline (resposta simulada determinística).
     - r = perguntar gpt:
         sistema: "Você resume em 3 frases."
-        usuario: "Resuma:\n{{documento}}"
-    - retornar r.texto
+        usuario: "Resuma:\ntilt é uma linguagem declarativa"
+    - imprimir r.texto
 ```
 
 Retorna `{ texto, modelo }`. O primeiro argumento posicional é o `llm`
@@ -42,18 +50,22 @@ declarado; `sistema:` e `usuario:` vêm do bloco `:` (ou de `prompt:`).
 
 ## Saída estruturada
 
-```tilt
+```tilt run
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
 tipo Ficha:
   nome: texto
   idade: inteiro
   nivel: "baixo" | "medio" | "alto"
 
-fluxo extrair:
-  entrada: { texto: texto }
+pipeline extrair:
   passos:
     - f = perguntar gpt, formato: Ficha:
-        usuario: "Extraia dados de:\n{{texto}}"
-    - retornar f              # mapa com os campos de Ficha
+        usuario: "Extraia dados de:\nana, 30, alto"
+    - imprimir f.nome, f.idade, f.nivel   # mapa com os campos de Ficha
 ```
 
 `formato: <Tipo>` devolve um `mapa` com os campos do `tipo`. No modo `mock` os
@@ -63,19 +75,27 @@ padrão.
 
 ## `incorporar`
 
-```tilt
-- v = incorporar "text-embedding-3-small", "texto de exemplo"   # tensor[f32, D]
+```tilt run
+pipeline vetores:
+  passos:
+    - v = incorporar "text-embedding-3-small", "texto de exemplo"   # tensor[f32, D]
+    - imprimir v.forma   # [16] no mock determinístico
 ```
 
 ## `dividir_texto`
 
-```tilt
-- pedacos = dividir_texto documento, tamanho: 800, sobreposicao: 100   # lista de textos
+```tilt run
+pipeline textos:
+  passos:
+    - doc = "primeira frase. segunda frase. terceira frase. quarta frase."
+    - pedacos = dividir_texto doc, tamanho: 30, sobreposicao: 5   # lista de textos
+    - imprimir tamanho pedacos
+    - imprimir pedacos[0]
 ```
 
 ## `indice` — RAG
 
-```tilt
+```tilt run
 indice base:
   embeddings: "text-embedding-3-small"
   armazenamento: "memoria"          # ou qdrant://host:porta/colecao (REST via curl)
@@ -86,11 +106,13 @@ indice base:
 
 pipeline indexar:
   passos:
-    - base.inserir "a fatura sai no primeiro dia util do mes"
-    - base.inserir docs           # lista/tabela: usa a coluna texto/conteudo/text/trecho, ou o valor
+    # Com TILT_LLM=mock, embeddings determinísticos de 16 dimensões.
+    - total = base.inserir([{ id: "a1", texto: "a fatura sai no primeiro dia util do mes" }])
+    - imprimir total   # 1
+    - base.inserir "o boleto vence dia dez"
     - trechos = base.buscar "quando sai a fatura", top_k: 3
     - para cada h em trechos:
-        imprimir h.id, h.score, h.texto
+        imprimir h.id, h.score
 ```
 
 - `.inserir <lista | tabela | texto>` → número de itens adicionados. `id` vem

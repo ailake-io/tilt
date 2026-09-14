@@ -30,9 +30,11 @@ Tilt.
 
 De dentro de um programa Tilt (numa `ferramenta` de um `agente`, por exemplo):
 
-```tilt
+```tilt check
+# 'entrada:' usa bloco (mapa inline não vale como tipo).
 ferramenta revisar:
-  entrada: { caminho: texto }
+  entrada:
+    caminho: texto
   executar:
     retornar checar_tilt(caminho)     # { ok, erros: [{codigo, linha, coluna, mensagem, notas}] }
 ```
