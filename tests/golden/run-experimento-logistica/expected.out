@@ -1,0 +1,11 @@
+== experimento churn ==
+modelo: regressao_logistica | linhas: 8 (treino 6, teste 2) | atributos: 3
+teste acuracia: 1.0000
+teste f1: 1.0000
+teste auc: (exige exemplos das 2 classes no teste; nota)
+teste matriz_confusao (linhas=true, colunas=previsto):
+                         1           0
+1                        2           0
+0                        0           0
+== pipeline usa ==
+risco: 1 0.994223

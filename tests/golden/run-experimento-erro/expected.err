@@ -1,0 +1,7 @@
+erro[T902]: modelo 'floresta_aleatoria' ainda nao implementado na 1a passada
+  --> input.tilt:4:11
+   |
+ 4 |   modelo: floresta_aleatoria
+   |           ^^^^^^^^^^^^^^^^^^
+   |
+

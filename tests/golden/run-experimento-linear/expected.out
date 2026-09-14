@@ -1,0 +1,6 @@
+== experimento preco ==
+modelo: regressao_linear | linhas: 6 (treino 4, teste 2) | atributos: 2
+teste rmse: 0.0000
+teste r2: 1.0000
+== pipeline usa ==
+preco: 260

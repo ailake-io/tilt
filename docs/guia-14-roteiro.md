@@ -27,15 +27,16 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `ordenar_por`/z-order e compactação (`vacuum`/`optimize`) — tabelas
   degradam com o tempo.
 
-## Machine learning clássico — maior buraco: `experimento` não executa
+## Machine learning clássico — feito (1ª passada)
 
-- `experimento` é **só sintaxe** (parseado, zero referências no
-  interpretador/VM/IR). `floresta_aleatoria`, `f1`, `matriz_confusao`,
-  `registrar_em: mlflow` — nada roda. Item nº 1 para a linguagem cumprir
-  a promessa de ML: pelo menos **regressão linear/logística + kmeans +
-  kNN executando de verdade**, com `prever`, divisão
-  treino/validação/teste e métricas (acurácia, f1, auc).
-- Sem isso, o `servico Predicao` do guia 06 é ficção.
+- `experimento` executa de verdade: `regressao_linear`, `regressao_logistica`
+  binária, `knn` e `kmeans`, com `prever` (`{classe, probabilidade}` /
+  `{valor}` / `{grupo}`), divisão treino/validação/teste com semente,
+  métricas (acurácia, f1 ponderado, auc, matriz_confusao, rmse, r2,
+  inércia) e `registrar_em: mlflow://` como JSON local. Detalhes e limites
+  no guia 04 e no guia 12.
+- Resta: `floresta_aleatoria`/`gradiente_impulsionado`/`svm`, imputação,
+  validação cruzada, multiclasse na logística, mlflow REST, `exportar: onnx`.
 
 ## Deep learning — treino real, mas de brinquedo
 
@@ -108,7 +109,7 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 
 ## Priorização sugerida
 
-1. `experimento` executável (ML clássico mínimo + métricas).
+1. ~~`experimento` executável~~ feito (1ª passada; ver acima).
 2. Robustez LLM (retry/backoff/timeout/fallback + tokens/custo).
 3. Operação de pipelines (timeout por passo, backoff, quarentena,
    `/saude` + `/metricas`).

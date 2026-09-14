@@ -1,0 +1,27 @@
+experimento churn:
+  dados: [
+    { uso: 10, plano: "a", churn: 1 },
+    { uso: 9, plano: "a", churn: 1 },
+    { uso: 8, plano: "b", churn: 1 },
+    { uso: 7, plano: "b", churn: 1 },
+    { uso: 3, plano: "a", churn: 0 },
+    { uso: 2, plano: "b", churn: 0 },
+    { uso: 1, plano: "a", churn: 0 },
+    { uso: 0, plano: "b", churn: 0 }
+  ]
+  alvo: "churn"
+  atributos: [uso, plano]
+  pre_processar:
+    - um_de_n: [plano]
+    - padronizar: [uso]
+  dividir: { treino: 0.75, teste: 0.25 }
+  modelo: regressao_logistica
+    taxa: 0.5
+    epocas: 500
+  metricas: [acuracia, f1, auc, matriz_confusao]
+  semente: 7
+
+pipeline usa:
+  passos:
+    - p = experimento churn.prever { uso: 9, plano: "a" }
+    - imprimir "risco:", p.classe, p.probabilidade

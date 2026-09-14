@@ -1,0 +1,10 @@
+== experimento vizinhos ==
+modelo: knn | linhas: 6 (treino 4, teste 2) | atributos: 2
+teste acuracia: 1.0000
+== experimento grupos ==
+modelo: kmeans | linhas: 6 (treino 4, teste 2) | atributos: 2
+teste inercia: 2.5000
+teste grupos: 1 1
+== pipeline usa ==
+classe: a 0.666667
+grupo: 0

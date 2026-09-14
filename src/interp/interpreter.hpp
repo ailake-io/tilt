@@ -2,6 +2,7 @@
 
 #include <ctime>
 #include <iosfwd>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -36,6 +37,37 @@ struct RouteResponse {
 // "not implemented" runtime error pointing at the milestone that will add them.
 class Interpreter {
  public:
+  // ML classico (experimento, 1a passada): modelo ajustado que fica em
+  // memoria para `experimento Nome.prever <mapa>`. Publico para os helpers
+  // livres de pre-processamento em interpreter.cpp.
+  struct ExpModel {
+    std::string kind;  // regressao_linear | regressao_logistica | knn | kmeans
+    bool classificacao = true;
+    std::vector<std::string> numericas;  // atributos numericos (ordem)
+    std::vector<std::string> quentes;    // atributos categoricos (um_de_n, ordem)
+    // Padronizacao por atributo numerico (media/desvio do treino; desvio 0 =
+    // constante, vira 0). So usada quando `padronizar:` a lista.
+    std::vector<double> medias;
+    std::vector<double> desvios;
+    std::vector<char> usa_std;
+    // Padronizacao interna (logistica/knn precisam de escala): por posicao
+    // final do vetor de atributos, aplicada depois dos passos do usuario.
+    std::vector<double> imedias;
+    std::vector<double> idesvios;
+    // Categorias por coluna quente (ordem de aparição no treino).
+    std::map<std::string, std::vector<std::string>> categorias;
+    // Classes (ordem de aparição no treino) para classificacao.
+    std::vector<rt::Value> classes;
+    // Pesos: linear (w + bias no fim) e logistica (w + bias no fim, no
+    // espaco padronizado interno). knn: base de treino; kmeans: centroides.
+    std::vector<double> pesos;
+    std::vector<std::vector<double>> base_x;
+    std::vector<int> base_y;
+    std::vector<double> base_yr;
+    std::vector<std::vector<double>> centroides;
+    int vizinhos = 5;
+  };
+
   Interpreter(const ast::Program& program, DiagnosticEngine& diag, std::ostream& out);
 
   // `tilt executar --agendar`: acknowledge `agenda:` cron on pipelines.
@@ -157,6 +189,11 @@ class Interpreter {
   rt::Value eval_modelo_call(const ast::Expr& call, Env& env);
   void run_treino(const ast::Item& decl);
 
+ private:
+  void run_experimento(const ast::Item& decl);
+  rt::Value eval_experimento_call(const ast::Expr& call, Env& env);
+  rt::Value experimento_prever(const std::string& nome, const rt::Value& entrada, Span span);
+
   // LLM + RAG.
   rt::LlmConfig llm_config(const std::string& name, Span span);
   rt::Value eval_perguntar(const ast::Expr& call, Env& env);
@@ -185,6 +222,8 @@ class Interpreter {
   std::unordered_map<std::string, const ast::Item*> entities_;
   std::vector<const ast::Item*> pipelines_;
   std::unordered_map<std::string, std::vector<Layer>> model_cache_;
+  std::unordered_map<std::string, ExpModel> experimentos_;
+  std::mutex experimentos_mutex_;
   std::unordered_map<const ast::Item*, std::shared_ptr<vm::Chunk>> vm_chunks_;  // null = not compilable
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa

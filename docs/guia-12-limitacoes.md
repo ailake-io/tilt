@@ -297,6 +297,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## ML / DL
 
+- `experimento` é de 1ª passada (guia 04): `regressao_linear` (equações
+  normais + crista), `regressao_logistica` binária (GD em lote),
+  `knn` (classificação e regressão) e `kmeans` (Lloyd, sem `alvo:`).
+  `floresta_aleatoria`, `gradiente_impulsionado` e `svm` parseiam mas
+  falham com erro claro de não implementado. Limites: sem imputação de
+  nulos (falha), sem validação cruzada nem busca de hiperparâmetros,
+  `pre_processar` só `um_de_n`/`padronizar` (sintaxe `- chave: [cols]`;
+  o `->` do esboço original não parseia), sem multiclasse na logística
+  (use knn), `f1` ponderado pelo suporte, `registrar_em: mlflow://`
+  grava JSON local (sem POST REST), sem `exportar: onnx`.
 - `pesos: "arquivo"` carrega no formato tilt-pesos (ver guia 04); arquivo
   ausente mantém o init Xavier com `[nota]`.
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e

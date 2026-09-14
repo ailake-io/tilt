@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <memory>
 #include <ostream>
+#include <random>
 #include <sstream>
 #include <string_view>
 #include <thread>
@@ -584,6 +585,10 @@ int Interpreter::run() {
         run_treino(*item);
         did_something = true;
       }
+      if (item && item->kind == ItemKind::Decl && item->key == "experimento") {
+        run_experimento(*item);
+        did_something = true;
+      }
     }
 
     if (!pipelines_.empty()) {
@@ -591,7 +596,7 @@ int Interpreter::run() {
     } else if (auto it = functions_.find("principal"); it != functions_.end()) {
       call_function(*it->second, {}, it->second->span);
     } else if (!did_something) {
-      out_ << "nada para executar: nenhum 'pipeline', 'treino' nem 'funcao principal'\n";
+      out_ << "nada para executar: nenhum 'pipeline', 'treino', 'experimento' nem 'funcao principal'\n";
     }
     return 0;
   } catch (const RuntimeAbort& a) {
@@ -614,6 +619,10 @@ int Interpreter::run_vm() {
     for (const auto& item : program_.items) {
       if (item && item->kind == ItemKind::Decl && item->key == "treino") {
         run_treino(*item);
+        did_something = true;
+      }
+      if (item && item->kind == ItemKind::Decl && item->key == "experimento") {
+        run_experimento(*item);
         did_something = true;
       }
     }
@@ -656,7 +665,7 @@ int Interpreter::run_vm() {
     } else if (auto it = functions_.find("principal"); it != functions_.end()) {
       call_function(*it->second, {}, it->second->span);
     } else if (!did_something) {
-      out_ << "nada para executar: nenhum 'pipeline', 'treino' nem 'funcao principal'\n";
+      out_ << "nada para executar: nenhum 'pipeline', 'treino', 'experimento' nem 'funcao principal'\n";
     }
     return 0;
   } catch (const RuntimeAbort& a) {
@@ -700,9 +709,10 @@ int Interpreter::run_scheduled() {
       return 0;
     }
 
-    // treinos e funcao principal nao entram no loop; rodam uma vez antes
+    // treinos, experimentos e funcao principal nao entram no loop; rodam uma vez antes
     for (const auto& item : program_.items) {
       if (item && item->kind == ItemKind::Decl && item->key == "treino") run_treino(*item);
+      if (item && item->kind == ItemKind::Decl && item->key == "experimento") run_experimento(*item);
     }
 
     std::time_t now = std::time(nullptr);
@@ -1939,6 +1949,980 @@ void Interpreter::run_treino(const Item& decl) {
   }
 }
 
+// ------------------------------------------------------- ML classico (experimento)
+
+namespace {
+
+// Chave estavel de um valor (classes e categorias): texto, numero e logico
+// com prefixo de tipo para nao colidir ("1" texto vs 1 inteiro).
+std::string chave_valor(const Value& v) {
+  switch (v.kind) {
+    case ValueKind::Inteiro: return "i:" + std::to_string(v.i);
+    case ValueKind::Decimal: {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "%.17g", v.d);
+      return std::string("d:") + buf;
+    }
+    case ValueKind::Texto: return "t:" + v.s;
+    case ValueKind::Logico: return std::string("b:") + (v.b ? "1" : "0");
+    default: return "?";
+  }
+}
+
+// Rotulo curto para a matriz de confusao (trunca texto longo).
+std::string rotulo_valor(const Value& v) {
+  std::string s;
+  switch (v.kind) {
+    case ValueKind::Inteiro: s = std::to_string(v.i); break;
+    case ValueKind::Decimal: {
+      char buf[32];
+      std::snprintf(buf, sizeof buf, "%.4g", v.d);
+      s = buf;
+      break;
+    }
+    case ValueKind::Texto: s = v.s; break;
+    case ValueKind::Logico: s = v.b ? "verdadeiro" : "falso"; break;
+    default: s = "?"; break;
+  }
+  if (s.size() > 12) s = s.substr(0, 11) + ".";
+  return s;
+}
+
+std::string fmt4(double v) {
+  char buf[32];
+  std::snprintf(buf, sizeof buf, "%.4f", v);
+  return buf;
+}
+
+// Nomes crus de lista [a, b, "c"] (colunas; sem avaliar, pois coluna nao e
+// variavel e pode colidir com nomes do escopo).
+std::vector<std::string> nomes_crus(const Expr& e, const std::string& contexto) {
+  if (e.kind != ExprKind::ListLit) {
+    throw std::runtime_error(contexto + " espera uma lista ([col1, col2])");
+  }
+  std::vector<std::string> out;
+  for (const auto& el : e.elems) {
+    if (!el || (el->kind != ExprKind::Name && el->kind != ExprKind::TextLit)) {
+      throw std::runtime_error(contexto + " espera nomes de coluna ([uso, plano])");
+    }
+    out.push_back(el->text);
+  }
+  if (out.empty()) throw std::runtime_error(contexto + " vazio (liste ao menos uma coluna)");
+  return out;
+}
+
+// Celula numerica de atributo: inteiro/decimal entram crus, logico coage
+// para 0/1; texto e nulo falham com sugestao acionavel.
+double celula_num(const Value& v, const std::string& col) {
+  if (v.kind == ValueKind::Inteiro || v.kind == ValueKind::Decimal ||
+      v.kind == ValueKind::Logico) {
+    return v.as_number();
+  }
+  if (v.kind == ValueKind::Nulo) {
+    throw std::runtime_error("atributo '" + col +
+                             "' tem nulo (sem imputacao na 1a passada; remova a linha)");
+  }
+  throw std::runtime_error("atributo '" + col + "' tem " + std::string(v.type_name()) +
+                           " (declare '" + col + "' em pre_processar como categoria um_de_n)");
+}
+
+// Resolve A x = b por eliminacao de Gauss com pivo parcial.
+std::vector<double> gauss(std::vector<std::vector<double>> a, std::vector<double> b) {
+  const std::size_t n = a.size();
+  if (n == 0 || a[0].size() != n || b.size() != n) throw std::runtime_error("sistema invalido");
+  for (std::size_t c = 0; c < n; ++c) {
+    std::size_t p = c;
+    for (std::size_t r = c + 1; r < n; ++r) {
+      if (std::fabs(a[r][c]) > std::fabs(a[p][c])) p = r;
+    }
+    if (std::fabs(a[p][c]) < 1e-12) {
+      throw std::runtime_error("matriz singular (atributos colineares ou linhas de menos?)");
+    }
+    if (p != c) {
+      std::swap(a[p], a[c]);
+      std::swap(b[p], b[c]);
+    }
+    for (std::size_t r = c + 1; r < n; ++r) {
+      const double f = a[r][c] / a[c][c];
+      for (std::size_t k = c; k < n; ++k) a[r][k] -= f * a[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  std::vector<double> x(n);
+  for (std::size_t r = n; r-- > 0;) {
+    double s = b[r];
+    for (std::size_t k = r + 1; k < n; ++k) s -= a[r][k] * x[k];
+    x[r] = s / a[r][r];
+  }
+  return x;
+}
+
+double sigmoide(double z) { return 1.0 / (1.0 + std::exp(-z)); }
+
+}  // namespace
+
+// Ajusta o pipeline do usuario no treino: categorias (ordem de aparição) e
+// media/desvio dos atributos em `padronizar:`.
+static void exp_ajustar(Interpreter::ExpModel& m, const std::vector<Value>& treino,
+                        const std::vector<std::string>& std_cols) {
+  m.categorias.clear();
+  for (const std::string& col : m.quentes) {
+    std::vector<std::string> cats;
+    for (const Value& r : treino) {
+      const Value* c = r.map->find(col);
+      if (!c || c->kind == ValueKind::Nulo) {
+        throw std::runtime_error("coluna categorica '" + col + "' tem valor ausente/nulo");
+      }
+      const std::string k = chave_valor(*c);
+      if (std::find(cats.begin(), cats.end(), k) == cats.end()) cats.push_back(k);
+    }
+    if (cats.size() < 2) {
+      throw std::runtime_error("coluna categorica '" + col + "' tem 1 unica categoria no treino");
+    }
+    m.categorias[col] = std::move(cats);
+  }
+  m.medias.assign(m.numericas.size(), 0.0);
+  m.desvios.assign(m.numericas.size(), 1.0);
+  m.usa_std.assign(m.numericas.size(), 0);
+  for (std::size_t j = 0; j < m.numericas.size(); ++j) {
+    if (std::find(std_cols.begin(), std_cols.end(), m.numericas[j]) == std_cols.end()) continue;
+    m.usa_std[j] = 1;
+    double soma = 0.0;
+    for (const Value& r : treino) soma += celula_num(*r.map->find(m.numericas[j]), m.numericas[j]);
+    const double media = soma / static_cast<double>(treino.size());
+    double var = 0.0;
+    for (const Value& r : treino) {
+      const double d = celula_num(*r.map->find(m.numericas[j]), m.numericas[j]) - media;
+      var += d * d;
+    }
+    var /= static_cast<double>(treino.size());
+    m.medias[j] = media;
+    m.desvios[j] = var > 0.0 ? std::sqrt(var) : 1.0;  // constante -> zeros
+  }
+}
+
+// Largura do vetor final: numericas + blocos one-hot.
+static std::size_t exp_largura(const Interpreter::ExpModel& m) {
+  std::size_t w = m.numericas.size();
+  for (const std::string& col : m.quentes) {
+    auto it = m.categorias.find(col);
+    if (it != m.categorias.end()) w += it->second.size();
+  }
+  return w;
+}
+
+// Aplica o pipeline numa linha (treino ou nova): numericas (com padronizar)
+// + one-hot (categoria nova vira zeros).
+static std::vector<double> exp_vetor(const Interpreter::ExpModel& m, const Value& row) {
+  if (row.kind != ValueKind::Mapa || !row.map) throw std::runtime_error("linha nao e um mapa");
+  std::vector<double> x;
+  x.reserve(exp_largura(m));
+  for (std::size_t j = 0; j < m.numericas.size(); ++j) {
+    const Value* c = row.map->find(m.numericas[j]);
+    if (!c) throw std::runtime_error("prever: falta o atributo '" + m.numericas[j] + "'");
+    double v = celula_num(*c, m.numericas[j]);
+    if (m.usa_std[j]) v = (v - m.medias[j]) / m.desvios[j];
+    x.push_back(v);
+  }
+  for (const std::string& col : m.quentes) {
+    const Value* c = row.map->find(col);
+    if (!c) throw std::runtime_error("prever: falta o atributo '" + col + "'");
+    const std::string k = chave_valor(*c);
+    const std::vector<std::string>& cats = m.categorias.at(col);
+    for (const std::string& cat : cats) x.push_back(cat == k ? 1.0 : 0.0);
+  }
+  return x;
+}
+
+// Padronizacao interna (logistica/knn): ajusta media/desvio por posicao no
+// treino e aplica em qualquer vetor.
+static void exp_std_ajustar(Interpreter::ExpModel& m, const std::vector<std::vector<double>>& xt) {
+  const std::size_t f = xt.empty() ? 0 : xt[0].size();
+  m.imedias.assign(f, 0.0);
+  m.idesvios.assign(f, 1.0);
+  for (std::size_t j = 0; j < f; ++j) {
+    double soma = 0.0;
+    for (const auto& r : xt) soma += r[j];
+    const double media = soma / static_cast<double>(xt.size());
+    double var = 0.0;
+    for (const auto& r : xt) {
+      const double d = r[j] - media;
+      var += d * d;
+    }
+    m.imedias[j] = media;
+    m.idesvios[j] = var > 0.0 ? std::sqrt(var / static_cast<double>(xt.size())) : 1.0;
+  }
+}
+
+static std::vector<double> exp_std_aplicar(const Interpreter::ExpModel& m,
+                                           const std::vector<double>& x) {
+  std::vector<double> z = x;
+  for (std::size_t j = 0; j < z.size() && j < m.imedias.size(); ++j) {
+    z[j] = (z[j] - m.imedias[j]) / m.idesvios[j];
+  }
+  return z;
+}
+
+void Interpreter::run_experimento(const Item& decl) {
+  const std::string name = decl_name(decl);
+  if (!decl.block) fail(decl.span, "experimento '" + name + "' sem configuracao");
+  const ast::Block& cfg = *decl.block;
+  ExpModel m;
+  // Particoes e metricas para impressao (preenchidas no try).
+  std::vector<std::string> relatorio;
+  std::size_t n_tr = 0, n_va = 0, n_te = 0, largura = 0, total = 0;
+  try {
+    // ---- dados
+    const Item* fd = find_field(cfg, "dados");
+    if (!fd || !fd->value) throw std::runtime_error("falta 'dados:' (tabela, lista de mapas ou caminho .csv/.parquet/.json)");
+    Value dados = eval(*fd->value, root_);
+    std::vector<Value> linhas;
+    if (dados.kind == ValueKind::Tabela || dados.kind == ValueKind::Lista) {
+      if (!dados.list) throw std::runtime_error("'dados' vazio");
+      linhas.assign(dados.list->begin(), dados.list->end());
+    } else if (dados.kind == ValueKind::Texto) {
+      const std::string& caminho = dados.s;
+      Value t;
+      if (caminho.size() >= 4 && caminho.compare(caminho.size() - 4, 4, ".csv") == 0) {
+        t = read_csv_file(caminho, fd->value->span);
+      } else if (caminho.size() >= 8 && caminho.compare(caminho.size() - 8, 8, ".parquet") == 0) {
+        t = rt::parquet_read(caminho);
+      } else if (caminho.size() >= 5 && caminho.compare(caminho.size() - 5, 5, ".json") == 0) {
+        std::ifstream in(caminho);
+        if (!in) throw std::runtime_error("nao foi possivel abrir '" + caminho + "'");
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        t = rt::json_parse(ss.str());
+      } else {
+        throw std::runtime_error("'dados' como texto precisa de .csv, .parquet ou .json (veio '" + caminho + "')");
+      }
+      if (t.kind == ValueKind::Lista) t.kind = ValueKind::Tabela;
+      if (t.kind != ValueKind::Tabela || !t.list) {
+        throw std::runtime_error("arquivo '" + caminho + "' nao produziu tabela");
+      }
+      linhas.assign(t.list->begin(), t.list->end());
+    } else {
+      throw std::runtime_error("'dados' deve ser tabela, lista de mapas ou caminho (veio " +
+                               std::string(dados.type_name()) + ")");
+    }
+    for (const Value& r : linhas) {
+      if (r.kind != ValueKind::Mapa || !r.map) {
+        throw std::runtime_error("'dados' deve ser lista de mapas (uma linha nao e mapa)");
+      }
+    }
+    if (linhas.size() < 2) {
+      throw std::runtime_error("precisa de ao menos 2 linhas (tem " +
+                               std::to_string(linhas.size()) + ")");
+    }
+    total = linhas.size();
+
+    // ---- modelo (antes do alvo: kmeans nao usa alvo)
+    const Item* fm = find_field(cfg, "modelo");
+    if (!fm || !fm->value || fm->value->kind != ExprKind::Name) {
+      throw std::runtime_error("falta 'modelo: regressao_linear | regressao_logistica | knn | kmeans'");
+    }
+    const std::string kind = fm->value->text;
+    const ast::Block* hyp = fm->block.get();
+    auto hnum = [&](const char* k, double fb) { return hyp ? field_num(*hyp, k, fb) : fb; };
+    auto hint = [&](const char* k, int fb) { return hyp ? field_int(*hyp, k, fb) : fb; };
+    if (kind != "regressao_linear" && kind != "regressao_logistica" && kind != "knn" &&
+        kind != "kmeans") {
+      if (kind == "floresta_aleatoria" || kind == "gradiente_impulsionado" || kind == "svm") {
+        fail(fm->value->span, "modelo '" + kind + "' ainda nao implementado na 1a passada",
+             DiagCode::NotImplemented);
+      }
+      throw std::runtime_error("modelo '" + kind +
+                               "' desconhecido (use regressao_linear | regressao_logistica | knn | kmeans)");
+    }
+    m.kind = kind;
+
+    // ---- alvo
+    std::string alvo;
+    if (const Item* fa = find_field(cfg, "alvo"); fa && fa->value) {
+      Value av = eval(*fa->value, root_);
+      if (av.kind != ValueKind::Texto) throw std::runtime_error("'alvo' deve ser texto com o nome da coluna");
+      alvo = av.s;
+    }
+    if (kind == "kmeans") {
+      if (!alvo.empty()) throw std::runtime_error("kmeans nao usa 'alvo:' (remova o campo)");
+    } else if (alvo.empty()) {
+      throw std::runtime_error("falta 'alvo: \"coluna\"'");
+    }
+    if (!alvo.empty() && !linhas[0].map->find(alvo)) {
+      throw std::runtime_error("coluna alvo '" + alvo + "' nao existe nos dados");
+    }
+
+    // ---- atributos (default: todas menos o alvo)
+    const Item* fat = find_field(cfg, "atributos");
+    if (fat && fat->value) {
+      m.numericas = nomes_crus(*fat->value, "'atributos'");
+    } else {
+      for (const auto& kv : linhas[0].map->items) {
+        if (kv.first != alvo) m.numericas.push_back(kv.first);
+      }
+      if (m.numericas.empty()) throw std::runtime_error("sem atributos (so ha a coluna alvo?)");
+    }
+    if (std::find(m.numericas.begin(), m.numericas.end(), alvo) != m.numericas.end()) {
+      throw std::runtime_error("'alvo' nao pode estar em 'atributos'");
+    }
+    for (const std::string& a : m.numericas) {
+      if (!linhas[0].map->find(a)) throw std::runtime_error("atributo '" + a + "' nao existe nos dados");
+    }
+
+    // ---- pre_processar: '- um_de_n: [cols]' / '- padronizar: [cols]'
+    std::vector<std::string> std_cols;
+    if (const Item* pp = find_field(cfg, "pre_processar"); pp && pp->block) {
+      for (const auto& it : pp->block->items) {
+        const Item* f = (it && it->kind == ItemKind::ListEntry && it->child) ? it->child.get()
+                                                                             : it.get();
+        if (!f || f->kind != ItemKind::Field || !f->value ||
+            (f->key != "um_de_n" && f->key != "padronizar")) {
+          throw std::runtime_error(
+              "pre_processar: use '- um_de_n: [cols]' ou '- padronizar: [cols]'");
+        }
+        std::vector<std::string> cols = nomes_crus(*f->value, "pre_processar");
+        for (const std::string& c : cols) {
+          if (std::find(m.numericas.begin(), m.numericas.end(), c) == m.numericas.end()) {
+            throw std::runtime_error("pre_processar: '" + c + "' nao esta em 'atributos'");
+          }
+        }
+        if (f->key == "um_de_n") {
+          m.quentes.insert(m.quentes.end(), cols.begin(), cols.end());
+        } else {
+          std_cols.insert(std_cols.end(), cols.begin(), cols.end());
+        }
+      }
+    }
+    // Separa numericas de quentes (quente sai da lista numerica, mantendo ordem).
+    {
+      std::vector<std::string> nums;
+      for (const std::string& a : m.numericas) {
+        if (std::find(m.quentes.begin(), m.quentes.end(), a) == m.quentes.end()) nums.push_back(a);
+      }
+      m.numericas.swap(nums);
+    }
+    for (const std::string& c : std_cols) {
+      if (std::find(m.quentes.begin(), m.quentes.end(), c) != m.quentes.end()) {
+        throw std::runtime_error("coluna '" + c + "' nao pode ser categoria e padronizada");
+      }
+      if (std::find(m.numericas.begin(), m.numericas.end(), c) == m.numericas.end()) {
+        throw std::runtime_error("padronizar: '" + c + "' nao e atributo numerico");
+      }
+    }
+
+    // ---- dividir
+    double f_tr = 0.75, f_va = 0.0, f_te = 0.25;
+    if (const Item* fdv = find_field(cfg, "dividir"); fdv && fdv->value) {
+      Value dv = eval(*fdv->value, root_);
+      if (dv.kind != ValueKind::Mapa || !dv.map) {
+        throw std::runtime_error("'dividir' deve ser mapa { treino: _, teste: _ [, validacao: _] }");
+      }
+      auto fracao = [&](const char* k, double fb) {
+        const Value* v = dv.map->find(k);
+        if (!v) return fb;
+        if (!v->is_number()) throw std::runtime_error("'dividir." + std::string(k) + "' deve ser numero");
+        return v->as_number();
+      };
+      f_tr = fracao("treino", f_tr);
+      f_va = fracao("validacao", 0.0);
+      f_te = fracao("teste", f_te);
+      if (!(f_tr > 0.0) || !(f_te > 0.0) || f_va < 0.0 || std::fabs(f_tr + f_va + f_te - 1.0) > 1e-9) {
+        throw std::runtime_error("'dividir' invalido (treino > 0, teste > 0, validacao >= 0, soma = 1)");
+      }
+    }
+    const int semente = field_int(cfg, "semente", 42);
+    std::vector<std::size_t> idx(total);
+    for (std::size_t i = 0; i < total; ++i) idx[i] = i;
+    std::mt19937 rng(static_cast<std::uint32_t>(semente));
+    std::shuffle(idx.begin(), idx.end(), rng);
+    n_tr = std::max<std::size_t>(1, static_cast<std::size_t>(f_tr * total));
+    n_va = static_cast<std::size_t>(f_va * total);
+    if (n_tr + n_va >= total) n_tr = total - n_va - 1;
+    n_te = total - n_tr - n_va;
+    if (n_te == 0) {  // garante teste mesmo com poucas linhas
+      n_te = 1;
+      n_tr -= 1;
+    }
+    auto fatia = [&](std::size_t ini, std::size_t n) {
+      std::vector<Value> out;
+      for (std::size_t k = 0; k < n; ++k) out.push_back(linhas[idx[ini + k]]);
+      return out;
+    };
+    const std::vector<Value> treino = fatia(0, n_tr);
+    const std::vector<Value> valid = fatia(n_tr, n_va);
+    const std::vector<Value> teste = fatia(n_tr + n_va, n_te);
+
+    // ---- pipeline + tarefa
+    exp_ajustar(m, treino, std_cols);
+    largura = exp_largura(m);
+    auto feats = [&](const std::vector<Value>& rs) {
+      std::vector<std::vector<double>> out;
+      out.reserve(rs.size());
+      for (const Value& r : rs) out.push_back(exp_vetor(m, r));
+      return out;
+    };
+    const std::vector<std::vector<double>> xt = feats(treino);
+    const std::vector<std::vector<double>> xv = feats(valid);
+    const std::vector<std::vector<double>> xs = feats(teste);
+
+    // y do treino / classes
+    std::vector<int> yt;
+    std::vector<double> ytr;
+    if (kind != "kmeans") {
+      const bool regr = (kind == "regressao_linear");
+      for (const Value& r : treino) {
+        const Value* c = r.map->find(alvo);
+        if (!c || c->kind == ValueKind::Nulo) {
+          throw std::runtime_error("alvo '" + alvo + "' com valor ausente/nulo no treino");
+        }
+        if (regr) {
+          if (!c->is_number()) {
+            throw std::runtime_error("regressao_linear preve numero; alvo '" + alvo + "' e " +
+                                     std::string(c->type_name()) + " (use regressao_logistica | knn)");
+          }
+          ytr.push_back(c->as_number());
+        } else {
+          const std::string k = chave_valor(*c);
+          int id = -1;
+          for (std::size_t j = 0; j < m.classes.size(); ++j) {
+            if (chave_valor(m.classes[j]) == k) {
+              id = static_cast<int>(j);
+              break;
+            }
+          }
+          if (id < 0) {
+            id = static_cast<int>(m.classes.size());
+            m.classes.push_back(*c);
+          }
+          yt.push_back(id);
+        }
+      }
+      if (!regr && kind == "regressao_logistica" && m.classes.size() != 2) {
+        throw std::runtime_error("regressao_logistica e binaria (" +
+                                 std::to_string(m.classes.size()) + " classes no alvo; use knn)");
+      }
+      m.classificacao = !regr;
+    }
+
+    // ---- ajuste por modelo
+    if (kind == "regressao_linear") {
+      const std::size_t f = largura;
+      std::vector<std::vector<double>> a(f + 1, std::vector<double>(f + 1, 0.0));
+      std::vector<double> b(f + 1, 0.0);
+      for (std::size_t i = 0; i < xt.size(); ++i) {
+        for (std::size_t j = 0; j <= f; ++j) {
+          const double vj = (j < f) ? xt[i][j] : 1.0;
+          b[j] += vj * ytr[i];
+          for (std::size_t k = 0; k <= f; ++k) a[j][k] += vj * ((k < f) ? xt[i][k] : 1.0);
+        }
+      }
+      for (std::size_t j = 0; j <= f; ++j) a[j][j] += 1e-8;  // crista: estabilidade
+      m.pesos = gauss(std::move(a), std::move(b));
+    } else if (kind == "regressao_logistica") {
+      exp_std_ajustar(m, xt);
+      const double taxa = hnum("taxa", hnum("taxa_aprendizado", 0.5));
+      const int epocas = hint("epocas", 500);
+      if (!(taxa > 0.0) || epocas < 1) throw std::runtime_error("'taxa' > 0 e 'epocas' >= 1");
+      const std::size_t f = largura;
+      m.pesos.assign(f + 1, 0.0);
+      std::vector<std::vector<double>> z;
+      z.reserve(xt.size());
+      for (const auto& r : xt) z.push_back(exp_std_aplicar(m, r));
+      for (int e = 0; e < epocas; ++e) {
+        std::vector<double> g(f + 1, 0.0);
+        for (std::size_t i = 0; i < z.size(); ++i) {
+          double s = m.pesos[f];
+          for (std::size_t j = 0; j < f; ++j) s += m.pesos[j] * z[i][j];
+          const double p = sigmoide(s);
+          const double err = p - static_cast<double>(yt[i]);
+          for (std::size_t j = 0; j < f; ++j) g[j] += err * z[i][j];
+          g[f] += err;
+        }
+        const double inv = taxa / static_cast<double>(z.size());
+        for (std::size_t j = 0; j <= f; ++j) m.pesos[j] -= inv * g[j];
+      }
+    } else if (kind == "knn") {
+      exp_std_ajustar(m, xt);
+      m.vizinhos = hint("vizinhos", 5);
+      if (m.vizinhos < 1) throw std::runtime_error("'vizinhos' >= 1");
+      if (static_cast<std::size_t>(m.vizinhos) > xt.size()) {
+        throw std::runtime_error("'vizinhos' (" + std::to_string(m.vizinhos) + ") maior que o treino (" +
+                                 std::to_string(xt.size()) + " linhas)");
+      }
+      m.base_x.reserve(xt.size());
+      for (const auto& r : xt) m.base_x.push_back(exp_std_aplicar(m, r));
+      m.base_y = yt;
+      m.base_yr = ytr;
+    } else {  // kmeans
+      const int k = hint("grupos", -1);
+      if (k < 1) throw std::runtime_error("kmeans exige 'grupos:' (numero de grupos >= 1)");
+      if (static_cast<std::size_t>(k) > xt.size()) {
+        throw std::runtime_error("'grupos' (" + std::to_string(k) + ") maior que o treino (" +
+                                 std::to_string(xt.size()) + " linhas)");
+      }
+      std::vector<std::size_t> ordem(xt.size());
+      for (std::size_t i = 0; i < ordem.size(); ++i) ordem[i] = i;
+      std::shuffle(ordem.begin(), ordem.end(), rng);
+      m.centroides.clear();
+      for (int c = 0; c < k; ++c) m.centroides.push_back(xt[ordem[static_cast<std::size_t>(c)]]);
+      std::vector<int> atrib(xt.size(), -1);
+      for (int it = 0; it < 100; ++it) {
+        bool mudou = false;
+        for (std::size_t i = 0; i < xt.size(); ++i) {
+          int melhor = 0;
+          double bd = 0.0;
+          for (std::size_t j = 0; j < xt[i].size(); ++j) {
+            const double d = xt[i][j] - m.centroides[0][j];
+            bd += d * d;
+          }
+          for (int c = 1; c < k; ++c) {
+            double d2 = 0.0;
+            for (std::size_t j = 0; j < xt[i].size(); ++j) {
+              const double d = xt[i][j] - m.centroides[static_cast<std::size_t>(c)][j];
+              d2 += d * d;
+            }
+            if (d2 < bd) {
+              bd = d2;
+              melhor = c;
+            }
+          }
+          if (atrib[i] != melhor) {
+            atrib[i] = melhor;
+            mudou = true;
+          }
+        }
+        if (!mudou) break;
+        std::vector<std::vector<double>> soma(static_cast<std::size_t>(k),
+                                              std::vector<double>(largura, 0.0));
+        std::vector<std::size_t> cont(static_cast<std::size_t>(k), 0);
+        for (std::size_t i = 0; i < xt.size(); ++i) {
+          const int c = atrib[i] < 0 ? 0 : atrib[i];
+          for (std::size_t j = 0; j < largura; ++j) soma[static_cast<std::size_t>(c)][j] += xt[i][j];
+          cont[static_cast<std::size_t>(c)] += 1;
+        }
+        for (int c = 0; c < k; ++c) {
+          if (cont[static_cast<std::size_t>(c)] == 0) continue;  // grupo vazio: mantem
+          for (std::size_t j = 0; j < largura; ++j) {
+            m.centroides[static_cast<std::size_t>(c)][j] =
+                soma[static_cast<std::size_t>(c)][j] /
+                static_cast<double>(cont[static_cast<std::size_t>(c)]);
+          }
+        }
+      }
+    }
+
+    // ---- metricas
+    std::vector<std::string> pedidas;
+    if (const Item* fmet = find_field(cfg, "metricas"); fmet && fmet->value) {
+      pedidas = nomes_crus(*fmet->value, "'metricas'");
+    }
+    auto prever_idx = [&](const std::vector<double>& xraw, double& proba) -> int {
+      if (kind == "regressao_logistica") {
+        const std::vector<double> z = exp_std_aplicar(m, xraw);
+        double s = m.pesos[largura];
+        for (std::size_t j = 0; j < largura; ++j) s += m.pesos[j] * z[j];
+        proba = sigmoide(s);
+        return proba >= 0.5 ? 1 : 0;
+      }
+      // knn
+      std::vector<std::pair<double, std::size_t>> dist;
+      const std::vector<double> z = exp_std_aplicar(m, xraw);
+      for (std::size_t i = 0; i < m.base_x.size(); ++i) {
+        double d2 = 0.0;
+        for (std::size_t j = 0; j < largura; ++j) {
+          const double d = z[j] - m.base_x[i][j];
+          d2 += d * d;
+        }
+        dist.emplace_back(d2, i);
+      }
+      std::sort(dist.begin(), dist.end());
+      if (m.classificacao) {
+        std::vector<int> votos(m.classes.size(), 0);
+        for (int v = 0; v < m.vizinhos; ++v) votos[static_cast<std::size_t>(m.base_y[dist[static_cast<std::size_t>(v)].second])] += 1;
+        int melhor = 0;
+        for (std::size_t c = 1; c < votos.size(); ++c) {
+          if (votos[c] > votos[static_cast<std::size_t>(melhor)]) melhor = static_cast<int>(c);
+        }
+        proba = static_cast<double>(votos[static_cast<std::size_t>(melhor)]) /
+                static_cast<double>(m.vizinhos);
+        return melhor;
+      }
+      proba = 0.0;
+      return -1;  // regressao: ver prever_num
+    };
+    auto prever_num = [&](const std::vector<double>& xraw) -> double {
+      if (kind == "regressao_linear") {
+        double s = m.pesos[largura];
+        for (std::size_t j = 0; j < largura; ++j) s += m.pesos[j] * xraw[j];
+        return s;
+      }
+      // knn regressao: media dos vizinhos
+      const std::vector<double> z = exp_std_aplicar(m, xraw);
+      std::vector<std::pair<double, std::size_t>> dist;
+      for (std::size_t i = 0; i < m.base_x.size(); ++i) {
+        double d2 = 0.0;
+        for (std::size_t j = 0; j < largura; ++j) {
+          const double d = z[j] - m.base_x[i][j];
+          d2 += d * d;
+        }
+        dist.emplace_back(d2, i);
+      }
+      std::sort(dist.begin(), dist.end());
+      double soma = 0.0;
+      for (int v = 0; v < m.vizinhos; ++v) soma += m.base_yr[dist[static_cast<std::size_t>(v)].second];
+      return soma / static_cast<double>(m.vizinhos);
+    };
+
+    if (kind == "kmeans") {
+      if (!pedidas.empty()) {
+        throw std::runtime_error("kmeans reporta inercia automaticamente; remova 'metricas:'");
+      }
+      auto avalia_grupo = [&](const std::vector<std::vector<double>>& xx, const char* rot) {
+        std::vector<std::size_t> tam(m.centroides.size(), 0);
+        double iner = 0.0;
+        for (const auto& r : xx) {
+          std::size_t melhor = 0;
+          double bd = 0.0;
+          for (std::size_t j = 0; j < r.size(); ++j) {
+            const double d = r[j] - m.centroides[0][j];
+            bd += d * d;
+          }
+          for (std::size_t c = 1; c < m.centroides.size(); ++c) {
+            double d2 = 0.0;
+            for (std::size_t j = 0; j < r.size(); ++j) {
+              const double d = r[j] - m.centroides[c][j];
+              d2 += d * d;
+            }
+            if (d2 < bd) {
+              bd = d2;
+              melhor = c;
+            }
+          }
+          tam[melhor] += 1;
+          iner += bd;
+        }
+        std::string t = "inercia: " + fmt4(iner);
+        std::string g = "grupos:";
+        for (std::size_t c = 0; c < tam.size(); ++c) g += " " + std::to_string(tam[c]);
+        relatorio.push_back(std::string(rot) + t);
+        relatorio.push_back(std::string(rot) + g);
+      };
+      avalia_grupo(xs, "teste ");
+      if (!xv.empty()) avalia_grupo(xv, "validacao ");
+    } else if (m.classificacao) {
+      if (pedidas.empty()) pedidas = {"acuracia"};
+      for (const std::string& p : pedidas) {
+        if (p != "acuracia" && p != "f1" && p != "auc" && p != "matriz_confusao") {
+          throw std::runtime_error("metrica '" + p +
+                                   "' invalida p/ classificacao (use acuracia | f1 | auc | matriz_confusao)");
+        }
+      }
+      auto avalia_classe = [&](const std::vector<std::vector<double>>& xx,
+                               const std::vector<Value>& rs, const char* rot) {
+        const std::size_t K = m.classes.size();
+        std::vector<std::size_t> ac(K, 0), tot(K, 0), previstos(K, 0);
+        std::vector<std::vector<std::size_t>> mat(K, std::vector<std::size_t>(K, 0));
+        std::size_t ok = 0;
+        std::vector<std::pair<double, int>> ranking;  // (proba da classe 1, rotulo 0/1)
+        for (std::size_t i = 0; i < xx.size(); ++i) {
+          const Value* c = rs[i].map->find(alvo);
+          int real = -1;
+          const std::string k = chave_valor(*c);
+          for (std::size_t j = 0; j < K; ++j) {
+            if (chave_valor(m.classes[j]) == k) {
+              real = static_cast<int>(j);
+              break;
+            }
+          }
+          if (real < 0) throw std::runtime_error("classe nova no teste/validacao (so vale o que apareceu no treino)");
+          double proba = 0.0;
+          const int pred = prever_idx(xx[i], proba);
+          if (pred == real) ++ok;
+          ac[static_cast<std::size_t>(pred)] += (pred == real ? 1 : 0);
+          tot[static_cast<std::size_t>(real)] += 1;
+          previstos[static_cast<std::size_t>(pred)] += 1;
+          mat[static_cast<std::size_t>(real)][static_cast<std::size_t>(pred)] += 1;
+          if (K == 2) ranking.emplace_back(proba, real == 1 ? 1 : 0);
+        }
+        const double n = static_cast<double>(xx.size());
+        for (const std::string& p : pedidas) {
+          if (p == "acuracia") {
+            relatorio.push_back(std::string(rot) + "acuracia: " + fmt4(static_cast<double>(ok) / n));
+          } else if (p == "f1") {
+            // F1 ponderado pelo suporte (padrao intuitivo: classes ausentes
+            // no teste nao derrubam a media).
+            double soma = 0.0, sup = 0.0;
+            for (std::size_t c = 0; c < K; ++c) {
+              const double prec = previstos[c] ? static_cast<double>(ac[c]) / previstos[c] : 0.0;
+              const double rec = tot[c] ? static_cast<double>(ac[c]) / tot[c] : 0.0;
+              const double f1c = (prec + rec > 0.0) ? 2.0 * prec * rec / (prec + rec) : 0.0;
+              soma += f1c * static_cast<double>(tot[c]);
+              sup += static_cast<double>(tot[c]);
+            }
+            relatorio.push_back(std::string(rot) + "f1: " + fmt4(sup > 0.0 ? soma / sup : 0.0));
+          } else if (p == "auc") {
+            if (K != 2) {
+              relatorio.push_back(std::string(rot) + "auc: (exige 2 classes; nota)");
+              continue;
+            }
+            std::sort(ranking.begin(), ranking.end());
+            double auc = 0.0;
+            std::size_t npos = 0, nneg = 0;
+            for (const auto& pr : ranking) {
+              if (pr.second == 1) ++npos;
+              else ++nneg;
+            }
+            if (npos == 0 || nneg == 0) {
+              relatorio.push_back(std::string(rot) +
+                                  "auc: (exige exemplos das 2 classes no teste; nota)");
+              continue;
+            }
+            std::size_t neg_antes = 0;
+            std::size_t i = 0;
+            // Mann-Whitney com empate = 0.5.
+            while (i < ranking.size()) {
+              std::size_t j = i;
+              while (j < ranking.size() && ranking[j].first == ranking[i].first) ++j;
+              std::size_t pos_g = 0;
+              for (std::size_t t = i; t < j; ++t) {
+                if (ranking[t].second == 1) ++pos_g;
+              }
+              auc += static_cast<double>(pos_g) * (static_cast<double>(neg_antes) +
+                                                   static_cast<double>((j - i - pos_g)) * 0.5);
+              for (std::size_t t = i; t < j; ++t) {
+                if (ranking[t].second == 0) ++neg_antes;
+              }
+              i = j;
+            }
+            auc /= (static_cast<double>(npos) * static_cast<double>(nneg));
+            relatorio.push_back(std::string(rot) + "auc: " + fmt4(auc));
+          } else if (p == "matriz_confusao") {
+            std::string bloco = std::string(rot) + "matriz_confusao (linhas=true, colunas=previsto):";
+            std::string cab = std::string(14, ' ');
+            for (std::size_t c = 0; c < K; ++c) {
+              std::string r = rotulo_valor(m.classes[c]);
+              cab += std::string(12 - std::min<std::size_t>(12, r.size()), ' ') + r;
+            }
+            bloco += "\n" + cab;
+            for (std::size_t r = 0; r < K; ++r) {
+              std::string lin = rotulo_valor(m.classes[r]);
+              lin += std::string(14 - std::min<std::size_t>(14, lin.size()), ' ');
+              for (std::size_t c = 0; c < K; ++c) {
+                const std::string n = std::to_string(mat[r][c]);
+                lin += std::string(12 - std::min<std::size_t>(12, n.size()), ' ') + n;
+              }
+              bloco += "\n" + lin;
+            }
+            relatorio.push_back(bloco);
+          }
+        }
+      };
+      avalia_classe(xs, teste, "teste ");
+      if (!xv.empty()) avalia_classe(xv, valid, "validacao ");
+    } else {
+      if (pedidas.empty()) pedidas = {"rmse"};
+      for (const std::string& p : pedidas) {
+        if (p != "rmse" && p != "r2") {
+          throw std::runtime_error("metrica '" + p + "' invalida p/ regressao (use rmse | r2)");
+        }
+      }
+      auto avalia_regr = [&](const std::vector<std::vector<double>>& xx,
+                             const std::vector<Value>& rs, const char* rot) {
+        double ss_res = 0.0, soma = 0.0;
+        for (std::size_t i = 0; i < xx.size(); ++i) {
+          const double real = rs[i].map->find(alvo)->as_number();
+          const double d = real - prever_num(xx[i]);
+          ss_res += d * d;
+          soma += real;
+        }
+        const double n = static_cast<double>(xx.size());
+        const double media = soma / n;
+        double ss_tot = 0.0;
+        for (std::size_t i = 0; i < xx.size(); ++i) {
+          const double d = rs[i].map->find(alvo)->as_number() - media;
+          ss_tot += d * d;
+        }
+        for (const std::string& p : pedidas) {
+          if (p == "rmse") {
+            relatorio.push_back(std::string(rot) + "rmse: " + fmt4(std::sqrt(ss_res / n)));
+          } else {
+            const double r2 = ss_tot > 0.0 ? 1.0 - ss_res / ss_tot : (ss_res == 0.0 ? 1.0 : 0.0);
+            relatorio.push_back(std::string(rot) + "r2: " + fmt4(r2));
+          }
+        }
+      };
+      // Reconstroi y do teste/validacao a partir das linhas (numeros ja validados).
+      avalia_regr(xs, teste, "teste ");
+      if (!xv.empty()) avalia_regr(xv, valid, "validacao ");
+    }
+
+    // ---- registrar_em (mlflow:// -> JSON local; REST fica p/ depois)
+    if (const Item* fr = find_field(cfg, "registrar_em"); fr && fr->value) {
+      Value rv = eval(*fr->value, root_);
+      if (rv.kind != ValueKind::Texto) throw std::runtime_error("'registrar_em' deve ser texto (ex.: \"mlflow://host/experimento\")");
+      if (rv.s.rfind("mlflow://", 0) != 0) {
+        throw std::runtime_error("'registrar_em' suporta 'mlflow://...' (1a passada grava o run em JSON local)");
+      }
+      Value doc = Value::mapa();
+      doc.map->set("experimento", Value::texto(name));
+      doc.map->set("modelo", Value::texto(kind));
+      doc.map->set("linhas", Value::inteiro(static_cast<std::int64_t>(total)));
+      doc.map->set("semente", Value::inteiro(semente));
+      Value mets = Value::mapa();
+      for (const std::string& lin : relatorio) {
+        const std::size_t p = lin.find(':');
+        if (p == std::string::npos) continue;
+        mets.map->set(lin.substr(0, p), Value::texto(lin.substr(p + 2)));
+      }
+      doc.map->set("metricas", mets);
+      const std::string caminho = "experimento_" + name + "_run.json";
+      std::ofstream out(caminho, std::ios::trunc);
+      if (!out) throw std::runtime_error("nao foi possivel gravar '" + caminho + "'");
+      out << rt::json_dump(doc) << "\n";
+      relatorio.push_back("run salvo em " + caminho + " (mlflow REST: 1a passada grava JSON local)");
+    }
+
+    // ---- saida
+    out_ << "== experimento " << name << " ==\n";
+    out_ << "modelo: " << kind << " | linhas: " << total << " (treino " << n_tr;
+    if (n_va) out_ << ", validacao " << n_va;
+    out_ << ", teste " << n_te << ") | atributos: " << largura << "\n";
+    for (const std::string& lin : relatorio) out_ << lin << "\n";
+  } catch (const std::exception& e) {
+    fail(decl.span, "experimento " + name + ": " + e.what());
+  }
+
+  {
+    std::lock_guard<std::mutex> lk(experimentos_mutex_);
+    experimentos_[name] = std::move(m);
+  }
+}
+
+// Previsao com modelo ajustado: {classe, probabilidade} | {valor} | {grupo}.
+Value Interpreter::experimento_prever(const std::string& nome, const Value& entrada, Span span) {
+  if (entrada.kind != ValueKind::Mapa || !entrada.map) {
+    fail(span, "prever espera um mapa {atributo: valor} (sem a coluna alvo)");
+  }
+  ExpModel m;
+  {
+    std::lock_guard<std::mutex> lk(experimentos_mutex_);
+    auto it = experimentos_.find(nome);
+    if (it == experimentos_.end()) {
+      fail(span, "experimento '" + nome + "' nao foi executado (rode o programa antes de prever)");
+    }
+    m = it->second;
+  }
+  std::vector<double> x;
+  try {
+    x = exp_vetor(m, entrada);
+  } catch (const std::exception& e) {
+    fail(span, std::string(e.what()));
+  }
+  Value out = Value::mapa();
+  if (m.kind == "kmeans") {
+    std::size_t melhor = 0;
+    double bd = 0.0;
+    for (std::size_t j = 0; j < x.size(); ++j) {
+      const double d = x[j] - m.centroides[0][j];
+      bd += d * d;
+    }
+    for (std::size_t c = 1; c < m.centroides.size(); ++c) {
+      double d2 = 0.0;
+      for (std::size_t j = 0; j < x.size(); ++j) {
+        const double d = x[j] - m.centroides[c][j];
+        d2 += d * d;
+      }
+      if (d2 < bd) {
+        bd = d2;
+        melhor = c;
+      }
+    }
+    out.map->set("grupo", Value::inteiro(static_cast<std::int64_t>(melhor)));
+    return out;
+  }
+  if (m.classificacao) {
+    double proba = 0.0;
+    int pred = 0;
+    if (m.kind == "regressao_logistica") {
+      const std::vector<double> z = exp_std_aplicar(m, x);
+      double s = m.pesos[x.size()];
+      for (std::size_t j = 0; j < x.size(); ++j) s += m.pesos[j] * z[j];
+      const double p1 = sigmoide(s);  // P(classes[1])
+      pred = p1 >= 0.5 ? 1 : 0;
+      proba = (pred == 1) ? p1 : 1.0 - p1;  // P da classe prevista
+    } else {  // knn
+      const std::vector<double> z = exp_std_aplicar(m, x);
+      std::vector<std::pair<double, std::size_t>> dist;
+      for (std::size_t i = 0; i < m.base_x.size(); ++i) {
+        double d2 = 0.0;
+        for (std::size_t j = 0; j < x.size(); ++j) {
+          const double d = z[j] - m.base_x[i][j];
+          d2 += d * d;
+        }
+        dist.emplace_back(d2, i);
+      }
+      std::sort(dist.begin(), dist.end());
+      std::vector<int> votos(m.classes.size(), 0);
+      for (int v = 0; v < m.vizinhos; ++v) {
+        votos[static_cast<std::size_t>(m.base_y[dist[static_cast<std::size_t>(v)].second])] += 1;
+      }
+      for (std::size_t c = 1; c < votos.size(); ++c) {
+        if (votos[c] > votos[static_cast<std::size_t>(pred)]) pred = static_cast<int>(c);
+      }
+      proba = static_cast<double>(votos[static_cast<std::size_t>(pred)]) /
+              static_cast<double>(m.vizinhos);
+    }
+    out.map->set("classe", m.classes[static_cast<std::size_t>(pred)]);
+    out.map->set("probabilidade", Value::decimal(proba));
+    return out;
+  }
+  double v = 0.0;
+  if (m.kind == "regressao_linear") {
+    v = m.pesos[x.size()];
+    for (std::size_t j = 0; j < x.size(); ++j) v += m.pesos[j] * x[j];
+  } else {  // knn regressao
+    const std::vector<double> z = exp_std_aplicar(m, x);
+    std::vector<std::pair<double, std::size_t>> dist;
+    for (std::size_t i = 0; i < m.base_x.size(); ++i) {
+      double d2 = 0.0;
+      for (std::size_t j = 0; j < x.size(); ++j) {
+        const double d = z[j] - m.base_x[i][j];
+        d2 += d * d;
+      }
+      dist.emplace_back(d2, i);
+    }
+    std::sort(dist.begin(), dist.end());
+    for (int k = 0; k < m.vizinhos; ++k) v += m.base_yr[dist[static_cast<std::size_t>(k)].second];
+    v /= static_cast<double>(m.vizinhos);
+  }
+  out.map->set("valor", Value::decimal(v));
+  return out;
+}
+
+// Forma `experimento Nome.prever <mapa>` (espelha `modelo Nome.executar`).
+Value Interpreter::eval_experimento_call(const Expr& call, Env& env) {
+  if (call.args.size() != 1 || call.args[0].value->kind != ExprKind::Call) {
+    fail(call.span, "uso: experimento <Nome>.prever <mapa>");
+  }
+  const Expr& inner = *call.args[0].value;
+  if (!inner.lhs || inner.lhs->kind != ExprKind::Member || !inner.lhs->lhs ||
+      inner.lhs->lhs->kind != ExprKind::Name) {
+    fail(inner.span, "uso: experimento <Nome>.prever <mapa>");
+  }
+  const std::string ename = inner.lhs->lhs->text;
+  const std::string method = inner.lhs->text;
+  auto it = entities_.find(ename);
+  if (it == entities_.end() || it->second->key != "experimento") {
+    fail(inner.span, "'" + ename + "' nao e um experimento declarado");
+  }
+  if (method != "prever") {
+    fail(inner.span, "metodo de experimento '" + method + "' desconhecido (use prever)");
+  }
+  if (inner.args.empty()) fail(inner.span, "prever precisa de um mapa {atributo: valor}");
+  Value entrada = eval(*inner.args[0].value, env);
+  return experimento_prever(ename, entrada, inner.span);
+}
+
 // ------------------------------------------------------------------ LLM + RAG
 
 namespace {
@@ -2744,6 +3728,11 @@ std::vector<Route> collect_routes(const ast::Block& block) {
 
 int Interpreter::serve(int port_override, int max_requests, int threads) {
   register_decls();
+
+  // Experimentos ajustam uma vez na subida (rotas com prever leem o cache).
+  for (const auto& item : program_.items) {
+    if (item && item->kind == ItemKind::Decl && item->key == "experimento") run_experimento(*item);
+  }
 
   const Item* svc = nullptr;
   for (const auto& item : program_.items) {
@@ -4809,6 +5798,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
          DiagCode::ConnectorNotImplemented);
   }
   if (name == "modelo") return eval_modelo_call(call, env);
+  if (name == "experimento") return eval_experimento_call(call, env);
 
   // Direct tool call: `<ferramenta> arg: valor`.
   if (auto tit = entities_.find(name);
@@ -4844,6 +5834,17 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       }
       if (ekind == "equipe" && (method == "executar" || method == "responder")) {
         return eval_equipe_call(receiver.s, call, env);
+      }
+      if (ekind == "experimento" && method == "prever") {
+        const Expr* entrada = nullptr;
+        for (const auto& a : call.args) {
+          if (a.name.empty() && a.value) {
+            entrada = a.value.get();
+            break;
+          }
+        }
+        if (!entrada) fail(call.span, "prever precisa de um mapa {atributo: valor}");
+        return experimento_prever(receiver.s, eval(*entrada, env), call.span);
       }
       if (ekind == "ferramenta" && method == "executar") {
         rt::ValueMap targs;

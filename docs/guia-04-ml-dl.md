@@ -96,6 +96,49 @@ omitidas. `eps:` default `0.00001`.
 - nt = xb.norma_lote uns [2], zeros [2], em_treino: verdadeiro
 ```
 
+## `experimento` (ML clássico)
+
+`experimento` ajusta um modelo clássico sobre uma tabela e já imprime as
+métricas no teste. Roda antes dos `pipeline`s (como `treino`), então
+`prever` funciona em qualquer passo, rota ou outro experimento.
+
+```tilt
+experimento prever_churn:
+  dados: [{ uso: 10, plano: "a", churn: 1 }, { uso: 1, plano: "b", churn: 0 }]
+  alvo: "churn"
+  atributos: [uso, plano]        # default: todas as colunas menos o alvo
+  pre_processar:
+    - um_de_n: [plano]           # one-hot (ordem de aparição no treino)
+    - padronizar: [uso]          # média/desvio do treino
+  dividir: { treino: 0.75, teste: 0.25 }   # default; validacao: opcional
+  modelo: regressao_logistica    # regressao_linear | knn | kmeans
+    taxa: 0.5                    # logistica (GD em lote; default 0.5/500)
+    epocas: 500
+  metricas: [acuracia, f1, auc, matriz_confusao]  # default por tarefa
+  semente: 7                     # embaralhamento e kmeans (default 42)
+
+pipeline usa:
+  passos:
+    - p = experimento prever_churn.prever { uso: 9, plano: "a" }
+    - responder: { risco_churn: p.probabilidade }   # p.classe também existe
+```
+
+Modelos: `regressao_linear` (equações normais + crista 1e-8; prevê
+`{valor}`), `regressao_logistica` (binária, GD interno com padronização
+própria; prevê `{classe, probabilidade}` = P da classe prevista), `knn`
+(`vizinhos:`, voto majoritário ou média; distância euclidiana em atributos
+padronizados internamente) e `kmeans` (`grupos:` obrigatório, sem `alvo:` nem
+`metricas:`; prevê `{grupo}`, reporta `inercia` + tamanhos). Outros nomes
+(`floresta_aleatoria`, `gradiente_impulsionado`, `svm`) falham com erro
+claro de "ainda não implementado".
+
+Métricas: classificação `acuracia` (default), `f1` (ponderado pelo suporte),
+`auc` (binária; exige exemplos das 2 classes no teste) e `matriz_confusao`;
+regressão `rmse` (default) e `r2`. `registrar_em: "mlflow://..."` grava o
+run (`experimento_<nome>_run.json` com métricas) — o POST REST do mlflow fica
+para depois. `dados:` aceita tabela inline, caminho `.csv`/`.parquet`/`.json`
+ou o valor de `ler_*`.
+
 ## `modelo`
 
 ```tilt
