@@ -916,6 +916,103 @@ std::pair<std::string, int> parse_bucket(const std::string& s) {
   return {col, n};
 }
 
+// "truncate[10](col)" -> {col, 10}; "" quando nao e sintaxe truncate.
+std::pair<std::string, int> parse_truncate(const std::string& s) {
+  if (s.rfind("truncate[", 0) != 0) return {"", 0};
+  const std::size_t rb = s.find(']', 9);
+  if (rb == std::string::npos || rb + 1 >= s.size() || s[rb + 1] != '(' || s.back() != ')') {
+    die("particionar_por: '" + s +
+        "' invalido (use truncate[W](coluna), ex.: truncate[10](id))");
+  }
+  int w = 0;
+  try {
+    w = std::stoi(s.substr(9, rb - 9));
+  } catch (const std::exception&) {
+    die("particionar_por: '" + s + "' com W invalido (use truncate[W](coluna))");
+  }
+  if (w <= 0) die("particionar_por: '" + s + "' com W <= 0");
+  const std::string col = s.substr(rb + 2, s.size() - rb - 3);
+  if (col.empty()) die("particionar_por: '" + s + "' sem coluna (use truncate[W](coluna))");
+  return {col, w};
+}
+
+// "year(col)", "month(col)", "day(col)", "hour(col)" -> {col, nome}; "" se
+// nao for transform temporal.
+std::pair<std::string, std::string> parse_temporal(const std::string& s) {
+  static const std::vector<std::string> names = {"year", "month", "day", "hour"};
+  for (const std::string& name : names) {
+    if (s.rfind(name + "(", 0) != 0) continue;
+    if (s.back() != ')') continue;
+    const std::string col = s.substr(name.size() + 1, s.size() - name.size() - 2);
+    if (col.empty()) continue;
+    return {col, name};
+  }
+  return {"", ""};
+}
+
+// Extrai componente ano/mes/dia/hora de uma string ISO (date ou timestamp).
+// Formato minimo: "YYYY-MM-DD" ou "YYYY-MM-DDTHH:MM:SS..."; delimitador T
+// ou espaco.
+int extract_iso_component(const std::string& s, const std::string& component) {
+  if (s.size() < 10) die("data/timestamp fora do formato ISO: '" + s + "'");
+  int year = 0, month = 0, day = 0;
+  try {
+    year = std::stoi(s.substr(0, 4));
+    month = std::stoi(s.substr(5, 2));
+    day = std::stoi(s.substr(8, 2));
+  } catch (const std::exception&) {
+    die("data/timestamp fora do formato ISO: '" + s + "'");
+  }
+  if (component == "year") return year;
+  if (component == "month") return month;
+  if (component == "day") return day;
+  if (component != "hour") die("componente temporal desconhecido: '" + component + "'");
+  if (s.size() < 13 || (s[10] != 'T' && s[10] != ' ')) {
+    die("timestamp fora do formato ISO (esperado 'YYYY-MM-DDTHH:...'): '" + s + "'");
+  }
+  try {
+    return std::stoi(s.substr(11, 2));
+  } catch (const std::exception&) {
+    die("timestamp fora do formato ISO: '" + s + "'");
+  }
+}
+
+// Aplica um transform de particao a um valor de origem.
+Value apply_transform(const Value& v, const PartitionField& pf) {
+  if (v.kind == ValueKind::Nulo) die("valor nulo em coluna de particao '" + pf.source_name + "'");
+  if (pf.transform == "identity" || pf.transform.empty()) return v;
+  if (pf.transform.rfind("bucket[", 0) == 0) {
+    return Value::inteiro(bucket_of(v, pf.source_type, pf.num_buckets, pf.source_name));
+  }
+  if (pf.transform.rfind("truncate[", 0) == 0) {
+    const std::size_t rb = pf.transform.find(']');
+    int w = 0;
+    try {
+      w = std::stoi(pf.transform.substr(9, rb - 9));
+    } catch (const std::exception&) {
+      die("transform truncate invalido: '" + pf.transform + "'");
+    }
+    if (v.kind == ValueKind::Inteiro) {
+      const std::int64_t q = v.i / w;
+      return Value::inteiro(q * w);
+    }
+    if (v.kind == ValueKind::Texto) {
+      const std::string prefix = v.s.substr(0, static_cast<std::size_t>(w));
+      return Value::texto(prefix);
+    }
+    die("truncate: coluna '" + pf.source_name + "' deve ser inteiro ou texto");
+  }
+  if (pf.transform == "year" || pf.transform == "month" || pf.transform == "day" ||
+      pf.transform == "hour") {
+    if (v.kind != ValueKind::Texto) {
+      die("transform " + pf.transform + ": coluna '" + pf.source_name +
+          "' deve ser texto no formato ISO (date/timestamp)");
+    }
+    return Value::inteiro(extract_iso_component(v.s, pf.transform));
+  }
+  die("transform de particao nao suportado: '" + pf.transform + "'");
+}
+
 // Colunas da 1a linha, recursivo para mapas (structs aninhados; listas e
 // escalares sao folhas). Chaves de struct: uniao em ordem de 1a aparicao
 // (como o writer parquet); tipo pela 1a celula nao nula da chave.
@@ -1100,10 +1197,10 @@ std::string join_part_cols(const std::vector<std::string>& cols) {
 // Monta o spec a partir da tabela escrita: localiza cada coluna (erro claro
 // em repetida ou inexistente), deduz o tipo pelo iceberg type do schema e o
 // source-id pelo id da coluna (posicao + 1). Field-ids 1000, 1001, ... na
-// ordem das colunas. Alem de nomes de coluna (identity), aceita
-// "bucket[N](col)" (Fase 12-5a): campo "col_bucket_N" com transform
-// bucket[N] e avro int; a coluna de origem permanece no parquet (o valor de
-// particao e derivado).
+// ordem das colunas. Alem de nome de coluna (identity), aceita transforms:
+// "bucket[N](col)", "truncate[W](col)", "year(col)", "month(col)",
+// "day(col)" e "hour(col)". Os transforms derivam o valor da particao a
+// partir da coluna de origem, que permanece no parquet.
 std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
                                       const std::vector<std::string>& part_cols,
                                       const char* ctx) {
@@ -1114,12 +1211,18 @@ std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
       die(std::string(ctx) + ": coluna de particao '" + col + "' repetida");
     }
     const auto [bsrc, nbuckets] = parse_bucket(col);
+    const auto [tsrc, tname] = parse_temporal(col);
+    const auto [wsrc, width] = parse_truncate(col);
     const bool eh_bucket = !bsrc.empty();
-    if (!eh_bucket && col.find('(') != std::string::npos) {
+    const bool eh_temporal = !tsrc.empty();
+    const bool eh_truncate = !wsrc.empty();
+    const bool eh_transform = eh_bucket || eh_temporal || eh_truncate;
+    if (!eh_transform && col.find('(') != std::string::npos) {
       die(std::string(ctx) + ": transform '" + col +
-          "' nao suportado na escrita (suportados: coluna para identity, bucket[N](col))");
+          "' nao suportado na escrita (suportados: coluna, bucket[N](col), "
+          "truncate[W](col), year(col), month(col), day(col), hour(col))");
     }
-    const std::string lookup = eh_bucket ? bsrc : col;
+    const std::string lookup = eh_bucket ? bsrc : eh_temporal ? tsrc : eh_truncate ? wsrc : col;
     bool achou = false;
     for (std::size_t k = 0; k < cols.size(); ++k) {
       if (cols[k].name == lookup) {
@@ -1131,12 +1234,20 @@ std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
         pf.field_id = 1000 + static_cast<std::int64_t>(i);
         pf.source_id = static_cast<std::int64_t>(k + 1);
         pf.source_name = lookup;
+        pf.source_type = cols[k].type;
         if (eh_bucket) {
           pf.name = lookup + "_bucket_" + std::to_string(nbuckets);
           pf.transform = "bucket[" + std::to_string(nbuckets) + "]";
           pf.num_buckets = nbuckets;
           pf.avro_ty = "int";
-          pf.source_type = cols[k].type;
+        } else if (eh_temporal) {
+          pf.name = tname + "_" + lookup;
+          pf.transform = tname;
+          pf.avro_ty = "int";
+        } else if (eh_truncate) {
+          pf.name = lookup + "_trunc_" + std::to_string(width);
+          pf.transform = "truncate[" + std::to_string(width) + "]";
+          pf.avro_ty = cols[k].type == "string" ? "string" : "int";
         } else {
           pf.name = col;
           pf.avro_ty = cols[k].type;
@@ -1211,27 +1322,12 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela,
     PartitionGroup candidato;
     candidato.part_map = Value::mapa();
     for (const PartitionField& pf : spec) {
-      if (pf.transform.rfind("bucket[", 0) == 0) {
-        // Bucket: hash da coluna de origem; o record carrega o inteiro e a
-        // coluna de origem permanece no parquet.
-        const Value* cell = row.map->find(pf.source_name);
-        const Value& v = cell ? *cell : Value::nulo();
-        if (v.kind != ValueKind::Inteiro && v.kind != ValueKind::Texto &&
-            v.kind != ValueKind::Logico) {
-          if (v.kind == ValueKind::Nulo)
-            die("valor nulo em coluna de particao '" + pf.source_name + "'");
-          die("coluna de particao '" + pf.source_name + "' deve ser texto, inteiro ou logico");
-        }
-        const int b = bucket_of(v, pf.source_type, pf.num_buckets, pf.source_name);
-        candidato.key += (candidato.key.empty() ? "" : "/") + pf.name + "=" + std::to_string(b);
-        candidato.part_map.map->set(pf.name, Value::inteiro(b));
-        continue;
-      }
-      const Value* cell = row.map->find(pf.name);
+      const Value* cell = row.map->find(pf.source_name);
       const Value& v = cell ? *cell : Value::nulo();
-      const std::string valor = partition_value_string(v, pf.name);
+      const Value part_val = apply_transform(v, pf);
+      const std::string valor = partition_value_string(part_val, pf.name);
       candidato.key += (candidato.key.empty() ? "" : "/") + pf.name + "=" + valor;
-      candidato.part_map.map->set(pf.name, v);
+      candidato.part_map.map->set(pf.name, part_val);
     }
     auto it = std::find_if(grupos.begin(), grupos.end(),
                            [&](const PartitionGroup& g) { return g.key == candidato.key; });
@@ -2412,24 +2508,23 @@ OndeFilter split_onde(const Value* onde, const std::vector<PartitionField>& spec
   OndeFilter f;
   if (onde && onde->kind == ValueKind::Mapa && onde->map) {
     for (const auto& kv : onde->map->items) {
+      // Predicado direto no nome do campo de particao (ex.: ano=2024).
       bool eh_particao = false;
       for (const PartitionField& pf : spec) {
         if (pf.name == kv.first) eh_particao = true;
       }
-      // Bucket: predicado na coluna de ORIGEM vira poda — converte o valor
-      // para o bucket e compara com o inteiro do record `partition`.
-      // (O predicado original segue tambem como residual: poda aproxima por
-      // hash, o filtro confirma o valor exato.)
+      // Predicado na coluna de ORIGEM de um transform: aplica o transform ao
+      // valor e poda pelo campo de particao correspondente. O predicado original
+      // segue como residual para confirmacao exata.
       for (const PartitionField& pf : spec) {
-        if (pf.transform.rfind("bucket[", 0) == 0 && pf.source_name == kv.first) {
-          try {
-            const int b = bucket_of(kv.second, pf.source_type, pf.num_buckets, pf.source_name);
-            f.prune.emplace_back(pf.name, Value::inteiro(b));
-          } catch (const std::exception&) {
-            // valor incompativel (ex.: nulo): sem poda, segue como residual
-          }
-          break;
+        if (pf.transform == "identity" || pf.source_name != kv.first) continue;
+        try {
+          Value transformed = apply_transform(kv.second, pf);
+          f.prune.emplace_back(pf.name, std::move(transformed));
+        } catch (const std::exception&) {
+          // valor incompativel (ex.: nulo): sem poda, segue como residual
         }
+        break;
       }
       if (eh_particao) {
         f.prune.push_back(kv);

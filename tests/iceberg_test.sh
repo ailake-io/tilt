@@ -723,4 +723,73 @@ PYEOF
 
 [ "$fail_st" = 0 ] || exit 1
 
+# --- 6. transforms com poda (Fase 12-5a) ----------------------------------------
+cat > "$tmp/transforms.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - t = [
+        { id: 1, ts: "2024-01-15T10:30:00", v: 12 },
+        { id: 2, ts: "2024-02-20T14:45:00", v: 25 },
+        { id: 3, ts: "2025-01-10T08:00:00", v: 37 },
+        { id: 4, ts: "2024-01-15T22:00:00", v: 18 }
+      ]
+    - escrever_iceberg t, "tab_year", particionar_por: ["year(ts)"]
+    - tudo = ler_iceberg "tab_year"
+    - imprimir "total:", tamanho tudo
+    # pruning pelo nome do campo de particao derivado (year_ts)
+    - y2024 = ler_iceberg "tab_year", onde: { year_ts: 2024 }
+    - imprimir "y2024:", tamanho y2024
+    - y2025 = ler_iceberg "tab_year", onde: { year_ts: 2025 }
+    - imprimir "y2025:", tamanho y2025
+    - escrever_iceberg t, "tab_trunc", particionar_por: ["truncate[10](v)"]
+    # pruning pelo nome do campo de particao derivado (v_trunc_10)
+    - v10 = ler_iceberg "tab_trunc", onde: { v_trunc_10: 10 }
+    - imprimir "v10:", tamanho v10
+    - v20 = ler_iceberg "tab_trunc", onde: { v_trunc_10: 20 }
+    - imprimir "v20:", tamanho v20
+TILTEOF
+out_tr=$(cd "$tmp" && "$BIN" executar transforms.tilt)
+printf '%s\n' "$out_tr"
+
+fail_tr=0
+confere_tr() {
+  echo "$out_tr" | grep -qE "$1" || { echo "saida (transforms) sem /$1/"; fail_tr=1; }
+}
+confere_tr "total: +4"
+confere_tr "y2024: +3"
+confere_tr "y2025: +1"
+confere_tr "v10: +2"
+confere_tr "v20: +1"
+
+python3 - "$tmp/tab_year" "$tmp/tab_trunc" <<'PYEOF'
+import glob
+import sys
+
+
+class Erro(Exception):
+    pass
+
+
+try:
+    from pyiceberg.table import StaticTable
+    from pyiceberg.transforms import YearTransform, TruncateTransform
+except ImportError:
+    print("pyiceberg ausente; validacao de transforms pulada")
+    sys.exit(0)
+
+for path in sys.argv[1:]:
+    metas = sorted(glob.glob(path + "/metadata/v*.metadata.json"))
+    if not metas:
+        raise Erro("metadata ausente em " + path)
+    tabela = StaticTable.from_metadata(metas[-1])
+    fields = list(tabela.metadata.spec().fields)
+    if len(fields) != 1:
+        raise Erro("esperado 1 campo de particao em %s" % path)
+    print("pyiceberg: %s -> %s %s" % (path.split("/")[-1], fields[0].name, fields[0].transform))
+
+print("pyiceberg: transforms validados")
+PYEOF
+
+[ "$fail_tr" = 0 ] || exit 1
+
 echo "iceberg_test ok"
