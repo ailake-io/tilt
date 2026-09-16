@@ -1,0 +1,11 @@
+pipeline p:
+  passos:
+    - tabela = ler_csv "pessoas.csv"
+    - primeira = tabela[0]
+    - imprimir primeira.nome, primeira.idade
+    - total = tamanho tabela
+    - imprimir "total={{total}}"
+    - v = tensor([1.0, 2.0, 4.0])
+    - imprimir v.forma, v.soma, v.media
+    - ausente = primeira?.email
+    - imprimir ausente

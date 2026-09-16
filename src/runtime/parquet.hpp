@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -60,5 +61,19 @@ void parquet_write(const std::string& path, const Value& tabela,
                    const std::vector<int>* field_ids = nullptr,
                    const ParquetWriteOpts& opts = {});
 Value parquet_read(const std::string& path);  // -> tabela (lista de mapas)
+
+// Streaming por row group (treino em arquivos grandes): abre uma vez e
+// decodifica grupo a grupo, sem materializar o arquivo todo.
+struct ParquetEstado;  // opaco (definido em parquet.cpp)
+struct ParquetFluxo {
+  std::string caminho;
+  std::vector<std::string> colunas;  // nomes top-level, em ordem
+  std::vector<std::int64_t> linhas_por_grupo;
+  std::int64_t grupos = 0;
+  std::int64_t linhas = 0;
+  std::shared_ptr<ParquetEstado> estado;
+};
+ParquetFluxo parquet_abrir_fluxo(const std::string& path);  // lanca em erro
+Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo);  // tabela; lanca em erro
 
 }  // namespace tilt::rt

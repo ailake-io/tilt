@@ -2,6 +2,7 @@
 
 #include "runtime/compat.hpp"
 #include "runtime/sql_params.hpp"
+#include "runtime/sql_pool.hpp"
 
 #include <cstdint>
 #include <cstdio>
@@ -87,6 +88,8 @@ struct MysqlApi {
   unsigned char (*stmt_free_result)(void*) = nullptr;
   unsigned char (*stmt_close)(void*) = nullptr;
   const char* (*stmt_error)(void*) = nullptr;
+  // Validacao do pool (mysql_ping existe em toda libmysqlclient/mariadb).
+  int (*ping)(void*) = nullptr;
 };
 
 template <typename F>
@@ -139,7 +142,8 @@ const MysqlApi& api() {
                     bind_sym(a.lib, a.stmt_fetch_column, "mysql_stmt_fetch_column") &&
                     bind_sym(a.lib, a.stmt_free_result, "mysql_stmt_free_result") &&
                     bind_sym(a.lib, a.stmt_close, "mysql_stmt_close") &&
-                    bind_sym(a.lib, a.stmt_error, "mysql_stmt_error");
+                    bind_sym(a.lib, a.stmt_error, "mysql_stmt_error") &&
+                    bind_sym(a.lib, a.ping, "mysql_ping");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = MysqlApi{};
@@ -254,25 +258,35 @@ bool returns_rows(const std::string& sql) {
          kw == "DESC" || kw == "EXPLAIN";
 }
 
-// Conecta; em qualquer falha já morre com a mensagem do servidor.
+// Abre; em qualquer falha já morre com a mensagem do servidor.
+void* abre_conn(const MysqlApi& db, const MysqlUrl& url) {
+  void* conn = db.init(nullptr);
+  if (!conn) die("falha de memoria ao iniciar a conexao");
+  void* ok = db.real_connect(conn, url.host.c_str(), url.user.empty() ? nullptr : url.user.c_str(),
+                             url.pass.empty() ? nullptr : url.pass.c_str(),
+                             url.db.empty() ? nullptr : url.db.c_str(), url.port, nullptr, 0);
+  if (!ok) {
+    const std::string msg = db.error(conn) ? db.error(conn) : "erro desconhecido";
+    db.close(conn);
+    die("falha na conexao: " + msg);
+  }
+  return conn;
+}
+
+// Conexao via pool (statements avulsos) ou dedicada (transacao, pooled=false).
+// O handle continua em `conn`; o pool valida com mysql_ping no checkout.
 struct Conn {
   const MysqlApi& db;
+  PooledConn pool;
   void* conn = nullptr;
 
-  explicit Conn(const MysqlApi& d, const MysqlUrl& url) : db(d) {
-    conn = db.init(nullptr);
-    if (!conn) die("falha de memoria ao iniciar a conexao");
-    void* ok = db.real_connect(conn, url.host.c_str(), url.user.empty() ? nullptr : url.user.c_str(),
-                               url.pass.empty() ? nullptr : url.pass.c_str(),
-                               url.db.empty() ? nullptr : url.db.c_str(), url.port, nullptr, 0);
-    if (!ok) {
-      const std::string msg = db.error(conn) ? db.error(conn) : "erro desconhecido";
-      db.close(conn);
-      die("falha na conexao: " + msg);
-    }
-  }
-  ~Conn() {
-    if (conn) db.close(conn);
+  Conn(const MysqlApi& d, const std::string& url, const MysqlUrl& parsed, const std::string& sql,
+       bool pooled = true)
+      : db(d),
+        pool(pooled ? "mysql" : "", url, [&] { return abre_conn(db, parsed); },
+             [&](void* h) { return !db.ping || db.ping(h) == 0; },
+             [&](void* h) { db.close(h); }, pooled ? sql : "") {
+    conn = pool.get();
   }
   Conn(const Conn&) = delete;
   Conn& operator=(const Conn&) = delete;
@@ -350,7 +364,7 @@ Value mysql_query(const std::string& url, const std::string& sql) {
   if (!returns_rows(sql)) {
     die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
   }
-  Conn conn(db, parsed);
+  Conn conn(db, url, parsed, sql);
   return executa_select(db, conn.conn, sql);
 }
 
@@ -359,7 +373,7 @@ void mysql_exec(const std::string& url, const std::string& sql) {
   if (!db.lib) die_lib_not_found();
   const MysqlUrl parsed = parse_url(url);
 
-  Conn conn(db, parsed);
+  Conn conn(db, url, parsed, sql);
   if (db.query(conn.conn, sql.c_str()) != 0) {
     die(std::string("falha ao executar comando: ") +
         (db.error(conn.conn) ? db.error(conn.conn) : "erro desconhecido"));
@@ -507,7 +521,7 @@ void mysql_exec_params(const std::string& url, const std::string& sql,
   const MysqlApi& db = api();
   if (!db.lib) die_lib_not_found();
   const MysqlUrl parsed = parse_url(url);
-  Conn conn(db, parsed);
+  Conn conn(db, url, parsed, sql);
   exec_um(db, conn.conn, sql, params, "");
 }
 
@@ -523,7 +537,7 @@ Value mysql_query_params(const std::string& url, const std::string& sql,
   if (!returns_rows(sql)) {
     die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
   }
-  Conn conn(db, parsed);
+  Conn conn(db, url, parsed, sql);
   Stmt st(db, conn.conn);
   std::vector<std::string> textos;
   std::vector<unsigned long> lens;
@@ -642,7 +656,7 @@ void mysql_transact(const std::string& url,
   const MysqlApi& db = api();
   if (!db.lib) die_lib_not_found();
   const MysqlUrl parsed = parse_url(url);
-  Conn conn(db, parsed);
+  Conn conn(db, url, parsed, "", false);  // transacao: conexao dedicada, fora do pool
   auto simples = [&](const char* sql) {
     if (db.query(conn.conn, sql) != 0) {
       die(std::string("falha em ") + sql + ": " +

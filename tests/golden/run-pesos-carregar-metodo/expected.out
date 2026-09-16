@@ -1,0 +1,5 @@
+== pipeline usar ==
+modelo M: pesos salvos em pesos.json (1 camadas)
+modelo M: pesos carregados de pesos.json (1 camadas)
+a: 0
+forma: [2]

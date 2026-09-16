@@ -41,7 +41,8 @@ class Interpreter {
   // memoria para `experimento Nome.prever <mapa>`. Publico para os helpers
   // livres de pre-processamento em interpreter.cpp.
   struct ExpModel {
-    std::string kind;  // regressao_linear | regressao_logistica | knn | kmeans
+    std::string kind;  // regressao_linear | regressao_logistica | knn | kmeans |
+                       // floresta_aleatoria | gradiente_impulsionado | svm
     bool classificacao = true;
     std::vector<std::string> numericas;  // atributos numericos (ordem)
     std::vector<std::string> quentes;    // atributos categoricos (um_de_n, ordem)
@@ -50,22 +51,47 @@ class Interpreter {
     std::vector<double> medias;
     std::vector<double> desvios;
     std::vector<char> usa_std;
-    // Padronizacao interna (logistica/knn precisam de escala): por posicao
+    // Padronizacao interna (logistica/knn/svm precisam de escala): por posicao
     // final do vetor de atributos, aplicada depois dos passos do usuario.
     std::vector<double> imedias;
     std::vector<double> idesvios;
+    // Imputacao (`- imputar: [cols]`): media (numerica) ou moda (categorica)
+    // ajustada no treino e aplicada em treino/teste/prever.
+    std::vector<std::string> imputar_cols;
+    std::map<std::string, double> imputar_num;
+    std::map<std::string, std::string> imputar_cat;
     // Categorias por coluna quente (ordem de aparição no treino).
     std::map<std::string, std::vector<std::string>> categorias;
     // Classes (ordem de aparição no treino) para classificacao.
     std::vector<rt::Value> classes;
-    // Pesos: linear (w + bias no fim) e logistica (w + bias no fim, no
-    // espaco padronizado interno). knn: base de treino; kmeans: centroides.
+    // Pesos: linear (w + bias no fim) e logistica binaria/svm (w + bias no fim,
+    // no espaco padronizado interno); logistica multinomial usa `pesos_multi`
+    // ((f+1) por classe); GBM usa `pesos` = {F0} + `arvores`. knn: base de
+    // treino; kmeans: centroides.
     std::vector<double> pesos;
+    std::vector<double> pesos_multi;
     std::vector<std::vector<double>> base_x;
     std::vector<int> base_y;
     std::vector<double> base_yr;
     std::vector<std::vector<double>> centroides;
     int vizinhos = 5;
+    // Arvores (floresta_aleatoria e gradiente_impulsionado).
+    struct NoArvore {
+      bool folha = true;
+      int atributo = -1;
+      double limiar = 0.0;
+      double valor = 0.0;  // folha: id de classe ou valor de regressao
+      int esq = -1;
+      int dir = -1;
+    };
+    struct Arvore {
+      std::vector<NoArvore> nos;
+    };
+    std::vector<Arvore> arvores;
+    int arvores_n = 50;
+    int profundidade = 0;  // 0 = padrao por modelo
+    double taxa_gbm = 0.1;
+    double custo_svm = 1.0;
   };
 
   Interpreter(const ast::Program& program, DiagnosticEngine& diag, std::ostream& out);
@@ -88,6 +114,9 @@ class Interpreter {
   // esta no subconjunto compilavel; cai de volta para o interpretador de
   // arvore por pipeline quando nao esta. Saida identica a run().
   int run_vm();
+  // Hook de CallFunc da VM: `ler_csv` via runtime; o resto, funcoes de
+  // usuario (com escopo de modulo). *handled=false = nome desconhecido.
+  rt::Value vm_call_hook(const std::string& name, std::vector<rt::Value>& args, bool* handled);
 
   // Serves the first `servico` declaration. `max_requests <= 0` runs forever.
   // `threads` <= 0 picks a default (min(4, cores)); 1 runs route handling
@@ -192,26 +221,100 @@ class Interpreter {
 
   // Deep learning.
   struct Layer {
-    enum Kind { Dense, Activation, Softmax, Dropout, LayerNorm } kind = Dense;
+    enum Kind { Dense, Activation, Softmax, Dropout, LayerNorm, Conv2d, NormaLote, Flatten, MaxPool } kind = Dense;
     rt::Tensor w;
     rt::Tensor b;
     std::string act;
     // Adam moment estimates (allocated lazily during training).
     rt::Tensor m_w, v_w, m_b, v_b;
+    // Running statistics for NormaLote (populated during training, used in inference).
+    rt::Tensor media_running, var_running;
+    // Batch statistics from the most recent training forward (per BN layer).
+    rt::Tensor bn_media, bn_var;
+    // Conv2d: kernel shape [C_out, C_in, KH, KW]
+    std::int64_t passo = 1;
+    // MaxPool: janela JxJ (passo uses `passo`, default = janela).
+    std::int64_t janela = 0;
+    // Flatten: largura apos achatar (para exportacao ONNX).
+    std::int64_t plano = 0;
+    // NormaLote: nome identificador
+    std::string nome_norma_lote;
   };
   rt::Tensor value_to_tensor(const rt::Value& v, Span span);
   void set_device(const ast::Item& decl);  // reads `dispositivo:` -> gpu on/off
   rt::Tensor mm(const rt::Tensor& a, const rt::Tensor& b);
   rt::Tensor act_relu(const rt::Tensor& x);
-  std::vector<Layer> build_layers(const ast::Item& model_decl, std::int64_t in_dim);
+  std::vector<Layer> build_layers(const ast::Item& model_decl, std::int64_t in_dim,
+                                 std::uint64_t seed_inicial = 0xC1A5);
+  static bool camada_com_pesos(Layer::Kind kind);
   const std::vector<Layer>& build_model(const ast::Item& decl, std::int64_t in_dim, Span span);
   rt::Tensor forward_layers(const std::vector<Layer>& layers, rt::Tensor x);
   rt::Value model_forward(const ast::Item& decl, const rt::Value& input, Span span);
   rt::Value eval_modelo_call(const ast::Expr& call, Env& env);
   void run_treino(const ast::Item& decl);
+  // Treino reutilizavel (treino avulso + busca em grade).
+  struct TreinoCfg {
+    std::string perda = "entropia_cruzada";
+    std::string otim = "sgd";
+    double lr = 0.1;
+    int epocas = 50;
+    int lote = -1;  // -1 = lote cheio
+    std::uint64_t seed_init = 0xC1A5;
+    std::uint64_t seed_mistura = 7;
+    double f_val = 0.0;
+    int paciencia = 0;
+    double melhorar_min = 0.0;
+    std::string agenda_tipo = "constante";
+    int degrau_a_cada = 10;
+    double degrau_fator = 0.5;
+    std::string checkpoint;
+    std::string retomar;
+    int a_cada = 0;
+    bool verbose = false;
+    bool silencioso = false;
+    // Dataloader streaming: quando `fluxo_csv` nao vazio, `x` vem em blocos
+    // do arquivo em vez da RAM (`fluxo_n` linhas, `fluxo_f` atributos).
+    std::string fluxo_csv;
+    std::string fluxo_alvo;
+    std::vector<std::string> fluxo_atributos;
+    std::vector<std::int64_t> fluxo_desloc;  // CSV: byte offset de cada linha de dados
+    bool fluxo_parquet = false;
+    std::int64_t fluxo_n = 0;
+    std::int64_t fluxo_f = 0;
+    std::int64_t bloco = 1024;
+  };
+  struct TreinoRelato {
+    float primeira = 0.0F;
+    float ultima = 0.0F;
+    int acertos = 0;
+    int total = 0;
+    int melhor_epoca = 0;
+    int epocas_feitas = 0;
+    bool parou_cedo = false;
+    bool classificacao = true;
+    std::vector<Layer> camadas;
+  };
+  // Dados avaliados de um bloco treino/busca: tensor RAM ou descritor de
+  // fluxo CSV (neste caso `x` vazio, `yf` com os rotulos da varredura).
+  struct DadosTreino {
+    rt::Tensor x;
+    std::vector<double> yf;
+    std::int64_t n = 0;
+  };
+  // Le os campos de configuracao de um bloco treino/busca.
+  void ler_cfg_treino(const ast::Block& cfg, std::int64_t n, const std::string& ctx, Span span,
+                      TreinoCfg& out);
+  // Avalia 'dados:' (-> RAM ou fluxo CSV) e preenche cfg.fluxo_* quando for fluxo.
+  DadosTreino ler_dados_treino(const ast::Expr& expr_dados, const std::string& ctx, Span span,
+                               TreinoCfg& cfg);
+  // Nucleo do treino: ajusta, imprime (salvo silencioso) e devolve relato + camadas.
+  TreinoRelato treinar_nucleo(const ast::Item& modelo_decl, rt::Tensor x, std::vector<double> yf,
+                              const TreinoCfg& cfg, const std::string& ctx, Span span);
+  void run_busca(const ast::Item& decl);
 
  private:
   void run_experimento(const ast::Item& decl);
+  void run_avaliacao(const ast::Item& decl);
   rt::Value eval_experimento_call(const ast::Expr& call, Env& env);
   rt::Value experimento_prever(const std::string& nome, const rt::Value& entrada, Span span);
 
@@ -221,6 +324,9 @@ class Interpreter {
   std::vector<rt::LlmConfig> cadeia_llm(const std::string& name, Span span);
   rt::Value eval_perguntar(const ast::Expr& call, Env& env);
   rt::Value structured_from_tipo(const std::string& tipo_name, const std::string& raw, Span span);
+  // Valor padrao de campo de `tipo`: avalia `campo: Tipo = padrao` (com o
+  // escopo raiz) ou cai para o padrao do tipo declarado quando ausente/falha.
+  rt::Value field_default(const ast::Item& field);
   rt::Value eval_indice_method(const std::string& indice_name, const std::string& method,
                                const ast::Expr& call, Env& env);
 

@@ -1,0 +1,22 @@
+modelo M:
+  camadas:
+    - linear: [2, 4]
+    - ativacao: relu
+    - linear: [4, 2]
+    - softmax
+
+treino M:
+  dados: carregador "dados.parquet", alvo: "y", fluxo: verdadeiro
+  perda: entropia_cruzada
+  otimizador: adam
+  taxa: 0.05
+  epocas: 30
+  lote: 4
+  bloco: 4
+  semente: 7
+
+pipeline p:
+  passos:
+    - a = modelo M.executar tensor([0.0, 0.0])
+    - b = modelo M.executar tensor([5.0, 5.0])
+    - imprimir "a:", a.argmax, "b:", b.argmax

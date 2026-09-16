@@ -8,6 +8,9 @@ tests/golden/*/.actual.*
 *.tar.gz.sha256
 CPack*.cmake
 tests/golden/run-pesos-salva/saida.json
+tests/golden/run-onnx-exporta/modelo.onnx
+tests/golden/run-pesos-carregar-metodo/pesos.json
+tests/golden/run-avaliacao-amostra/run.json
 tests/golden/run-stdlib/dados.json
 tests/golden/run-parquet/saida.parquet
 tests/golden/run-parquet-nulos/saida_nulos.parquet
@@ -15,6 +18,7 @@ tests/golden/run-fonte-parquet/entrada.parquet
 tests/golden/run-delta/tabela_delta/
 tests/golden/run-delta-append/saida_delta/
 tests/golden/run-delta-particionado/vendas/
+vendas_delta/
 tests/golden/run-delta-particionado/por_ano/
 tests/golden/run-delta-particionado/avulsos/
 tests/golden/run-delta-particionado/erro_barra/
@@ -28,3 +32,7 @@ tests/golden/run-iceberg-particionado/erro_barra/
 tests/golden/run-iceberg-particionado/erro_nulo/
 tests/golden/run-delta-evolucao/tabela_evolutiva/
 tests/golden/run-iceberg-evolucao/tabela_evolutiva/
+tests/golden/run-modelo-cnn/pesos.json
+tests/golden/run-modelo-cnn/modelo.onnx
+tests/golden/run-treino-checkpoint/ckpt.json
+tests/golden/run-gguf-exporta/modelo.gguf

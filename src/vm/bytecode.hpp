@@ -24,6 +24,7 @@ enum class Op : std::uint8_t {
   Len,         // 1 arg -> inteiro
   MakeList,    // b: argc (pops argc values -> lista)
   Index,       // pop idx, pop lista -> elemento
+  GetField,    // a: names index (field), b: 1 if reached via '?.' (missing -> nulo)
   Return,      // pop -> function result
   ReturnNil,
 };

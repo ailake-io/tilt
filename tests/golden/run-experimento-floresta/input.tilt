@@ -1,0 +1,24 @@
+experimento prever_churn:
+  dados: [
+    { uso: 10, plano: "a", churn: 1 },
+    { uso: 9, plano: "b", churn: 1 },
+    { uso: 8, plano: "a", churn: 1 },
+    { uso: 7, plano: "b", churn: 1 },
+    { uso: 2, plano: "a", churn: 0 },
+    { uso: 1, plano: "b", churn: 0 },
+    { uso: 3, plano: "a", churn: 0 },
+    { uso: 0, plano: "b", churn: 0 }
+  ]
+  alvo: "churn"
+  atributos: [uso, plano]
+  pre_processar:
+    - um_de_n: [plano]
+    - padronizar: [uso]
+  modelo: floresta_aleatoria
+  metricas: [acuracia, f1]
+  semente: 7
+
+pipeline p:
+  passos:
+    - r = experimento prever_churn.prever { uso: 9, plano: "a" }
+    - imprimir r.classe, r.probabilidade

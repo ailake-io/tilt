@@ -1,0 +1,22 @@
+experimento multi:
+  dados: [
+    { x: 0, y: "a" },
+    { x: 1, y: "a" },
+    { x: 5, y: "b" },
+    { x: 6, y: "b" },
+    { x: 10, y: "c" },
+    { x: 11, y: "c" },
+    { x: 2, y: "a" },
+    { x: 7, y: "b" },
+    { x: 12, y: "c" }
+  ]
+  alvo: "y"
+  atributos: [x]
+  modelo: regressao_logistica
+  metricas: [acuracia]
+  semente: 7
+
+pipeline p:
+  passos:
+    - r = experimento multi.prever { x: 6 }
+    - imprimir r.classe, r.probabilidade

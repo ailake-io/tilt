@@ -1,0 +1,14 @@
+funcao soma a b:
+  retornar a + b
+
+funcao saudar nome[]:
+  retornar nome
+
+pipeline p:
+  passos:
+    - x = soma(1)
+    - y = soma(1, 2, 3)
+    - z = soma(1, 2)
+    - w = saudar()
+    - v = saudar("a", "b")
+    - imprimir x, y, z

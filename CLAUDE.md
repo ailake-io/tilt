@@ -11,7 +11,7 @@ A **Tilt** existe para que uma pessoa consiga descrever um pipeline de dados, tr
 Pilares:
 
 1. **Fácil primeiro.** Indentação de 2 espaços, pares `chave: valor`, listas com `-`. Sem `{ }`, sem `;`, sem `()` ruidosos. Tipos são opcionais — o compilador infere. Uma forma óbvia de fazer cada coisa.
-2. **Quatro domínios nativos.** `pipeline`, `modelo`, `treino`, `experimento`, `llm`, `indice`, `ferramenta`, `agente` e `equipe` são palavras-chave da linguagem, não bibliotecas.
+2. **Quatro domínios nativos.** `pipeline`, `modelo`, `treino`, `experimento`, `avaliacao`, `llm`, `indice`, `ferramenta`, `agente` e `equipe` são palavras-chave da linguagem, não bibliotecas.
 3. **Runtime C++ enxuto.** Sem GC tradicional. APIs rodam em *Request Arenas* de liberação instantânea. Tensores residem em memória contígua alinhada (*pinned* / *unified memory*).
 4. **Aceleração nativa.** Tipos de tensor n-dimensional, operadores matriciais vetorizados (SIMD/AVX) e despacho direto de kernel GPU (CUDA / ROCm / Metal) via runtime C++, com *fallback* automático em CPU.
 5. **Padrões seguros.** Segredos vêm de `env`. Erros de indentação, tipo e dimensão de tensor são detectados em tempo de compilação com mensagens que ensinam.
@@ -247,9 +247,11 @@ experimento prever_churn:
   semente: 7
 ```
 
-Modelos nativos: `regressao_linear`, `regressao_logistica`, `knn`, `kmeans`
-(`floresta_aleatoria`, `gradiente_impulsionado` e `svm` parseiam, mas falham
-com erro claro de "ainda não implementado" — ver guia 04).
+Modelos nativos: `regressao_linear`, `regressao_logistica` (binária e
+multinomial), `knn`, `kmeans`, `floresta_aleatoria`,
+`gradiente_impulsionado` e `svm` (ver guia 04; `imputar:`,
+`validacao_cruzada:` e hiperparâmetros `arvores:`/`profundidade:`/
+`taxa:`/`custo:` suportados).
 
 ### 6.2 Uso do modelo treinado
 ```tilt run
@@ -328,10 +330,14 @@ treino Mini:
   epocas: 3
 ```
 
-O `treino` real hoje: `dados:` inline `{ x: tensor 2D, y: lista }`,
+O `treino` real hoje: `dados:` inline `{ x: tensor 2D|4D, y: lista }`,
+`carregador` (RAM) ou `carregador ..., fluxo: verdadeiro` (CSV em blocos),
 `perda: entropia_cruzada | quadratica`, `otimizador: sgd | adam`,
-`taxa:`/`epocas:`. Carregadores com lote, validação, agendador, AMP,
-`parar_cedo` e `ao_epoca` são roteiro (ver guia 04 e guia 12).
+`taxa:`/`epocas:`/`lote:`/`semente:`, `agendador:` (cosseno|degrau),
+`validacao:` + `parar_cedo:`, `checkpoint:`/`a_cada:`/`retomar:`, com
+backward de `densa`, `conv2d`, `norma_lote`, `agrupamento_max` e `achatar`;
+`busca` faz grade de hiperparâmetros (`criterio: perda|acuracia`). AMP,
+`ao_epoca` e quantização GGUF são roteiro (ver guia 04 e guia 12).
 
 ### 7.3 Tensores explícitos (controle fino)
 ```tilt check
@@ -360,10 +366,14 @@ pipeline pesos:
   passos:
     # Salva no formato tilt-pesos (JSON); 'pesos:' do modelo carrega de volta.
     - modelo Mini.salvar_pesos "mini.pesos"
+    - modelo Mini.carregar_pesos "mini.pesos"
+    - modelo Mini.exportar_onnx "mini.onnx"
     - imprimir "ok"
 ```
 
-Exportação `onnx`/`gguf` ainda não existe (roteiro) — ver guia 04 e guia 12.
+Exportação ONNX via `modelo <Nome>.exportar_onnx "modelo.onnx"` (opset 20,
+sem dependências) e GGUF v3 via `modelo <Nome>.exportar_gguf "modelo.gguf"`
+(só escrita, F32) — ver guia 04 e guia 12.
 
 ---
 
@@ -730,8 +740,9 @@ tilt/
 
 ### Fase 2 — Parser dos blocos declarativos
 - [ ] `ProgramNode` com declarações de alto nível.
-- [ ] `tipo` → registro estruturado (uniões literais `"a" | "b"`; valores
-  padrão `campo: <tipo> = <valor>` ainda não parseiam).
+- [x] `tipo` → registro estruturado (uniões literais `"a" | "b"`; valores
+  padrão `campo: <tipo> = <valor>` parseiam, validados em `T011` e aplicados
+  em `formato:`/`entrada:`).
 - [ ] `fonte`, `pipeline`, `modelo`, `treino`, `experimento`, `llm`, `indice`, `fluxo`, `ferramenta`, `agente`, `equipe`, `servico` → nós dedicados com metadados de execução.
 - [ ] `passos:` → lista de instruções sequenciais; encadeamento `.metodo` e chamadas sem parênteses (`ler clientes`, `perguntar gpt, usuario: x`).
 - [ ] Controle de fluxo: `se/senao`, `para cada`, `enquanto`, `tentar/capturar`, `retornar`, `funcao`.
@@ -828,8 +839,8 @@ cmake --build . --parallel
 | Fluxo | `se` `senao` `para cada` `em` `enquanto` `tentar` `capturar` |
 | Dados | `fonte` `pipeline` `verificar` `ler` `escrever` `filtrar` `derivar` `agrupar_por` `agenda` `janela` |
 | ML | `experimento` `modelo` `treino` `atributos` `alvo` `dividir` `metricas` `prever` |
-| DL | `camadas` `densa` `conv2d` `abandono` `ativacao` `perda` `otimizador` `epocas` `dispositivo` `tensor` `no dispositivo` `retropropagar` |
-| LLM | `llm` `perguntar` `perguntar_em_fluxo` `sistema` `usuario` `formato` `incorporar` |
+| DL | `camadas` `densa` `conv2d` `agrupamento_max` `achatar` `abandono` `ativacao` `perda` `otimizador` `epocas` `lote` `semente` `agendador` `validacao` `parar_cedo` `checkpoint` `retomar` `busca` `grade` `criterio` `dispositivo` `tensor` `no dispositivo` `retropropagar` |
+| LLM | `llm` `perguntar` `perguntar_em_fluxo` `sistema` `usuario` `formato` `incorporar` `avaliacao` `caso` `limiar` |
 | RAG | `indice` `embeddings` `armazenamento` `buscar` `inserir` `dividir_texto` |
 | Agentes | `ferramenta` `descricao` `executar` `agente` `papel` `ferramentas` `memoria` `max_passos` `equipe` `estrategia` `supervisor` |
 | Serviços | `servico` `porta` `rota` `entrada` `passos` `responder` `responder_em_fluxo` `meio` |

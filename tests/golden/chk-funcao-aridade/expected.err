@@ -1,0 +1,25 @@
+erro[T011]: 'soma' espera 2 argumento(s), encontrou 1
+  --> input.tilt:9:11
+   |
+ 9 |     - x = soma(1)
+   |           ^^^^
+   |
+   = assinatura: funcao soma (2 parametro(s))
+
+erro[T011]: 'soma' espera 2 argumento(s), encontrou 3
+  --> input.tilt:10:11
+    |
+ 10 |     - y = soma(1, 2, 3)
+    |           ^^^^
+    |
+   = assinatura: funcao soma (2 parametro(s))
+
+erro[T011]: 'saudar' espera entre 0 e 1 argumentos, encontrou 2
+  --> input.tilt:13:11
+    |
+ 13 |     - v = saudar("a", "b")
+    |           ^^^^^^
+    |
+   = assinatura: funcao saudar (1 parametro(s), 1 opcional(is) '[]')
+
+3 erro(s) em input.tilt

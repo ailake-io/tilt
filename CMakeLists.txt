@@ -47,6 +47,8 @@ add_library(tilt_core STATIC
   src/runtime/value.cpp
   src/runtime/json.cpp
   src/runtime/tensor.cpp
+  src/runtime/onnx.cpp
+  src/runtime/gguf.cpp
   src/runtime/llm.cpp
   src/runtime/vectorstore.cpp
   src/runtime/http_server.cpp
@@ -66,6 +68,7 @@ add_library(tilt_core STATIC
   src/runtime/s3.cpp
   src/runtime/sha256.cpp
   src/runtime/sqlite.cpp
+  src/runtime/sql_pool.cpp
   src/runtime/postgres.cpp
   src/runtime/duckdb.cpp
   src/runtime/mysql.cpp

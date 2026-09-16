@@ -50,10 +50,16 @@ servico Ops:
 
 - `rota <metodo> "/caminho":` — casa método (`get`/`post`/...) e caminho exatos.
 - O corpo JSON da requisição vira a variável `entrada` no escopo dos `passos:`.
-- Se a rota declara `entrada: <Tipo>`, campos ausentes → `400 { "erro": "campo 'x' ausente" }`.
+- Se a rota declara `entrada: <Tipo>`, campos ausentes → `400 { "erro": "campo 'x' ausente" }`
+  (com valor padrão `campo: <Tipo> = <valor>` o campo é preenchido em vez de rejeitar),
+  e valor presente com tipo escalar divergente → `400 { "erro": "campo 'x' deve ser <tipo>" }`
+  (`inteiro` alarga para `decimal`; demais tipos passam sem verificação).
 - `- responder: status:, dados:` monta a resposta. `dados:` pode ser um bloco
   (vira mapa) ou um valor. Sem `status:`, é `200`.
 - Rota não encontrada → `404`. Exceção no handler → `500 { "erro": "..." }`.
+- Desligamento gracioso: `SIGINT`/`SIGTERM` param de aceitar conexões novas,
+  drenam as respostas em voo e encerram (sem `--requisicoes` o servidor só
+  sai assim).
 - `meio:` (middleware): blocos de passos que rodam antes de cada rota
   casada, no mesmo escopo dela — variáveis atribuídas no `meio:` são
   visíveis nos `passos:` da rota, e um `responder:` no `meio:` aborta a

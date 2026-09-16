@@ -1,0 +1,17 @@
+erro[T011]: valor padrao de 'nome' e 'inteiro', mas o campo e 'texto'
+  --> input.tilt:2:17
+   |
+ 2 |   nome: texto = 42
+   |                 ^^
+   |
+   = ajuste o padrao para o tipo declarado ou o tipo para o padrao
+
+erro[T011]: valor padrao de 'qtd' e 'texto', mas o campo e 'inteiro'
+  --> input.tilt:3:18
+   |
+ 3 |   qtd: inteiro = "muito"
+   |                  ^^^^^^^
+   |
+   = ajuste o padrao para o tipo declarado ou o tipo para o padrao
+
+2 erro(s) em input.tilt

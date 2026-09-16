@@ -29,6 +29,19 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ops_servico.tilt)
 
 add_test(
+  NAME servico_entrada
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/servico_entrada_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico_entrada.tilt)
+
+add_test(
+  NAME servico_shutdown
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/servico_shutdown_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ops_servico.tilt
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico_lento.tilt)
+
+add_test(
   NAME http
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/http_test.sh
           $<TARGET_FILE:tilt>
@@ -89,6 +102,10 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sqlite_test.sh
           $<TARGET_FILE:tilt>
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sqlite_params.tilt)
+
+add_test(
+  NAME sql_pool
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sql_pool_test.sh)
 
 add_test(
   NAME parquet

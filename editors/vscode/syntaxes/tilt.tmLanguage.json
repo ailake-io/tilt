@@ -51,7 +51,7 @@
       "match": "\\b[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?\\b"
     },
     "decl": {
-      "match": "\\b(tipo|funcao|seja|constante|importar|de|fonte|pipeline|verificar|modelo|treino|tarefa|experimento|llm|indice|fluxo|ferramenta|agente|equipe|servico|rota)\\b",
+      "match": "\\b(tipo|funcao|seja|constante|importar|de|fonte|pipeline|verificar|modelo|treino|busca|tarefa|experimento|avaliacao|llm|indice|fluxo|ferramenta|agente|equipe|servico|rota)\\b",
       "name": "keyword.declaration.tilt"
     },
     "control": {

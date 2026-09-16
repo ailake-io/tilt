@@ -1,0 +1,6 @@
+pipeline p:
+  passos:
+    - tabela = ler_csv "pessoas.csv"
+    - imprimir tamanho tabela
+    - para cada linha em tabela:
+        imprimir linha.nome, linha.idade

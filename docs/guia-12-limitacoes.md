@@ -218,8 +218,15 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   é somente leitura (consultas SELECT); gravação via `executar_sql`
   (INSERT/UPDATE/DELETE/DDL, um comando por chamada, com `?` posicionais via
   lista `params` opcional), leitura parametrizada via `consultar_sql`
-  (mesma ligação, devolve tabela) e `transacao` (BEGIN/COMMIT numa única conexão,
+  (mesma ligação, devolve tabela) e   `transacao` (BEGIN/COMMIT numa única conexão dedicada — fora do pool,
   ROLLBACK com o índice do passo; ClickHouse sem transações — erro claro);
+  postgres/mysql/duckdb têm pool por (backend, url) nos statements avulsos
+  (`executar_sql`/`consultar_sql`: até 8 ociosas por chave, validadas com
+  PQstatus/mysql_ping no checkout; `TILT_SQL_POOL=0` desliga,
+  `TILT_SQL_POOL_MAX` ajusta o teto, `TILT_SQL_POOL_DEBUG=1` loga
+  hit/miss/stale/discard; BEGIN/START/SET no início do SQL não volta ao
+  pool). sqlite (open barato) e clickhouse (HTTP) seguem uma conexão por
+  chamada, sem pool;
   Postgres carrega `libpq.so.5`, SQLite
   `libsqlite3.so.0`, DuckDB `libduckdb.so` e MySQL/MariaDB `libmariadb.so.3`
   ou `libmysqlclient.so*` via `dlopen` — precisam estar instalados no sistema.
@@ -298,26 +305,42 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## ML / DL
 
 - `experimento` é de 1ª passada (guia 04): `regressao_linear` (equações
-  normais + crista), `regressao_logistica` binária (GD em lote),
-  `knn` (classificação e regressão) e `kmeans` (Lloyd, sem `alvo:`).
-  `floresta_aleatoria`, `gradiente_impulsionado` e `svm` parseiam mas
-  falham com erro claro de não implementado. Limites: sem imputação de
-  nulos (falha), sem validação cruzada nem busca de hiperparâmetros,
-  `pre_processar` só `um_de_n`/`padronizar` (sintaxe `- chave: [cols]`;
-  o `->` do esboço original não parseia), sem multiclasse na logística
-  (use knn), `f1` ponderado pelo suporte, `registrar_em: mlflow://`
-  grava JSON local (sem POST REST), sem `exportar: onnx`.
+  normais + crista), `regressao_logistica` binária e multinomial (GD em
+  lote), `knn` (classificação e regressão), `kmeans` (Lloyd, sem `alvo:`),
+  `floresta_aleatoria`, `gradiente_impulsionado` e `svm`. Limites: sem
+  busca de hiperparâmetros, `pre_processar` só `um_de_n`/`padronizar`/
+  `imputar` (sintaxe `- chave: [cols]`; o `->` do esboço original não
+  parseia), `f1` ponderado pelo suporte, `registrar_em: mlflow://`
+  grava JSON local (sem POST REST).
 - `pesos: "arquivo"` carrega no formato tilt-pesos (ver guia 04); arquivo
-  ausente mantém o init Xavier com `[nota]`.
+  ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
+  tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20
+  (Gemm + ativações + Softmax + LayerNormalization + Conv +
+  BatchNormalization + MaxPool + Flatten).
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
-  forward) e `norma_camada` (sem affine).
-- `conv2d`/`norma_lote` existem como **operações de tensor** (guia 04):
-  `conv2d` com padding válido e `passo:` (stride) 1+; `norma_lote` com
-  `eps:`/`em_treino:`. Limites: sem pooling, sem dilation nem padding
-  explícito; não são camadas de `modelo`/`treino` (erro claro no `modelo`),
-  sem integração com o carregador de pesos tilt-pesos e sem backward.
+  forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
+  `agrupamento_max` e `achatar` (CNN de brinquedo em CPU, lote cheio).
+- `conv2d`/`norma_lote` existem como **operações de tensor** (guia 04) e
+  como camadas de `modelo`/`treino` (`conv2d: [C_saida, C_entrada, KH, KW]`
+  com 5º elemento opcional de passo, `norma_lote`, `agrupamento_max:
+  [janela]`/`[janela, passo]`, `achatar`; CNN exige `entrada: tensor[...]`
+  completa): `conv2d` com padding válido e passo 1+ (com viés); `norma_lote`
+  com `eps:`/`em_treino:` nas ops e gama/beta +   média/variância correntes nas
+  camadas. `treino` roda em lote cheio por default, com `lote:` (mini-lotes
+  embaralhados por época), `semente:` (init + embaralhamento reproduzíveis),
+  `checkpoint:`/`a_cada:` (JSON tilt-checkpoint com pesos, momentos do Adam
+  e época) e `retomar:` (continuação bit-idêntica), `agendador:`
+  (`{ tipo: cosseno }` ou `{ tipo: degrau, a_cada:, fator: }`),
+  `validacao:` (fração) + `parar_cedo:` (`N` ou
+  `{ paciencia:, melhorar_min: }`, restaura os melhores pesos) e `busca`
+  em grade (`modelo:`, `grade:`, `criterio: perda|acuracia`, máx. 64
+  combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro`
+  treina CSV grande   em blocos (`bloco:`, default 1024) sem materializar —
+  bit-idêntico ao RAM. `exportar_gguf` grava GGUF v3 (só escrita).
+  Limites: fluxo só CSV e só modelo 2D; sem dilation nem padding
+  explícito; sem AMP; sem dataloader de Parquet.
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.
 
@@ -346,6 +369,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   score é `1 - distance` da query do Chroma).
 - Os embeddings do modo `mock` são um bag-of-tokens hasheado (16 dimensões) —
   bons para testes determinísticos, não para relevância real.
+- `avaliacao` é de 1ª passada (guia 05): `dados:` inline/bloco/caminho,
+  `executar:` por caso com `caso` + `retornar`, métricas `exata`/`contem`/
+  `regex`/`tolerancia`/`juiz` (todas precisam passar por caso), gate no
+  `limiar:`, `amostra:` + `semente:` determinísticos e `registrar_em:`
+  (JSON local). Limites: juiz sem cadeia estruturada nem voto multi-juiz,
+  amostra só por contagem, `registrar_em` sem POST REST.
 
 ## Agentes
 
@@ -374,15 +403,18 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## VM / nativo
 
 - A VM cobre `funcao` pura e `pipeline`s no subconjunto (literais incl.
-  listas, `para cada`, índice, `contem`); o resto roda no interpretador de
+  listas, `para cada`, índice, `contem`, interpolação `{{nome}}` sobre locais,
+  acesso a campo — mapa/tabela, `.tamanho`, props de tensor, `?.` — e
+  `ler_csv` de 1 argumento); o resto roda no interpretador de
   árvore (`tilt executar --vm` cai por pipeline, transparente).
 - `e` / `ou` na VM fazem curto-circuito (desde a Fase 8), com resultado
   sempre `logico`.
 - `tilt compilar` cobre o **programa inteiro** dentro do subconjunto da VM:
   `funcao principal` ou pipelines, com texto/decimal/lista e saída idêntica
   ao interpretador (runtime C espelhando `value.cpp`; teste `native`
-  diferencial). Fora do subconjunto (builtins como `ler_csv`, interpolação,
-  membros, `agenda:`/`ao_falhar:`) rejeita com mensagem clara.
+  diferencial). Fora do subconjunto (`ler_csv`, membros/GetField,
+  `agenda:`/`ao_falhar:`) rejeita com mensagem clara — o validador do
+  codegen é fail-closed (allow-list de ops + nomes de CallFunc).
 - Backends de codegen nativo: **x86-64** e **ARM64 (AArch64)**, o mesmo
   subconjunto nos dois (`--arch x86_64|arm64`, `auto` = host). O backend
   ARM64 emite ELF/AAPCS (validado por geração + montagem cross no teste

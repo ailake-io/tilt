@@ -68,6 +68,33 @@ struct Emitter {
         return false;
       }
     }
+    // Fail-closed: op novo sem emissor nao pode passar em silencio (o switch
+    // de emissao nao tem default). GetField ainda nao tem emissor.
+    for (const auto& in : c.code) {
+      switch (in.op) {
+        case Op::Const:
+        case Op::LoadLocal:
+        case Op::StoreLocal:
+        case Op::Pop:
+        case Op::Neg:
+        case Op::Not:
+        case Op::Truthy:
+        case Op::Binop:
+        case Op::Jump:
+        case Op::JumpIfFalse:
+        case Op::CallFunc:
+        case Op::Print:
+        case Op::Len:
+        case Op::MakeList:
+        case Op::Index:
+        case Op::Return:
+        case Op::ReturnNil:
+          break;
+        default:
+          *err = "instrucao fora do subconjunto nativo (GetField/membros ainda sem emissor)";
+          return false;
+      }
+    }
     return true;
   }
 
@@ -251,6 +278,8 @@ struct Emitter {
                 "  mov x2, sp\n  bl tv_index\n  add sp, sp, #"
              << kSlot << "\n";
           break;
+        case Op::GetField:
+          break;  // inalcançavel: chunk_supported rejeita antes de emitir
         case Op::Return:
           copy_slot(os, "x19", 0, "sp", 0);
           os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp], #16\n  ret\n";
@@ -305,6 +334,14 @@ Result emit_program(const ast::Program& program) {
       u.chunk = is_pipeline ? vm::compile_pipeline(decl, names) : vm::compile_function(decl, names);
     } catch (const vm::NotCompilable& nc) {
       return std::string(nc.reason);
+    }
+    // CallFunc nativo so resolve funcoes compiladas (tilt_fn_*); nomes como
+    // 'ler_csv' (IO via hook da VM) nao tem simbolo — rejeita com mensagem.
+    // (So CallFunc: GetField tambem usa `names`, para campos, nao funcoes.)
+    for (const auto& in : u.chunk.code) {
+      if (in.op != vm::Op::CallFunc) continue;
+      const auto& n = u.chunk.names[static_cast<std::size_t>(in.a)];
+      if (!names.count(n)) return "chamada a '" + n + "' fora do subconjunto nativo";
     }
     units.push_back(std::move(u));
     return "";

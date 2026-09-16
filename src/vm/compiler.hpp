@@ -15,7 +15,9 @@ struct NotCompilable {
 // Compiles a `funcao` declaration to bytecode. Throws NotCompilable when the
 // body uses anything outside the supported pure subset (literals incl. listas
 // e indice, locals, arithmetic/comparison/logic, se/enquanto/para
-// cada/retornar, calls to `funcao`s in `known_funcs`, and imprimir/tamanho).
+// cada/retornar, calls to `funcao`s in `known_funcs`, imprimir/tamanho,
+// ler_csv (1 arg), member access (mapa/tabela, `.tamanho`, tensor props,
+// `?.`) and text interpolation over locals).
 Chunk compile_function(const ast::Item& fn, const std::unordered_set<std::string>& known_funcs);
 
 // Compiles the `passos:` block of a `pipeline` declaration to bytecode.

@@ -8,16 +8,19 @@ cache por função. É transparente — não há flag.
 
 Subconjunto suportado:
 
-- literais `inteiro`, `decimal`, `texto` (sem `{{ }}`), `logico`, `nulo` e
+- literais `inteiro`, `decimal`, `texto` (com `{{nome}}` interpolado sobre
+  locais; `{{desconhecido}}` cai no interpretador), `logico`, `nulo` e
   **listas** (`[...]`);
 - variáveis locais e parâmetros;
 - `+ - * / %`, comparações, `contem`, `e` / `ou` / `nao`;
-- **índice** `lista[i]`;
+- **índice** `lista[i]` e **campo** `mapa.campo` (incl. `.tamanho`, props de
+  tensor como `.forma`/`.media`, e `?.`);
 - `se` / `senao se` / `senao`, `enquanto`, **`para cada`**, `retornar`;
-- chamadas a outras `funcao`s (recursão inclusive) e a `imprimir` / `tamanho`.
+- chamadas a outras `funcao`s (recursão inclusive) e a `imprimir` / `tamanho`
+  / `ler_csv` (1 argumento, vira tabela como no interpretador).
 
-Fora disso (`tentar`, membros, tensores, LLM, agente, tabelas, interpolação,
-…) a função cai no interpretador de árvore.
+Fora disso (`tentar`, tensores construídos, LLM, agente, interpolação com
+nome não-local, …) a função cai no interpretador de árvore.
 
 `e` / `ou` compilam com curto-circuito (Fase 8): o lado direito só é
 avaliado quando o esquerdo não decide, e o resultado é sempre `logico` —
@@ -68,10 +71,12 @@ host x86-64) exige toolchain no PATH: `aarch64-linux-gnu-gcc` /
 `x86_64-linux-gnu-gcc` ou o override por env `CC_AARCH64` / `CC_X86_64` —
 sem isso, erro claro antes de chamar o compilador.
 
-Rejeita, com mensagem clara: passo fora do subconjunto (chamadas builtin como
-`ler_csv`, interpolação, membros), constante/operador fora do subconjunto,
-pipeline com `agenda:` / `ao_falhar:`, programas sem pipeline nem
-`funcao principal` e arquitetura desconhecida em `--arch`.
+Rejeita, com mensagem clara: passo fora do subconjunto (chamadas builtin sem
+suporte como `escrever_csv`, interpolação com nome não-local, literais de
+mapa), constante/operador/instrução fora do subconjunto nativo (o validador
+é fail-closed: `GetField`/membros e `ler_csv` não têm emissor), chamada a
+nome sem símbolo compilado, pipeline com `agenda:` / `ao_falhar:`, programas
+sem pipeline nem `funcao principal` e arquitetura desconhecida em `--arch`.
 
 ### Semântica idêntica ao interpretador
 

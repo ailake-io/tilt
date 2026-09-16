@@ -55,12 +55,22 @@
     "detail": "declaracao de topo"
   },
   {
+    "label": "busca",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
     "label": "tarefa",
     "kind": "keyword",
     "detail": "declaracao de topo"
   },
   {
     "label": "experimento",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
+  },
+  {
+    "label": "avaliacao",
     "kind": "keyword",
     "detail": "declaracao de topo"
   },

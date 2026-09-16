@@ -18,9 +18,9 @@ bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
 }
 
 bool is_decl_keyword(std::string_view w) {
-  return word_in(w, {"tipo", "fonte", "pipeline", "verificar", "modelo", "treino", "tarefa",
-                     "experimento", "llm", "indice", "fluxo", "ferramenta", "agente", "equipe",
-                     "servico"});
+  return word_in(w, {"tipo", "fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa",
+                     "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente",
+                     "equipe", "servico"});
 }
 
 bool is_stmt_keyword(std::string_view w) {
@@ -363,6 +363,11 @@ ItemPtr Parser::parse_field() {
     it->block = std::make_unique<Block>(parse_body());
   } else {
     it->value = parse_expr();
+    // Valor padrao de campo de `tipo`: `nome: texto = "anon"`. Era erro
+    // T014; agora parseia e o checker valida (T011) e o runtime aplica.
+    if (accept(TokenKind::Equal)) {
+      it->default_value = parse_expr();
+    }
     if (!attach_trailing_block(it->value.get())) {
       accept(TokenKind::Newline);
       // `chave: tag` followed by a deeper block is a tagged config section
@@ -625,6 +630,7 @@ ExprPtr Parser::parse_postfix() {
       advance();
       auto call = make_expr(ExprKind::Call, e->span);
       call->lhs = std::move(e);
+      call->paren_call = true;
       skip_newlines();
       while (!at(TokenKind::RParen) && !at(TokenKind::EndOfFile)) {
         Arg a;

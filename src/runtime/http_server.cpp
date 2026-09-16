@@ -4,6 +4,7 @@
 
 #include <cctype>
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -38,6 +39,31 @@ constexpr int kMaxConns = 256;
 constexpr int kIdleTimeoutSec = 30;
 constexpr int kMaxEvents = 64;
 #endif
+
+// Desligamento gracioso via SIGINT/SIGTERM: o handler so levanta a flag
+// (seguro para signal); os loops de accept a consultam junto da cota e
+// caem no begin_shutdown existente — param de aceitar, drenam respostas
+// pendentes e fecham. Instalado em run(), restaurado ao sair.
+volatile std::sig_atomic_t g_shutdown_requested = 0;
+
+void on_shutdown_signal(int) { g_shutdown_requested = 1; }
+
+inline bool shutdown_requested() { return g_shutdown_requested != 0; }
+
+struct SignalGuard {
+  using Handler = void (*)(int);
+  Handler old_int = SIG_DFL;
+  Handler old_term = SIG_DFL;
+  SignalGuard() {
+    g_shutdown_requested = 0;
+    old_int = std::signal(SIGINT, on_shutdown_signal);
+    old_term = std::signal(SIGTERM, on_shutdown_signal);
+  }
+  ~SignalGuard() {
+    std::signal(SIGINT, old_int);
+    std::signal(SIGTERM, old_term);
+  }
+};
 
 const char* status_text(int code) {
   switch (code) {
@@ -342,7 +368,7 @@ int run_epoll(int listen_fd, const std::function<HttpResponse(const HttpRequest&
         }
       }
       for (int fd : stale) close_conn(fd);
-      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
       continue;
     }
 
@@ -370,7 +396,7 @@ int run_epoll(int listen_fd, const std::function<HttpResponse(const HttpRequest&
           c->last_active = now_sec();
           conns.emplace(client, std::move(c));
         }
-        if (max_requests > 0 && served >= max_requests) begin_shutdown();
+        if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
         continue;
       }
 
@@ -387,7 +413,7 @@ int run_epoll(int listen_fd, const std::function<HttpResponse(const HttpRequest&
       it = conns.find(fd);
       if (it == conns.end()) continue;
       if (events[i].events & EPOLLIN && !it->second->peer_eof) service_conn(*it->second, ep);
-      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
     }
   }
 
@@ -622,7 +648,7 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
         }
       }
       for (int fd : stale) close_conn(fd);
-      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
       continue;
     }
 
@@ -647,7 +673,7 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
           drain_pending(c);
           queue_out(c);
         }
-        if (max_requests > 0 && served >= max_requests) begin_shutdown();
+        if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
         continue;
       }
 
@@ -673,7 +699,7 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
           c->last_active = now_sec();
           conns.emplace(client, std::move(c));
         }
-        if (max_requests > 0 && served >= max_requests) begin_shutdown();
+        if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
         continue;
       }
 
@@ -690,7 +716,7 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
       it = conns.find(fd);
       if (it == conns.end()) continue;
       if (events[i].events & EPOLLIN && !it->second->peer_eof) service_conn(*it->second);
-      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
     }
   }
 
@@ -859,7 +885,7 @@ int run_event_loop(int listen_fd, const std::function<HttpResponse(const HttpReq
         }
       }
       for (int fd : stale) close_conn(fd);
-      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
       continue;
     }
 
@@ -878,7 +904,7 @@ int run_event_loop(int listen_fd, const std::function<HttpResponse(const HttpReq
         c->last_active = win_now_sec();
         conns.emplace(client, std::move(c));
       }
-      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
     }
 
     // Snapshot dos prontos: service_conn/drain_out fecham conexoes e
@@ -899,7 +925,7 @@ int run_event_loop(int listen_fd, const std::function<HttpResponse(const HttpReq
       it = conns.find(fd);
       if (it == conns.end()) continue;
       drain_out(*it->second);
-      if (max_requests > 0 && served >= max_requests) begin_shutdown();
+      if (shutdown_requested() || (max_requests > 0 && served >= max_requests)) begin_shutdown();
     }
   }
 
@@ -1002,6 +1028,7 @@ std::string HttpServer::listen_on(const std::string& host, int port) {
 
 int HttpServer::run(const std::function<HttpResponse(const HttpRequest&)>& handler, int max_requests,
                     int threads) {
+  SignalGuard sinais;  // SIGINT/SIGTERM -> drena e encerra (graceful shutdown)
 #if defined(__linux__)
   if (threads > 1) return run_epoll_parallel(fd_, handler, max_requests, threads, last_error_);
   return run_epoll(fd_, handler, max_requests, last_error_);

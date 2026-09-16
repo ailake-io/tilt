@@ -1,0 +1,13 @@
+tipo Pedido:
+  nome: texto = "anon"
+  qtd: inteiro
+
+servico Loja:
+  porta: 8487
+  rota post "/pedidos":
+    entrada: Pedido
+    passos:
+      - responder:
+          dados:
+            nome: entrada.nome
+            qtd: entrada.qtd

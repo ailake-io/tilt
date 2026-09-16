@@ -1,0 +1,22 @@
+modelo CNN:
+  entrada: tensor[f32, 1, 4, 4]
+  camadas:
+    - conv2d: [2, 1, 2, 2]
+    - ativacao: relu
+    - norma_lote
+    - agrupamento_max: [2]
+    - achatar
+    - linear: [2, 2]
+    - softmax
+
+pipeline p:
+  passos:
+    - x = uns [1, 1, 4, 4]
+    - y = modelo CNN.executar x
+    - imprimir y.forma, y.argmax
+    - modelo CNN.salvar_pesos "pesos.json"
+    - modelo CNN.carregar_pesos "pesos.json"
+    - z = modelo CNN.executar x
+    - imprimir z.forma, z.argmax
+    - modelo CNN.exportar_onnx "modelo.onnx"
+    - imprimir "onnx ok"

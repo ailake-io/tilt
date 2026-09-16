@@ -31,6 +31,18 @@ class SourceFile {
   // 1-based line contents, without the trailing newline. Empty view if out of range.
   std::string_view line_text(uint32_t line) const;
 
+  // Byte offset of 1-based (line, column), clamped into the file.
+  uint32_t offset_of(uint32_t line, uint32_t column) const {
+    if (line_starts_.empty()) return 0;
+    const uint32_t ln = line < 1 ? 1 : (line > line_starts_.size() ? line_starts_.size() : line);
+    const uint32_t start = line_starts_[ln - 1];
+    const uint32_t end =
+        (ln < line_starts_.size()) ? line_starts_[ln] : static_cast<uint32_t>(contents_.size());
+    const uint32_t col = column < 1 ? 1 : column;
+    const uint32_t off = start + col - 1;
+    return off > end ? end : off;
+  }
+
  private:
   std::string path_;
   std::string contents_;

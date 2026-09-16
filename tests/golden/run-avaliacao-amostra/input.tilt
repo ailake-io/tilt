@@ -1,0 +1,13 @@
+avaliacao amostra:
+  dados:
+    - { v: 1, esperado: 1 }
+    - { v: 2, esperado: 2 }
+    - { v: 3, esperado: 3 }
+    - { v: 4, esperado: 4 }
+    - { v: 5, esperado: 5 }
+  executar:
+    - retornar caso.v
+  amostra: 2
+  semente: 7
+  registrar_em: "run.json"
+  verboso: verdadeiro

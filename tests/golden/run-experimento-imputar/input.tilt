@@ -1,0 +1,20 @@
+experimento imp:
+  dados: [
+    { x: 1, g: "a", y: 0 },
+    { x: 2, g: "a", y: 0 },
+    { x: 3, g: nulo, y: 0 },
+    { x: nulo, g: "b", y: 1 },
+    { x: 8, g: "b", y: 1 },
+    { x: 9, g: "b", y: 1 },
+    { x: 10, g: "a", y: 1 },
+    { x: 11, g: "b", y: 1 }
+  ]
+  alvo: "y"
+  atributos: [x, g]
+  pre_processar:
+    - um_de_n: [g]
+    - imputar: [x, g]
+  modelo: floresta_aleatoria
+    arvores: 10
+  metricas: [acuracia]
+  semente: 7

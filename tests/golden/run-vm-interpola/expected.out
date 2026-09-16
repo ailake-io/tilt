@@ -1,0 +1,5 @@
+== pipeline p ==
+ola mundo!
+n=42, razao=3.14
+sem var {{desconhecida}} continua
+vazio=[]

@@ -1,0 +1,9 @@
+avaliacao soma:
+  dados:
+    - { a: 1, b: 2, esperado: 3 }
+    - { a: 10, b: 20, esperado: 30 }
+  executar:
+    - retornar caso.a + caso.b
+  metricas: [exata, tolerancia]
+  limiar: 1.0
+  verboso: verdadeiro

@@ -1,0 +1,20 @@
+experimento preco:
+  dados: [
+    { m2: 10, quartos: 1, preco: 100 },
+    { m2: 20, quartos: 1, preco: 180 },
+    { m2: 20, quartos: 2, preco: 220 },
+    { m2: 30, quartos: 2, preco: 300 },
+    { m2: 30, quartos: 3, preco: 340 },
+    { m2: 40, quartos: 3, preco: 420 }
+  ]
+  alvo: "preco"
+  atributos: [m2, quartos]
+  dividir: { treino: 0.7, teste: 0.3 }
+  modelo: regressao_linear
+  metricas: [rmse, r2]
+  semente: 3
+
+pipeline usa:
+  passos:
+    - v = experimento preco.prever { m2: 25, quartos: 2 }
+    - imprimir "preco:", v.valor

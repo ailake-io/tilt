@@ -1,9 +1,9 @@
 {
   "format-version": 2,
-  "table-uuid": "dfdb09c7-74a1-4554-96c7-5d291dfb9686",
+  "table-uuid": "33c71b12-32ae-451c-aee0-298cfc99d285",
   "location": "/home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi",
   "last-sequence-number": 0,
-  "last-updated-ms": 1789219688742,
+  "last-updated-ms": 1789552574757,
   "last-column-id": 4,
   "last-partition-id": 1001,
   "schemas": [
@@ -19,25 +19,25 @@
     { "spec-id": 0, "fields": [{ "field-id": 1000, "source-id": 1, "transform": "identity", "name": "estado" }, { "field-id": 1001, "source-id": 2, "transform": "identity", "name": "ano" }] }
   ],
   "default-spec-id": 0,
-  "current-snapshot-id": 2752501267701733784,
+  "current-snapshot-id": 8073084028563344645,
   "snapshots": [
     {
-      "snapshot-id": 7713489672642200194,
-      "timestamp-ms": 1789219688737,
+      "snapshot-id": 6528517541185310975,
+      "timestamp-ms": 1789552574750,
       "summary": { "operation": "overwrite" },
-      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-7713489672642200194-0-dd3c1b6c-ccba-414e-868b-f5d519910ef0.avro"
+      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-6528517541185310975-0-1c7a1c7b-5a2e-4a8c-9a1a-4b03ff1f6a59.avro"
     },
     {
-      "snapshot-id": 2752501267701733784,
-      "timestamp-ms": 1789219688742,
+      "snapshot-id": 8073084028563344645,
+      "timestamp-ms": 1789552574757,
       "summary": { "operation": "append" },
-      "parent-snapshot-id": 7713489672642200194,
-      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-2752501267701733784-0-5271cf80-4aac-4af8-aeab-9b52f68dad04.avro"
+      "parent-snapshot-id": 6528517541185310975,
+      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-8073084028563344645-0-53710090-3a57-44cf-bb6d-98d2d94574e2.avro"
     }
   ],
   "snapshot-log": [
-    { "timestamp-ms": 1789219688737, "snapshot-id": 7713489672642200194 },
-    { "timestamp-ms": 1789219688742, "snapshot-id": 2752501267701733784 }
+    { "timestamp-ms": 1789552574750, "snapshot-id": 6528517541185310975 },
+    { "timestamp-ms": 1789552574757, "snapshot-id": 8073084028563344645 }
   ],
   "metadata-log": [],
   "sort-orders": [ { "order-id": 0, "fields": [] } ],

@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "runtime/tensor.hpp"
+
 namespace tilt::vm {
 
 using rt::Value;
@@ -120,6 +122,80 @@ rt::Value Vm::run(const Chunk& chunk, std::vector<rt::Value> args) {
         }
         stack.push_back((*base.list)[static_cast<std::size_t>(i)]);
         break;
+      }
+      case Op::GetField: {
+        Value base = pop();
+        const std::string& m = chunk.names[static_cast<std::size_t>(in.a)];
+        const bool optional = in.b != 0;
+        if (base.kind == ValueKind::Tensor && base.tensor) {
+          const rt::Tensor& t = *base.tensor;
+          if (m == "forma") {
+            rt::ValueList dims;
+            for (std::int64_t d : t.shape) dims.push_back(Value::inteiro(d));
+            stack.push_back(Value::lista(std::move(dims)));
+            break;
+          }
+          if (m == "dados") {
+            rt::ValueList vals;
+            for (float fv : t.data) vals.push_back(Value::decimal(fv));
+            stack.push_back(Value::lista(std::move(vals)));
+            break;
+          }
+          if (m == "soma") {
+            stack.push_back(Value::decimal(rt::sum_all(t)));
+            break;
+          }
+          if (m == "media") {
+            stack.push_back(Value::decimal(rt::mean_all(t)));
+            break;
+          }
+          if (m == "argmax") {
+            stack.push_back(Value::inteiro(rt::argmax_last(t)));
+            break;
+          }
+          if (m == "transposta") {
+            stack.push_back(Value::tensor_de(rt::transpose2d(t)));
+            break;
+          }
+          if (m == "softmax") {
+            stack.push_back(Value::tensor_de(rt::softmax_last(t)));
+            break;
+          }
+          if (m == "relu" || m == "gelu" || m == "silu" || m == "sigmoide" || m == "tanh") {
+            stack.push_back(Value::tensor_de(rt::apply_unary(t, m)));
+            break;
+          }
+          if (m == "item") {
+            if (t.size() != 1) throw std::runtime_error("item espera um tensor de 1 elemento");
+            stack.push_back(Value::decimal(t.data[0]));
+            break;
+          }
+          if (m == "tamanho") {
+            stack.push_back(Value::inteiro(t.size()));
+            break;
+          }
+        }
+        if ((base.kind == ValueKind::Mapa || base.kind == ValueKind::Tabela) && base.map) {
+          if (Value* f = base.map->find(m)) {
+            stack.push_back(*f);
+            break;
+          }
+        }
+        if (m == "tamanho") {
+          if ((base.kind == ValueKind::Lista || base.kind == ValueKind::Tabela) && base.list) {
+            stack.push_back(Value::inteiro(static_cast<std::int64_t>(base.list->size())));
+            break;
+          }
+          if (base.kind == ValueKind::Texto) {
+            stack.push_back(Value::inteiro(static_cast<std::int64_t>(base.s.size())));
+            break;
+          }
+        }
+        if (optional) {
+          stack.push_back(Value::nulo());
+          break;
+        }
+        throw std::runtime_error(std::string("'") + base.type_name() + "' nao tem o campo '" + m + "'");
       }
       case Op::Return:
         return pop();

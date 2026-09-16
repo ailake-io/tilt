@@ -207,6 +207,21 @@ Tensor reshape(const Tensor& a, std::vector<std::int64_t> shape) {
   return out;
 }
 
+Tensor fatiar_lote(const Tensor& a, const std::vector<std::int64_t>& idx) {
+  if (a.shape.empty()) die("fatiar_lote espera um tensor nao escalar");
+  const std::int64_t linha = a.size() / a.shape[0];
+  Tensor out;
+  out.shape = a.shape;
+  out.shape[0] = static_cast<std::int64_t>(idx.size());
+  out.data.reserve(static_cast<std::size_t>(idx.size() * static_cast<std::size_t>(linha)));
+  for (std::int64_t i : idx) {
+    if (i < 0 || i >= a.shape[0]) die("fatiar_lote: indice fora do lote");
+    const float* base = a.data.data() + static_cast<std::size_t>(i * linha);
+    out.data.insert(out.data.end(), base, base + linha);
+  }
+  return out;
+}
+
 Tensor apply_unary(const Tensor& a, const std::string& fn) {
   Tensor out = a;
   for (float& v : out.data) {
@@ -338,6 +353,152 @@ Tensor conv2d(const Tensor& x, const Tensor& k, std::int64_t passo) {
   return out;
 }
 
+Tensor adicionar_vies_conv(const Tensor& y, const Tensor& vies) {
+  if (y.rank() != 4) die("vies de conv2d espera uma saida [N, C, H, W] (" + y.shape_str() + ")");
+  if (vies.rank() != 1 || vies.shape[0] != y.shape[1]) {
+    die("vies de conv2d espera [" + std::to_string(y.shape[1]) + "] (" + vies.shape_str() + ")");
+  }
+  Tensor out = y;
+  const std::int64_t n = y.shape[0];
+  const std::int64_t canais = y.shape[1];
+  const std::int64_t hw = y.shape[2] * y.shape[3];
+  for (std::int64_t nn = 0; nn < n; ++nn) {
+    for (std::int64_t c = 0; c < canais; ++c) {
+      const float b = vies.data[static_cast<std::size_t>(c)];
+      float* base = out.data.data() + static_cast<std::size_t>((nn * canais + c) * hw);
+      for (std::int64_t k = 0; k < hw; ++k) base[static_cast<std::size_t>(k)] += b;
+    }
+  }
+  return out;
+}
+
+void conv2d_backward(const Tensor& x, const Tensor& nucleo, const Tensor& grad_saida,
+                     std::int64_t passo, Tensor& grad_x, Tensor& grad_nucleo, Tensor& grad_vies) {
+  if (x.rank() != 4) die("conv2d_backward espera uma entrada [N, C_in, H, W] (" + x.shape_str() + ")");
+  if (nucleo.rank() != 4) {
+    die("conv2d_backward espera um nucleo [C_out, C_in, KH, KW] (" + nucleo.shape_str() + ")");
+  }
+  if (passo < 1) die("conv2d_backward: passo deve ser >= 1");
+  const std::int64_t n = x.shape[0];
+  const std::int64_t cin = x.shape[1];
+  const std::int64_t h = x.shape[2];
+  const std::int64_t w = x.shape[3];
+  const std::int64_t cout = nucleo.shape[0];
+  const std::int64_t kh = nucleo.shape[2];
+  const std::int64_t kw = nucleo.shape[3];
+  if (nucleo.shape[1] != cin) die("conv2d_backward: canais do nucleo incompativeis com a entrada");
+  const std::int64_t oh = (h - kh) / passo + 1;
+  const std::int64_t ow = (w - kw) / passo + 1;
+  if (grad_saida.shape != std::vector<std::int64_t>({n, cout, oh, ow})) {
+    die("conv2d_backward: gradiente com forma inesperada (" + grad_saida.shape_str() + ")");
+  }
+  grad_x = Tensor::zeros(x.shape);
+  grad_nucleo = Tensor::zeros(nucleo.shape);
+  grad_vies = Tensor::zeros({cout});
+  for (std::int64_t nn = 0; nn < n; ++nn) {
+    for (std::int64_t co = 0; co < cout; ++co) {
+      for (std::int64_t i = 0; i < oh; ++i) {
+        for (std::int64_t j = 0; j < ow; ++j) {
+          const float gy = grad_saida.data[static_cast<std::size_t>(((nn * cout + co) * oh + i) * ow + j)];
+          grad_vies.data[static_cast<std::size_t>(co)] += gy;
+          for (std::int64_t ci = 0; ci < cin; ++ci) {
+            for (std::int64_t u = 0; u < kh; ++u) {
+              for (std::int64_t v = 0; v < kw; ++v) {
+                const std::int64_t hh = i * passo + u;
+                const std::int64_t ww = j * passo + v;
+                const std::size_t xi = static_cast<std::size_t>(((nn * cin + ci) * h + hh) * w + ww);
+                const std::size_t ki = static_cast<std::size_t>(((co * cin + ci) * kh + u) * kw + v);
+                grad_nucleo.data[ki] += x.data[xi] * gy;
+                grad_x.data[xi] += nucleo.data[ki] * gy;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+Tensor maxpool2d(const Tensor& x, std::int64_t janela, std::int64_t passo) {
+  if (x.rank() != 4) die("agrupamento_max espera uma entrada [N, C, H, W] (" + x.shape_str() + ")");
+  if (janela < 1) die("agrupamento_max: janela deve ser >= 1");
+  if (passo < 1) passo = janela;
+  const std::int64_t n = x.shape[0];
+  const std::int64_t canais = x.shape[1];
+  const std::int64_t h = x.shape[2];
+  const std::int64_t w = x.shape[3];
+  if (janela > h || janela > w) {
+    die("agrupamento_max: janela " + std::to_string(janela) + "x" + std::to_string(janela) +
+        " maior que a entrada " + std::to_string(h) + "x" + std::to_string(w));
+  }
+  const std::int64_t oh = (h - janela) / passo + 1;
+  const std::int64_t ow = (w - janela) / passo + 1;
+  Tensor out = Tensor::zeros({n, canais, oh, ow});
+  for (std::int64_t nn = 0; nn < n; ++nn) {
+    for (std::int64_t c = 0; c < canais; ++c) {
+      for (std::int64_t i = 0; i < oh; ++i) {
+        for (std::int64_t j = 0; j < ow; ++j) {
+          float melhor = x.data[static_cast<std::size_t>(((nn * canais + c) * h + i * passo) * w + j * passo)];
+          for (std::int64_t u = 0; u < janela; ++u) {
+            for (std::int64_t v = 0; v < janela; ++v) {
+              if (u == 0 && v == 0) continue;
+              const float atual = x.data[static_cast<std::size_t>(((nn * canais + c) * h + i * passo + u) * w +
+                                                                  j * passo + v)];
+              if (atual > melhor) melhor = atual;
+            }
+          }
+          out.data[static_cast<std::size_t>(((nn * canais + c) * oh + i) * ow + j)] = melhor;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+Tensor maxpool2d_backward(const Tensor& x, const Tensor& grad_saida, std::int64_t janela,
+                          std::int64_t passo) {
+  if (x.rank() != 4) die("maxpool2d_backward espera uma entrada [N, C, H, W] (" + x.shape_str() + ")");
+  if (janela < 1) die("maxpool2d_backward: janela deve ser >= 1");
+  if (passo < 1) passo = janela;
+  const std::int64_t n = x.shape[0];
+  const std::int64_t canais = x.shape[1];
+  const std::int64_t h = x.shape[2];
+  const std::int64_t w = x.shape[3];
+  const std::int64_t oh = (h - janela) / passo + 1;
+  const std::int64_t ow = (w - janela) / passo + 1;
+  if (grad_saida.shape != std::vector<std::int64_t>({n, canais, oh, ow})) {
+    die("maxpool2d_backward: gradiente com forma inesperada (" + grad_saida.shape_str() + ")");
+  }
+  Tensor grad_x = Tensor::zeros(x.shape);
+  for (std::int64_t nn = 0; nn < n; ++nn) {
+    for (std::int64_t c = 0; c < canais; ++c) {
+      for (std::int64_t i = 0; i < oh; ++i) {
+        for (std::int64_t j = 0; j < ow; ++j) {
+          std::int64_t melhor_u = 0;
+          std::int64_t melhor_v = 0;
+          float melhor = x.data[static_cast<std::size_t>(((nn * canais + c) * h + i * passo) * w + j * passo)];
+          for (std::int64_t u = 0; u < janela; ++u) {
+            for (std::int64_t v = 0; v < janela; ++v) {
+              if (u == 0 && v == 0) continue;
+              const float atual = x.data[static_cast<std::size_t>(((nn * canais + c) * h + i * passo + u) * w +
+                                                                  j * passo + v)];
+              if (atual > melhor) {
+                melhor = atual;
+                melhor_u = u;
+                melhor_v = v;
+              }
+            }
+          }
+          const std::size_t xi = static_cast<std::size_t>(((nn * canais + c) * h + i * passo + melhor_u) * w +
+                                                          j * passo + melhor_v);
+          grad_x.data[xi] += grad_saida.data[static_cast<std::size_t>(((nn * canais + c) * oh + i) * ow + j)];
+        }
+      }
+    }
+  }
+  return grad_x;
+}
+
 namespace {
 
 // Parametro por canal: escalar (broadcast) ou rank-1 [C].
@@ -401,6 +562,83 @@ Tensor norma_lote(const Tensor& x, const Tensor& gama, const Tensor& beta, const
     }
   }
   return out;
+}
+
+void norma_lote_estatisticas(const Tensor& x, Tensor& media, Tensor& var) {
+  if (x.rank() < 2) die("norma_lote espera um tensor [N, C, ...] (" + x.shape_str() + ")");
+  const std::int64_t n = x.shape[0];
+  const std::int64_t canais = x.shape[1];
+  const std::int64_t rest = x.size() / (n * canais);
+  media = Tensor::zeros({canais});
+  var = Tensor::zeros({canais});
+  const float total = static_cast<float>(n * rest);
+  for (std::int64_t nn = 0; nn < n; ++nn) {
+    for (std::int64_t c = 0; c < canais; ++c) {
+      const float* base = x.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      for (std::int64_t k = 0; k < rest; ++k) media.data[static_cast<std::size_t>(c)] += base[k];
+    }
+  }
+  for (std::int64_t c = 0; c < canais; ++c) media.data[static_cast<std::size_t>(c)] /= total;
+  for (std::int64_t nn = 0; nn < n; ++nn) {
+    for (std::int64_t c = 0; c < canais; ++c) {
+      const float* base = x.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      float acc = 0.0F;
+      for (std::int64_t k = 0; k < rest; ++k) {
+        const float d = base[k] - media.data[static_cast<std::size_t>(c)];
+        acc += d * d;
+      }
+      var.data[static_cast<std::size_t>(c)] += acc;
+    }
+  }
+  for (std::int64_t c = 0; c < canais; ++c) var.data[static_cast<std::size_t>(c)] /= total;
+}
+
+void norma_lote_backward(const Tensor& x, const Tensor& grad_saida, const Tensor& gama,
+                         const Tensor& media, const Tensor& var, float eps, Tensor& grad_x,
+                         Tensor& grad_gama, Tensor& grad_beta) {
+  if (x.rank() < 2) die("norma_lote_backward espera um tensor [N, C, ...] (" + x.shape_str() + ")");
+  if (grad_saida.shape != x.shape) {
+    die("norma_lote_backward: gradiente com forma inesperada (" + grad_saida.shape_str() + ")");
+  }
+  const std::int64_t n = x.shape[0];
+  const std::int64_t canais = x.shape[1];
+  const std::int64_t rest = x.size() / (n * canais);
+  if (media.shape != std::vector<std::int64_t>({canais}) ||
+      var.shape != std::vector<std::int64_t>({canais})) {
+    die("norma_lote_backward: media/var devem ser [" + std::to_string(canais) + "]");
+  }
+  grad_x = Tensor::zeros(x.shape);
+  grad_gama = Tensor::zeros({canais});
+  grad_beta = Tensor::zeros({canais});
+  const float m = static_cast<float>(n * rest);
+  for (std::int64_t c = 0; c < canais; ++c) {
+    const float g = param_por_canal(gama, c, canais, "gama");
+    const float mu = media.data[static_cast<std::size_t>(c)];
+    const float inv = 1.0F / std::sqrt(var.data[static_cast<std::size_t>(c)] + eps);
+    float soma_dy = 0.0F;
+    float soma_dy_xchapeu = 0.0F;
+    for (std::int64_t nn = 0; nn < n; ++nn) {
+      const float* xb = x.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      const float* gb = grad_saida.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      for (std::int64_t k = 0; k < rest; ++k) {
+        const float xchapeu = (xb[k] - mu) * inv;
+        soma_dy += gb[k];
+        soma_dy_xchapeu += gb[k] * xchapeu;
+        grad_gama.data[static_cast<std::size_t>(c)] += gb[k] * xchapeu;
+        grad_beta.data[static_cast<std::size_t>(c)] += gb[k];
+      }
+    }
+    const float escala = g * inv / m;
+    for (std::int64_t nn = 0; nn < n; ++nn) {
+      const float* xb = x.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      const float* gb = grad_saida.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      float* ob = grad_x.data.data() + static_cast<std::size_t>((nn * canais + c) * rest);
+      for (std::int64_t k = 0; k < rest; ++k) {
+        const float xchapeu = (xb[k] - mu) * inv;
+        ob[k] = escala * (m * gb[k] - soma_dy - xchapeu * soma_dy_xchapeu);
+      }
+    }
+  }
 }
 
 float sum_all(const Tensor& a) {

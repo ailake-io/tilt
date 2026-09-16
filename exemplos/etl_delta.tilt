@@ -1,0 +1,22 @@
+# ETL completo com Delta Lake local: ler CSV, agregar, escrever particionado,
+# anexar incremental e ler com pruning de particao. Hermetico (sem servidores).
+# Gera o diretorio vendas_delta/ ao lado de onde o comando roda.
+
+pipeline etl_vendas_delta:
+  passos:
+    - bruto = ler_csv "exemplos/dados/vendas.csv"
+    - por_regiao = bruto.agrupar_por "regiao", { receita: somar "valor", pedidos: contar }
+    - verificar por_regiao:
+        - nao_nulo: [regiao, receita]
+        ao_violar: avisar
+    - escrever_delta por_regiao, "vendas_delta", particionar_por: ["regiao"]
+    - tudo = ler_delta "vendas_delta"
+    - imprimir "regioes:", tamanho tudo
+    - sul = ler_delta "vendas_delta", onde: { regiao: "sul" }
+    - imprimir "sul:", tamanho sul
+    - para cada r em sul:
+        imprimir r.regiao, "receita", r.receita, "em", r.pedidos, "pedidos"
+    - extra = [{ regiao: "norte", receita: 40, pedidos: 1 }]
+    - anexar_delta extra, "vendas_delta", particionar_por: ["regiao"]
+    - tudo2 = ler_delta "vendas_delta"
+    - imprimir "regioes apos anexar:", tamanho tudo2

@@ -29,30 +29,39 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 ## Machine learning clássico — feito (1ª passada)
 
 - `experimento` executa de verdade: `regressao_linear`, `regressao_logistica`
-  binária, `knn` e `kmeans`, com `prever` (`{classe, probabilidade}` /
+  binária e multinomial, `knn`, `kmeans`, `floresta_aleatoria`,
+  `gradiente_impulsionado` e `svm`, com `prever` (`{classe, probabilidade}` /
   `{valor}` / `{grupo}`), divisão treino/validação/teste com semente,
-  métricas (acurácia, f1 ponderado, auc, matriz_confusao, rmse, r2,
-  inércia) e `registrar_em: mlflow://` como JSON local. Detalhes e limites
-  no guia 04 e no guia 12.
-- Resta: `floresta_aleatoria`/`gradiente_impulsionado`/`svm`, imputação,
-  validação cruzada, multiclasse na logística, mlflow REST, `exportar: onnx`.
+  `validacao_cruzada:`, `imputar:`, métricas (acurácia, f1 ponderado, auc,
+  matriz_confusao, rmse, r2, inércia) e `registrar_em: mlflow://` como JSON
+  local. Detalhes e limites no guia 04 e no guia 12.
+- Resta: mlflow REST, busca de hiperparâmetros.
 
 ## Deep learning — treino real, mas de brinquedo
 
-Funciona: `treino` em CPU com camadas `densa`, adam/SGD, perdas entropia
+Funciona: `treino` em CPU com camadas `densa`, `conv2d`, `norma_lote`,
+`agrupamento_max` e `achatar`, adam/SGD, perdas entropia
 cruzada/quadrática, autograd manual.
 
-- **Camadas que faltam no `modelo`/`treino`**: `conv2d`/`norma_lote` são só
-  ops avulsas (sem backward, sem pesos) — CNN não treina. Sem
-  `incorporacao` treinável, sem recorrência, sem abandono no treino.
+- **CNN de brinquedo**: `conv2d` (com viés), `norma_lote` (gama/beta +
+  média/variância correntes), `agrupamento_max` e `achatar` treinam de
+  verdade (lote cheio, CPU). Sem `incorporacao` treinável, sem recorrência,
+  sem abandono no treino, sem dilation/padding explícito, sem mini-lotes.
 - **GPU não validada** (`TILT_GPU=fake` em CPU; CUDA nunca rodou em
   hardware real) + sem AMP real.
-- **Exportação zero**: `modelo.exportar: onnx/gguf` não existe no
-  interpretador — o modelo treinado fica preso na Tilt. Sem ONNX não há
-  deploy fora dela.
-- **Faltam**: dataloader completo, checkpoint de treino com retomada
-  (incl. estado do otimizador), busca de hiperparâmetros, seed
-  reproduzível.
+- **Exportação**: `modelo <Nome>.exportar_onnx "modelo.onnx"` existe no
+  interpretador (ONNX opset 20, sem dependências; ver guia 04) — o modelo
+  treinado sai da Tilt para qualquer runtime ONNX. Resta `gguf`.
+- **Feito (treino utilizável)**: mini-lotes (`lote:`) com embaralhamento,
+  `semente:` reproduzível (init + embaralhamento), checkpoint com retomada
+  (`checkpoint:`/`a_cada:`/`retomar:`, bit-idêntico ao contínuo), agendador
+  de taxa (`cosseno`/`degrau`), `validacao:` + `parar_cedo:` (restaura
+  melhores pesos), `busca` em grade com `criterio:`, dataloader streaming
+  de CSV (`carregador ..., fluxo: verdadeiro` + `bloco:`) e exportação
+  `gguf` (v3, só escrita).
+- **Faltam**: dataloader de arquivos grandes em outros formatos (Parquet),
+  busca de hiperparâmetros além de grade (random/bayesiana), `gguf` com
+  quantização (hoje só F32).
 
 ## LLM / RAG — funcional, falta engenharia de produção
 
@@ -70,8 +79,10 @@ com backoff, `reserva:`, `teto_tokens:` e `tokens:` na resposta.
 - **RAG**: sem reranking, chunking só de tamanho fixo (sem respeito a
   sentença/código), sem busca híbrida (vetor + keyword/BM25), sem
   avaliação de recuperação.
-- **Evals**: zero. Sem bloco `avaliacao` (dataset ouro + métrica + limiar)
-  não há LLMOps — ninguém itera prompt sem eval.
+- **Evals**: bloco `avaliacao` em 1ª passada (dataset em `dados:`, métricas
+  `exata`/`contem`/`regex`/`tolerancia`/`juiz`, gate no `limiar:`,
+  `amostra:` + `semente:`, `registrar_em:` em JSON local; ver guia 05 e
+  guia 12). Restam juiz com voto, amostra por fração e mlflow REST.
 - **Observabilidade LLM**: sem log de prompts/respostas nem contagem de
   tokens e custo por chamada/fluxo.
 
@@ -118,8 +129,8 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
    `espera:`/`backoff:`, `tempo_limite:` por passo, `quarentena:` no
    `para cada`, `saude:`/`metricas:` no `servico`; sem latências no
    `/metricas`, sem Retry-After/cache no LLM).
-4. `exportar: onnx`.
+4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
 3. Operação de pipelines (timeout por passo, backoff, quarentena,
    `/saude` + `/metricas`).
-4. `exportar: onnx`.
-5. `avaliacao` (evals — fundação de LLMOps).
+4. ~~`exportar: onnx`~~ feito (ver item 4 acima).
+5. ~~`avaliacao` (evals — fundação de LLMOps)~~ feito em 1ª passada (ver guia 05).

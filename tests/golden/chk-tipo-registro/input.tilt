@@ -1,0 +1,6 @@
+tipo Pedido:
+  cliente: ClienteInexistente
+
+pipeline p:
+  passos:
+    - imprimir "ok"

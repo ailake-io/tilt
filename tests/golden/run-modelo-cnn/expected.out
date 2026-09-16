@@ -1,0 +1,7 @@
+== pipeline p ==
+[1, 2] 0
+modelo CNN: pesos salvos em pesos.json (3 camadas)
+modelo CNN: pesos carregados de pesos.json (3 camadas)
+[1, 2] 0
+modelo CNN: onnx exportado para modelo.onnx
+onnx ok

@@ -70,9 +70,9 @@ parcial (viés `[N]` no último eixo) e pesos vindos de arquivo.
 
 ### Convolução 2D e batch norm
 
-`conv2d` é uma operação de tensor (não uma camada de `modelo`): entrada
-`[N, C_in, H, W]` convoluída com núcleo `[C_out, C_in, KH, KW]`, padding
-**válido** (sem borda), `passo:` (stride) opcional default 1 — saída
+`conv2d` existe como operação de tensor e como camada de `modelo`:
+entrada `[N, C_in, H, W]` convoluída com núcleo `[C_out, C_in, KH, KW]`,
+padding **válido** (sem borda) — saída
 `[N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]`. Sem dilation nem padding
 explícito por ora.
 
@@ -124,9 +124,11 @@ experimento prever_churn:
     - um_de_n: [plano]           # one-hot (ordem de aparição no treino)
     - padronizar: [uso]          # média/desvio do treino
   dividir: { treino: 0.75, teste: 0.25 }   # default; validacao: opcional
-  modelo: regressao_logistica    # regressao_linear | knn | kmeans
+  modelo: regressao_logistica    # + regressao_linear | knn | kmeans |
+                                 #   floresta_aleatoria | gradiente_impulsionado | svm
     taxa: 0.5                    # logistica (GD em lote; default 0.5/500)
     epocas: 500
+  validacao_cruzada: 4           # opcional; media +- desvio no final
   metricas: [acuracia, f1, auc, matriz_confusao]  # default por tarefa
   semente: 7                     # embaralhamento e kmeans (default 42)
 
@@ -141,9 +143,11 @@ Modelos: `regressao_linear` (equações normais + crista 1e-8; prevê
 própria; prevê `{classe, probabilidade}` = P da classe prevista), `knn`
 (`vizinhos:`, voto majoritário ou média; distância euclidiana em atributos
 padronizados internamente) e `kmeans` (`grupos:` obrigatório, sem `alvo:` nem
-`metricas:`; prevê `{grupo}`, reporta `inercia` + tamanhos). Outros nomes
-(`floresta_aleatoria`, `gradiente_impulsionado`, `svm`) falham com erro
-claro de "ainda não implementado".
+`metricas:`; prevê `{grupo}`, reporta `inercia` + tamanhos),
+`floresta_aleatoria` (`arvores:`, `profundidade:`), `gradiente_impulsionado`
+(`arvores:`, `taxa:`, `profundidade:`) e `svm` (`custo:`, binária). Alvo
+numérico binário (2 valores) classifica; com 3+ valores, floresta/GBM fazem
+regressão. Nulos com `- imputar: [cols]` (média/moda do treino).
 
 Métricas: classificação `acuracia` (default), `f1` (ponderado pelo suporte),
 `auc` (binária; exige exemplos das 2 classes no teste) e `matriz_confusao`;
@@ -175,16 +179,44 @@ pipeline classifica:
 
 Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmoide|tanh`,
 `softmax`, `abandono: p` / `dropout: p`, `norma_camada` (normalização sobre a
-última dimensão, sem affine — na inferência e no treino). `norma_lote`/`conv2d`
-não são camadas de `modelo` — existem como operações de tensor (ver acima) e
-no `modelo` produzem erro claro em vez de serem ignoradas silenciosamente.
+última dimensão, sem affine — na inferência e no treino),
+`conv2d: [C_saida, C_entrada, KH, KW]` (quinto elemento opcional = passo),
+`norma_lote` (affine por canal, com média/variância correntes),
+`agrupamento_max: [janela]` ou `[janela, passo]` e `achatar` (achata o lote
+`[N, ...]` para `[N, C]` antes da `densa`). Modelos convolucionais exigem a
+anotação completa da entrada, ex.: `entrada: tensor[f32, 1, 4, 4]` (sem o
+lote). No `treino`, `x` pode ser 4D `[N, C, H, W]` quando o modelo começa
+com `conv2d`.
+
+```tilt run
+modelo CNN:
+  entrada: tensor[f32, 1, 4, 4]
+  camadas:
+    - conv2d: [2, 1, 2, 2]
+    - ativacao: relu
+    - norma_lote
+    - agrupamento_max: [2]
+    - achatar
+    - linear: [2, 2]
+    - softmax
+
+pipeline cnn:
+  passos:
+    - y = modelo CNN.executar uns [1, 1, 4, 4]
+    - imprimir y.forma, y.argmax   # [1, 2] <classe>
+```
 
 ### Pesos de arquivo
 
 `pesos: "caminho"` carrega pesos no formato **tilt-pesos** (JSON gerado por
-`modelo <Nome>.salvar_pesos`, com `w`/`b` por camada densa). Forma
+`modelo <Nome>.salvar_pesos`, com `w`/`b` por camada com parâmetros:
+`densa`/`linear`, `conv2d` — incluindo `passo` — e `norma_lote` — incluindo
+`media_running`/`var_running`). Forma
 incompatível com o modelo → erro `T901` mostrando o esperado vs. o encontrado;
-arquivo ausente → init Xavier com `[nota]`.
+arquivo ausente → init Xavier com `[nota]`. O carregamento também pode ser
+feito em tempo de execução com `modelo <Nome>.carregar_pesos "caminho"`
+(mesma validação de formas; o modelo passa a usar os pesos carregados nas
+chamadas seguintes de `executar`).
 
 ```tilt run
 modelo Mini:
@@ -197,8 +229,47 @@ pipeline pesos:
   passos:
     # Salva no formato tilt-pesos (JSON); 'pesos:' do modelo carrega de volta.
     - modelo Mini.salvar_pesos "mini.pesos"
+    - modelo Mini.carregar_pesos "mini.pesos"
     - imprimir "ok"
 ```
+
+### Exportação ONNX
+
+`modelo <Nome>.exportar_onnx "modelo.onnx"` exporta o modelo (pesos atuais,
+incluindo pós-`treino`) para **ONNX opset 20**, sem dependências externas:
+cada `densa`/`linear` vira um `Gemm`, ativações viram `Relu`/`Gelu`/
+`Sigmoid`+`Mul` (`silu`) /`Sigmoid`/`Tanh`, mais `Softmax` (eixo 1),
+`LayerNormalization`, `Conv`, `BatchNormalization`, `MaxPool` e `Flatten`;
+`abandono` é identidade na inferência e não é
+exportado. A entrada é `[lote, ...]` (`lote` dinâmico, resto de
+`entrada: tensor[...]`). O arquivo passa no `onnx.checker` e roda em
+qualquer runtime ONNX (ex.: onnxruntime). `gelu` usa a aproximação tanh da
+Tilt, então pode diferir ~1e-4 do `Gelu` exato do ONNX.
+
+```tilt run
+modelo Mini:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 4
+    - ativacao: relu
+    - densa: 2
+    - softmax
+
+pipeline exporta:
+  passos:
+    - modelo Mini.exportar_onnx "mini.onnx"
+    - modelo Mini.exportar_gguf "mini.gguf"
+    - imprimir "ok"
+```
+
+### Exportação GGUF
+
+`modelo <Nome>.exportar_gguf "modelo.gguf"` grava os pesos no formato
+**GGUF v3** (o mesmo do llama.cpp), sem dependências: cada camada com
+parâmetros vira dois tensores F32 (`camada-<i>.peso` e `camada-<i>.vies`,
+dimensões invertidas por convenção do GGUF) mais metadados
+(`general.architecture = "tilt"`, nome do modelo). Só escrita — a Tilt não
+executa GGUF (use llama.cpp/ollama para inferir).
 
 ### Inferência
 
@@ -241,13 +312,17 @@ treino Xor:
   otimizador: adam                  # sgd | adam
   taxa: 0.05                         # ou taxa_aprendizado:
   epocas: 3
+  lote: 4                            # mini-lote (default: lote cheio); embaralha por época
+  semente: 7                         # init Xavier + embaralhamento (reproduzível)
 ```
 
 Perdas: `entropia_cruzada` (classificação, exige `softmax` final) e
 `quadratica` (regressão escalar — a saída deve ter largura 1 e não ter
 `softmax`). O backward cobre todas as camadas: `densa`/`linear` (com SGD/Adam),
-ativações (derivada exata da mesma aproximação da forward — inclusive `gelu`)
-e `norma_camada` (sem affine). Resumo determinístico:
+ativações (derivada exata da mesma aproximação da forward — inclusive `gelu`),
+`norma_camada` (sem affine), `conv2d` (núcleo + viés, com SGD/Adam),
+`norma_lote` (gama/beta, com estatísticas do lote no treino e média/variância
+correntes na inferência), `agrupamento_max` e `achatar`. Resumo determinístico:
 
 ```
 treino Xor: perda caiu sim | acuracia 2/4
@@ -256,6 +331,91 @@ treino Xor: perda caiu sim | acuracia 2/4
 Pós-treino os pesos ficam no `modelo` — chamadas seguintes de
 `modelo Xor.executar` usam o modelo treinado. (`verboso: verdadeiro`
 imprime a perda a cada ~epocas/10.)
+
+### Checkpoint e retomada
+
+`checkpoint: "caminho"` salva ao final (e a cada `a_cada: N` épocas) um
+JSON **tilt-checkpoint** com pesos, momentos do Adam, estatísticas do
+`norma_lote`, época e otimizador. `retomar: "caminho"` continua de onde
+parou — bit a bit idêntico ao treino contínuo (mesmos `epocas:`,
+`lote:`, `semente:`, `taxa:` e `otimizador:`; `epocas:` deve passar a
+época do checkpoint):
+
+```tilt run
+modelo Xor:
+  camadas:
+    - densa: 2
+    - softmax
+
+treino Xor:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  epocas: 2
+  checkpoint: "xor.json"
+
+treino Xor:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  epocas: 4
+  retomar: "xor.json"
+```
+
+### Agendador, validação e parada antecipada
+
+```tilt run
+modelo Xor:
+  camadas:
+    - densa: 2
+    - softmax
+
+treino Xor:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  epocas: 100
+  agendador: { tipo: cosseno }      # ou { tipo: degrau, a_cada: 10, fator: 0.5 }
+  validacao: 0.25                    # fração separada do treino (embaralhada)
+  parar_cedo: { paciencia: 5 }       # ou N direto; + melhorar_min: D opcional
+```
+
+`agendador:` varia a taxa por época (cosseno até ~0, ou degrau que
+multiplica por `fator` a cada `a_cada` épocas). `validacao:` reserva uma
+fração para medir a perda em modo inferência a cada época; `parar_cedo:`
+restaura os melhores pesos e interrompe após `paciencia` épocas sem melhora
+(`melhorar_min:` = melhora mínima para contar).
+
+### Busca em grade
+
+```tilt run
+modelo Xor:
+  camadas:
+    - densa: 2
+    - softmax
+
+busca Otima:
+  modelo: Xor
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 0, 0, 0] }
+  perda: entropia_cruzada
+  epocas: 20
+  grade:
+    taxa: [0.1, 0.01]
+    otimizador: [sgd, adam]
+  criterio: perda                    # ou acuracia (só com entropia_cruzada)
+```
+
+Roda todas as combinações (máx. 64) com os mesmos dados, imprime a tabela
+e deixa os melhores pesos no `modelo`. Aceita os mesmos campos do `treino`
+(`lote:`, `semente:`, `validacao:`, ...) menos `checkpoint:`/`retomar:`.
+
+### Dataloader streaming
+
+`carregador "dados.csv", alvo: "y", fluxo: verdadeiro` não materializa
+nada: o `treino` varre o arquivo uma vez (contagem + rótulos) e o relê em
+blocos de `bloco:` linhas por época — só o bloco corrente vive na RAM.
+Equivalente bit a bit ao treino em RAM (mesma semente, mesmos lotes) e à
+retomada. Limites: só CSV, só modelo 2D (denso).
 
 ## GPU
 

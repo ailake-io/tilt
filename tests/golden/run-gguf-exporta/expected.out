@@ -1,0 +1,4 @@
+== pipeline usar ==
+modelo M: gguf exportado para modelo.gguf (4 tensores)
+a: 0
+forma: [2]

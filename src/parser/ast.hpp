@@ -60,6 +60,7 @@ struct Expr {
   std::string text;       // literal text / name / operator / member name / device name
   bool boolean = false;   // BoolLit
   bool optional = false;  // Member reached via '?.'
+  bool paren_call = false;  // Call com parenteses f(...) (forma nao-ambigua; bare-call e guloso)
 
   ExprPtr lhs;
   ExprPtr rhs;
@@ -111,6 +112,7 @@ struct Item {
   std::vector<ExprPtr> header;   // tokens between key and ':'  (e.g. `rota post "/x"`)
   std::vector<Arg> params;       // Decl `funcao`: parameters (name + optional type expr)
   ExprPtr value;                 // inline value after ':' (Field); RHS (`seja`); `funcao` return type
+  ExprPtr default_value;         // Field `chave: Tipo = padrao` em `tipo` (valor padrao do campo)
   std::unique_ptr<Block> block;  // nested block (Decl / Field)
 
   StmtPtr stmt;   // Stmt

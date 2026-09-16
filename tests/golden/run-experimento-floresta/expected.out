@@ -1,0 +1,6 @@
+== experimento prever_churn ==
+modelo: floresta_aleatoria | linhas: 8 (treino 6, teste 2) | atributos: 3
+teste acuracia: 1.0000
+teste f1: 1.0000
+== pipeline p ==
+1 0.52

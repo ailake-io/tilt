@@ -171,6 +171,79 @@ def main() -> int:
     if "seja y" not in h:
         problems.append(f"hover nome declarado vazio: {h[:80]!r}")
 
+    # ------------------------------------------------- hover com tipos (S3.4)
+    typedoc = (
+        "tipo Pedido:\n"
+        "  nome: texto\n"
+        "  qtd: inteiro = 1\n"
+        "\n"
+        "funcao soma a: inteiro, b: inteiro -> inteiro:\n"
+        "  retornar a + b\n"
+        "\n"
+        "pipeline p:\n"
+        "  passos:\n"
+        "    - total = soma(2, 3)\n"
+        "    - imprimir total\n"
+    )
+    tframes = run_lsp(
+        binary,
+        typedoc,
+        [
+            hover_req(30, 4, 8),  # soma (assinatura com tipos)
+            hover_req(31, 0, 6),  # Pedido (campos do tipo)
+            hover_req(32, 4, 12),  # a (parametro tipado)
+            hover_req(33, 9, 8),  # total (variavel sem anotacao: sem tipo)
+        ],
+    )
+    if tframes is None:
+        return 1
+    tr = by_id(tframes)
+
+    h = (tr.get(30, {}).get("result") or {}).get("contents", {}).get("value", "")
+    if "funcao soma(a: inteiro, b: inteiro) -> inteiro" not in h:
+        problems.append(f"hover assinatura soma: {h[:160]!r}")
+    h = (tr.get(31, {}).get("result") or {}).get("contents", {}).get("value", "")
+    if "nome: texto" not in h or "qtd: inteiro" not in h:
+        problems.append(f"hover campos Pedido: {h[:160]!r}")
+    h = (tr.get(32, {}).get("result") or {}).get("contents", {}).get("value", "")
+    if "a: inteiro" not in h:
+        problems.append(f"hover parametro a: {h[:160]!r}")
+    h = (tr.get(33, {}).get("result") or {}).get("contents", {}).get("value", "")
+    if "variavel total" not in h or "->" in h.split("```")[0]:
+        problems.append(f"hover variavel sem tipo vazou tipo: {h[:160]!r}")
+
+    # ------------------------------------------- hover de expressoes (S3.4-D2)
+    exprdoc = (
+        "pipeline p:\n"
+        "  passos:\n"
+        "    - x = 2 + 3\n"
+        "    - nomes = [\"a\", \"b\"]\n"
+        "    - primeiro = nomes[0]\n"
+        "    - imprimir x\n"
+    )
+    eframes = run_lsp(
+        binary,
+        exprdoc,
+        [
+            hover_req(40, 2, 12),  # 2 + 3 (binaria => inteiro)
+            hover_req(41, 5, 15),  # x em `imprimir x` (uso => valor: inteiro)
+            hover_req(42, 4, 24),  # ] de nomes[0] (indice em lista de texto)
+        ],
+    )
+    if eframes is None:
+        return 1
+    er = by_id(eframes)
+
+    h = (er.get(40, {}).get("result") or {}).get("contents", {}).get("value", "")
+    if "`inteiro`" not in h:
+        problems.append(f"hover expr 2+3: {h[:160]!r}")
+    h = (er.get(41, {}).get("result") or {}).get("contents", {}).get("value", "")
+    if "valor: inteiro" not in h:
+        problems.append(f"hover uso de x: {h[:160]!r}")
+    h = (er.get(42, {}).get("result") or {}).get("contents", {}).get("value", "")
+    if "`texto`" not in h:
+        problems.append(f"hover nomes[0]: {h[:160]!r}")
+
     # ----------------------------------------------------------- definition
     def def_req(i, line, ch):
         return {

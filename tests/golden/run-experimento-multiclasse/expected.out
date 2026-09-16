@@ -1,0 +1,5 @@
+== experimento multi ==
+modelo: regressao_logistica | linhas: 9 (treino 6, teste 3) | atributos: 1
+teste acuracia: 1.0000
+== pipeline p ==
+b 0.982838

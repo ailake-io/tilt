@@ -35,6 +35,9 @@ Tensor matmul(const Tensor& a, const Tensor& b);
 Tensor transpose2d(const Tensor& a);
 Tensor reshape(const Tensor& a, std::vector<std::int64_t> shape);
 
+// Fatia linhas da dimensao 0 (mini-lote): saida [idx.size(), ...].
+Tensor fatiar_lote(const Tensor& a, const std::vector<std::int64_t>& idx);
+
 Tensor apply_unary(const Tensor& a, const std::string& fn);  // relu/gelu/silu/sigmoide/tanh
 Tensor softmax_last(const Tensor& a);
 Tensor layer_norm_last(const Tensor& a);  // normaliza sobre a ultima dimensao (sem affine)
@@ -42,12 +45,24 @@ Tensor layer_norm_last(const Tensor& a);  // normaliza sobre a ultima dimensao (
 // Convolucao 2D NCHW, padding valido: [N, C_in, H, W] x [C_out, C_in, KH, KW]
 // -> [N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]. Sem dilation.
 Tensor conv2d(const Tensor& x, const Tensor& nucleo, std::int64_t passo = 1);
+Tensor adicionar_vies_conv(const Tensor& y, const Tensor& vies);
+void conv2d_backward(const Tensor& x, const Tensor& nucleo, const Tensor& grad_saida,
+                     std::int64_t passo, Tensor& grad_x, Tensor& grad_nucleo, Tensor& grad_vies);
+
+// Agrupamento maximo NCHW, padding valido: janela JxJ e passo S (padrao S = J).
+Tensor maxpool2d(const Tensor& x, std::int64_t janela, std::int64_t passo = 0);
+Tensor maxpool2d_backward(const Tensor& x, const Tensor& grad_saida, std::int64_t janela,
+                          std::int64_t passo = 0);
 
 // Batch norm por canal sobre [N, C, ...]: y = gama * (x - media) / sqrt(var + eps) + beta.
 // gama/beta/media/var aceitos como [C] ou escalar; com em_treino, media/var sao
 // calculadas do proprio lote (variancia populacional) e os tensores media/var ignorados.
 Tensor norma_lote(const Tensor& x, const Tensor& gama, const Tensor& beta, const Tensor& media,
                   const Tensor& var, float eps, bool em_treino);
+void norma_lote_estatisticas(const Tensor& x, Tensor& media, Tensor& var);
+void norma_lote_backward(const Tensor& x, const Tensor& grad_saida, const Tensor& gama,
+                         const Tensor& media, const Tensor& var, float eps, Tensor& grad_x,
+                         Tensor& grad_gama, Tensor& grad_beta);
 
 float sum_all(const Tensor& a);
 float mean_all(const Tensor& a);

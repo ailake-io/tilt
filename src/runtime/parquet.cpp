@@ -2527,7 +2527,144 @@ void parquet_write(const std::string& path, const Value& tabela,
   out.write("PAR1", 4);
 }
 
-Value parquet_read(const std::string& path) {
+// No de schema achatado (usa ColDesc para as folhas). Era local de
+// parquet_read; içado para permitir abertura/leitura por row group.
+struct RField {
+  std::string name;
+  bool is_struct = false;
+  bool is_list = false;
+  bool is_map = false;      // grupo MAP: key/value como listas zipadas
+  bool nested_list = false;  // lista de listas (Marco 2 / B2a)
+  bool inner_nullable = false;  // grupo element interno OPTIONAL
+  bool struct_list = false;  // lista de structs (Marco 2 / B2b)
+  bool elem_struct_nullable = false;  // elemento struct Nulo (OPTIONAL)
+  int elem_null_level = -1;  // def do marcador de elemento Nulo
+  bool optional = false;  // rep==1 no proprio nivel (struct) ou outer (lista)
+  bool repeated = false;  // folha de lista
+  bool elem_nullable = false;
+  bool allow_null_element = false;  // valores Nulo em mapa
+  bool struct_elem_field = false;  // campo de elemento de lista de structs
+  PType leaf_type = PT_BYTE_ARRAY;
+  int max_def = 0;
+  int max_rep = 0;
+  int def_base = 0;       // soma dos optionals dos structs ancestrais
+  bool outer_optional = false;
+  int conv = 0;           // conversao logica (ver ColDesc)
+  int dec_scale = 0;      // escala (decimal) ou divisor (hora/timestamp)
+  int fixed_len = 0;      // FIXED_LEN_BYTE_ARRAY
+  int null_level = -1;    // struct/map OPTIONAL: def <= null_level = nulo
+  int leaf_idx = -1;
+  int value_idx = -1;  // mapa: folha dos valores (chave = leaf_idx)
+  std::vector<int> sub_leaves;  // folhas da subarvore (structs/mapas)
+  std::vector<RField> children;
+};
+
+// Arquivo parquet aberto: bytes + schema + metadados dos row groups.
+// Permite decodificar grupo a grupo sem materializar o arquivo todo.
+ struct LeitorParquet {
+   std::string path;
+   std::string file;
+   std::vector<RField> top;
+   std::vector<ColDesc> cols_desc;
+   std::vector<std::vector<ColMeta>> row_groups;
+   std::vector<std::int64_t> rg_num_rows;
+   std::int64_t num_rows = 0;
+ };
+
+ LeitorParquet abrir_parquet(const std::string& path);
+
+// Remonta um valor (folha/struct/lista/mapa) da linha `r` sobre colunas ja
+// decodificadas. Era lambda local de parquet_read; virou funcao para reuso
+// na leitura por row group.
+Value montar_no(const RField& f, std::size_t r,
+                const std::vector<std::vector<Value>>& columns,
+                const std::vector<std::vector<int>>& coldefs) {
+  if (f.struct_list) {
+    // Linha nula (externa ou ancestral): todos os campos Nulo -> Nulo;
+    // vazia: todos [] -> []; senao zipa por posicao.
+    bool tudo_nulo = true;
+    for (const RField& ch : f.children) {
+      const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
+      if (r < col.size() && col[r].kind == ValueKind::Lista) {
+        tudo_nulo = false;
+        break;
+      }
+    }
+    if (tudo_nulo) return Value::nulo();
+    Value out = Value::lista();
+    std::size_t n = 0;
+    for (const RField& ch : f.children) {
+      const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
+      if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list) {
+        n = std::max(n, col[r].list->size());
+      }
+    }
+    for (std::size_t j = 0; j < n; ++j) {
+      bool algum = false;
+      Value m = Value::mapa();
+      for (const RField& ch : f.children) {
+        const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
+        Value v;
+        if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list &&
+            j < col[r].list->size()) {
+          v = (*col[r].list)[j];
+        }
+        if (v.kind != ValueKind::Nulo) algum = true;
+        m.map->set(ch.name, std::move(v));
+      }
+      if (f.elem_struct_nullable && !algum) {
+        out.list->push_back(Value::nulo());
+      } else {
+        out.list->push_back(std::move(m));
+      }
+    }
+    return out;
+  }
+  if (f.is_map) {
+    const auto& keys = columns[static_cast<std::size_t>(f.leaf_idx)];
+    const auto& vals = columns[static_cast<std::size_t>(f.value_idx)];
+    const Value& k = r < keys.size() ? keys[r] : Value::nulo();
+    const Value& v = r < vals.size() ? vals[r] : Value::nulo();
+    // Mapa nulo quando as chaves sao Nulo (struct ancestral nulo ou mapa
+    // nulo: def abaixo da base em ambas as folhas).
+    if (k.kind != ValueKind::Lista || v.kind != ValueKind::Lista) {
+      return Value::nulo();
+    }
+    if (k.list->size() != v.list->size()) {
+      die("coluna '" + f.name + "': chaves e valores do mapa com tamanhos diferentes");
+    }
+    Value m = Value::mapa();
+    for (std::size_t i = 0; i < k.list->size(); ++i) {
+      const Value& key = (*k.list)[i];
+      if (key.kind != ValueKind::Texto) {
+        die("coluna '" + f.name + "': chave de mapa nao-texto");
+      }
+      m.map->set(key.s, (*v.list)[i]);
+    }
+    return m;
+  }
+  if (!f.is_struct) {
+    const auto& col = columns[static_cast<std::size_t>(f.leaf_idx)];
+    if (r >= col.size()) die("coluna '" + f.name + "' tem menos valores que 'num_rows'");
+    return col[r];
+  }
+  if (f.optional) {
+    bool definido = false;
+    for (int li : f.sub_leaves) {
+      const auto& dd = coldefs[static_cast<std::size_t>(li)];
+      if (r < dd.size() && dd[r] > f.null_level) {
+        definido = true;
+        break;
+      }
+    }
+    if (!definido) return Value::nulo();
+  }
+  Value m = Value::mapa();
+  for (const RField& ch : f.children) m.map->set(ch.name, montar_no(ch, r, columns, coldefs));
+  return m;
+}
+
+LeitorParquet abrir_parquet(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) die("nao foi possivel abrir '" + path + "'");
   std::string file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -2889,35 +3026,6 @@ Value parquet_read(const std::string& path) {
   // Arvore de campos lidos do schema (Fase 12-5a): escalares, listas e
   // structs aninhados. `max_def/max_rep` acumulam os niveis dos grupos
   // ancestrais (struct OPTIONAL soma 1, como o outer das listas).
-  struct RField {
-    std::string name;
-    bool is_struct = false;
-    bool is_list = false;
-    bool is_map = false;      // grupo MAP: key/value como listas zipadas
-    bool nested_list = false;  // lista de listas (Marco 2 / B2a)
-    bool inner_nullable = false;  // grupo element interno OPTIONAL
-    bool struct_list = false;  // lista de structs (Marco 2 / B2b)
-    bool elem_struct_nullable = false;  // elemento struct Nulo (OPTIONAL)
-    int elem_null_level = -1;  // def do marcador de elemento Nulo
-    bool optional = false;  // rep==1 no proprio nivel (struct) ou outer (lista)
-    bool repeated = false;  // folha de lista
-    bool elem_nullable = false;
-    bool allow_null_element = false;  // valores Nulo em mapa
-    bool struct_elem_field = false;  // campo de elemento de lista de structs
-    PType leaf_type = PT_BYTE_ARRAY;
-    int max_def = 0;
-    int max_rep = 0;
-    int def_base = 0;       // soma dos optionals dos structs ancestrais
-    bool outer_optional = false;
-    int conv = 0;           // conversao logica (ver ColDesc)
-    int dec_scale = 0;      // escala (decimal) ou divisor (hora/timestamp)
-    int fixed_len = 0;      // FIXED_LEN_BYTE_ARRAY
-    int null_level = -1;    // struct/map OPTIONAL: def <= null_level = nulo
-    int leaf_idx = -1;
-    int value_idx = -1;  // mapa: folha dos valores (chave = leaf_idx)
-    std::vector<int> sub_leaves;  // folhas da subarvore (structs/mapas)
-    std::vector<RField> children;
-  };
   std::function<RField(int, int)> parse_no;
   parse_no = [&](int idx, int def_base) -> RField {
     const SchemaElem& e = selem[static_cast<std::size_t>(idx)];
@@ -3186,6 +3294,26 @@ Value parquet_read(const std::string& path) {
     }
     if (rg_num_rows[rg] < 0) rg_num_rows[rg] = num_rows;
   }
+  LeitorParquet lp;
+  lp.path = path;
+  lp.file = std::move(file);
+  lp.top = std::move(top);
+  lp.cols_desc = std::move(cols_desc);
+  lp.row_groups = std::move(row_groups);
+  lp.rg_num_rows = std::move(rg_num_rows);
+  lp.num_rows = num_rows;
+  return lp;
+}
+
+Value parquet_read(const std::string& path) {
+  LeitorParquet lp = abrir_parquet(path);
+  const std::string& file = lp.file;
+  const std::vector<RField>& top = lp.top;
+  const std::vector<ColDesc>& cols_desc = lp.cols_desc;
+  const std::vector<std::vector<ColMeta>>& row_groups = lp.row_groups;
+  const std::vector<std::int64_t>& rg_num_rows = lp.rg_num_rows;
+  const std::int64_t num_rows = lp.num_rows;
+  const std::size_t ncols = cols_desc.size();
 
   // decodifica cada coluna: percorre os row groups concatenando os chunks
   std::vector<std::vector<Value>> columns(ncols);
@@ -3204,100 +3332,58 @@ Value parquet_read(const std::string& path) {
   // Nulo nos campos ausentes). Struct REQUIRED e sempre mapa. Listas de
   // structs zipam os campos por posicao (elemento todo-Nulo vira Nulo
   // quando o grupo element e OPTIONAL).
-  std::function<Value(const RField&, std::size_t)> build_no =
-      [&](const RField& f, std::size_t r) -> Value {
-    if (f.struct_list) {
-      // Linha nula (externa ou ancestral): todos os campos Nulo -> Nulo;
-      // vazia: todos [] -> []; senao zipa por posicao.
-      bool tudo_nulo = true;
-      for (const RField& ch : f.children) {
-        const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
-        if (r < col.size() && col[r].kind == ValueKind::Lista) {
-          tudo_nulo = false;
-          break;
-        }
-      }
-      if (tudo_nulo) return Value::nulo();
-      Value out = Value::lista();
-      std::size_t n = 0;
-      for (const RField& ch : f.children) {
-        const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
-        if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list) {
-          n = std::max(n, col[r].list->size());
-        }
-      }
-      for (std::size_t j = 0; j < n; ++j) {
-        bool algum = false;
-        Value m = Value::mapa();
-        for (const RField& ch : f.children) {
-          const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
-          Value v;
-          if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list &&
-              j < col[r].list->size()) {
-            v = (*col[r].list)[j];
-          }
-          if (v.kind != ValueKind::Nulo) algum = true;
-          m.map->set(ch.name, std::move(v));
-        }
-        if (f.elem_struct_nullable && !algum) {
-          out.list->push_back(Value::nulo());
-        } else {
-          out.list->push_back(std::move(m));
-        }
-      }
-      return out;
-    }
-    if (f.is_map) {
-      const auto& keys =
-          columns[static_cast<std::size_t>(f.leaf_idx)];
-      const auto& vals =
-          columns[static_cast<std::size_t>(f.value_idx)];
-      const Value& k = r < keys.size() ? keys[r] : Value::nulo();
-      const Value& v = r < vals.size() ? vals[r] : Value::nulo();
-      // Mapa nulo quando as chaves sao Nulo (struct ancestral nulo ou mapa
-      // nulo: def abaixo da base em ambas as folhas).
-      if (k.kind != ValueKind::Lista || v.kind != ValueKind::Lista) {
-        return Value::nulo();
-      }
-      if (k.list->size() != v.list->size()) {
-        die("coluna '" + f.name + "': chaves e valores do mapa com tamanhos diferentes");
-      }
-      Value m = Value::mapa();
-      for (std::size_t i = 0; i < k.list->size(); ++i) {
-        const Value& key = (*k.list)[i];
-        if (key.kind != ValueKind::Texto) {
-          die("coluna '" + f.name + "': chave de mapa nao-texto");
-        }
-        m.map->set(key.s, (*v.list)[i]);
-      }
-      return m;
-    }
-    if (!f.is_struct) {
-      const auto& col = columns[static_cast<std::size_t>(f.leaf_idx)];
-      if (r >= col.size()) die("coluna '" + f.name + "' tem menos valores que 'num_rows'");
-      return col[r];
-    }
-    if (f.optional) {
-      bool definido = false;
-      for (int li : f.sub_leaves) {
-        const auto& dd = coldefs[static_cast<std::size_t>(li)];
-        if (r < dd.size() && dd[r] > f.null_level) {
-          definido = true;
-          break;
-        }
-      }
-      if (!definido) return Value::nulo();
-    }
-    Value m = Value::mapa();
-    for (const RField& ch : f.children) m.map->set(ch.name, build_no(ch, r));
-    return m;
-  };
+  // Remontagem via montar_no (funcao de arquivo, reutilizada na leitura por grupo).
 
   Value tabela = Value::tabela();
   for (std::int64_t r = 0; r < num_rows; ++r) {
     Value row = Value::mapa();
     for (const RField& t : top) {
-      row.map->set(t.name, build_no(t, static_cast<std::size_t>(r)));
+      row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+    }
+    tabela.list->push_back(std::move(row));
+  }
+  return tabela;
+}
+
+// ---- streaming por row group ----
+
+struct ParquetEstado {
+  LeitorParquet leitor;
+};
+
+ParquetFluxo parquet_abrir_fluxo(const std::string& path) {
+  ParquetFluxo fx;
+  fx.caminho = path;
+  auto estado =
+      std::shared_ptr<ParquetEstado>(new ParquetEstado(), [](ParquetEstado* p) { delete p; });
+  estado->leitor = abrir_parquet(path);
+  for (const RField& t : estado->leitor.top) fx.colunas.push_back(t.name);
+  fx.grupos = static_cast<std::int64_t>(estado->leitor.row_groups.size());
+  fx.linhas = estado->leitor.num_rows;
+  for (std::int64_t r : estado->leitor.rg_num_rows) fx.linhas_por_grupo.push_back(r);
+  fx.estado = std::move(estado);
+  return fx;
+}
+
+Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo) {
+  if (!fx.estado) die("fluxo parquet fechado");
+  LeitorParquet& lp = fx.estado->leitor;
+  if (grupo < 0 || grupo >= static_cast<std::int64_t>(lp.row_groups.size())) {
+    die("row group " + std::to_string(grupo) + " fora do arquivo '" + lp.path + "'");
+  }
+  const std::size_t g = static_cast<std::size_t>(grupo);
+  const std::size_t ncols = lp.cols_desc.size();
+  std::vector<std::vector<Value>> columns(ncols);
+  std::vector<std::vector<int>> coldefs(ncols);
+  for (std::size_t ci = 0; ci < ncols; ++ci) {
+    decode_chunk(lp.file, lp.row_groups[g][ci], lp.cols_desc[ci], lp.rg_num_rows[g], columns[ci],
+                 &coldefs[ci]);
+  }
+  Value tabela = Value::tabela();
+  for (std::int64_t r = 0; r < lp.rg_num_rows[g]; ++r) {
+    Value row = Value::mapa();
+    for (const RField& t : lp.top) {
+      row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
     }
     tabela.list->push_back(std::move(row));
   }

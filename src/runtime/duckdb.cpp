@@ -2,6 +2,7 @@
 
 #include "runtime/compat.hpp"
 #include "runtime/sql_params.hpp"
+#include "runtime/sql_pool.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -155,26 +156,51 @@ bool returns_rows(const std::string& sql) {
          kw == "EXPLAIN" || kw == "DESCRIBE" || kw == "SUMMARIZE" || kw == "SHOW";
 }
 
-// Abre o banco e uma conexão; em qualquer falha já morre com mensagem clara.
-// A conexão e o banco precisam ser fechados pelo caller (disconnect/close
-// aceitam ponteiros e zeram os handles).
-struct Conn {
-  const DuckdbApi& db;
+// Par banco+conexao guardado no pool como um handle opaco.
+struct DbConn {
   void* database = nullptr;
   void* connection = nullptr;
+};
 
-  explicit Conn(const DuckdbApi& d, const std::string& db_path) : db(d) {
-    if (db.open(db_path.c_str(), &database) != kDuckdbSuccess || database == nullptr) {
-      die("nao foi possivel abrir o banco '" + db_path + "'");
-    }
-    if (db.connect(database, &connection) != kDuckdbSuccess || connection == nullptr) {
-      db.close(&database);
-      die("nao foi possivel conectar no banco '" + db_path + "'");
-    }
+// Abre banco+conexao; em qualquer falha já morre com mensagem clara.
+DbConn* abre_banco(const DuckdbApi& db, const std::string& db_path) {
+  auto* p = new DbConn;
+  if (db.open(db_path.c_str(), &p->database) != kDuckdbSuccess || p->database == nullptr) {
+    delete p;
+    die("nao foi possivel abrir o banco '" + db_path + "'");
   }
-  ~Conn() {
-    db.disconnect(&connection);
-    db.close(&database);
+  if (db.connect(p->database, &p->connection) != kDuckdbSuccess || p->connection == nullptr) {
+    db.close(&p->database);
+    delete p;
+    die("nao foi possivel conectar no banco '" + db_path + "'");
+  }
+  return p;
+}
+
+void fecha_banco(const DuckdbApi& db, void* h) {
+  auto* p = static_cast<DbConn*>(h);
+  if (!p) return;
+  db.disconnect(&p->connection);
+  db.close(&p->database);
+  delete p;
+}
+
+// Conexao via pool (statements avulsos) ou dedicada (transacao, pooled=false).
+// DuckDB e em-processo: a conexao nao "cai" sozinha, validacao e trivial.
+struct Conn {
+  const DuckdbApi& db;
+  PooledConn pool;
+  void* connection = nullptr;
+
+  Conn(const DuckdbApi& d, const std::string& db_path, const std::string& sql, bool pooled = true)
+      : db(d),
+        pool(pooled ? "duckdb" : "", db_path, [&] { return abre_banco(db, db_path); },
+             [](void* h) {
+               auto* p = static_cast<DbConn*>(h);
+               return p && p->connection;
+             },
+             [&](void* h) { fecha_banco(db, h); }, pooled ? sql : "") {
+    connection = static_cast<DbConn*>(pool.get())->connection;
   }
   Conn(const Conn&) = delete;
   Conn& operator=(const Conn&) = delete;
@@ -248,7 +274,7 @@ Value duckdb_query(const std::string& db_path, const std::string& sql) {
     die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
   }
 
-  Conn conn(db, db_path);
+  Conn conn(db, db_path, sql);
   DuckdbResult result;
   if (db.query(conn.connection, sql.c_str(), &result) != kDuckdbSuccess) {
     const std::string msg = result_error(db, &result);
@@ -281,7 +307,7 @@ void duckdb_exec(const std::string& db_path, const std::string& sql) {
   // A C API nao expoe duckdb_execute_statements nesta versao; DDL/DML roda via
   // duckdb_query (sucesso = DuckDBSuccess, sem linhas) e o erro vem de
   // duckdb_result_error.
-  Conn conn(db, db_path);
+  Conn conn(db, db_path, sql);
   DuckdbResult result;
   if (db.query(conn.connection, sql.c_str(), &result) != kDuckdbSuccess) {
     const std::string msg = result_error(db, &result);
@@ -364,7 +390,7 @@ void duckdb_exec_params(const std::string& db_path, const std::string& sql,
     die("libduckdb nao encontrada: instale o pacote duckdb");
 #endif
   }
-  Conn conn(db, db_path);
+  Conn conn(db, db_path, sql);
   exec_um(db, conn.connection, sql, params, "");
 }
 
@@ -384,7 +410,7 @@ Value duckdb_query_params(const std::string& db_path, const std::string& sql,
   if (!returns_rows(sql)) {
     die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
   }
-  Conn conn(db, db_path);
+  Conn conn(db, db_path, sql);
   void* prep = prepara_e_liga(db, conn.connection, sql, params, "", "consulta");
   DuckdbResult result;
   const int rc = db.execute_prepared(prep, &result);
@@ -422,7 +448,7 @@ void duckdb_transact(const std::string& db_path,
     db.destroy_result(&result);
     if (rc != kDuckdbSuccess) die(std::string("falha em ") + sql + ": " + msg);
   };
-  Conn conn(db, db_path);
+  Conn conn(db, db_path, "", false);  // transacao: conexao dedicada, fora do pool
   simples(conn.connection, "BEGIN TRANSACTION");
   for (std::size_t k = 0; k < passos.size(); ++k) {
     try {

@@ -1,0 +1,4 @@
+== pipeline usar ==
+modelo M: onnx exportado para modelo.onnx
+a: 0
+forma: [2]

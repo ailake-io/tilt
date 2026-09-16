@@ -2,6 +2,7 @@
 
 #include "runtime/compat.hpp"
 #include "runtime/sql_params.hpp"
+#include "runtime/sql_pool.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -160,25 +161,28 @@ Value postgres_query(const std::string& url, const std::string& sql) {
 #endif
   }
 
-  void* conn = connect_or_die(pq, url);
+  // Pool por (backend, url): a conexao volta ao idle no fim do escopo
+  // (validada com PQstatus na proxima aquisicao). Erros dao die() e o
+  // destructor recicla — sem pq.finish manual aqui.
+  PooledConn pool("postgres", url, [&] { return connect_or_die(pq, url); },
+                  [&](void* h) { return pq.status(h) == kConnectionOk; },
+                  [&](void* h) { pq.finish(h); }, sql);
+  void* conn = pool.get();
 
   void* res = pq.exec(conn, sql.c_str());
   if (!res) {
     const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
-    pq.finish(conn);
     die("falha ao executar consulta: " + msg);
   }
   if (pq.result_status(res) != kPgTuplesOk) {
     const char* err = pq.error_message(conn);
     const std::string detail = (err && *err) ? ": " + std::string(err) : "";
     pq.clear(res);
-    pq.finish(conn);
     die("apenas consultas SELECT sao suportadas nesta versao" + detail);
   }
 
   Value out = materializa_pg(pq, res);
   pq.clear(res);
-  pq.finish(conn);
   return out;
 }
 
@@ -192,17 +196,18 @@ void postgres_exec(const std::string& url, const std::string& sql) {
 #endif
   }
 
-  void* conn = connect_or_die(pq, url);
+  PooledConn pool("postgres", url, [&] { return connect_or_die(pq, url); },
+                  [&](void* h) { return pq.status(h) == kConnectionOk; },
+                  [&](void* h) { pq.finish(h); }, sql);
+  void* conn = pool.get();
   void* res = pq.exec(conn, sql.c_str());
   if (!res) {
     const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
-    pq.finish(conn);
     die("falha ao executar comando: " + msg);
   }
   const int status = pq.result_status(res);
   const std::string err = pq.error_message(conn) ? pq.error_message(conn) : "";
   pq.clear(res);
-  pq.finish(conn);
   if (status != kPgCommandOk && status != kPgTuplesOk) {
     die("comando rejeitado pelo servidor: " + (err.empty() ? "erro desconhecido" : err));
   }
@@ -268,14 +273,10 @@ void postgres_exec_params(const std::string& url, const std::string& sql,
     die("libpq.so.5 nao encontrada; instale o pacote libpq5");
 #endif
   }
-  void* conn = connect_or_die(pq, url);
-  try {
-    exec_um(pq, conn, sql, params, "");
-  } catch (...) {
-    pq.finish(conn);
-    throw;
-  }
-  pq.finish(conn);
+  PooledConn pool("postgres", url, [&] { return connect_or_die(pq, url); },
+                  [&](void* h) { return pq.status(h) == kConnectionOk; },
+                  [&](void* h) { pq.finish(h); }, sql);
+  exec_um(pq, pool.get(), sql, params, "");
 }
 
 // Consulta com `?` ligados em texto via PQexecParams (SELECT com params).
@@ -306,24 +307,24 @@ Value postgres_query_params(const std::string& url, const std::string& sql,
       valores.push_back(textos.back().c_str());
     }
   }
-  void* conn = connect_or_die(pq, url);
+  PooledConn pool("postgres", url, [&] { return connect_or_die(pq, url); },
+                  [&](void* h) { return pq.status(h) == kConnectionOk; },
+                  [&](void* h) { pq.finish(h); }, sql);
+  void* conn = pool.get();
   void* res = pq.exec_params(conn, reescrito.c_str(), static_cast<int>(params.size()), nullptr,
                              valores.data(), nullptr, nullptr, 0);
   if (!res) {
     const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
-    pq.finish(conn);
     die("falha ao executar consulta: " + msg);
   }
   if (pq.result_status(res) != kPgTuplesOk) {
     const char* err = pq.error_message(conn);
     const std::string detail = (err && *err) ? ": " + std::string(err) : "";
     pq.clear(res);
-    pq.finish(conn);
     die("apenas consultas SELECT sao suportadas nesta versao" + detail);
   }
   Value out = materializa_pg(pq, res);
   pq.clear(res);
-  pq.finish(conn);
   return out;
 }
 

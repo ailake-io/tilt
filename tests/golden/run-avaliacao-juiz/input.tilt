@@ -1,0 +1,15 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+avaliacao juiz:
+  dados:
+    - { v: "PASSA", esperado: "x" }
+  executar:
+    - retornar caso.v
+  metricas: [juiz]
+  juiz:
+    llm: gpt
+    usuario: "Repita: {{saida}}"
+  verboso: verdadeiro

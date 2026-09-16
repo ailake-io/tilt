@@ -1,0 +1,7 @@
+erro[T901]: parquet: nao foi possivel abrir 'dados.parquet'
+  --> input.tilt:9:10
+   |
+ 9 |   dados: carregador "dados.parquet", alvo: "y", fluxo: verdadeiro
+   |          ^^^^^^^^^^
+   |
+

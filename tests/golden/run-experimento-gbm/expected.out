@@ -1,0 +1,5 @@
+== experimento gbm ==
+modelo: gradiente_impulsionado | linhas: 8 (treino 6, teste 2) | atributos: 1
+teste acuracia: 1.0000
+== pipeline p ==
+1 0.85615

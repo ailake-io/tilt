@@ -1,0 +1,9 @@
+tipo Pedido:
+  nome: texto = "anon"
+  qtd: inteiro = 1
+  urgente: logico = falso
+  nivel: "baixo" | "medio" | "alto" = "medio"
+
+pipeline p:
+  passos:
+    - imprimir "ok"

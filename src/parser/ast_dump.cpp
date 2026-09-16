@@ -299,6 +299,10 @@ struct Printer {
           os << " ";
           expr(*it.value);
         }
+        if (it.default_value) {
+          os << " = ";
+          expr(*it.default_value);
+        }
         bool nested = it.block || (it.value && has_call_block(*it.value));
         if (!nested) {
           os << ")\n";

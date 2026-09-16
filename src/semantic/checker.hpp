@@ -27,16 +27,36 @@ namespace tilt {
 // `funcao`/`pipeline`/`servico`.
 class SemanticChecker {
  public:
-  SemanticChecker(const ast::Program& program, DiagnosticEngine& diag);
-  void run();
-
- private:
   struct Symbol {
     std::string name;
     std::string kind;  // declaring keyword, or "var" / "modulo"
     sema::Type type;
     Span span;
   };
+
+  SemanticChecker(const ast::Program& program, DiagnosticEngine& diag);
+  void run();
+
+  // Para o LSP: simbolos globais com tipos resolvidos (apos run()) e
+  // anotacoes de tipo por expressao (params/retorno de `funcao`, campos de
+  // `entrada:`/`saida:`). Retorna nullptr quando sem anotacao.
+  const std::unordered_map<std::string, Symbol>& globals() const { return globals_; }
+  const sema::Type* annotation_of(const ast::Expr* e) const {
+    auto it = annotation_cache_.find(e);
+    return it == annotation_cache_.end() ? nullptr : &it->second;
+  }
+  // Para o LSP: tipo/forma inferidos de uma expressao (apos run()).
+  // nullptr = desconhecido (hover cai no texto atual).
+  const sema::TypeKind* hover_type(const ast::Expr* e) const {
+    auto it = hover_types_.find(e);
+    return it == hover_types_.end() ? nullptr : &it->second;
+  }
+  const std::vector<std::int64_t>* hover_shape(const ast::Expr* e) const {
+    auto it = hover_shapes_.find(e);
+    return it == hover_shapes_.end() ? nullptr : &it->second;
+  }
+
+ private:
 
   void collect();
   void resolve_types();
@@ -75,10 +95,21 @@ class SemanticChecker {
   // Type inference (T011): infere o tipo de uma expressao a partir de
   // literais, builtins, metodos e anotacoes conhecidas em `types`, validando
   // operadores, chamadas de builtins e metodos quando o tipo esta evidente.
+  // (Wrapper registra conhecidos em hover_types_/hover_shapes_ para o LSP;
+  // a logica mora em infer_type_impl/infer_shape_impl.)
   // Desconhecido = sem verificacao (sem falsos positivos).
+  // Tipos conhecidos sao registrados em hover_types_ para o LSP.
   sema::TypeKind infer_type(const ast::Expr& expr, const TypeEnv& types);
+  sema::TypeKind infer_type_impl(const ast::Expr& expr, const TypeEnv& types);
+  std::optional<TensorShape> infer_shape_impl(const ast::Expr& expr, const ShapeEnv& shapes);
   void check_return(const ast::Expr* value, Span span, const TypeEnv& types,
                     const ShapeEnv& shapes);
+  // Aridade de chamada de `funcao` do usuario (T011). Faltantes sempre
+  // acusam (runtime preenche com nulo em silencio); sobrantes so na forma
+  // com parenteses — bare-call (`f x, y`) e guloso por desenho e o runtime
+  // ignora o excedente. So chamadas 100% posicionais; o resto pula.
+  void check_funcao_arity(const std::string& name, const std::vector<ast::Arg>& args, bool paren,
+                          Span span);
 
   // Anotacoes de tipo ja resolvidas na passada 2 (params/retorno de
   // `funcao`, campos de `entrada:`/`saida:`), por expressao de tipo.
@@ -110,6 +141,9 @@ class SemanticChecker {
   const ast::Program& program_;
   DiagnosticEngine& diag_;
   std::unordered_map<std::string, Symbol> globals_;
+  // Tipos/formas por expressao para o hover do LSP (so conhecidos).
+  std::unordered_map<const ast::Expr*, sema::TypeKind> hover_types_;
+  std::unordered_map<const ast::Expr*, std::vector<std::int64_t>> hover_shapes_;
 };
 
 // Convenience wrapper used by the CLI.

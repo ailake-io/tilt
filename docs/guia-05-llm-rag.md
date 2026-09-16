@@ -59,7 +59,7 @@ Cobertura com HTTP de verdade em `tests/llm_retry_test.sh` (mock local com
 
 | `TILT_LLM` | Comportamento |
 |---|---|
-| `mock` | respostas e embeddings determinísticos, **offline** — usado nos testes |
+| `mock` | respostas e embeddings determinísticos, **offline** — usado nos testes; `formato:` preenche campos com o padrão do `tipo` (`campo: <Tipo> = <valor>`) ou do tipo declarado |
 | vazio | chamada real via `curl` (Anthropic `/v1/messages`, OpenAI `/chat/completions` e `/embeddings`) |
 
 Em modo real o corpo vai num arquivo temporário e `curl --fail-with-body` faz o
@@ -199,3 +199,83 @@ pipeline indexar:
   `metadatas[].texto` e `documents[]` do ponto.
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).
+
+## `avaliacao` (evals)
+
+Evals de 1ª passada: o bloco `avaliacao` roda `executar:` uma vez por caso
+de `dados:` (mapa no escopo como `caso`, saída via `retornar`) e pontua cada
+caso contra `esperado` com todas as `metricas:` pedidas. Abaixo do `limiar:`
+(default 1.0), aborta com `T910` — ou só avisa com `ao_reprovar: avisar`.
+`dados:` aceita lista inline, bloco de casos, caminho `.csv`/`.parquet`/
+`.json` ou valor de `ler_*`.
+
+Métricas: `exata` (igualdade), `contem` (substring), `regex` (padrão em
+`esperado`, `regex_search`), `tolerancia` (números, `|saída − esperado| <=
+tolerancia:`, default 1e-6) e `juiz` (juiz-LLM — ver abaixo). O caso passa se
+**todas** passarem; o placar é `casos que passaram / casos rodados`.
+
+```tilt run
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+avaliacao resumo:
+  dados:
+    - { pergunta: "O que é tilt?", esperado: "[mock]" }
+    - { pergunta: "Resuma tilt", esperado: "resposta para" }
+  executar:
+    - resposta = perguntar gpt, usuario: caso.pergunta
+    - retornar resposta.texto
+  metricas: [contem]
+  limiar: 0.5
+  verboso: verdadeiro
+```
+
+Saída (com `TILT_LLM=mock`):
+
+```
+== avaliacao resumo ==
+  caso 0: passou
+  caso 1: passou
+avaliacao resumo: 2/2 passou | media 1.00 (limiar 0.50)
+```
+
+### Juiz-LLM, amostragem e run em arquivo
+
+A métrica `juiz` delega o veredito a um `llm`: exige o bloco `juiz:` com
+`llm:` (mais `sistema:`/`usuario:` opcionais, com `{{saida}}` e
+`{{esperado}}` interpolados). O caso passa se a resposta contiver `PASSA`;
+`FALHA` ou resposta sem veredito reprovam o caso (motivo `juiz: FALHA` ou
+`juiz indeciso`).
+
+`amostra: N` + `semente:` (default 7) rodam no máximo N casos, embaralhados
+de forma determinística (xorshift64*, o mesmo do init Xavier) — o resumo
+mostra `(amostra N/total, semente S)`. `registrar_em: "run.json"` grava o
+run (média, limiar, métricas, amostra/semente e por caso `{indice, passou,
+motivo, saida}`).
+
+```tilt run
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+avaliacao com_juiz:
+  dados:
+    - { pergunta: "Diga ok", esperado: "ok" }
+  executar:
+    - resposta = perguntar gpt, usuario: caso.pergunta
+    - retornar resposta.texto
+  metricas: [juiz]
+  juiz:
+    llm: gpt
+    usuario: "Esperado {{esperado}} na saida? Responda PASSA ou FALHA."
+  amostra: 1
+  registrar_em: "avaliacao_run.json"
+  ao_reprovar: avisar
+```
+
+Limites: juiz sem cadeia de pensamento estruturada nem multi-juiz com voto;
+amostra só por contagem (sem fração); `registrar_em` grava JSON local
+(sem POST REST).

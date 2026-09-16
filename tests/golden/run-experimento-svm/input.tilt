@@ -1,0 +1,17 @@
+experimento sv:
+  dados: [
+    { x: -2, y: 0 },
+    { x: -1, y: 0 },
+    { x: 1, y: 1 },
+    { x: 2, y: 1 }
+  ]
+  alvo: "y"
+  atributos: [x]
+  modelo: svm
+  metricas: [acuracia]
+  semente: 7
+
+pipeline p:
+  passos:
+    - r = experimento sv.prever { x: 1 }
+    - imprimir r.classe, r.probabilidade

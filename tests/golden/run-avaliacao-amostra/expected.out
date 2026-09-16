@@ -1,0 +1,5 @@
+== avaliacao amostra ==
+  caso 1: passou
+  caso 3: passou
+avaliacao amostra: 2/2 passou | media 1.00 (limiar 1.00) (amostra 2/5, semente 7)
+run salvo em run.json

@@ -1,0 +1,4 @@
+== experimento cv ==
+modelo: regressao_logistica | linhas: 8 (treino 6, teste 2) | atributos: 3
+teste acuracia: 1.0000
+cv acuracia: 1.0000 +- 0.0000 (4 folds)

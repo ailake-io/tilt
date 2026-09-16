@@ -1,0 +1,16 @@
+# Segundo `treino X` com `retomar:` nao e duplicata (T032): e continuacao
+# via checkpoint. (Sem `modelo` aqui de proposito: isola a isencao retomar
+# da isencao treino+modelo. O fluxo completo com modelo esta no guia-04.)
+treino Xor:
+  dados: { x: [[0, 0], [0, 1]], y: [0, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  epocas: 2
+  checkpoint: "xor.json"
+
+treino Xor:
+  dados: { x: [[0, 0], [0, 1]], y: [0, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  epocas: 4
+  retomar: "xor.json"

@@ -26,8 +26,9 @@ bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
 }
 
 bool is_entity_keyword(std::string_view kw) {
-  return word_in(kw, {"fonte", "pipeline", "verificar", "modelo", "treino", "tarefa", "experimento",
-                      "llm", "indice", "fluxo", "ferramenta", "agente", "equipe", "servico"});
+  return word_in(kw, {"fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa", "experimento",
+                       "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente", "equipe",
+                       "servico"});
 }
 
 bool is_secret_key(std::string_view key) {
@@ -156,6 +157,21 @@ void SemanticChecker::collect() {
       define(name, "tipo", std::move(rt), item->span);
       continue;
     }
+    // Segundo `treino X` com `retomar:` = continuacao de treino via
+    // checkpoint (o runtime executa os dois em ordem); sem `retomar:`
+    // continua duplicata (T032). Espelha a isencao treino+modelo.
+    if (kw == "treino" && item->block) {
+      if (auto it = globals_.find(name); it != globals_.end() && it->second.kind == "treino") {
+        bool retoma = false;
+        for (const auto& f : item->block->items) {
+          if (f && f->kind == ItemKind::Field && f->key == "retomar") {
+            retoma = true;
+            break;
+          }
+        }
+        if (retoma) continue;
+      }
+    }
     Type et;
     et.kind = TypeKind::Entidade;
     et.name = name;
@@ -268,6 +284,22 @@ void SemanticChecker::resolve_type_annotations(const Item& decl) {
     for (const auto& f : decl.block->items) {
       if (!f || f->kind != ItemKind::Field || !f->value) continue;
       Type ft = resolve_type_expr(*f->value);
+      // Valor padrao (`campo: Tipo = padrao`): o tipo do padrao precisa ser
+      // compativel com o declarado. Literais resolvem sem ambiente; nome
+      // desconhecido vira Unknown e segue sem verificacao (conservador).
+      if (f->default_value) {
+        TypeEnv vazio;
+        sema::TypeKind dk = infer_type(*f->default_value, vazio);
+        if (dk != TypeKind::Unknown) {
+          Type dv = Type::scalar(dk);
+          if (!sema::assignable(ft, dv)) {
+            report(DiagCode::TypeMismatch, f->default_value->span,
+                   "valor padrao de '" + f->key + "' e '" + sema::type_to_string(dv) +
+                       "', mas o campo e '" + sema::type_to_string(ft) + "'",
+                   {"ajuste o padrao para o tipo declarado ou o tipo para o padrao"});
+          }
+        }
+      }
       if (sym) sym->type.fields.emplace_back(f->key, std::make_shared<Type>(std::move(ft)));
     }
     return;
@@ -374,6 +406,14 @@ void SemanticChecker::visit_item(const Item& item, std::string_view entity_kw) {
   switch (item.kind) {
     case ItemKind::Field: {
       if (item.key == "dispositivo" && item.value) check_device(*item.value);
+      // Valor padrao ('= ...') so faz sentido em campo de `tipo`; aqui
+      // entity_kw nunca e "tipo" (nao e entity keyword), entao qualquer
+      // default_value neste caminho e erro.
+      if (item.default_value) {
+        report(DiagCode::TypeMismatch, item.default_value->span,
+               "valor padrao ('= ...') so e permitido em campo de 'tipo'",
+               {"ex.: tipo Pedido:\n  nome: texto = \"anon\""});
+      }
       if (is_secret_key(item.key) && item.value && item.value->kind == ExprKind::TextLit) {
         report(DiagCode::SecretMustUseEnv, item.value->span,
                "segredo em '" + item.key + "' nao deve ser um literal",
@@ -426,7 +466,7 @@ bool is_builtin_name(std::string_view w) {
 // Implicit bindings introduced by the runtime (row predicates, callbacks, ...).
 bool is_magic_name(std::string_view w) {
   return word_in(w, {"linha", "linhas", "entrada", "epoca", "epocas", "metricas", "passo",
-                     "resultado"});
+                      "resultado", "caso"});
 }
 
 bool is_lazy_row_method(std::string_view m) {
@@ -458,6 +498,16 @@ void for_each_layer(const ast::Block& block, const F& emit) {
 const Item* find_field(const ast::Block& block, std::string_view key) {
   for (const auto& it : block.items) {
     if (it && it->kind == ItemKind::Field && it->key == key) return it.get();
+  }
+  return nullptr;
+}
+
+// Decl `funcao <nome>` no programa (para validar aridade de chamadas, T011).
+// Retorna nullptr se nao existir (ex.: importada de modulo) — sem verificacao.
+const Item* find_funcao_decl(const ast::Program& program, std::string_view name) {
+  for (const auto& item : program.items) {
+    if (!item || item->kind != ItemKind::Decl || item->key != "funcao") continue;
+    if (decl_name(*item) == name) return item.get();
   }
   return nullptr;
 }
@@ -722,7 +772,7 @@ bool is_texto_method(std::string_view m) { return word_in(m, {"maiusculas", "min
 // equipe, ferramenta, indice, modelo) — nunca rejeitar esses.
 bool is_entity_method(std::string_view m) {
   return word_in(m, {"responder", "perguntar", "executar", "para_frente", "inserir", "buscar",
-                     "salvar_pesos"});
+                     "salvar_pesos", "carregar_pesos", "exportar_onnx", "exportar"});
 }
 
 void collect_entrada_names(const ast::Block& block, std::unordered_set<std::string>& scope) {
@@ -922,6 +972,13 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::check_atencao(
 
 std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const Expr& e,
                                                                          const ShapeEnv& shapes) {
+  auto out = infer_shape_impl(e, shapes);
+  if (out) hover_shapes_[&e] = *out;
+  return out;
+}
+
+std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape_impl(
+    const Expr& e, const ShapeEnv& shapes) {
   switch (e.kind) {
     case ExprKind::Name: {
       auto it = shapes.find(e.text);
@@ -1087,6 +1144,12 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape(const E
 }
 
 sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) {
+  sema::TypeKind t = infer_type_impl(e, types);
+  if (t != sema::TypeKind::Unknown) hover_types_[&e] = t;
+  return t;
+}
+
+sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& types) {
   using sema::TypeKind;
   switch (e.kind) {
     case ExprKind::IntLit: return TypeKind::Inteiro;
@@ -1338,6 +1401,7 @@ sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) 
       const std::string& name = e.lhs->text;
       // `funcao` do usuario sobrescreve builtin no runtime; com retorno
       // conhecido (anotacao ou corpo, C1) ele e o tipo da chamada.
+      // (Aridade e validada em check_expr, que visita toda chamada uma vez.)
       if (const Symbol* s = lookup(name); s && s->kind == "funcao") {
         if (s->type.ret && s->type.ret->kind != TypeKind::Unknown) return s->type.ret->kind;
         return TypeKind::Unknown;
@@ -1462,6 +1526,40 @@ void SemanticChecker::check_return(const Expr* value, Span span, const TypeEnv& 
          {"ajuste o valor retornado ou o tipo da assinatura '-> ...'"});
 }
 
+void SemanticChecker::check_funcao_arity(const std::string& name, const std::vector<ast::Arg>& args,
+                                          bool paren, Span span) {
+  const Item* decl = find_funcao_decl(program_, name);
+  if (!decl) return;  // ex.: importada de modulo — sem verificacao
+  int npos = 0;
+  for (const auto& arg : args) {
+    if (arg.name.empty()) {
+      ++npos;
+    } else {
+      return;  // com argumento nomeado, pula (semantica nao modelada)
+    }
+  }
+  int obrigatorios = 0;
+  for (const auto& p : decl->params) {
+    if (p.optional_annotation.empty()) ++obrigatorios;
+  }
+  const int total = static_cast<int>(decl->params.size());
+  if (npos >= obrigatorios && (npos <= total || !paren)) return;
+  const std::string esperado = obrigatorios == total ? std::to_string(total) + " argumento(s)"
+                                                     : "entre " + std::to_string(obrigatorios) +
+                                                           " e " + std::to_string(total) +
+                                                           " argumentos";
+  std::string nota = "assinatura: funcao " + name;
+  if (total > 0) {
+    nota += " (" + std::to_string(total) + " parametro(s)";
+    if (obrigatorios < total) {
+      nota += ", " + std::to_string(total - obrigatorios) + " opcional(is) '[]'";
+    }
+    nota += ")";
+  }
+  report(DiagCode::TypeMismatch, span,
+         "'" + name + "' espera " + esperado + ", encontrou " + std::to_string(npos), {nota});
+}
+
 void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
   switch (e.kind) {
     case ExprKind::Name: {
@@ -1513,6 +1611,15 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
       const bool lazy = e.lhs && e.lhs->kind == ExprKind::Member && is_lazy_row_method(e.lhs->text);
       if (e.lhs && e.lhs->kind == ExprKind::Member) {
         check_expr(*e.lhs->lhs, scope);  // the receiver
+      }
+      // Aridade de `funcao` do usuario (T011): o runtime preenche faltantes
+      // com nulo e ignora sobrantes em silencio; o checker exige entre
+      // obrigatorios e total. So valida chamadas 100% posicionais.
+      if (e.lhs && e.lhs->kind == ExprKind::Name) {
+        const std::string& callee = e.lhs->text;
+        if (const Symbol* s = lookup(callee); s && s->kind == "funcao") {
+          check_funcao_arity(callee, e.args, e.paren_call, e.span);
+        }
       }
       // callee that is a bare Name is assumed to be a stdlib function; not flagged.
       for (std::size_t i = 0; i < e.args.size(); ++i) {
@@ -1842,31 +1949,81 @@ void SemanticChecker::check_model_shapes() {
   for (const auto& item : program_.items) {
     if (!item || item->kind != ItemKind::Decl || item->key != "modelo" || !item->block) continue;
 
-    std::int64_t cur = -1;  // running feature dimension; -1 = unknown
+    // Forma sem lote: da anotacao literal; vazia = desconhecida.
+    TensorShape forma;
     if (const Item* ent = find_field(*item->block, "entrada")) {
-      // A cadeia densa/linear opera sobre a ultima dimensao (espelha o
-      // runtime, que usa shape.back() como dimensao de entrada).
-      if (auto dims = tensor_annotation_dims(ent->value.get())) cur = dims->back();
+      if (auto dims = tensor_annotation_dims(ent->value.get())) forma = *dims;
     }
 
     const Item* camadas = find_field(*item->block, "camadas");
     if (!camadas || !camadas->block) continue;
 
+    auto ler = [&](const ast::Expr* e) -> std::int64_t {
+      return e && e->kind == ExprKind::IntLit ? std::stoll(e->text) : -1;
+    };
     for_each_layer(*camadas->block, [&](const std::string& key, const ast::Expr* value) {
       if (key == "densa" && value && value->kind == ExprKind::IntLit) {
-        cur = std::stoll(value->text);
+        if (forma.size() == 3) {
+          report(DiagCode::TensorShapeMismatch, value->span,
+                 "camada 'densa' precisa de entrada 1D; insira 'achatar' antes da densa",
+                 {"insira '- achatar' depois do bloco convolucional"});
+          return;
+        }
+        if (forma.size() == 1) forma = {std::stoll(value->text)};
       } else if (key == "linear" && value && value->kind == ExprKind::ListLit &&
                  value->elems.size() == 2 && value->elems[0]->kind == ExprKind::IntLit &&
                  value->elems[1]->kind == ExprKind::IntLit) {
         const std::int64_t a = std::stoll(value->elems[0]->text);
         const std::int64_t b = std::stoll(value->elems[1]->text);
-        if (cur >= 0 && a != cur) {
+        if (forma.size() == 3) {
+          report(DiagCode::TensorShapeMismatch, value->span,
+                 "camada 'linear' precisa de entrada 1D; insira 'achatar' antes da densa",
+                 {"insira '- achatar' depois do bloco convolucional"});
+          return;
+        }
+        if (forma.size() == 1 && a != forma.back()) {
           report(DiagCode::TensorShapeMismatch, value->span,
                  "camada 'linear' espera entrada de " + std::to_string(a) +
-                     " mas a camada anterior produz " + std::to_string(cur),
-                 {"ajuste para linear: [" + std::to_string(cur) + ", " + std::to_string(b) + "]"});
+                     " mas a camada anterior produz " + std::to_string(forma.back()),
+                 {"ajuste para linear: [" + std::to_string(forma.back()) + ", " + std::to_string(b) + "]"});
         }
-        cur = b;
+        if (forma.size() == 1) forma = {b};
+      } else if (key == "conv2d" && value && value->kind == ExprKind::ListLit &&
+                 (value->elems.size() == 4 || value->elems.size() == 5)) {
+        const std::int64_t c_saida = ler(value->elems[0].get());
+        const std::int64_t c_entrada = ler(value->elems[1].get());
+        const std::int64_t kh = ler(value->elems[2].get());
+        const std::int64_t kw = ler(value->elems[3].get());
+        const std::int64_t passo = value->elems.size() == 5 ? ler(value->elems[4].get()) : 1;
+        if (forma.size() != 3 || c_saida <= 0 || c_entrada <= 0 || kh <= 0 || kw <= 0 || passo < 1) {
+          return;  // runtime detalha; aqui so propaga o conhecido
+        }
+        if (c_entrada != forma[0] || kh > forma[1] || kw > forma[2]) return;
+        forma = {c_saida, (forma[1] - kh) / passo + 1, (forma[2] - kw) / passo + 1};
+      } else if (key == "norma_lote") {
+        return;  // preserva canais/forma
+      } else if (key == "achatar") {
+        if (forma.size() == 3 && forma[0] > 0 && forma[1] > 0 && forma[2] > 0) {
+          forma = {forma[0] * forma[1] * forma[2]};
+        }
+      } else if (key == "agrupamento_max" &&
+                 (value == nullptr || value->kind == ExprKind::IntLit ||
+                  (value->kind == ExprKind::ListLit &&
+                   (value->elems.size() == 1 || value->elems.size() == 2)))) {
+        std::int64_t janela = -1;
+        std::int64_t passo = -1;
+        if (value == nullptr) return;
+        if (value->kind == ExprKind::IntLit) {
+          janela = ler(value);
+          passo = janela;
+        } else {
+          janela = ler(value->elems[0].get());
+          passo = value->elems.size() == 2 ? ler(value->elems[1].get()) : janela;
+        }
+        if (forma.size() != 3 || janela < 1 || passo < 1 || janela > forma[1] || janela > forma[2]) {
+          return;
+        }
+        forma = {forma[0], (forma[1] - janela) / passo + 1, (forma[2] - janela) / passo + 1};
       }
     });
   }

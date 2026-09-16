@@ -1,5 +1,4 @@
 experimento futuro:
   dados: [{ a: 1, b: 0 }, { a: 2, b: 1 }]
   alvo: "b"
-  modelo: floresta_aleatoria
-    arvores: 300
+  modelo: rede_neural

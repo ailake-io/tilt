@@ -1,0 +1,31 @@
+modelo CNN:
+  entrada: tensor[f32, 1, 4, 4]
+  camadas:
+    - conv2d: [2, 1, 2, 2]
+    - ativacao: relu
+    - norma_lote
+    - agrupamento_max: [2]
+    - achatar
+    - linear: [2, 2]
+    - softmax
+
+treino CNN:
+  dados: {
+    x: [
+      [[[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]],
+      [[[0, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]],
+      [[[1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1]]],
+      [[[1, 1, 1, 1], [1, 1, 0, 1], [1, 1, 1, 1], [1, 1, 1, 1]]]
+    ],
+    y: [0, 0, 1, 1]
+  }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.1
+  epocas: 20
+
+pipeline p:
+  passos:
+    - a = modelo CNN.executar tensor [[[[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]]]
+    - b = modelo CNN.executar tensor [[[[1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1]]]]
+    - imprimir a.argmax, b.argmax

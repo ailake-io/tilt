@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -10,6 +11,8 @@
 #include "diagnostics/diagnostic.hpp"
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
+#include "semantic/checker.hpp"
+#include "semantic/type.hpp"
 
 namespace tilt::lsp {
 
@@ -30,9 +33,9 @@ bool starts_with_ci(std::string_view s, std::string_view prefix) {
   return true;
 }
 
-const std::array<std::string_view, 20> kDeclKeywords = {
+const std::array<std::string_view, 22> kDeclKeywords = {
     "tipo",   "funcao",   "seja",   "constante", "importar", "de",     "fonte",
-    "pipeline", "verificar", "modelo", "treino",  "tarefa",   "experimento", "llm",
+    "pipeline", "verificar", "modelo", "treino",  "busca",    "tarefa",   "experimento", "avaliacao", "llm",
     "indice", "fluxo",    "ferramenta", "agente", "equipe",  "servico"};
 
 const std::array<std::string_view, 7> kStmtKeywords = {
@@ -75,7 +78,11 @@ const std::vector<FieldSet>& field_sets() {
       {"llm", {"provedor", "modelo", "temperatura", "max_tokens", "chave", "base_url"}},
       {"modelo", {"camadas", "dispositivo", "pesos", "entrada", "arquitetura"}},
       {"treino",
-       {"dados", "perda", "otimizador", "epocas", "taxa", "taxa_aprendizado", "lote", "verboso"}},
+       {"dados", "perda", "otimizador", "epocas", "taxa", "taxa_aprendizado", "lote", "semente",
+        "validacao", "parar_cedo", "agendador", "checkpoint", "a_cada", "retomar", "verboso"}},
+      {"busca",
+       {"modelo", "dados", "perda", "otimizador", "epocas", "taxa", "lote", "semente", "validacao",
+        "parar_cedo", "agendador", "grade", "criterio", "verboso"}},
       {"tarefa", {"entrada", "executar"}},
       {"indice", {"embeddings", "armazenamento", "dimensao", "metrica"}},
       {"fonte", {"tipo", "caminho", "arquivo", "url", "consulta", "formato", "brokers", "topico", "lingua", "conf"}},
@@ -86,6 +93,7 @@ const std::vector<FieldSet>& field_sets() {
       {"equipe", {"agentes", "estrategia", "supervisor", "objetivo"}},
       {"servico", {"porta", "dispositivo", "meio", "rota"}},
       {"verificar", {"nao_nulo", "unico", "intervalo", "ao_violar"}},
+      {"avaliacao", {"dados", "executar", "metricas", "limiar", "tolerancia", "ao_reprovar", "verboso", "amostra", "semente", "juiz", "registrar_em"}},
   };
   return sets;
 }
@@ -308,8 +316,10 @@ const std::vector<KeywordDoc>& keyword_docs() {
       {"verificar", "Declara regras de verificacao de dados."},
       {"modelo", "Declara um modelo (bloco com `camadas:`, `entrada:`, ...)."},
       {"treino", "Bloco de treino de um modelo (`dados:`, `perda:`, `epocas:`, ...)."},
+      {"busca", "Busca em grade de hiperparametros (`modelo:`, `grade:`, `criterio:`)."},
       {"tarefa", "Declara uma tarefa de um experimento."},
       {"experimento", "Declara um experimento de ML."},
+      {"avaliacao", "Declara uma avaliacao (evals: `dados:`, `executar:`, `metricas:`, `limiar:`)."},
       {"llm", "Declara uma configuracao de LLM (`provedor:`, `modelo:`, `temperatura:`, ...)."},
       {"indice", "Declara um indice de embeddings para RAG."},
       {"fluxo", "Declara um fluxo de agente (`entrada:`, `passos:`)."},
@@ -407,7 +417,8 @@ bool span_is_at(const Span& s, std::uint32_t line, std::uint32_t column) {
 struct NameDecl {
   std::string name;
   Span span;
-  std::string kind;  // declaring keyword, or "variavel" / "parametro"
+  std::string kind;    // declaring keyword, or "variavel" / "parametro"
+  std::string parent;  // funcao dona do parametro (vazio nos demais)
 };
 
 // First Identifier token named `name` at/after `from_offset` (used to recover
@@ -426,13 +437,13 @@ void collect_item(const ast::Item& it, const std::vector<Token>& toks, std::vect
 
 void collect_stmt(const ast::Stmt& s, const std::vector<Token>& toks, std::vector<NameDecl>& out) {
   if (s.kind == ast::StmtKind::Assign && s.a && s.a->kind == ast::ExprKind::Name) {
-    out.push_back({s.a->text, s.a->span, "variavel"});
+    out.push_back({s.a->text, s.a->span, "variavel", {}});
   }
   if (s.kind == ast::StmtKind::ForEach && !s.name.empty()) {
-    out.push_back({s.name, token_span_after(toks, s.name, s.span.offset), "variavel"});
+    out.push_back({s.name, token_span_after(toks, s.name, s.span.offset), "variavel", {}});
   }
   if (s.kind == ast::StmtKind::Try && !s.name.empty()) {
-    out.push_back({s.name, token_span_after(toks, s.name, s.span.offset), "variavel"});
+    out.push_back({s.name, token_span_after(toks, s.name, s.span.offset), "variavel", {}});
   }
   auto walk_block = [&](const ast::Block& b) {
     for (const auto& i : b.items) {
@@ -447,15 +458,17 @@ void collect_stmt(const ast::Stmt& s, const std::vector<Token>& toks, std::vecto
 
 void collect_item(const ast::Item& it, const std::vector<Token>& toks, std::vector<NameDecl>& out) {
   if (it.kind == ast::ItemKind::Decl) {
+    std::string decl_name;
     if (!it.header.empty() && it.header[0] && it.header[0]->kind == ast::ExprKind::Name) {
-      out.push_back({it.header[0]->text, it.header[0]->span, it.key});
+      decl_name = it.header[0]->text;
+      out.push_back({decl_name, it.header[0]->span, it.key, {}});
     }
     if (it.key == "funcao") {
       std::uint32_t from = it.span.offset;
       for (const auto& p : it.params) {
         if (p.name.empty()) continue;
         const Span sp = token_span_after(toks, p.name, from);
-        out.push_back({p.name, sp, "parametro"});
+        out.push_back({p.name, sp, "parametro", decl_name});
         from = sp.offset + 1;
       }
     }
@@ -504,6 +517,240 @@ std::string trim_right(std::string_view s) {
     s.remove_suffix(1);
   }
   return std::string(s);
+}
+
+// Filhos que carregam valor (nomes de campo/chave nao sao expressoes).
+template <typename F>
+void each_child_expr(const ast::Expr& e, F&& fn) {
+  if (e.lhs) fn(*e.lhs);
+  if (e.rhs) fn(*e.rhs);
+  if (e.extra) fn(*e.extra);
+  for (const auto& a : e.args) {
+    if (a.value) fn(*a.value);
+  }
+  for (const auto& el : e.elems) {
+    if (el) fn(*el);
+  }
+  for (const auto& en : e.entries) {
+    if (en.value) fn(*en.value);
+  }
+  if (e.block) {
+    for (const auto& it : e.block->items) {
+      if (it && it->kind == ast::ItemKind::Field && it->value) fn(*it->value);
+    }
+  }
+}
+
+// Fim efetivo de uma expressao: o parser nao estende o span dos nos compostos
+// (Binary pega o span do lhs), entao o fim e o maximo entre o proprio span e
+// o dos filhos. Sem isso, hover no operador/2o operando nao acha nada.
+std::uint32_t expr_end(const ast::Expr& e) {
+  std::uint32_t end = e.span.offset + e.span.length;
+  each_child_expr(e, [&](const ast::Expr& c) {
+    const std::uint32_t ce = expr_end(c);
+    if (ce > end) end = ce;
+  });
+  return end;
+}
+
+// Expressao mais interna contendo o offset (para hover de tipos).
+const ast::Expr* inner_expr(const ast::Expr& e, std::uint32_t off) {
+  if (!(e.span.offset <= off && off < expr_end(e))) return nullptr;
+  const ast::Expr* best = &e;
+  each_child_expr(e, [&](const ast::Expr& c) {
+    if (const ast::Expr* f = inner_expr(c, off)) best = f;
+  });
+  return best;
+}
+
+const ast::Expr* inner_stmt_expr(const ast::Stmt& s, std::uint32_t off) {
+  const ast::Expr* best = nullptr;
+  auto descend = [&](const ast::Expr* c) {
+    if (c) {
+      if (const ast::Expr* f = inner_expr(*c, off)) best = f;
+    }
+  };
+  descend(s.a.get());
+  descend(s.b.get());
+  auto walk_block = [&](const ast::Block& b, auto&& self) -> void {
+    for (const auto& it : b.items) {
+      if (!it) continue;
+      if (it->stmt) {
+        if (const ast::Expr* f = inner_stmt_expr(*it->stmt, off)) best = f;
+      }
+      if (it->child && it->child->stmt) {
+        if (const ast::Expr* f = inner_stmt_expr(*it->child->stmt, off)) best = f;
+      }
+      if (it->value) descend(it->value.get());
+      if (it->default_value) descend(it->default_value.get());
+      for (const auto& h : it->header) descend(h.get());
+      if (it->block) self(*it->block, self);
+    }
+  };
+  walk_block(s.body, walk_block);
+  for (const auto& ei : s.elifs) {
+    descend(ei.cond.get());
+    walk_block(ei.body, walk_block);
+  }
+  if (s.else_body) walk_block(*s.else_body, walk_block);
+  if (s.catch_body) walk_block(*s.catch_body, walk_block);
+  return best;
+}
+
+void inner_prog_item(const ast::Item& it, std::uint32_t off, const ast::Expr*& best) {
+  if (it.stmt) {
+    if (const ast::Expr* f = inner_stmt_expr(*it.stmt, off)) best = f;
+  }
+  if (it.child && it.child->stmt) {
+    if (const ast::Expr* f = inner_stmt_expr(*it.child->stmt, off)) best = f;
+  }
+  if (it.value) {
+    if (const ast::Expr* f = inner_expr(*it.value, off)) best = f;
+  }
+  if (it.default_value) {
+    if (const ast::Expr* f = inner_expr(*it.default_value, off)) best = f;
+  }
+  for (const auto& h : it.header) {
+    if (h) {
+      if (const ast::Expr* f = inner_expr(*h, off)) best = f;
+    }
+  }
+  // Params/retorno de funcao tambem sao expressoes pairaveis.
+  if (it.kind == ast::ItemKind::Decl && it.key == "funcao") {
+    for (const auto& pm : it.params) {
+      if (pm.value) {
+        if (const ast::Expr* f = inner_expr(*pm.value, off)) best = f;
+      }
+    }
+  }
+  if (it.block) {
+    for (const auto& sub : it.block->items) {
+      if (sub) inner_prog_item(*sub, off, best);
+    }
+  }
+}
+
+const ast::Expr* inner_prog_expr(const ast::Program& prog, std::uint32_t off) {
+  const ast::Expr* best = nullptr;
+  for (const auto& p : prog.items) {
+    if (p) inner_prog_item(*p, off, best);
+  }
+  return best;
+}
+
+// RHS da atribuicao cujo alvo tem o span dado (para tipo de uso de variavel).
+const ast::Expr* assign_rhs_at(const ast::Block& b, std::uint32_t target_off) {
+  const ast::Expr* found = nullptr;
+  std::function<void(const ast::Block&)> walk = [&](const ast::Block& blk) {
+    for (const auto& it : blk.items) {
+      if (!it || found) return;
+      const ast::Item* node = it.get();
+      if (node->kind == ast::ItemKind::ListEntry && node->child) node = node->child.get();
+      if (node->kind == ast::ItemKind::Stmt && node->stmt && node->stmt->kind == ast::StmtKind::Assign &&
+          node->stmt->a && node->stmt->a->kind == ast::ExprKind::Name &&
+          node->stmt->a->span.offset == target_off && node->stmt->b) {
+        found = node->stmt->b.get();
+        return;
+      }
+      if (node->block) walk(*node->block);
+    }
+  };
+  walk(b);
+  return found;
+}
+
+std::string render_hover_type(const SemanticChecker& sema, const ast::Expr* e) {
+  if (!e) return {};
+  const sema::TypeKind* k = sema.hover_type(e);
+  if (!k) return {};
+  if (*k == sema::TypeKind::Tensor) {
+    sema::Type t;
+    t.kind = sema::TypeKind::Tensor;
+    if (const auto* sh = sema.hover_shape(e)) t.dims = *sh;
+    return sema::type_to_string(t);
+  }
+  sema::Type t = sema::Type::scalar(*k);
+  return sema::type_to_string(t);
+}
+
+// Sufixo de tipos para o hover de uma declaracao resolvida ("" = desconhecido,
+// mantem a mensagem textual atual). Usa os tipos ja resolvidos pelo checker
+// (passada 2 + tabela de simbolos), sem inferencia nova.
+std::string hover_type_suffix(const ast::Program& prog, const SemanticChecker& sema,
+                              const NameDecl& d) {
+  const auto& globals = sema.globals();
+  if (d.kind == "funcao") {
+    const ast::Item* decl = nullptr;
+    for (const auto& it : prog.items) {
+      if (it && it->kind == ast::ItemKind::Decl && it->key == "funcao" && !it->header.empty() &&
+          it->header[0] && it->header[0]->text == d.name) {
+        decl = it.get();
+        break;
+      }
+    }
+    if (!decl) return {};
+    std::string md = "\n\n`funcao " + d.name + "(";
+    bool first = true;
+    for (const auto& p : decl->params) {
+      if (p.name.empty()) continue;
+      if (!first) md += ", ";
+      first = false;
+      std::string pname = p.name;
+      // `nome[]` = parametro opcional (sufixo do parser).
+      bool opcional = false;
+      if (pname.size() > 2 && pname.compare(pname.size() - 2, 2, "[]") == 0) {
+        pname.erase(pname.size() - 2);
+        opcional = true;
+      } else if (!p.optional_annotation.empty()) {
+        opcional = true;
+      }
+      md += pname + ": ";
+      if (const sema::Type* t = sema.annotation_of(p.value.get())) {
+        md += sema::type_to_string(*t);
+      } else {
+        md += "?";
+      }
+      if (opcional) md += " (opcional)";
+    }
+    md += ")";
+    std::string ret = "?";
+    if (auto it = globals.find(d.name);
+        it != globals.end() && it->second.type.ret &&
+        it->second.type.ret->kind != sema::TypeKind::Unknown) {
+      ret = sema::type_to_string(*it->second.type.ret);
+    } else if (const sema::Type* t = sema.annotation_of(decl->value.get())) {
+      if (t->kind != sema::TypeKind::Unknown) ret = sema::type_to_string(*t);
+    }
+    md += " -> " + ret + "`";
+    return md;
+  }
+  if (d.kind == "tipo") {
+    auto it = globals.find(d.name);
+    if (it == globals.end() || it->second.type.fields.empty()) return {};
+    std::string md = "\n\nCampos de `" + d.name + "`:";
+    for (const auto& [fname, ftype] : it->second.type.fields) {
+      md += "\n- " + fname + ": " + (ftype ? sema::type_to_string(*ftype) : "?");
+    }
+    return md;
+  }
+  if (d.kind == "parametro" && !d.parent.empty()) {
+    for (const auto& it : prog.items) {
+      if (!it || it->kind != ast::ItemKind::Decl || it->key != "funcao" || it->header.empty() ||
+          !it->header[0] || it->header[0]->text != d.parent) {
+        continue;
+      }
+      for (const auto& p : it->params) {
+        std::string pname = p.name;
+        if (pname.size() > 2 && pname.compare(pname.size() - 2, 2, "[]") == 0) pname.erase(pname.size() - 2);
+        if (pname != d.name) continue;
+        if (const sema::Type* t = sema.annotation_of(p.value.get())) {
+          if (t->kind != sema::TypeKind::Unknown) return "\n\n`" + d.name + ": " + sema::type_to_string(*t) + "`";
+        }
+        return {};
+      }
+    }
+  }
+  return {};
 }
 
 }  // namespace
@@ -573,7 +820,20 @@ std::vector<CompletionItem> complete(const SourceFile& src, std::uint32_t line, 
 std::string hover(const SourceFile& src, std::uint32_t line, std::uint32_t column) {
   bool as_member = false;
   const std::string word = word_at(src, line, column, &as_member);
-  if (word.empty()) return {};
+  // Sem palavra (operador, pontuacao): so o tipo da expressao pode responder.
+  if (word.empty()) {
+    DiagnosticEngine d2(&src);
+    Lexer l2(src, d2);
+    const std::vector<Token> t2 = l2.tokenize();
+    Parser p2(t2, d2);
+    const ast::Program pr = p2.parse_program();
+    SemanticChecker s2(pr, d2);
+    s2.run();
+    if (const ast::Expr* e = inner_prog_expr(pr, src.offset_of(line + 1, column + 1))) {
+      if (std::string t = render_hover_type(s2, e); !t.empty()) return "`" + t + "`";
+    }
+    return {};
+  }
 
   if (as_member) {
     if (const char* doc = find_method_doc(word)) {
@@ -596,15 +856,44 @@ std::string hover(const SourceFile& src, std::uint32_t line, std::uint32_t colum
   const std::vector<Token> toks = lexer.tokenize();
   Parser parser(toks, diag);
   const ast::Program prog = parser.parse_program();
+  SemanticChecker sema(prog, diag);
+  sema.run();
   const auto decls = collect_decls(prog, toks);
   if (const NameDecl* d = resolve_decl(decls, word, line, column)) {
     std::string md = std::string("`") + d->kind + " " + word + "` — declarado na linha " +
                      std::to_string(d->span.line) + ".";
+    md += hover_type_suffix(prog, sema, *d);
+    // Uso de variavel: tipo do RHS da atribuicao que a declarou.
+    if (d->kind == "variavel") {
+      for (const auto& it : prog.items) {
+        if (!it || !it->block) continue;
+        if (const ast::Expr* rhs = assign_rhs_at(*it->block, d->span.offset)) {
+          if (std::string t = render_hover_type(sema, rhs); !t.empty()) {
+            md += "\n\n`valor: " + t + "`";
+            break;
+          }
+        }
+      }
+    }
     const std::string_view decl_line = src.line_text(d->span.line);
     if (!decl_line.empty()) {
       md += std::string("\n\n```tilt\n") + std::string(trim_right(decl_line)) + "\n```";
     }
     return md;
+  }
+  // Sem declaracao: tipo da expressao mais interna sob o cursor.
+  // (LSP e 0-based; offset_of e 1-based.)
+  const std::uint32_t off = src.offset_of(line + 1, column + 1);
+  if (const ast::Expr* e = inner_prog_expr(prog, off)) {
+    if (std::string t = render_hover_type(sema, e); !t.empty()) {
+      std::string md = "`" + t + "`";
+      const std::string_view text = src.text();
+      if (e->span.length > 0 && e->span.length <= 60 && e->span.offset + e->span.length <= text.size()) {
+        std::string slice(text.substr(e->span.offset, e->span.length));
+        md += " — `" + slice + "`";
+      }
+      return md;
+    }
   }
   return {};
 }

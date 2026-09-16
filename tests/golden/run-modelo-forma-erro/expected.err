@@ -1,7 +1,7 @@
-erro[T901]: modelo M: tensor: matmul: dimensao interna incompativel
-  --> input.tilt:8:23
+erro[T901]: modelo 'M': 'linear' espera entrada de 3 mas a camada anterior produz 2
+  --> input.tilt:1:1
    |
- 8 |     - imprimir modelo M.executar x
-   |                       ^
+ 1 | modelo M:
+   | ^^^^^^
    |
 

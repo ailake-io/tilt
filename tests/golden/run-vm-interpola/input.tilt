@@ -1,0 +1,10 @@
+pipeline p:
+  passos:
+    - nome = "mundo"
+    - n = 42
+    - razao = 3.14
+    - imprimir "ola {{nome}}!"
+    - imprimir "n={{n}}, razao={{razao}}"
+    - imprimir "sem var {{desconhecida}} continua"
+    - vazio = ""
+    - imprimir "vazio=[{{vazio}}]"

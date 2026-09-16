@@ -17,9 +17,21 @@ pipeline tipos:
     - imprimir "tipo declarado"
 ```
 
-Campos: `nome: <tipo>`. (Valores padrão `campo: <tipo> = <valor>` ainda não
-parseiam — fica para um marco futuro.) Um `tipo` pode ser usado como anotação
+Campos: `nome: <tipo>`, com valor padrão opcional `nome: <tipo> = <valor>`.
+O padrão precisa ser compatível com o declarado (`T011` caso contrário) e é
+aplicado quando o campo falta: em `formato:` de `perguntar` (inclusive no mock)
+e em `entrada:` de rotas (sem 400). Um `tipo` pode ser usado como anotação
 em `entrada:`, parâmetros de `funcao` e como `formato:` de `perguntar`.
+
+```tilt run
+tipo Pedido:
+  nome: texto = "anon"
+  qtd: inteiro = 1
+
+pipeline p:
+  passos:
+    - imprimir "tipo com padrao"
+```
 
 ```tilt run
 # 'entrada:' valida a rota contra o tipo (campo faltando ou com tipo

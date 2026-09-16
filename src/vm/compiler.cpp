@@ -19,6 +19,39 @@ namespace {
 
 [[noreturn]] void bail(std::string why) { throw NotCompilable{std::move(why)}; }
 
+// Divide um literal em partes de texto puro e {{nome}} (nome com espacos
+// aparados, como o interpretador). Sem "}}" de fechamento, o "{{" segue
+// literal — espelha Interpreter::interpolate.
+struct TextPart {
+  bool is_name = false;
+  std::string text;
+};
+
+std::vector<TextPart> split_interp(const std::string& text) {
+  std::vector<TextPart> parts;
+  std::string cur;
+  for (std::size_t k = 0; k < text.size();) {
+    if (k + 1 < text.size() && text[k] == '{' && text[k + 1] == '{') {
+      const std::size_t end = text.find("}}", k + 2);
+      if (end != std::string::npos) {
+        std::string name = text.substr(k + 2, end - (k + 2));
+        while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+        while (!name.empty() && name.back() == ' ') name.pop_back();
+        if (!cur.empty()) {
+          parts.push_back({false, cur});
+          cur.clear();
+        }
+        parts.push_back({true, name});
+        k = end + 2;
+        continue;
+      }
+    }
+    cur += text[k++];
+  }
+  if (!cur.empty() || parts.empty()) parts.push_back({false, cur});
+  return parts;
+}
+
 struct Builder {
   const std::unordered_set<std::string>& known;
   Chunk chunk;
@@ -74,10 +107,29 @@ struct Builder {
       case ExprKind::DecimalLit:
         emit(Op::Const, const_idx(rt::Value::decimal(std::strtod(e.text.c_str(), nullptr))));
         return;
-      case ExprKind::TextLit:
-        if (e.text.find("{{") != std::string::npos) bail("interpolacao de texto");
-        emit(Op::Const, const_idx(rt::Value::texto(e.text)));
+      case ExprKind::TextLit: {
+        // Interpolacao: partes concatenadas com '+' (texto + x usa
+        // to_display, igual ao interpretador). Nome fora dos locais
+        // conhecidos (global, entidade) cai para o interpretador.
+        auto parts = split_interp(e.text);
+        if (parts.size() == 1 && !parts[0].is_name) {
+          emit(Op::Const, const_idx(rt::Value::texto(e.text)));
+          return;
+        }
+        bool first = true;
+        for (const auto& p : parts) {
+          if (p.is_name) {
+            const int s = slot_of(p.text, false);
+            if (s < 0) bail("interpolacao com '{{" + p.text + "}}' fora dos locais");
+            emit(Op::LoadLocal, s);
+          } else {
+            emit(Op::Const, const_idx(rt::Value::texto(p.text)));
+          }
+          if (!first) emit(Op::Binop, op_idx("+"));
+          first = false;
+        }
         return;
+      }
       case ExprKind::BoolLit:
         emit(Op::Const, const_idx(rt::Value::logico(e.boolean)));
         return;
@@ -141,11 +193,25 @@ struct Builder {
         emit(Op::Binop, op_idx(e.text));
         return;
       }
+      case ExprKind::Member: {
+        // Acesso a campo (mapa/tabela, `.tamanho`, props de tensor e `?.`):
+        // paridade total com o interpretador no Op::GetField.
+        expr(*e.lhs);
+        emit(Op::GetField, name_idx(e.text), e.optional ? 1 : 0);
+        return;
+      }
       case ExprKind::Call: {
         if (!e.lhs || e.lhs->kind != ExprKind::Name) bail("chamada nao trivial");
         const std::string& callee = e.lhs->text;
         for (const auto& a : e.args) {
           if (!a.name.empty()) bail("argumento nomeado");
+        }
+        // `ler_csv "arq"` (1 posicional): via CallFunc, resolvido no hook
+        // da VM contra o leitor do runtime (tabela, como no interpretador).
+        if (callee == "ler_csv" && e.args.size() == 1) {
+          expr(*e.args[0].value);
+          emit(Op::CallFunc, name_idx("ler_csv"), 1);
+          return;
         }
         if (callee == "imprimir" || callee == "imprima" || callee == "print") {
           for (const auto& a : e.args) expr(*a.value);

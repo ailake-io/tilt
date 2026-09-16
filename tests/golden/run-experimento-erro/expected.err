@@ -1,7 +1,7 @@
-erro[T902]: modelo 'floresta_aleatoria' ainda nao implementado na 1a passada
-  --> input.tilt:4:11
+erro[T901]: experimento futuro: modelo 'rede_neural' desconhecido (use regressao_linear | regressao_logistica | knn | kmeans | floresta_aleatoria | gradiente_impulsionado | svm)
+  --> input.tilt:1:1
    |
- 4 |   modelo: floresta_aleatoria
-   |           ^^^^^^^^^^^^^^^^^^
+ 1 | experimento futuro:
+   | ^^^^^^^^^^^
    |
 

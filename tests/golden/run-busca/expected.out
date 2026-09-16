@@ -1,0 +1,8 @@
+busca Otima: 4 combinacoes
+  #1 taxa=0.1 otimizador=sgd -> perda 0.2432 (acuracia 8/8)
+  #2 taxa=0.1 otimizador=adam -> perda 0.0051 (acuracia 8/8)
+  #3 taxa=0.01 otimizador=sgd -> perda 0.4303 (acuracia 6/8)
+  #4 taxa=0.01 otimizador=adam -> perda 0.2883 (acuracia 7/8)
+busca Otima: melhor #1 (taxa=0.1 otimizador=sgd) acuracia 8/8
+== pipeline p ==
+a: 0 b: 1

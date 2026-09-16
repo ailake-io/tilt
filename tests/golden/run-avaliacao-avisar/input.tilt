@@ -1,0 +1,9 @@
+avaliacao parcial:
+  dados:
+    - { v: "tilt", esperado: "tilt" }
+    - { v: "outro", esperado: "tilt" }
+  executar:
+    - retornar caso.v
+  metricas: [exata]
+  limiar: 0.8
+  ao_reprovar: avisar

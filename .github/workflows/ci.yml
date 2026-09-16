@@ -37,6 +37,8 @@ jobs:
           ./build/release/bin/tilt versao
           ./build/release/bin/tilt checar exemplos/soma.tilt
           ./build/release/bin/tilt executar exemplos/resumo_vendas.tilt
+          ./build/release/bin/tilt executar exemplos/etl_delta.tilt
+          TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente.tilt
 
   # Port Windows (MSVC, windows-latest): a suíte de testes é em shell script
   # (bash/sh), então aqui o job garante apenas que o projeto compila com o

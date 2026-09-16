@@ -1,0 +1,7 @@
+tipo Pedido:
+  nome: texto = 42
+  qtd: inteiro = "muito"
+
+pipeline p:
+  passos:
+    - imprimir "ok"

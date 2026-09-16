@@ -1,0 +1,21 @@
+modelo M:
+  camadas:
+    - linear: [2, 6]
+    - ativacao: relu
+    - linear: [6, 2]
+    - softmax
+
+treino M:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1], [5, 5], [5, 6], [6, 5], [6, 6]], y: [0, 0, 0, 0, 1, 1, 1, 1] }
+  perda: entropia_cruzada
+  otimizador: adam
+  taxa: 0.05
+  epocas: 30
+  lote: 4
+  semente: 7
+
+pipeline p:
+  passos:
+    - a = modelo M.executar tensor([0.0, 0.0])
+    - b = modelo M.executar tensor([5.0, 5.0])
+    - imprimir "a:", a.argmax, "b:", b.argmax
