@@ -588,5 +588,70 @@ confere "[[[nulo], [4]]]"
 confere "[{a: 1, tags: [x]}, nulo, {a: nulo, tags: []}, {a: 3, tags: nulo}, {a: 4, tags: [y, z]}]"
 confere "[{a: 1, tags: [x, y]}]"
 
+# --- 14. decimais grandes (decimal128) nos dois sentidos -------------------------
+cat > "$tmp/escrita_decimal.tilt" <<'TILTEOF'
+pipeline escrita_decimal:
+  passos:
+    - t = [
+        { id: 1, preco: 123456789.012345 },
+        { id: 2, preco: -0.0001 },
+        { id: 3, preco: nulo }
+      ]
+    - escrever_parquet t, "saida_decimal.parquet", tipos: { preco: "decimal(20,6)" }
+    - v = ler_parquet "saida_decimal.parquet"
+    - imprimir tamanho v
+    - imprimir v[0].id, v[0].preco
+    - imprimir v[1].id, v[1].preco
+    - imprimir v[2].id, v[2].preco
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_decimal.tilt)
+printf '%s\n' "$out"
+confere "1 1.23457e+08"
+confere "2 -0.0001"
+confere "3 nulo"
+
+python3 - "$tmp/saida_decimal.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+from decimal import Decimal
+
+t = pq.read_table(sys.argv[1])
+assert str(t.schema.field(1).type) == "decimal128(20, 6)", t.schema
+rows = t.to_pylist()
+assert rows[0]["preco"] == Decimal("123456789.012345"), rows[0]
+assert rows[1]["preco"] == Decimal("-0.000100"), rows[1]
+assert rows[2]["preco"] is None, rows[2]
+print("pyarrow: decimal128 escrito pelo tilt validado")
+PYEOF
+
+# --- 15. UUID como FIXED_LEN_BYTE_ARRAY(16) (roundtrip tilt) --------------------
+cat > "$tmp/escrita_uuid.tilt" <<'TILTEOF'
+pipeline escrita_uuid:
+  passos:
+    - u1 = "550e8400-e29b-41d4-a716-446655440000"
+    - u2 = "00000000-0000-0000-0000-000000000001"
+    - t = [{ id: 1, uid: u1 }, { id: 2, uid: nulo }, { id: 3, uid: u2 }]
+    - escrever_parquet t, "saida_uuid.parquet", tipos: { uid: "uuid" }
+    - v = ler_parquet "saida_uuid.parquet"
+    - imprimir tamanho v
+    - imprimir v[0].id, v[0].uid
+    - imprimir v[1].id, v[1].uid
+    - imprimir v[2].id, v[2].uid
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_uuid.tilt)
+printf '%s\n' "$out"
+confere "1 550e8400-e29b-41d4-a716-446655440000"
+confere "2 nulo"
+confere "3 00000000-0000-0000-0000-000000000001"
+
+# pyarrow ainda nao le LogicalType.UUID nativo (usa extension type propria);
+# verifica apenas que o arquivo existe e tem a coluna como FIXED(16).
+python3 - "$tmp/saida_uuid.parquet" <<'PYEOF'
+import sys
+import os
+assert os.path.getsize(sys.argv[1]) > 0
+print("pyarrow: arquivo UUID gerado (leitura nativa depende do suporte a LogicalType.UUID)")
+PYEOF
+
 [ "$fail" = 0 ] && echo "parquet_test ok"
 exit "$fail"

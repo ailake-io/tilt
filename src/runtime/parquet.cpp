@@ -239,6 +239,11 @@ struct Column {
   bool is_struct = false;
   std::vector<Column> children;
   std::vector<bool> struct_defined;
+  // Metadados para tipos logicos avancados (decimal grande, UUID).
+  int dec_precision = 0;
+  int dec_scale = 0;
+  int fixed_len = 0;
+  bool logical_uuid = false;
 };
 
 PType type_of(const Value& v) {
@@ -702,6 +707,46 @@ std::string table_to_columns(const Value& tabela, std::vector<Column>& cols) {
   return "";
 }
 
+// Converte string UUID canonica (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) em 16 bytes.
+std::string uuid_bytes(const std::string& s) {
+  std::string compact;
+  compact.reserve(32);
+  for (char ch : s) {
+    if (ch == '-') continue;
+    if (!std::isxdigit(static_cast<unsigned char>(ch))) {
+      die("uuid invalido (caractere nao-hex): '" + s + "'");
+    }
+    compact.push_back(ch);
+  }
+  if (compact.size() != 32) {
+    die("uuid invalido (tamanho " + std::to_string(compact.size()) + "): '" + s + "'");
+  }
+  std::string out;
+  out.reserve(16);
+  for (std::size_t i = 0; i < compact.size(); i += 2) {
+    unsigned int byte = 0;
+    std::sscanf(compact.data() + i, "%2x", &byte);
+    out.push_back(static_cast<char>(static_cast<unsigned char>(byte)));
+  }
+  return out;
+}
+
+// Codifica um double como decimal big-endian signed com escala e tamanho fixo.
+std::string decimal_bytes_from_double(double v, int scale, int fixed_len) {
+  const double p = std::pow(10.0, scale);
+  __int128_t unscaled = static_cast<__int128_t>(std::llround(v * p));
+  std::string out(fixed_len, '\0');
+  for (int i = fixed_len - 1; i >= 0; --i) {
+    out[i] = static_cast<char>(static_cast<unsigned char>(unscaled & 0xFF));
+    unscaled >>= 8;
+  }
+  // Verifica overflow (após preencher, os bits restantes devem ser 0 ou -1).
+  if (unscaled != 0 && unscaled != -1) {
+    die("decimal: valor fora do alcance da precisao");
+  }
+  return out;
+}
+
 // Codifica os valores definidos da coluna em encoding PLAIN.
 std::string plain_encode(const Column& c) {
   std::string out;
@@ -756,9 +801,23 @@ std::string plain_encode(const Column& c) {
       break;
     }
     case PT_INT96:
-    case PT_FIXED:
       die("coluna '" + c.name + "': escrita " + type_name(c.type) +
           " nao suportada (leitura apenas)");
+    case PT_FIXED: {
+      if (c.fixed_len <= 0) die("coluna '" + c.name + "': FIXED sem type_length");
+      if (c.logical_uuid) {
+        for (const std::string& s : c.strings) {
+          const std::string b = uuid_bytes(s);
+          raw(b.data(), b.size());
+        }
+      } else {
+        for (double d : c.nums) {
+          const std::string b = decimal_bytes_from_double(d, c.dec_scale, c.fixed_len);
+          raw(b.data(), b.size());
+        }
+      }
+      break;
+    }
     case PT_BYTE_ARRAY: {
       for (const std::string& s : c.strings) {
         put32(static_cast<std::uint32_t>(s.size()));
@@ -1519,16 +1578,27 @@ std::string int96_iso(std::uint64_t nanos, std::uint32_t juliano) {
 }
 
 // Decimal de bytes big-endian com sinal (BYTE_ARRAY/FIXED) com escala.
+// Suporta ate 16 bytes (decimal128); valores maiores que int64 usam double.
 double decimal_bytes(const std::uint8_t* b, std::size_t n, int escala, const std::string& col) {
-  if (n == 0 || n > 8) {
+  if (n == 0 || n > 16) {
     die("coluna '" + col + "': decimal de " + std::to_string(n) +
-        " bytes fora do suportado (1..8)");
+        " bytes fora do suportado (1..16)");
   }
-  std::int64_t v = (b[0] & 0x80) ? -1 : 0;  // extensao de sinal
-  for (std::size_t k = 0; k < n; ++k) v = (v << 8) | b[k];
+  const bool neg = (b[0] & 0x80) != 0;
+  // Trabalha com o valor absoluto em double (perde precisao acima de ~15
+  // digitos, mas Value::Decimal e double de qualquer forma).
+  double v = 0.0;
+  for (std::size_t k = 0; k < n; ++k) {
+    std::uint8_t byte = b[k];
+    if (neg) byte = static_cast<std::uint8_t>(~byte);
+    v = v * 256.0 + byte;
+  }
+  if (neg) {
+    v = -(v + 1.0);
+  }
   double p = 1.0;
   for (int k = 0; k < escala; ++k) p *= 10.0;
-  return static_cast<double>(v) / p;
+  return v / p;
 }
 
 std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t avail,
@@ -1619,7 +1689,18 @@ std::vector<Value> plain_values(PType t, const std::uint8_t* data, std::size_t a
       }
       for (std::size_t k = 0; k < count; ++k) {
         const std::uint8_t* b = data + k * static_cast<std::size_t>(fixed_len);
-        if (conv == 1) {
+        if (conv == 5) {  // UUID -> string canonica
+          const auto hex = [](std::uint8_t v) {
+            const char* d = "0123456789abcdef";
+            return std::string{d[v >> 4], d[v & 0xF]};
+          };
+          std::string s;
+          for (int i = 0; i < fixed_len; ++i) {
+            s += hex(b[i]);
+            if (i == 3 || i == 5 || i == 7 || i == 9) s += '-';
+          }
+          vals.push_back(Value::texto(s));
+        } else if (conv == 1) {
           vals.push_back(Value::decimal(decimal_bytes(b, static_cast<std::size_t>(fixed_len),
                                                        dec_scale, col)));
         } else {
@@ -2402,17 +2483,56 @@ void write_logical_list(Tw& w) {
   w.struct_end();
 }
 
-void write_schema_leaf(Tw& fw, PType type, bool optional, const std::string& name,
-                       FidAlloc& fa) {
+// Anota logica DECIMAL (LogicalType.DECIMAL + ConvertedType.DECIMAL).
+void write_logical_decimal(Tw& w, int precision, int scale) {
+  w.field(10, T_STRUCT);  // logicalType: union LogicalType
+  w.struct_begin();
+  w.field(5, T_STRUCT);  // LogicalType.DECIMAL
+  w.struct_begin();
+  w.field_i32(1, scale);
+  w.field_i32(2, precision);
+  w.struct_end();
+  w.struct_end();
+}
+
+// Anota logica UUID (LogicalType.UUID) em FIXED_LEN_BYTE_ARRAY(16).
+void write_logical_uuid(Tw& w) {
+  w.field(10, T_STRUCT);  // logicalType: union LogicalType
+  w.struct_begin();
+  w.field(13, T_STRUCT);  // LogicalType.UUID
+  w.struct_begin();
+  w.struct_end();
+  w.struct_end();
+}
+
+void write_schema_leaf(Tw& fw, const Column& c, FidAlloc& fa) {
+  const PType type = c.type;
+  const bool optional = c.optional;
+  const std::string& name = c.name;
   fw.struct_begin();
   fw.field_i32(1, static_cast<std::int32_t>(type));
   fw.field_i32(3, optional ? 1 : 0);
   fw.field_str(4, name);
+  if (type == PT_FIXED) {
+    if (c.fixed_len <= 0) die("coluna '" + c.name + "': FIXED_LEN_BYTE_ARRAY sem type_length");
+    fw.field_i32(2, c.fixed_len);  // type_length
+    if (!c.logical_uuid) {
+      fw.field_i32(6, 5);            // ConvertedType.DECIMAL
+      fw.field_i32(7, c.dec_scale);
+      fw.field_i32(8, c.dec_precision);
+    }
+  }
   if (type == PT_BYTE_ARRAY) fw.field_i32(6, 0);  // ConvertedType.UTF8
   if (type == PT_INT32) fw.field_i32(6, 17);      // ConvertedType.INT_32
   fw.field_i32(9, fa.take());
   if (type == PT_BYTE_ARRAY) write_logical_string(fw);
   if (type == PT_INT32) write_logical_integer(fw, 32, true);
+  if (type == PT_FIXED) {
+    if (c.logical_uuid)
+      write_logical_uuid(fw);
+    else
+      write_logical_decimal(fw, c.dec_precision, c.dec_scale);
+  }
   fw.struct_end();
 }
 
@@ -2452,7 +2572,10 @@ void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {
       fw.struct_end();
       for (const Column& ch : c.children) write_schema_tree(fw, ch, fa, false);
     } else if (c.nesting_depth == 1) {
-      write_schema_leaf(fw, c.type, c.elem_nullable, "element", fa);
+      Column el = c;
+      el.name = "element";
+      el.optional = c.elem_nullable;
+      write_schema_leaf(fw, el, fa);
     } else {
       // lista aninhada: emite um grupo element recursivamente
       Column inner;
@@ -2469,12 +2592,70 @@ void write_schema_tree(Tw& fw, const Column& c, FidAlloc& fa, bool is_top) {
     }
     return;
   }
-  write_schema_leaf(fw, c.type, c.optional, c.name, fa);
+  write_schema_leaf(fw, c, fa);
+}
+
+// Parse "decimal(p,s)" -> (precision, scale). Retorna true se bater.
+bool parse_decimal_type(const std::string& s, int& precision, int& scale) {
+  if (s.rfind("decimal(", 0) != 0) return false;
+  if (s.back() != ')') return false;
+  const std::string inner = s.substr(8, s.size() - 9);
+  const auto comma = inner.find(',');
+  if (comma == std::string::npos) return false;
+  try {
+    precision = std::stoi(inner.substr(0, comma));
+    scale = std::stoi(inner.substr(comma + 1));
+  } catch (...) {
+    return false;
+  }
+  return precision > 0 && scale >= 0 && scale <= precision;
+}
+
+// Tamanho em bytes de um tipo decimal dada a precisao (Parquet spec).
+int decimal_fixed_len(int precision) {
+  if (precision <= 9) return 4;
+  if (precision <= 18) return 8;
+  if (precision <= 38) return 16;
+  if (precision <= 76) return 32;
+  return -1;
+}
+
+// Aplica um tipo opt-in (`tipos:`) a uma folha. `path` e usado nas mensagens.
+void aplica_tipo_folha(Column& c, const std::string& path, const std::string& tn) {
+  if (tn == "int32") {
+    if (c.type != PT_INT64) die("tipos: '" + path + "' int32 exige coluna de inteiros");
+    c.type = PT_INT32;
+  } else if (tn == "float") {
+    if (c.type != PT_DOUBLE) die("tipos: '" + path + "' float exige coluna de decimais");
+    c.type = PT_FLOAT;
+  } else if (tn == "uuid") {
+    if (c.type != PT_BYTE_ARRAY) die("tipos: '" + path + "' uuid exige coluna de texto");
+    c.type = PT_FIXED;
+    c.fixed_len = 16;
+    c.logical_uuid = true;
+  } else {
+    int precision = 0, scale = 0;
+    if (parse_decimal_type(tn, precision, scale)) {
+      if (c.type != PT_DOUBLE && c.type != PT_INT64) {
+        die("tipos: '" + path + "' decimal exige coluna numerica");
+      }
+      const int flen = decimal_fixed_len(precision);
+      if (flen < 0) die("tipos: '" + path + "' precisao decimal muito grande");
+      c.type = PT_FIXED;
+      c.fixed_len = flen;
+      c.dec_precision = precision;
+      c.dec_scale = scale;
+    } else {
+      die("tipos: '" + path + "' tipo '" + tn +
+          "' invalido (use \"int32\", \"float\", \"uuid\" ou \"decimal(p,s)\")");
+    }
+  }
 }
 
 // Estreitamento fisico opt-in (`tipos:`): "int32" (de coluna inteira, com
-// checagem de alcance na codificacao) e "float" (de decimal). Caminho
-// pontilhado ("col" ou "struct.campo"); lista usa o caminho do grupo.
+// checagem de alcance na codificacao), "float" (de decimal), "uuid" e
+// "decimal(p,s)". Caminho pontilhado ("col" ou "struct.campo"); lista usa o
+// caminho do grupo.
 void aplicar_tipos(std::vector<Column>& cols, const std::map<std::string, std::string>& tipos) {
   if (tipos.empty()) return;
   std::function<void(Column&, const std::string&)> visita = [&](Column& c,
@@ -2493,35 +2674,12 @@ void aplicar_tipos(std::vector<Column>& cols, const std::map<std::string, std::s
     }
     if (c.nesting_depth > 0) {
       const auto it = tipos.find(path);
-      if (it != tipos.end()) {
-        if (it->second == "int32") {
-          if (c.type != PT_INT64) die("tipos: '" + path + "' int32 exige coluna de inteiros");
-          c.type = PT_INT32;
-        } else if (it->second == "float") {
-          if (c.type != PT_DOUBLE) die("tipos: '" + path + "' float exige coluna de decimais");
-          c.type = PT_FLOAT;
-        } else {
-          die("tipos: '" + path + "' tipo '" + it->second + "' invalido");
-        }
-      }
+      if (it != tipos.end()) aplica_tipo_folha(c, path, it->second);
       return;
     }
     const auto it = tipos.find(path);
     if (it == tipos.end()) return;
-    if (it->second == "int32") {
-      if (c.type != PT_INT64) {
-        die("tipos: '" + path + "' int32 exige coluna de inteiros");
-      }
-      c.type = PT_INT32;
-    } else if (it->second == "float") {
-      if (c.type != PT_DOUBLE) {
-        die("tipos: '" + path + "' float exige coluna de decimais");
-      }
-      c.type = PT_FLOAT;
-    } else {
-      die("tipos: '" + path + "' tipo '" + it->second +
-          "' invalido (use \"int32\" ou \"float\")");
-    }
+    aplica_tipo_folha(c, path, it->second);
   };
   for (Column& c : cols) visita(c, c.name);
   for (const auto& [path, tn] : tipos) {
@@ -3049,6 +3207,7 @@ LeitorParquet abrir_parquet(const std::string& path) {
     int logical_int_bits = 0;
     bool logical_int_signed = true;
     bool logical_decimal = false;
+    bool logical_uuid = false;
     int num_children = 0;
     int parent = -1;
   };
@@ -3123,6 +3282,13 @@ LeitorParquet abrir_parquet(const std::string& path) {
                   }
                   tr.pos = sub.pos;
                   e.logical_decimal = true;
+                } else if (lid == 13) {  // LogicalType.UUID
+                  if (lt != T_STRUCT) {
+                    die("LogicalType.UUID espera struct vazio (lt=" + std::to_string(lt) + ")");
+                  }
+                  tr.skip(lt);
+                  e.logical_uuid = true;
+                  consumido = true;
                 } else if (lid == 6) {
                   e.logical_date = true;  // LogicalType.DATE (struct vazio)
                   tr.skip(lt);
@@ -3333,6 +3499,13 @@ LeitorParquet abrir_parquet(const std::string& path) {
     const bool tsus_c = e.converted == 10;
     const bool is_dec = dec_c || e.logical_decimal;
     const bool is_date = date_c || e.logical_date;
+    if (e.logical_uuid) {
+      if (e.type != PT_FIXED || e.type_length != 16) {
+        die("coluna '" + col + "': UUID exige FIXED_LEN_BYTE_ARRAY(16)");
+      }
+      conv = 5;
+      return;
+    }
     if (is_dec) {
       if (e.scale < 0) die("coluna '" + col + "': decimal sem escala");
       conv = 1;

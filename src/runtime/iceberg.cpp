@@ -2109,21 +2109,6 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
     std::int64_t proximo = 0;
     assign_ids(arvore_ids, proximo);
   }
-  auto resolve_folhas = [&](const std::string& name, std::vector<int>& dst) {
-    const std::vector<Column>& base =
-        ids_by_name != nullptr ? *ids_by_name : arvore_ids;
-    for (const Column& c : base) {
-      if (c.name != name) continue;
-      std::vector<int> tmp;
-      leaf_ids(std::vector<Column>{c}, tmp);  // struct entra com o proprio id
-      if (tmp.empty() || tmp.front() <= 0) {
-        die("coluna '" + name + "' sem field-id no schema (evolucao de schema inconsistente)");
-      }
-      dst.insert(dst.end(), tmp.begin(), tmp.end());
-      return;
-    }
-    die("coluna '" + name + "' fora do schema (evolucao de schema inconsistente)");
-  };
   if (spec != nullptr) {
     grupos = partition_rows(tabela, *spec);
   } else {
@@ -2145,12 +2130,15 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
     const std::string path = subdir + "/" + nome;
     std::vector<int> field_ids;
     if (spec != nullptr || ids_by_name != nullptr) {
-      const Value& first = g.rows.list->front();
-      for (const auto& kv : first.map->items) {
-        if (std::find(removidas.begin(), removidas.end(), kv.first) != removidas.end()) {
+      const std::vector<Column>& base =
+          ids_by_name != nullptr ? *ids_by_name : arvore_ids;
+      for (const Column& col : base) {
+        if (std::find(removidas.begin(), removidas.end(), col.name) != removidas.end()) {
           continue;  // identity fora do parquet
         }
-        resolve_folhas(kv.first, field_ids);
+        std::vector<int> tmp;
+        leaf_ids(std::vector<Column>{col}, tmp);
+        field_ids.insert(field_ids.end(), tmp.begin(), tmp.end());
       }
     }
     parquet_write(path, g.rows, field_ids.empty() ? nullptr : &field_ids);
