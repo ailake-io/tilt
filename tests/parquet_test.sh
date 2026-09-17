@@ -514,5 +514,79 @@ printf '%s\n' "$out"
 confere "[[1, 2], [3]]"
 confere "[{a: 1, b: x}, {a: 2, b: nulo}]"
 
+# --- 13. 3 niveis + struct com campo lista (Fase 12-5a.1) --------------------
+cat > "$tmp/escrita_nivel3.tilt" <<'TILTEOF'
+pipeline escrita_nivel3:
+  passos:
+    - t = [{ m: [[[0]]] }, { m: [[nulo]] }, { m: [[[]]] }, { m: [[],[nulo]] }, { m: [[[nulo]]] }, { m: nulo }, { m: [] }]
+    - escrever_parquet t, "saida_nivel3.parquet"
+    - v = ler_parquet "saida_nivel3.parquet"
+    - imprimir tamanho v
+    - para cada l em v:
+        imprimir l.m
+    - s = [{ id: 1, itens: [{ a: 1, tags: ["x"] }] }, { id: 2, itens: [{ a: 2, tags: ["y", "z"] }, { a: 3, tags: [] }] }]
+    - escrever_parquet s, "saida_comp.parquet"
+    - w = ler_parquet "saida_comp.parquet"
+    - imprimir tamanho w
+    - imprimir w[0].itens
+    - imprimir w[1].itens
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_nivel3.tilt)
+printf '%s\n' "$out"
+confere "[[[0]]]"
+confere "[[nulo]]"
+confere "[{a: 1, tags: [x]}]"
+confere "[{a: 2, tags: [y, z]}, {a: 3, tags: []}]"
+
+python3 - "$tmp/saida_nivel3.parquet" "$tmp/saida_comp.parquet" "$tmp/py_nivel3.parquet" "$tmp/py_comp.parquet" <<'PYEOF'
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+# tilt -> pyarrow: 3 niveis e struct-composto intactos
+t = pq.read_table(sys.argv[1]).to_pylist()
+assert t[0]["m"] == [[[0]]], t[0]
+assert t[1]["m"] == [[None]], t[1]
+assert t[4]["m"] == [[[None]]], t[4]
+s = pq.read_table(sys.argv[2]).to_pylist()
+assert s[0]["itens"] == [{"a": 1, "tags": ["x"]}], s[0]
+assert s[1]["itens"][1] == {"a": 3, "tags": []}, s[1]
+print("pyarrow: nivel3 e struct-composto escritos pelo tilt validados")
+
+# pyarrow -> tilt: fixtures externas (nulos/vazios em todos os niveis)
+t2 = pa.table({"m": pa.array(
+    [None, [], [None], [[]], [[None]], [[], []], [[[1]]], [[[1, 2], [3]]],
+     [[[None], [4]]], [[[], [5]]]],
+    type=pa.list_(pa.list_(pa.list_(pa.int64()))))})
+pq.write_table(t2, sys.argv[3])
+s2 = pa.table({"l": pa.array(
+    [[{"a": 1, "tags": ["x", "y"]}], [], None, [None],
+     [{"a": 1, "tags": ["x"]}, None, {"a": None, "tags": []},
+      {"a": 3, "tags": None}, {"a": 4, "tags": ["y", "z"]}]],
+    type=pa.list_(pa.field("element", pa.struct(
+        [("a", pa.int64()), ("tags", pa.list_(pa.string()))]))))})
+pq.write_table(s2, sys.argv[4])
+print("pyarrow: fixtures nivel3/comp gerados")
+PYEOF
+
+cat > "$tmp/leitura_nivel3.tilt" <<'TILTEOF'
+pipeline leitura_nivel3:
+  passos:
+    - dados = ler_parquet "py_nivel3.parquet"
+    - imprimir tamanho dados
+    - para cada l em dados:
+        imprimir l.m
+    - s = ler_parquet "py_comp.parquet"
+    - imprimir tamanho s
+    - para cada l em s:
+        imprimir l.l
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_nivel3.tilt)
+printf '%s\n' "$out"
+confere "[[[1, 2], [3]]]"
+confere "[[[nulo], [4]]]"
+confere "[{a: 1, tags: [x]}, nulo, {a: nulo, tags: []}, {a: 3, tags: nulo}, {a: 4, tags: [y, z]}]"
+confere "[{a: 1, tags: [x, y]}]"
+
 [ "$fail" = 0 ] && echo "parquet_test ok"
 exit "$fail"
