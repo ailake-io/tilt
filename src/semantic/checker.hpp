@@ -74,6 +74,8 @@ class SemanticChecker {
   // agregacoes. So para literais em linha reta (fluxo-insensivel como o
   // TypeEnv); ramos condicionais restauram o estado anterior.
   using MapShapes = std::unordered_map<std::string, std::unordered_map<std::string, sema::TypeKind>>;
+  using MapTensorShapes =
+      std::unordered_map<std::string, std::unordered_map<std::string, TensorShape>>;
   using ListElems = std::unordered_map<std::string, sema::TypeKind>;
 
   void scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes, TypeEnv types);
@@ -120,8 +122,13 @@ class SemanticChecker {
   bool silencioso_ = false;
   std::string funcao_coleta_;
   std::vector<sema::TypeKind> retornos_coletados_;
+  std::vector<std::optional<TensorShape>> retornos_formas_coletadas_;
+  // Formas de retorno conhecidas de funcoes locais. A chamada instancia '_'
+  // com as dimensoes conhecidas dos argumentos tensores.
+  std::unordered_map<std::string, TensorShape> funcao_formas_retorno_;
   // Formas de mapas/listas por variavel (ver MapShapes/ListElems acima).
   MapShapes formas_mapa_;
+  MapTensorShapes formas_tensor_mapa_;
   ListElems elem_lista_;
 
   void define(const std::string& name, std::string kind, sema::Type type, Span span);

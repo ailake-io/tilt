@@ -2,8 +2,23 @@
 
 Levantamento do estado real (parser × checker × interpretador × runtime) e
 dos gaps por domínio para a Tilt ficar excelente em engenharia de dados,
-machine learning, deep learning, LLM, LLMOps e MLOps. Estado: pós-Marco 3/D1
-(`executar_sql` com `?` + `transacao`; ver guia 03).
+machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fase 12-5a.6
+concluída; consolidação da 12-5a.7 em andamento.
+
+## Fase 12-5a — formatos e formas de tensor
+
+As entregas .1–.5 estão cobertas pelos testes de Parquet/Iceberg e a .6 pelo
+checker semântico e seus goldens. O estado consolidado é:
+
+- Parquet: listas aninhadas e listas recursivas de structs, `field_id`,
+  decimais grandes e UUID.
+- Iceberg: transforms com poda, partition summaries, sequence numbers e
+  equality deletes na leitura.
+- Shape solver: contratos de retorno tensor em funções locais com `_`,
+  instanciação pelas dimensões conhecidas dos argumentos e propagação para
+  atribuições diretas como `m.campo = tensor`.
+- A .7 foi concluída com golden de regressão, documentação revisada e commit
+  isolado das alterações da fase.
 
 ## Engenharia de dados — base sólida, faltam operação e escala
 

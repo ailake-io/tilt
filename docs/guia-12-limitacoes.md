@@ -27,10 +27,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `reformar` (n. de elementos, com `_` inferido), `transposta` (2D),
   `matmul` (2D e batched ND), broadcast elementwise (NumPy: 1 expande) e
   `atencao(q, k, v, escala)` (bare ou `nn.atencao`). Dimensões `_`
-  (simbólicas, `-1`) são compatíveis com tudo e se propagam; incompatível
+  (simbólicas, `-1`) são compatíveis com tudo e se propagam; contratos de
+  funções locais com entrada/retorno tensor instanciam `_` no chamador, e
+  `m.campo = tensor` preserva a forma conhecida do campo. Incompatível
   evidente continua sem veredito (runtime decide). Fora do
   solver: formas através de chamadas de `funcao` genéricas ou condicionais,
-  e `conv2d` com formas dinâmicas (não literais fora de `_`) —
+  e `conv2d` com formas dinâmicas sem contrato —
   nesses casos a validação de dimensão continua acontecendo em runtime. No
   runtime, `_` em forma avaliada falha com mensagem própria, exceto em
   `reformar([...])` (inferido) e anotação/`checar`.
@@ -58,11 +60,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
   por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
-  RLE), **listas de escalares** (anotação LIST, elemento Nulo vira OPTIONAL —
+  RLE),   **listas de escalares** (anotação LIST, elemento Nulo vira OPTIONAL —
   Marco 2 / B3), **structs** (Fase 12-5a), **listas aninhadas**
-  (`list<list<...>>`, Marco 2 / B2a, nulos em todos os níveis) e **listas de
-  structs** (Marco 2 / B2b, elemento Nulo vira OPTIONAL) — tudo validado com
-  pyarrow nos dois sentidos — e estreitamento opt-in `tipos: {col:
+  (`list<list<...>>`, Marco 2 / B2a, nulos em todos os níveis),
+  **3 níveis de lista** (Fase 12-5a.1, nulos/vazios em todos os níveis) e
+  **listas de structs** (Marco 2 / B2b, elemento Nulo vira OPTIONAL;
+  campos-escalares **e campos-lista** nos elementos, Fase 12-5a.1) — tudo
+  validado com pyarrow nos dois sentidos — e estreitamento opt-in `tipos: {col:
   "int32"|"float"}` (Marco 1 / B1, com anotação INTEGER) e dictionary
   encoding automático com fallback (Marco 2 / B4, `dicionario: falso`
   desliga). A leitura cobre
@@ -75,7 +79,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   encoding PLAIN ou PLAIN_DICTIONARY, páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
   gzip/deflate (zlib via `dlopen`) e **snappy** (codec próprio, sem dlopen).
-  Ainda fora do subconjunto: 3+ níveis de lista, structs com
+  Ainda fora do subconjunto: 4+ níveis de lista, struct/map/lista-aninhada
+  como campo de elemento struct (só escalar e lista-1-nível), structs com
   `field_ids` explícitos (caminho Iceberg), decimais com mais de 8 bytes e
   UUID como tipo próprio.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
@@ -148,10 +153,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
    poda por valor. **Deletes (Fase 12-5a)**: `apagar_iceberg` (position e
    equality) + leitura filtrada; pyiceberg aplica os position deletes do
    tilt (equality deletes o próprio pyiceberg ainda não suporta — upstream).
-   Mas: valor nulo em coluna de partição,
+   Os manifest lists carregam `partitions` com `contains_null`, `lower_bound` e
+   `upper_bound` por campo, além de `sequence_number`/`min_sequence_number`;
+   snapshots e entradas de manifest também recebem sequence numbers reais da
+   spec v2 (validado com pyiceberg). Mas: valor nulo em coluna de partição,
    valores com `/` e coluna repetida não são suportados (erro claro, sem
-   escaping), não há partitions summary nos manifests e data sequence numbers
-   são sempre 0. A estrutura escrita (metadata, manifest list, manifest e
+   escaping). A estrutura escrita (metadata, manifest list, manifest e
    parquet com field-ids) carrega no **pyiceberg**.
 - Todos os conectores planejados rodam — a lista de stubs de conectores está
   vazia. CSV, JSON, Parquet, Delta, Iceberg, SQLite, Postgres, DuckDB, MySQL/
@@ -406,7 +413,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   listas, `para cada`, índice, `contem`, interpolação `{{nome}}` sobre locais,
   acesso a campo — mapa/tabela, `.tamanho`, props de tensor, `?.` — e
   `ler_csv` de 1 argumento); o resto roda no interpretador de
-  árvore (`tilt executar --vm` cai por pipeline, transparente).
+  árvore (`tilt executar --vm` cai por pipeline, transparente). Chunks vão
+  para `<fonte>.tiltc` (SHA do fonte; `TILT_VM_NOCACHE=1` desliga).
 - `e` / `ou` na VM fazem curto-circuito (desde a Fase 8), com resultado
   sempre `logico`.
 - `tilt compilar` cobre o **programa inteiro** dentro do subconjunto da VM:
@@ -461,13 +469,16 @@ A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
   `libmariadb.dll`, `zlib1.dll`, `nvcuda.dll`),
   `epoll` do servidor HTTP vira um event loop com `select()` (sem o caminho
   paralelo de workers — `--threads N` é serial no Windows por enquanto),
-  cores do terminal ficam desligadas. Limites atuais do port:
-  - HTTP externo (S3, LLM, Qdrant, Iceberg REST) continua dependendo do
-    binário `curl` — no Windows, `curl.exe` do sistema (Windows 10+), mas o
-    quoting de argumentos segue o padrão shell POSIX (aspas simples), o que
-    o `cmd.exe` não interpreta; trate esses conectores como não validados
-    no Windows nesta fase.
+  cores ANSI via VT processing no console, `in_path` com `PATHEXT`.
+  Limites atuais do port:
+  - HTTP externo (S3, LLM, Qdrant, Iceberg REST) depende do `curl.exe` do
+    sistema (Windows 10+); os argumentos usam quoting `cmd.exe`
+    (`tilt_win_quote`, regra CommandLineToArgvW — teste `quote_test.sh`),
+    mas como não há runner Windows local, trate como em validação pelo CI.
+    Residual: pares `%...%` sofrem expansão do `cmd` (URLs com dois escapes
+    `%NN` podem corromper; só trocando o spawn por `CreateProcess`).
   - TLS carrega OpenSSL via DLL (`libssl-3-x64.dll`/`libcrypto-3-x64.dll`)
     no `PATH`; sem elas, `rediss://`/`mongodb+srv://`/kafka TLS erros claros.
   - A suíte `ctest` é em shell script e só roda em Linux/macOS — o job
-    Windows valida build + smoke (`versao`, `checar`, `executar`).
+    Windows valida build (`-Werror`) + smoke estendido (`versao`, `checar`,
+    `executar`, incluindo ETL Delta e agente mock).

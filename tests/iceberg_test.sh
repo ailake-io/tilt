@@ -314,13 +314,24 @@ fields = [f["name"] for f in md["schemas"][0]["fields"]]
 if fields != ["nome", "idade", "nota"]:
     raise Erro("schema inesperado: " + repr(fields))
 
-# (b) manifest list + manifest do snapshot final: ADD do arquivo do append ----
+# (b) sequence numbers reais da spec v2 -----------------------------------------
+if md.get("last-sequence-number") != 2:
+    raise Erro("last-sequence-number deve ser 2, obtido %r" % md.get("last-sequence-number"))
+if snaps[0].get("sequence-number") != 1:
+    raise Erro("snapshot 0 deve ter sequence-number 1, obtido %r" % snaps[0].get("sequence-number"))
+if snaps[1].get("sequence-number") != 2:
+    raise Erro("snapshot 1 deve ter sequence-number 2, obtido %r" % snaps[1].get("sequence-number"))
+
+# (c) manifest list + manifest do snapshot final: ADD do arquivo do append ----
 _, mlist = ocf(sem_file(snaps[1]["manifest-list"]))
 if len(mlist) != 1:
     raise Erro("manifest list do append deve ter 1 registro")
 m0 = mlist[0]
 if m0["added_files_count"] != 1 or m0["existing_files_count"] != 1 or m0["added_snapshot_id"] != cur_id:
     raise Erro("manifest list: contagens/snapshot incorretos")
+if m0["sequence_number"] != 2 or m0["min_sequence_number"] != 1:
+    raise Erro("manifest list: sequence numbers incorretos: %r/%r" %
+               (m0["sequence_number"], m0["min_sequence_number"]))
 mpath = sem_file(m0["manifest_path"])
 if not os.path.exists(mpath):
     raise Erro("manifest ausente: " + mpath)
@@ -340,6 +351,12 @@ e = by_status[1]
 df = e["data_file"]
 if e["snapshot_id"] != cur_id or by_status[0]["snapshot_id"] != cur_id:
     raise Erro("snapshot_id das entradas != snapshot corrente")
+if e["sequence_number"] != 2 or e["file_sequence_number"] != 2:
+    raise Erro("entrada ADDED: sequence numbers incorretos: %r/%r" %
+               (e["sequence_number"], e["file_sequence_number"]))
+if by_status[0]["sequence_number"] != 1 or by_status[0]["file_sequence_number"] != 1:
+    raise Erro("entrada EXISTING: sequence numbers incorretos: %r/%r" %
+               (by_status[0]["sequence_number"], by_status[0]["file_sequence_number"]))
 if df["record_count"] != 1:
     raise Erro("record_count do append deve ser 1, obtido %r" % df["record_count"])
 if df["file_format"] != "PARQUET" or df["content"] != 0:
@@ -417,6 +434,18 @@ if [f.field_id for f in fields] != [1000, 1001]:
     raise Erro("field-ids do spec divergem: %r" % [f.field_id for f in fields])
 if [f.name for f in fields] != ["estado", "ano"]:
     raise Erro("nomes do spec divergem: %r" % [f.name for f in fields])
+
+# partition summaries do manifest list: limites por campo identity
+manifests = tabela.inspect.manifests().to_pylist()
+if len(manifests) != 1:
+    raise Erro("esperado 1 manifest, obtidos %d" % len(manifests))
+summaries = manifests[0]["partition_summaries"]
+if len(summaries) != 2:
+    raise Erro("esperados 2 partition summaries, obtidos %d" % len(summaries))
+if [(s["lower_bound"], s["upper_bound"]) for s in summaries] != [("rj", "sp"), ("2024", "2025")]:
+    raise Erro("partition summaries divergentes: %r" % summaries)
+if any(s["contains_null"] or s["contains_nan"] is not None for s in summaries):
+    raise Erro("partition summaries marcaram nulo/NaN indevidamente: %r" % summaries)
 
 # leitura completa: 5 linhas, colunas de particao reidratadas com tipo
 plan = tabela.scan().to_arrow()
@@ -642,17 +671,33 @@ if sorted(vistos) != [1, 2, 3, 4, 5]:
     raise Erro("ids nos data files divergem: %r" % sorted(vistos))
 print("murmur3: layout bucket do tilt confere com a referencia")
 
+# summaries do manifest list: limites por campo de particao e sequence number
+manifests = t0.inspect.manifests().to_pylist()
+if len(manifests) != 1:
+    raise Erro("esperado 1 manifest, obtidos %d" % len(manifests))
+summary = manifests[0]["partition_summaries"]
+if len(summary) != 1 or summary[0]["lower_bound"] != "0" or summary[0]["upper_bound"] != "3":
+    raise Erro("summary bucket[4] divergente: %r" % summary)
+if summary[0]["contains_null"] or summary[0]["contains_nan"] is not None:
+    raise Erro("summary bucket[4] marcou nulo/NaN indevidamente: %r" % summary)
+if t0.metadata.last_sequence_number != 1:
+    raise Erro("last-sequence-number inicial deve ser 1")
+
 # snapshot v1 = apos o position delete (id 2 fora): pyiceberg aplica o delete
 t1 = StaticTable.from_metadata(metas[1])
 ids1 = sorted(r["id"] for r in t1.scan().to_arrow().to_pylist())
 if ids1 != [1, 3, 4, 5]:
     raise Erro("position delete nao aplicado pelo pyiceberg: %r" % ids1)
+if t1.metadata.last_sequence_number != 2:
+    raise Erro("last-sequence-number apos position delete deve ser 2")
 
 # snapshot final = apos o equality delete (pyiceberg nao suporta equality —
 # https://github.com/apache/iceberg/issues/6568 — mas deve RECONHECER o nosso
 # manifest como equality delete, nao falhar no parse; o tilt ja conferiu
 # restam2: 3 acima)
 t2 = StaticTable.from_metadata(metas[-1])
+if t2.metadata.last_sequence_number != 3:
+    raise Erro("last-sequence-number apos equality delete deve ser 3")
 try:
     plan = t2.scan().to_arrow()
     raise Erro("pyiceberg aplicou equality deletes (suporte novo? atualize o teste)")
@@ -663,6 +708,26 @@ print("pyiceberg: spec bucket[4], murmur3 e position delete validados")
 PYEOF
 
 [ "$fail_bkt" = 0 ] || exit 1
+
+# --- 4b. equality delete respeita sequence number de data files posteriores ---------
+cat > "$tmp/equality_sequence.tilt" <<TILTEOF
+pipeline principal:
+  passos:
+    - t = [{ id: 1, v: "antigo" }, { id: 2, v: "mantido" }]
+    - escrever_iceberg t, "equality_sequence"
+    - n = apagar_iceberg "equality_sequence", onde: { id: 1 }, modo: "igualdade"
+    - imprimir "apagadas_seq: ", n
+    - novo = [{ id: 1, v: "novo" }]
+    - anexar_iceberg novo, "equality_sequence"
+    - atual = ler_iceberg "equality_sequence"
+    - imprimir "restam_seq: ", tamanho atual
+    - imprimir "id1_seq: ", tamanho ler_iceberg "equality_sequence", onde: { id: 1 }
+TILTEOF
+out_eq_seq=$(cd "$tmp" && "$BIN" executar equality_sequence.tilt)
+printf "%s\n" "$out_eq_seq"
+echo "$out_eq_seq" | grep -qE "apagadas_seq: +1"
+echo "$out_eq_seq" | grep -qE "restam_seq: +2"
+echo "$out_eq_seq" | grep -qE "id1_seq: +1"
 
 # --- 5. structs aninhados + evolucao (Marco 2 / B5) -------------------------------
 cat > "$tmp/struct_evo.tilt" <<'TILTEOF'

@@ -8,6 +8,26 @@
 - 🟡 **P2** — Recomendado / Melhoria
 - 🟢 **P3** — Desejável / Nice to have
 
+## Status atual — Fase 12
+
+### Fase 12-5a
+- [x] 12-5a.1 — Parquet: 3+ níveis de lista e listas de structs recursivas
+- [x] 12-5a.2 — Parquet: `field_ids`, decimais grandes e UUID
+- [x] 12-5a.3 — Iceberg: transforms com poda
+- [x] 12-5a.4 — Iceberg: partition summaries e sequence numbers reais
+- [x] 12-5a.5 — Iceberg: equality deletes na leitura
+- [x] 12-5a.6 — Core shape solver dinâmico e member assignment (contratos de
+  forma em funções locais com `_`, instanciação pelo argumento e propagação
+  para `m.campo = tensor`)
+- [x] 12-5a.7 — Goldens, documentação e commit da fase concluídos
+
+### Próximas fases
+- [ ] Fase 12-6 — Operação de pipelines
+- [ ] Fase 12-7 — GPU real/CUDA + AMP + dataloader Parquet
+- [ ] Fase 12-8 — CI Windows com testes funcionais
+- [ ] GPU — validação em hardware real (deferida)
+
+
 ---
 
 ## 1. Linguagem e Compilador
@@ -19,8 +39,8 @@
 - [ ] Integrar testes de lint/estilo no CI (`.github/workflows/ci.yml`)
 
 ### 1.2 Parser e Semântica (P1)
-- [ ] Completar parse de `tipo` com valores padrão (`campo: <tipo> = <valor>`)
-- [ ] Validar aridade de funções de usuário (atualmente sem validação)
+- [x] Parse de `tipo` com valores padrão (Sprint 1: parseia, T011, aplica em formato/entrada)
+- [x] Aridade de funções de usuário (Sprint 1: T011, faltantes sempre; sobra só em f(...))
 - [ ] Implementar inferência de tipos para fluxo condicional (T011 — subconjunto conservador já existe)
 - [ ] Completar solver de formas para `atencao` dinâmica e `conv2d` com formas dinâmicas (T012)
 
@@ -32,14 +52,14 @@
   `run-vm-interpola/membro/ler-csv` com paridade interp×VM verificada)
 - [ ] Implementar JIT (compilação em runtime sem passar por `.s`+`cc`)
 - [ ] Adicionar testes end-to-end para codegen ARM64 em qemu (atualmente depende de toolchain cross)
-- [ ] Implementar cache de bytecode em disco (`.tiltc`) — Fase 6 da roadmap
+- [x] Cache de bytecode em disco (Sprint 3: `.tiltc`, SHA do fonte, fail-closed)
 
 ---
 
 ## 2. Runtime e Conectores
 
 ### 2.1 Conectores de Dados (P1)
-- [ ] Adicionar connector `delta` nativo (não listado em `CMakeLists.txt` como `delta.cpp` — apenas via parquet)
+- [x] Connector `delta` nativo (`src/runtime/delta.cpp`, escrita/leitura/append/evolução/widening)
 - [ ] Validar conectores PostgreSQL, MySQL, DuckDB, ClickHouse em CI real (apenas smoke test no Windows)
 - [ ] Melhorar tratamento de erros em conectores TLS (redis/mongo/kafka) — certificados auto-assinados
 - [x] Adicionar pooling de conexões para bancos relacionais (Sprint 2:
@@ -51,11 +71,12 @@
 ### 2.2 Parquet/Delta/Iceberg (P2)
 - [ ] Suportar 3+ níveis de lista no Parquet (atualmente limitado)
 - [ ] Suportar structs com `field_ids` explícitos (caminho Iceberg)
-- [ ] Implementar evolução de schema para Delta Lake (fase 27)
-- [ ] Implementar evolução de schema para Iceberg (fase 27)
+- [x] Evolução de schema Delta (fase 27 add-column + widening int->long/float->double)
+- [x] Evolução de schema Iceberg (fase 27 add-column + widening, ids estáveis)
 - [ ] Implementar REST catalog do Iceberg (fase 29)
 - [ ] Implementar `tilt servir-catalogo` (fase 30)
-- [ ] Adicionar deletes (position/equality) para Iceberg (fase 12-5a — parcial)
+- [x] Adicionar deletes (position/equality) para Iceberg (fase 12-5a; leitura
+  nativa aplica ambos, pyiceberg aplica position e ainda não suporta equality)
 
 ### 2.3 Streaming (P2)
 - [ ] Implementar streaming de Parquet no treino (`carregador ..., fluxo: verdadeiro` — apenas CSV)
@@ -67,10 +88,10 @@
 ## 3. Machine Learning
 
 ### 3.1 Experimentos (P1)
-- [ ] Implementar `busca` de hiperparâmetros em grade (criterio: perda|acuracia, máx 64 combinações)
-- [ ] Adicionar `imputar` no `pre_processar` (sintaxe `- chave: [cols]`)
-- [ ] Implementar `f1` ponderado pelo suporte (atualmente limitado)
-- [ ] Adicionar `validacao_cruzada` para experimentos
+- [x] `busca` em grade (já existia; validada na Sprint 1)
+- [x] `imputar` no `pre_processar` (já existe)
+- [x] `f1` ponderado pelo suporte (já existe)
+- [x] `validacao_cruzada` (já existe)
 - [ ] Implementar `registrar_em: mlflow://` (atualmente grava JSON local)
 
 ### 3.2 Treino (P1)
@@ -92,7 +113,7 @@
 ## 4. LLM e RAG
 
 ### 4.1 LLM (P1)
-- [ ] Implementar `TILT_LLM=mock` para testes determinísticos offline
+- [x] `TILT_LLM=mock` (já existia; verificado na Sprint 2)
 - [ ] Adicionar suporte a `Retry-After` header em retry de LLM
 - [ ] Implementar cache de respostas LLM — roteiro
 - [ ] Implementar streaming com retry (atualmente sem retry em streaming)
@@ -114,12 +135,12 @@
 ## 5. Agentes
 
 ### 5.1 Ferramentas (P1)
-- [ ] Implementar `execucao` com corpo direto (sem `-`) para `ferramenta` — verificar se funciona
+- [x] `executar:` com corpo direto em `ferramenta` (funciona; documentado no guia-06)
 - [ ] Adicionar validação de entrada de ferramentas (tipagem de campos)
 - [ ] Implementar allowlist de ferramentas em serviços HTTP
 
 ### 5.2 Agentes (P2)
-- [ ] Implementar `memoria: vetorial` (atualmente apenas `conversa` e `nenhuma`)
+- [x] `memoria: vetorial` (Sprint 3: índice por agente, top-3, T011 em valor inválido)
 - [ ] Adicionar suporte a múltiplos LLMs em `equipe` (supervisor com fallback)
 - [ ] Implementar `max_passos` com logging detalhado de cada passo
 
@@ -130,12 +151,12 @@
 ### 6.1 Servidor HTTP (P1)
 - [ ] Implementar observabilidade completa (`/metricas` em formato Prometheus)
 - [ ] Implementar latências por rota em `/metricas` (atualmente ausente)
-- [ ] Adicionar graceful shutdown no servidor HTTP
+- [x] Graceful shutdown (Sprint 1: SIGINT/SIGTERM drenam e encerram)
 - [ ] Implementar conexões persistentes (keep-alive) em Windows (`select()` loop)
 
 ### 6.2 Serviços (P1)
-- [ ] Implementar middleware customizado em `servico` (além de `registro_requisicoes` e `limite_taxa`)
-- [ ] Adicionar validação de entrada (`entrada:`) contra `tipo` definido em rotas
+- [x] `meio:` (middleware) em `servico` (já existe)
+- [x] Validação de `entrada:` (Sprint 1: presença+T011-era 400 + tipos escalares + defaults)
 - [ ] Implementar versionamento de API (prefixo `/v1/`, `/v2/`)
 
 ---
@@ -143,7 +164,7 @@
 ## 7. Plataforma e DevOps
 
 ### 7.1 Windows Port (P1)
-- [ ] Validar quoting de argumentos `curl` no Windows (`cmd.exe` vs PowerShell)
+- [x] Quoting `cmd.exe` (Sprint 3: `tilt_shell_quote`, `quote_test.sh`; residual % documentado)
 - [ ] Implementar TLS via DLL no Windows (`libssl-3-x64.dll`)
 - [ ] Adicionar suporte a SQLite/Postgres/MySQL no Windows via dlopen/LoadLibrary
 - [ ] Migrar `tests/ctest` para Windows (atualmente shell-script only)
@@ -202,11 +223,14 @@
 ## 10. Integração com Ecossistema
 
 ### 10.1 IDE/LSP (P2)
-- [ ] Implementar `goto definition` no LSP
+- [x] `goto definition` no LSP (same-file; cross-file futuro)
 - [ ] Implementar `find references` no LSP
-- [ ] Implementar `hover type` (mostrar tipo ao passar o mouse)
+- [x] `hover type` (Sprint 3: assinatura de `funcao`, campos de `tipo`, tipo
+  do valor em usos de variável, tipo da expressão sob o cursor com forma de
+  tensor; desconhecido cai no texto atual)
 - [ ] Implementar `rename symbol` no LSP
-- [ ] Adicionar diagnostics em tempo real (on-type) no LSP
+- [ ] Adicionar diagnostics em tempo real (on-type) no LSP (hoje: full reparse
+  por `didChange`, sem debounce/cache)
 
 ### 10.2 Formatos (P2)
 - [ ] Adicionar suporte a Parquet com ZSTD compression
@@ -258,6 +282,30 @@ arquivo e só o par treino+modelo é isento de duplicata.
    e doc de `formato:`-com-padrão atualizada.
 5. [x] Triar T032 checkpoint/retomar — virou fix: isenção `treino`+`retomar:`
    no checker + `modelo Xor:` nos 3 blocos do guia-04; docs 102/102.
+
+### Enfileirado (pós-Sprint 3): aceitar nulo em coluna de partição
+- Hoje: erro claro fase 26 (Delta + Iceberg). Proposta: convenção Hive
+  `__HIVE_DEFAULT_PARTITION__` no layout + `null` no log/manifest, reidratar
+  marcador→`nulo` na leitura + poda com `nulo`, validar pyiceberg/Spark.
+  Irmão gêmeo (`/` em valores) fica de fora salvo pedido.
+
+### Sprint 3 — em andamento
+- [x] S3.4 Hover com tipos (assinatura, campos, valor em uso, expr + forma)
+- [x] Iceberg nulo-partição msg (opção b: sufixo fase-26 restaurado; 158/158)
+- [x] S3.1 Cache `.tiltc` (`src/vm/bytecode_cache.*`, SHA do fonte,
+  fail-closed, `TILT_VM_NOCACHE`/`TILT_VM_DEBUG`, teste `tiltc_test.sh`)
+- [x] S3.2 Type widening Delta/Iceberg (`integer`→`long`, `float`→`double`,
+  top-level e subcolunas struct; promoção no commit com ids estáveis;
+  `short`/`byte`/`decimal(p,s)` seguem erro; `schema_widen_test.sh` com
+  tabelas externas pyarrow + validação pyiceberg)
+- [x] S3.3 Windows (curl quoting + config seguro): `tilt_shell_quote` único
+  no compat (POSIX inalterado; Win list2cmdline-style), 3 cópias removidas,
+  `-w`/`--data @` citados; `tilt_enable_vt` (cores), `in_path` com PATHEXT,
+  CI Windows com `-Werror` + smoke paridade; `quote_test.sh` standalone
+  (sem runner Windows). Residual documentado: pares `%...%` no cmd.
+- [x] S3.5 Agente `memoria: vetorial` (índice por agente, top-3 no prompt,
+  `embeddings:` opcional, teto 200 turnos, `T011` em valor inválido; goldens
+  `run-agente-memoria-vetorial` + `chk-memoria`)
 
 ### Sprint 3 (restante)
 

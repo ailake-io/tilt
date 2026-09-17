@@ -52,7 +52,11 @@ Com formas inteiramente literais ou anotadas, `checar` propaga e valida
 dimensões antes de executar (`T012`). Formas entram por literais
 (`tensor [...]`, `uns`/`zeros`/`aleatorio [..]`) e por anotações
 (`entrada: tensor[...]`, parâmetros de `funcao` como `x: tensor[...]`) e
-propagam por atribuição. O que é verificado:
+propagam por atribuição. Funções locais com entrada e retorno tensor anotados
+também carregam a forma para o chamador; dimensões `_` do retorno são
+instanciadas pelas dimensões conhecidas dos argumentos. Atribuições diretas a
+campos de mapa (`m.campo = tensor`) preservam a forma para os passos seguintes.
+O que é verificado:
 
 | Operação | Verificação em `checar` |
 |---|---|
@@ -65,8 +69,9 @@ propagam por atribuição. O que é verificado:
 
 O que o solver **não** deriva vira "forma desconhecida" e segue sem
 verificação (o erro, se houver, continua vindo em runtime): formas através
-de chamadas de `funcao`, condicionais, dimensões `_`/não literais, broadcast
-parcial (viés `[N]` no último eixo) e pesos vindos de arquivo.
+de funções genéricas sem contrato tensor, condicionais, dimensões não
+literais, broadcast parcial (viés `[N]` no último eixo) e pesos vindos de
+arquivo.
 
 ### Convolução 2D e batch norm
 

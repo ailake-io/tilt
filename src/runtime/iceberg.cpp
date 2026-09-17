@@ -748,6 +748,7 @@ const char* kManifestEntrySchema = R"AVRO({"type":"record","name":"manifest_entr
 {"name":"partition","type":{"type":"record","name":"partition","fields":[]},"field-id":102},
 {"name":"record_count","type":"long","field-id":103},
 {"name":"file_size_in_bytes","type":"long","field-id":104},
+{"name":"equality_ids","type":["null",{"type":"array","items":"int","element-id":136}],"default":null,"field-id":135},
 {"name":"sort_order_id","type":["null","int"],"default":null,"field-id":140}
 ]},"field-id":2}]})AVRO";
 
@@ -789,6 +790,12 @@ std::string iceberg_type_name(const Value& v) {
     case ValueKind::Mapa: return "struct";  // aninhado (Marco 2 / B5)
     default: return "string";
   }
+}
+
+// Promocao de tipo sem perda (widening, como a spec Iceberg permite para
+// primitivas: int->long, float->double). Todo o resto divergente e erro.
+bool is_widening(const std::string& stored, const std::string& deduced) {
+  return (stored == "int" && deduced == "long") || (stored == "float" && deduced == "double");
 }
 
 struct Column {
@@ -888,7 +895,8 @@ std::string bucket_hash_bytes(const Value& v, const std::string& iceberg_type,
 
 // bucket(v) = murmur3(bytes) % N com semantica Java (% com sinal).
 int bucket_of(const Value& v, const std::string& iceberg_type, int n, const std::string& col) {
-  if (v.kind == ValueKind::Nulo) die("valor nulo em coluna de particao '" + col + "'");
+  if (v.kind == ValueKind::Nulo)
+    die("valor nulo em coluna de particao '" + col + "' (fase 26: particao com nulo nao e suportada)");
   const std::string bytes = bucket_hash_bytes(v, iceberg_type, col);
   const std::int32_t h = static_cast<std::int32_t>(murmur3_x86_32(
       reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()));
@@ -979,7 +987,9 @@ int extract_iso_component(const std::string& s, const std::string& component) {
 
 // Aplica um transform de particao a um valor de origem.
 Value apply_transform(const Value& v, const PartitionField& pf) {
-  if (v.kind == ValueKind::Nulo) die("valor nulo em coluna de particao '" + pf.source_name + "'");
+  if (v.kind == ValueKind::Nulo)
+    die("valor nulo em coluna de particao '" + pf.source_name +
+        "' (fase 26: particao com nulo nao e suportada)");
   if (pf.transform == "identity" || pf.transform.empty()) return v;
   if (pf.transform.rfind("bucket[", 0) == 0) {
     return Value::inteiro(bucket_of(v, pf.source_type, pf.num_buckets, pf.source_name));
@@ -1381,6 +1391,7 @@ struct Snapshot {
   std::string manifest_list;
   std::int64_t parent = -1;
   bool has_parent = false;
+  std::int64_t sequence_number = 0;  // v2: numero sequencial do snapshot
 };
 
 // Uma versao do schema no metadata (id + fields com ids/required estáveis —
@@ -1403,7 +1414,11 @@ struct TableMeta {
   std::int64_t version = -1;
   std::string location;
   std::string uuid;  // estavel por tabela (metadata "uuid", spec v2)
+  std::int64_t last_sequence_number = 0;      // maior sequence number de snapshot
+  std::int64_t last_file_sequence_number = 0;  // maior file_sequence_number de data file
 };
+
+std::int64_t compute_last_file_sequence_number(const std::vector<Snapshot>& snapshots);
 
 Value parse_metadata(const std::string& path, TableMeta& out) {
   Value md;
@@ -1435,6 +1450,9 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
   }
   if (const Value* lc = map_find(md, "last-column-id"); lc && lc->kind == ValueKind::Inteiro) {
     out.last_column_id = lc->i;
+  }
+  if (const Value* ls = map_find(md, "last-sequence-number"); ls && ls->kind == ValueKind::Inteiro) {
+    out.last_sequence_number = ls->i;
   }
   if (const Value* schemas = map_find(md, "schemas"); schemas && schemas->kind == ValueKind::Lista) {
     // Campos recursivos (structs aninhados tem "type" objeto).
@@ -1587,11 +1605,13 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
       const Value* ml = map_find(s, "manifest-list");
       const Value* sum = map_find(s, "summary");
       const Value* parent = map_find(s, "parent-snapshot-id");
+      const Value* seq = map_find(s, "sequence-number");
       if (!id || id->kind != ValueKind::Inteiro || !ml || ml->kind != ValueKind::Texto) {
         die("snapshot incompleto em '" + path + "'");
       }
       snap.id = id->i;
       snap.ts = ts && ts->kind == ValueKind::Inteiro ? ts->i : 0;
+      snap.sequence_number = seq && seq->kind == ValueKind::Inteiro ? seq->i : 0;
       snap.manifest_list = ml->s;
       if (sum && sum->kind == ValueKind::Mapa) {
         if (const Value* op = map_find(*sum, "operation"); op && op->kind == ValueKind::Texto) {
@@ -1619,6 +1639,8 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
   // versao pelo nome do arquivo (v<N>.metadata.json canonico; v<N>-<uuid>
   // legado ainda aceito na leitura)
   out.version = metadata_version_from_name(path);
+  // file_sequence_number nao tem campo no metadata; deduzimos dos manifests.
+  out.last_file_sequence_number = compute_last_file_sequence_number(out.snapshots);
   return md;
 }
 
@@ -1665,14 +1687,19 @@ std::string manifest_entry_schema_json(const std::vector<PartitionField>& spec) 
   return s;
 }
 
-Value make_manifest_entry(int status, std::int64_t snapshot_id, const std::string& file_path,
-                          std::int64_t record_count, std::int64_t file_size, int content,
-                          const std::vector<PartitionField>& spec, const Value& part_map) {
+Value make_manifest_entry(int status, std::int64_t snapshot_id,
+                          std::int64_t sequence_number, std::int64_t file_sequence_number,
+                          const std::string& file_path, std::int64_t record_count,
+                          std::int64_t file_size, int content,
+                          const std::vector<PartitionField>& spec, const Value& part_map,
+                          const std::vector<std::int64_t>& equality_ids) {
   Value e = Value::mapa();
   e.map->set("status", Value::inteiro(status));
   e.map->set("snapshot_id", Value::inteiro(snapshot_id));
-  e.map->set("sequence_number", Value::nulo());
-  e.map->set("file_sequence_number", Value::nulo());
+  e.map->set("sequence_number",
+             sequence_number > 0 ? Value::inteiro(sequence_number) : Value::nulo());
+  e.map->set("file_sequence_number",
+             file_sequence_number > 0 ? Value::inteiro(file_sequence_number) : Value::nulo());
   Value df = Value::mapa();
   df.map->set("content", Value::inteiro(content));
   df.map->set("file_path", Value::texto(file_path));
@@ -1686,6 +1713,13 @@ Value make_manifest_entry(int status, std::int64_t snapshot_id, const std::strin
   df.map->set("partition", std::move(part));
   df.map->set("record_count", Value::inteiro(record_count));
   df.map->set("file_size_in_bytes", Value::inteiro(file_size));
+  if (content == 2 && !equality_ids.empty()) {
+    Value ids = Value::lista();
+    for (const std::int64_t id : equality_ids) ids.list->push_back(Value::inteiro(id));
+    df.map->set("equality_ids", std::move(ids));
+  } else {
+    df.map->set("equality_ids", Value::nulo());
+  }
   df.map->set("sort_order_id", Value::nulo());
   e.map->set("data_file", std::move(df));
   return e;
@@ -1697,6 +1731,9 @@ struct FileInfo {
   std::int64_t size = 0;
   int content = 0;   // 0 DATA, 1 POSITION DELETES, 2 EQUALITY DELETES
   Value part_map;  // valores de particao (tipados) por coluna; vazio = sem particao
+  std::int64_t sequence_number = 0;       // snapshot sequence do data file
+  std::int64_t file_sequence_number = 0;  // file sequence number global
+  std::vector<std::int64_t> equality_ids; // field-ids usados por equality delete
 };
 
 std::string write_manifest(const std::string& meta_dir,
@@ -1716,9 +1753,12 @@ std::string write_manifest(const std::string& meta_dir,
     for (const FileInfo& f : files) {
       if (f.path == path) info = &f;
     }
-    records.push_back(make_manifest_entry(status, snapshot_id, path, info ? info->records : 0,
-                                          info ? info->size : 0, info ? info->content : 0,
-                                          spec, info ? info->part_map : Value::mapa()));
+    records.push_back(make_manifest_entry(
+        status, snapshot_id, info ? info->sequence_number : 0,
+        info ? info->file_sequence_number : 0, path, info ? info->records : 0,
+        info ? info->size : 0, info ? info->content : 0, spec,
+        info ? info->part_map : Value::mapa(),
+        info ? info->equality_ids : std::vector<std::int64_t>{}));
   }
   const std::string name = new_uuid() + "-m0.avro";
   const std::string path = meta_dir + "/" + name;
@@ -1775,7 +1815,8 @@ std::string partition_bound_bytes(const PartitionField& pf, const Value& v) {
 }
 
 std::string write_manifest_list(const std::string& meta_dir, const std::string& manifest_name,
-                                std::int64_t snapshot_id, int added, int existing, int deleted,
+                                std::int64_t snapshot_id, std::int64_t sequence_number,
+                                int added, int existing, int deleted,
                                 std::int64_t added_rows, std::int64_t existing_rows,
                                 const std::vector<FileInfo>& files,
                                 const std::vector<PartitionField>& spec, int list_content = 0) {
@@ -1794,10 +1835,16 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
   rec.map->set("manifest_length", Value::inteiro(manifest_length));
   rec.map->set("partition_spec_id", Value::inteiro(0));
   rec.map->set("content", Value::inteiro(list_content));  // 0 DATA, 1 DELETES
-  // 1a passada: sem data sequence numbers reais (manifest entries os tem
-  // nulos); 0 e o neutro e readers reais aceitam.
-  rec.map->set("sequence_number", Value::inteiro(0));
-  rec.map->set("min_sequence_number", Value::inteiro(0));
+  // sequence numbers reais da spec v2: sequence_number do snapshot e
+  // min_sequence_number entre todas as entradas do manifest.
+  std::int64_t min_sequence_number = sequence_number;
+  for (const FileInfo& f : files) {
+    if (f.sequence_number > 0 && f.sequence_number < min_sequence_number) {
+      min_sequence_number = f.sequence_number;
+    }
+  }
+  rec.map->set("sequence_number", Value::inteiro(sequence_number));
+  rec.map->set("min_sequence_number", Value::inteiro(min_sequence_number));
   rec.map->set("added_snapshot_id", Value::inteiro(snapshot_id));
   rec.map->set("added_files_count", Value::inteiro(added));
   rec.map->set("existing_files_count", Value::inteiro(existing));
@@ -1865,15 +1912,16 @@ std::string build_metadata_json(const std::string& dir, const std::string& uuid,
                                 const std::vector<PartitionField>& spec,
                                 const std::vector<Snapshot>& snapshots,
                                 std::vector<std::pair<std::int64_t, std::int64_t>> snapshot_log,
-                                std::int64_t current_snapshot, std::int64_t last_updated) {
+                                std::int64_t current_snapshot,
+                                std::int64_t last_sequence_number,
+                                std::int64_t last_updated) {
   std::string out = "{\n";
   out += "  \"format-version\": 2,\n";
   out += "  \"table-uuid\": \"" + json_escape(uuid) + "\",\n";
   out += "  \"location\": \"" + json_escape(dir) + "\",\n";
-  // campos obrigatorios do spec v2 que readers reais (Spark/TableMetadataParser)
-  // exigem: sequence numbers ainda nao sao atribuidos (tabela nova = 0) e a
-  // tabela fica sem sort order (order vazio, como uma tabela recém-criada).
-  out += "  \"last-sequence-number\": 0,\n";
+  // campos obrigatorios do spec v2: last-sequence-number e sequence-number
+  // por snapshot. Tabela nova comeca em 1.
+  out += "  \"last-sequence-number\": " + std::to_string(last_sequence_number) + ",\n";
   out += "  \"last-updated-ms\": " + std::to_string(last_updated) + ",\n";
   out += "  \"last-column-id\": " + std::to_string(last_column_id) + ",\n";
   // ids de campo de particao comecam em 1000 (spec); sem spec fica 999
@@ -1911,6 +1959,7 @@ std::string build_metadata_json(const std::string& dir, const std::string& uuid,
     out += (k ? ",\n" : "\n");
     out += "    {\n";
     out += "      \"snapshot-id\": " + std::to_string(s.id) + ",\n";
+    out += "      \"sequence-number\": " + std::to_string(s.sequence_number) + ",\n";
     out += "      \"timestamp-ms\": " + std::to_string(s.ts) + ",\n";
     out += "      \"summary\": { \"operation\": \"" + s.operation + "\" },\n";
     if (s.has_parent) {
@@ -1983,7 +2032,35 @@ struct ActiveEntry {
   Value partition;
   std::int64_t records = 0;
   std::int64_t size = 0;
+  std::int64_t sequence_number = 0;      // snapshot sequence do data file
+  std::int64_t file_sequence_number = 0;  // file_sequence_number global do data file
+  std::vector<std::int64_t> equality_ids; // field-ids usados por equality delete
 };
+
+// Maior file_sequence_number ja atribuido em qualquer snapshot (para novos
+// data files continuarem a sequencia global).
+std::int64_t compute_last_file_sequence_number(const std::vector<Snapshot>& snapshots) {
+  std::int64_t max_fseq = 0;
+  for (const Snapshot& snap : snapshots) {
+    std::string list_path = snap.manifest_list;
+    if (list_path.rfind("file://", 0) == 0) list_path = list_path.substr(7);
+    auto [list_schema, manifests] = ocf_read(list_path);
+    (void)list_schema;
+    for (const Value& m : manifests) {
+      const Value* mp = map_find(m, "manifest_path");
+      if (!mp || mp->kind != ValueKind::Texto) continue;
+      std::string manifest_path = mp->s;
+      if (manifest_path.rfind("file://", 0) == 0) manifest_path = manifest_path.substr(7);
+      auto [m_schema, entries] = ocf_read(manifest_path);
+      (void)m_schema;
+      for (const Value& e : entries) {
+        const Value* fseq = map_find(e, "file_sequence_number");
+        if (fseq && fseq->kind == ValueKind::Inteiro) max_fseq = std::max(max_fseq, fseq->i);
+      }
+    }
+  }
+  return max_fseq;
+}
 
 // coleta (status, content, file_path, partition) dos manifests de um snapshot
 void collect_manifest_entries(const Snapshot& snap, std::vector<ActiveEntry>& out) {
@@ -2017,6 +2094,16 @@ void collect_manifest_entries(const Snapshot& snap, std::vector<ActiveEntry>& ou
       entry.records = rc && rc->kind == ValueKind::Inteiro ? rc->i : 0;
       const Value* fs = map_find(*df, "file_size_in_bytes");
       entry.size = fs && fs->kind == ValueKind::Inteiro ? fs->i : 0;
+      const Value* seq = map_find(e, "sequence_number");
+      entry.sequence_number = seq && seq->kind == ValueKind::Inteiro ? seq->i : 0;
+      const Value* fseq = map_find(e, "file_sequence_number");
+      entry.file_sequence_number = fseq && fseq->kind == ValueKind::Inteiro ? fseq->i : 0;
+      const Value* eqids = map_find(*df, "equality_ids");
+      if (eqids && eqids->kind == ValueKind::Lista && eqids->list) {
+        for (const Value& id : *eqids->list) {
+          if (id.is_number()) entry.equality_ids.push_back(static_cast<std::int64_t>(id.as_number()));
+        }
+      }
       out.push_back(std::move(entry));
     }
   }
@@ -2239,9 +2326,17 @@ MergedSchema merge_append_schema(const TableMeta& meta, const Value& tabela) {
             ty_s = ty->type;
           }
           if (!ty_s.empty() && ty_s != old.type) {
-            die("anexar_iceberg: coluna '" + ctx + old.name + "' com tipo divergente (esperado " +
-                old.type + "; recebido " + ty_s +
-                ") (evolucao de schema suporta apenas adicao de colunas)");
+            // Widening: promove o tipo mantendo o field-id (ids estaveis);
+            // vale tambem para subcolunas de struct (mesma regra).
+            if (is_widening(old.type, ty_s)) {
+              old.type = ty_s;
+              merged.evolved = true;
+            } else {
+              die("anexar_iceberg: coluna '" + ctx + old.name + "' com tipo divergente (esperado " +
+                  old.type + "; recebido " + ty_s +
+                  ") (evolucao de schema: apenas adicao de colunas e widening int->long, "
+                  "float->double)");
+            }
           }
         }
         for (const Column& x : novas) {
@@ -2310,7 +2405,7 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
   mkdir_if_missing(meta_dir);
   mkdir_if_missing(dir + "/data");
 
-  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, &wc.cols);
+  std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, &wc.cols);
 
   std::vector<std::pair<int, std::string>> changes;
   for (const FileInfo& f : datas) changes.emplace_back(1, f.path);
@@ -2319,18 +2414,24 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
 
   const std::int64_t snapshot_id = new_snapshot_id();
   const std::int64_t ts = now_ms();
+  const std::int64_t sequence_number = 1;  // primeira snapshot v2
+  for (std::size_t i = 0; i < datas.size(); ++i) {
+    datas[i].sequence_number = sequence_number;
+    datas[i].file_sequence_number = static_cast<std::int64_t>(i + 1);
+  }
 
   const std::string manifest_name =
       write_manifest(meta_dir, changes, snapshot_id, datas, wc.spec_fields);
   std::int64_t added_rows = 0;
   for (const FileInfo& f : datas) added_rows += f.records;
   const std::string list_path =
-      write_manifest_list(meta_dir, manifest_name, snapshot_id,
+      write_manifest_list(meta_dir, manifest_name, snapshot_id, sequence_number,
                           static_cast<int>(datas.size()), 0, 0, added_rows, 0, datas,
                           wc.spec_fields);
 
   wc.snap.id = snapshot_id;
   wc.snap.ts = ts;
+  wc.snap.sequence_number = sequence_number;
   wc.snap.operation = "overwrite";
   wc.snap.manifest_list = list_path;
   wc.snap.has_parent = false;
@@ -2338,7 +2439,8 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
 
   wc.json = build_metadata_json(dir, new_uuid(), {SchemaVer{schema_id, wc.cols}}, schema_id,
                                 proximo, wc.spec_fields,
-                                {wc.snap}, {{ts, snapshot_id}}, snapshot_id, ts);
+                                {wc.snap}, {{ts, snapshot_id}}, snapshot_id,
+                                sequence_number, ts);
   return wc;
 }
 
@@ -2402,7 +2504,7 @@ AppendCore append_core(const std::string& dir, const std::string& dir_display,
   const std::vector<ActiveEntry> previous =
       meta.current_snapshot >= 0 ? resolve_active_files(meta) : std::vector<ActiveEntry>{};
 
-  const std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, &merged.cols);
+  std::vector<FileInfo> datas = write_data_files(dir, tabela, pspec, &merged.cols);
 
   std::vector<std::pair<int, std::string>> changes;
   std::vector<FileInfo> infos;
@@ -2414,9 +2516,32 @@ AppendCore append_core(const std::string& dir, const std::string& dir_display,
     info.records = e.records;
     info.size = e.size;
     info.part_map = e.partition;
+    info.sequence_number = e.sequence_number;
+    info.file_sequence_number = e.file_sequence_number;
     infos.push_back(std::move(info));
     existing_rows += e.records;
   }
+
+  const std::int64_t snapshot_id = new_snapshot_id();
+  const std::int64_t ts = now_ms();
+  const std::int64_t sequence_number = meta.last_sequence_number + 1;
+  std::int64_t next_file_sequence = meta.last_file_sequence_number;
+  if (next_file_sequence <= 0) {
+    // Metadata legado sem file_sequence_number: deduzimos dos manifests.
+    next_file_sequence = compute_last_file_sequence_number(meta.snapshots);
+  }
+
+  // Arquivos ja ativos sem sequence number (tabela migrada de versao sem eles)
+  // recebem a primeira sequencia; novos arquivos continuam a sequencia global.
+  for (FileInfo& info : infos) {
+    if (info.sequence_number <= 0) info.sequence_number = 1;
+    if (info.file_sequence_number <= 0) info.file_sequence_number = ++next_file_sequence;
+  }
+  for (FileInfo& f : datas) {
+    f.sequence_number = sequence_number;
+    f.file_sequence_number = ++next_file_sequence;
+  }
+
   std::int64_t added_rows = 0;
   for (const FileInfo& f : datas) {
     changes.emplace_back(1, f.path);
@@ -2424,18 +2549,16 @@ AppendCore append_core(const std::string& dir, const std::string& dir_display,
     added_rows += f.records;
   }
 
-  const std::int64_t snapshot_id = new_snapshot_id();
-  const std::int64_t ts = now_ms();
-
   const std::string meta_dir = dir + "/metadata";
   const std::string manifest_name =
       write_manifest(meta_dir, changes, snapshot_id, infos, spec_fields);
   const std::string list_path = write_manifest_list(
-      meta_dir, manifest_name, snapshot_id, static_cast<int>(datas.size()),
+      meta_dir, manifest_name, snapshot_id, sequence_number, static_cast<int>(datas.size()),
       static_cast<int>(previous.size()), 0, added_rows, existing_rows, infos, spec_fields);
 
   ac.snap.id = snapshot_id;
   ac.snap.ts = ts;
+  ac.snap.sequence_number = sequence_number;
   ac.snap.operation = "append";
   ac.snap.manifest_list = list_path;
   ac.snap.parent = meta.current_snapshot;
@@ -2465,7 +2588,7 @@ AppendCore append_core(const std::string& dir, const std::string& dir_display,
   // uuid estavel por tabela (spec v2): reaproveita o do metadata corrente
   ac.json = build_metadata_json(dir, meta.uuid.empty() ? new_uuid() : meta.uuid, ac.schemas,
                                 ac.current_schema_id, merged.last_column_id, spec_fields,
-                                snapshots, log, snapshot_id, ts);
+                                snapshots, log, snapshot_id, sequence_number, ts);
   return ac;
 }
 
@@ -2545,11 +2668,18 @@ bool passa_pruning(const ActiveEntry& e, const std::vector<std::pair<std::string
 // Deletes da Fase 12-5a, carregados dos manifests do snapshot corrente:
 // - position: arquivo {file_path, pos} -> linhas apagadas por (arquivo,
 //   indice fisico no arquivo);
-// - equality: linhas-chave; apaga a linha de dados quando TODAS as colunas
-//   em comum batem (pred_eq) — exige ao menos 1 coluna em comum.
+// - equality: linhas-chave declaradas por equality_ids; respeita o sequence number e
+//   apaga apenas data files anteriores ou do mesmo sequence; manifests antigos sem equality_ids
+//   usam todas as colunas presentes no delete file como chave.
+struct EqualityDelete {
+  Value row;
+  std::vector<std::int64_t> equality_ids;
+  std::int64_t sequence_number = 0;
+};
+
 struct LoadedDeletes {
   std::map<std::string, std::set<std::int64_t>> pos;  // path sem scheme -> posicoes
-  std::vector<Value> eq;                              // linhas de equality delete
+  std::vector<EqualityDelete> eq;                    // linhas de equality delete
 };
 
 LoadedDeletes load_deletes(const std::vector<ActiveEntry>& deletes) {
@@ -2573,7 +2703,12 @@ LoadedDeletes load_deletes(const std::vector<ActiveEntry>& deletes) {
       }
     } else if (d.content == 2) {
       for (const Value& row : *chunk.list) {
-        if (row.kind == ValueKind::Mapa && row.map) out.eq.push_back(row);
+        if (row.kind != ValueKind::Mapa || !row.map) continue;
+        EqualityDelete ed;
+        ed.row = row;
+        ed.equality_ids = d.equality_ids;
+        ed.sequence_number = d.sequence_number;
+        out.eq.push_back(std::move(ed));
       }
     }
   }
@@ -2582,21 +2717,54 @@ LoadedDeletes load_deletes(const std::vector<ActiveEntry>& deletes) {
 
 // Linha de dados apagada por position ou equality delete?
 bool apagada_por_delete(const std::string& fpath_norm, std::int64_t pos, const Value& row,
+                        std::int64_t data_sequence_number, const std::vector<Column>& schema,
                         const LoadedDeletes& dels) {
   const auto itp = dels.pos.find(fpath_norm);
   if (itp != dels.pos.end() && itp->second.count(pos)) return true;
   if (row.kind != ValueKind::Mapa || !row.map) return false;
-  for (const Value& d : dels.eq) {
-    if (d.kind != ValueKind::Mapa || !d.map) continue;
-    int compartilhadas = 0;
+
+  for (const EqualityDelete& d : dels.eq) {
+    // Equality deletes so afetam data files com sequence number menor ou
+    // igual ao sequence do delete. Arquivos adicionados depois permanecem.
+    if (d.sequence_number > 0 && data_sequence_number > d.sequence_number) continue;
     bool bate = true;
-    for (const auto& kv : d.map->items) {
-      const Value* cell = row.map->find(kv.first);
-      if (!cell) continue;
-      ++compartilhadas;
-      if (!pred_eq(*cell, kv.second)) {
-        bate = false;
-        break;
+    int compartilhadas = 0;
+    if (!d.equality_ids.empty()) {
+      for (const std::int64_t id : d.equality_ids) {
+        const Column* col = nullptr;
+        for (const Column& c : schema) {
+          if (c.id == id) {
+            col = &c;
+            break;
+          }
+        }
+        if (!col) {
+          bate = false;
+          break;
+        }
+        const Value* expected = d.row.map->find(col->name);
+        const Value* actual = row.map->find(col->name);
+        if (!expected || !actual) {
+          bate = false;
+          break;
+        }
+        ++compartilhadas;
+        if (!pred_eq(*actual, *expected)) {
+          bate = false;
+          break;
+        }
+      }
+    } else {
+      // Compatibilidade com delete files antigos que nao declaravam
+      // equality_ids: nesse caso, todas as colunas presentes sao a chave.
+      for (const auto& kv : d.row.map->items) {
+        const Value* cell = row.map->find(kv.first);
+        if (!cell) continue;
+        ++compartilhadas;
+        if (!pred_eq(*cell, kv.second)) {
+          bate = false;
+          break;
+        }
       }
     }
     if (bate && compartilhadas > 0) return true;
@@ -2721,7 +2889,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
           die("linha de '" + path + "' nao e um mapa");
         }
         const Value m = project_row(f, row, meta);
-        const bool apagada = apagada_por_delete(path, pos, m, dels);
+        const bool apagada = apagada_por_delete(path, pos, m, f.sequence_number, meta.schema_cols, dels);
         ++pos;
         if (apagada) continue;
         if (passa_residual(m)) out.list->push_back(m);
@@ -2747,7 +2915,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
           die("linha de '" + path + "' nao e um mapa");
         }
         const Value m = project_schema(row, meta.schema_cols, "", path);
-        const bool apagada = apagada_por_delete(path, pos, m, dels);
+        const bool apagada = apagada_por_delete(path, pos, m, f.sequence_number, meta.schema_cols, dels);
         ++pos;
         if (apagada) continue;
         if (passa_residual(m)) out.list->push_back(m);
@@ -2786,7 +2954,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
           }
         }
       }
-      const bool apagada = apagada_por_delete(path, pos, row, dels);
+      const bool apagada = apagada_por_delete(path, pos, row, f.sequence_number, meta.schema_cols, dels);
       ++pos;
       if (apagada) continue;
       if (passa_residual(row)) out.list->push_back(std::move(row));
@@ -2838,14 +3006,7 @@ RestCfg rest_cfg() {
   return cfg;
 }
 
-std::string shell_quote(const std::string& s) {
-  std::string out = "'";
-  for (char c : s) {
-    out += c == '\'' ? "'\\''" : std::string(1, c);
-  }
-  out += "'";
-  return out;
-}
+
 
 std::string slurp_file(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
@@ -2896,8 +3057,8 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
   std::string body_file;
   std::string cmd = "curl -s ";
   if (falhar) cmd += "--fail-with-body ";
-  cmd += "-w '%{http_code}' -X " + method;
-  cmd += " -H " + shell_quote("Content-Type: application/json");
+  cmd += "-w " + tilt_shell_quote("%{http_code}") + " -X " + method;
+  cmd += " -H " + tilt_shell_quote("Content-Type: application/json");
   if (!body.empty()) {
     std::string body_path;
     const int fd = tilt_tempfile("iceberg_body", body_path);
@@ -2912,7 +3073,7 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
       }
     }
     body_file = body_path;
-    cmd += " --data @" + body_file;
+    cmd += " --data @" + tilt_shell_quote(body_file);
   }
   std::string out_file;
   const int ofd = tilt_tempfile("iceberg_resp", out_file);
@@ -2921,7 +3082,7 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
     die("nao foi possivel criar arquivo temporario");
   }
   tilt_close_file(ofd);
-  cmd += " -o " + shell_quote(out_file) + " " + shell_quote(url);
+  cmd += " -o " + tilt_shell_quote(out_file) + " " + tilt_shell_quote(url);
 
   std::string resp;
   {
@@ -3286,7 +3447,7 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
         die("linha de '" + path + "' nao e um mapa");
       }
       Value m = project_row(f, row, meta);
-      const bool ja_apagada = apagada_por_delete(path, pos, m, vigentes);
+      const bool ja_apagada = apagada_por_delete(path, pos, m, f.sequence_number, meta.schema_cols, vigentes);
       if (!ja_apagada && residual_match(m, filtro.residual)) {
         alvos.push_back({f.path, pos, std::move(m), f.partition});
       }
@@ -3294,6 +3455,15 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
     }
   }
   if (alvos.empty()) return dc;  // sem commit
+
+  std::vector<std::int64_t> equality_ids;
+  if (igualdade && onde.kind == ValueKind::Mapa && onde.map) {
+    for (const auto& kv : onde.map->items) {
+      for (const Column& c : meta.schema_cols) {
+        if (c.name == kv.first && c.id > 0) equality_ids.push_back(c.id);
+      }
+    }
+  }
 
   // Um delete file por particao dos data files atingidos (com o record
   // `partition` correspondente na entrada do manifest): readers que casam
@@ -3356,6 +3526,7 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
     dinfo.size = del_size;
     dinfo.content = igualdade ? 2 : 1;
     dinfo.part_map = g.part;
+    dinfo.equality_ids = equality_ids;
     del_changes.emplace_back(1, dinfo.path);
     del_infos.push_back(std::move(dinfo));
   }
@@ -3377,9 +3548,26 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
     info.records = e.records;
     info.size = e.size;
     info.part_map = e.partition;
+    info.sequence_number = e.sequence_number;
+    info.file_sequence_number = e.file_sequence_number;
     infos.push_back(std::move(info));
     existing_rows += e.records;
   }
+
+  const std::int64_t sequence_number = meta.last_sequence_number + 1;
+  std::int64_t next_file_sequence = meta.last_file_sequence_number;
+  if (next_file_sequence <= 0) {
+    next_file_sequence = compute_last_file_sequence_number(meta.snapshots);
+  }
+  for (FileInfo& info : infos) {
+    if (info.sequence_number <= 0) info.sequence_number = 1;
+    if (info.file_sequence_number <= 0) info.file_sequence_number = ++next_file_sequence;
+  }
+  for (FileInfo& d : del_infos) {
+    d.sequence_number = sequence_number;
+    d.file_sequence_number = ++next_file_sequence;
+  }
+
   std::int64_t del_rows = 0;
   for (std::size_t k = 0; k < del_changes.size(); ++k) {
     changes.push_back(del_changes[k]);
@@ -3389,11 +3577,12 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
   const std::string manifest_name =
       write_manifest(meta_dir, changes, snapshot_id, infos, meta.spec);
   const std::string list_path = write_manifest_list(
-      meta_dir, manifest_name, snapshot_id, static_cast<int>(del_changes.size()),
+      meta_dir, manifest_name, snapshot_id, sequence_number, static_cast<int>(del_changes.size()),
       static_cast<int>(resolvidos.data.size()), 0, del_rows, existing_rows, infos, meta.spec, 1);
 
   dc.snap.id = snapshot_id;
   dc.snap.ts = ts;
+  dc.snap.sequence_number = sequence_number;
   dc.snap.operation = "delete";
   dc.snap.manifest_list = list_path;
   dc.snap.parent = meta.current_snapshot;
@@ -3405,7 +3594,7 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
   dc.version = meta.version < 0 ? 0 : meta.version + 1;
   dc.json = build_metadata_json(location, meta.uuid.empty() ? new_uuid() : meta.uuid,
                                 meta.schemas, meta.current_schema_id, meta.last_column_id,
-                                meta.spec, snapshots, log, snapshot_id, ts);
+                                meta.spec, snapshots, log, snapshot_id, sequence_number, ts);
   dc.apagadas = static_cast<std::int64_t>(alvos.size());
   return dc;
 }

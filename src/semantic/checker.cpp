@@ -351,6 +351,7 @@ void SemanticChecker::resolve_types() {
   // Formas por variavel nao sobrevivem entre entidades (cada corpo anda com
   // env proprio); limpa o que a pre-passagem possa ter registrado.
   formas_mapa_.clear();
+  formas_tensor_mapa_.clear();
   elem_lista_.clear();
 }
 
@@ -420,6 +421,15 @@ void SemanticChecker::visit_item(const Item& item, std::string_view entity_kw) {
                {"use " + item.key + ": env \"NOME_DA_VARIAVEL\""});
       }
       if (entity_kw == "agente" && item.key == "ferramentas") check_tool_list(item);
+      if (entity_kw == "agente" && item.key == "memoria" && item.value &&
+          item.value->kind == ExprKind::Name) {
+        const std::string& m = item.value->text;
+        if (m != "nenhuma" && m != "conversa" && m != "vetorial") {
+          report(DiagCode::TypeMismatch, item.value->span,
+                 "memoria '" + m + "' desconhecida (use nenhuma | conversa | vetorial)",
+                 {"memoria: vetorial recupera os turnos mais similares via embeddings"});
+        }
+      }
       if (item.block) walk_block(*item.block, entity_kw);
       break;
     }
@@ -1009,6 +1019,14 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape_impl(
     case ExprKind::Member: {
       // Propriedades elementwise (preservam a forma) e transposta 2D.
       if (!e.lhs) return std::nullopt;
+      // Campos tensores de mapas podem ser preenchidos por uma atribuicao
+      // anterior (`m.x = uns [...]`). Mantemos esse conhecimento no mesmo
+      // ambiente linear usado para os demais campos de mapa.
+      if (e.lhs->kind == ExprKind::Name) {
+        if (auto it = formas_tensor_mapa_.find(e.lhs->text); it != formas_tensor_mapa_.end()) {
+          if (auto sh = it->second.find(e.text); sh != it->second.end()) return sh->second;
+        }
+      }
       if (word_in(e.text, {"softmax", "relu", "gelu", "silu", "sigmoide", "tanh", "norma_camada"})) {
         return infer_shape(*e.lhs, shapes);
       }
@@ -1026,6 +1044,41 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape_impl(
     }
     case ExprKind::Call: {
       if (!e.lhs) return std::nullopt;
+      // Funcao local com contrato tensor: instancia as dimensoes simbolicas
+      // do retorno com as dimensoes conhecidas dos argumentos anotados. Isso
+      // permite validar a cadeia no chamador sem fingir conhecer dimensoes
+      // que nao vieram dos argumentos.
+      if (e.lhs->kind == ExprKind::Name) {
+        auto fit = funcao_formas_retorno_.find(e.lhs->text);
+        if (fit != funcao_formas_retorno_.end()) {
+          TensorShape out = fit->second;
+          const Item* decl = find_funcao_decl(program_, e.lhs->text);
+          std::vector<std::int64_t> bindings;
+          if (decl) {
+            std::size_t arg_pos = 0;
+            for (const auto& p : decl->params) {
+              while (arg_pos < e.args.size() && !e.args[arg_pos].name.empty()) ++arg_pos;
+              if (arg_pos >= e.args.size()) break;
+              auto param_shape = tensor_annotation_dims(p.value.get());
+              auto arg_shape = e.args[arg_pos].value ?
+                                   infer_shape(*e.args[arg_pos].value, shapes) :
+                                   std::nullopt;
+              ++arg_pos;
+              if (!param_shape || !arg_shape || param_shape->size() != arg_shape->size()) continue;
+              for (std::size_t i = 0; i < param_shape->size(); ++i) {
+                if ((*param_shape)[i] < 0 && (*arg_shape)[i] >= 0) {
+                  bindings.push_back((*arg_shape)[i]);
+                }
+              }
+            }
+          }
+          std::size_t binding = 0;
+          for (auto& d : out) {
+            if (d < 0 && binding < bindings.size()) d = bindings[binding++];
+          }
+          return out;
+        }
+      }
       // C2: `atencao(q, k, v, escala)` bare ou `nn.atencao(...)` — regra
       // propria, sem depender do receiver.
       if (e.lhs->kind == ExprKind::Name && e.lhs->text == "atencao") {
@@ -1505,17 +1558,23 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
 void SemanticChecker::check_return(const Expr* value, Span span, const TypeEnv& types,
                                    const ShapeEnv& shapes) {
   sema::Type vt = sema::Type::scalar(value ? infer_type(*value, types) : sema::TypeKind::Nulo);
+  // Infere uma unica vez: alem de alimentar a coleta de retornos, isto evita
+  // duplicar diagnosticos de conv2d/reformar quando o retorno esta anotado.
+  const std::optional<TensorShape> value_shape = value ? infer_shape(*value, shapes) : std::nullopt;
   if (silencioso_) {
     // Pre-passagem C1: so coleta (retornos `nulo` contam para a unanimidade).
-    if (!funcao_coleta_.empty()) retornos_coletados_.push_back(vt.kind);
+    if (!funcao_coleta_.empty()) {
+      retornos_coletados_.push_back(vt.kind);
+      retornos_formas_coletadas_.push_back(value_shape);
+    }
     return;
   }
   if (!current_ret_ || current_ret_->kind == sema::TypeKind::Unknown) return;
   // Tensores inferidos carregam a forma conhecida para comparar dimensoes.
   if (vt.kind == sema::TypeKind::Tensor && value) {
-    if (auto sh = infer_shape(*value, shapes)) {
+    if (value_shape) {
       vt.name = "f32";
-      vt.dims = *sh;
+      vt.dims = *value_shape;
     }
   }
   if (vt.kind == sema::TypeKind::Unknown) return;
@@ -1666,11 +1725,17 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
           // Formas de mapas/listas (C1): literais registram campos/elemento;
           // reatribuicao com outra coisa invalida; `y = x` propaga a forma.
           formas_mapa_.erase(s.a->text);
+          formas_tensor_mapa_.erase(s.a->text);
           elem_lista_.erase(s.a->text);
           if (s.b->kind == ExprKind::MapLit) {
             auto& forma = formas_mapa_[s.a->text];
             for (const auto& entry : s.b->entries) {
-              if (entry.value) forma[entry.key] = infer_type(*entry.value, types);
+              if (entry.value) {
+                forma[entry.key] = infer_type(*entry.value, types);
+                if (auto sh = infer_shape(*entry.value, shapes)) {
+                  formas_tensor_mapa_[s.a->text][entry.key] = *sh;
+                }
+              }
             }
           } else if (s.b->kind == ExprKind::ListLit) {
             sema::TypeKind el = sema::TypeKind::Unknown;
@@ -1700,6 +1765,10 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
             if (auto it = formas_mapa_.find(s.b->text); it != formas_mapa_.end()) {
               formas_mapa_[s.a->text] = it->second;
             }
+            if (auto it = formas_tensor_mapa_.find(s.b->text);
+                it != formas_tensor_mapa_.end()) {
+              formas_tensor_mapa_[s.a->text] = it->second;
+            }
             if (auto it = elem_lista_.find(s.b->text); it != elem_lista_.end()) {
               elem_lista_[s.a->text] = it->second;
             }
@@ -1710,6 +1779,26 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
         scope.insert(s.a->text);
       } else if (s.a) {
         check_expr(*s.a, scope);
+        // Assignment to a direct map member refines the member type and shape
+        // for subsequent statements (`m.x = ...; m.x.conv2d ...`). Nested
+        // receivers remain dynamic until a future structural type pass.
+        if (s.b && s.a->kind == ExprKind::Member && s.a->lhs &&
+            s.a->lhs->kind == ExprKind::Name) {
+          const std::string& base = s.a->lhs->text;
+          const std::string& member = s.a->text;
+          const TypeKind t = infer_type(*s.b, types);
+          if (t != TypeKind::Unknown) {
+            formas_mapa_[base][member] = t;
+          } else if (auto mit = formas_mapa_.find(base); mit != formas_mapa_.end()) {
+            mit->second.erase(member);
+          }
+          if (auto sh = infer_shape(*s.b, shapes)) {
+            formas_tensor_mapa_[base][member] = *sh;
+          } else if (auto mit = formas_tensor_mapa_.find(base);
+                     mit != formas_tensor_mapa_.end()) {
+            mit->second.erase(member);
+          }
+        }
       }
       return;
     case ast::StmtKind::Expr:
@@ -1720,11 +1809,7 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       }
       return;
     case ast::StmtKind::Return:
-      if (s.a) {
-        check_expr(*s.a, scope);
-        infer_shape(*s.a, shapes);
-        infer_type(*s.a, types);
-      }
+      if (s.a) check_expr(*s.a, scope);
       check_return(s.a.get(), s.span, types, shapes);
       return;
     case ast::StmtKind::If: {
@@ -1732,20 +1817,24 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       // Formas sao fluxo-insensiveis: ramos restauram o estado anterior
       // (sem falsos positivos; perde-se precisao dentro de ramos).
       const MapShapes formas_salvas = formas_mapa_;
+      const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, scope, shapes, types);
       for (const auto& ei : s.elifs) {
         if (ei.cond) check_expr(*ei.cond, scope);
         formas_mapa_ = formas_salvas;
+        formas_tensor_mapa_ = formas_tensor_salvas;
         elem_lista_ = elems_salvos;
         walk_stmt_block(ei.body, scope, shapes, types);
       }
       if (s.else_body) {
         formas_mapa_ = formas_salvas;
+        formas_tensor_mapa_ = formas_tensor_salvas;
         elem_lista_ = elems_salvos;
         walk_stmt_block(*s.else_body, scope, shapes, types);
       }
       formas_mapa_ = formas_salvas;
+      formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;
       return;
     }
@@ -1754,33 +1843,40 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       Scope inner = scope;
       if (!s.name.empty()) inner.insert(s.name);
       const MapShapes formas_salvas = formas_mapa_;
+      const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, std::move(inner), shapes, types);
       formas_mapa_ = formas_salvas;
+      formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;
       return;
     }
     case ast::StmtKind::While: {
       if (s.a) check_expr(*s.a, scope);
       const MapShapes formas_salvas = formas_mapa_;
+      const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, scope, shapes, types);
       formas_mapa_ = formas_salvas;
+      formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;
       return;
     }
     case ast::StmtKind::Try: {
       const MapShapes formas_salvas = formas_mapa_;
+      const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
       walk_stmt_block(s.body, scope, shapes, types);
       if (s.catch_body) {
         Scope inner = scope;
         if (!s.name.empty()) inner.insert(s.name);
         formas_mapa_ = formas_salvas;
+        formas_tensor_mapa_ = formas_tensor_salvas;
         elem_lista_ = elems_salvos;
         walk_stmt_block(*s.catch_body, std::move(inner), shapes, types);
       }
       formas_mapa_ = formas_salvas;
+      formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;
       return;
     }
@@ -1815,6 +1911,7 @@ void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, Shap
   // Formas de mapas/listas valem por entidade (cada corpo anda com env
   // proprio); limpa o que outras entidades ou a pre-passagem registraram.
   formas_mapa_.clear();
+  formas_tensor_mapa_.clear();
   elem_lista_.clear();
   collect_entrada_names(block, scope);
   // Anotacoes `entrada: tensor[...]` (inline ou em bloco) semeiam as formas
@@ -1863,6 +1960,7 @@ void SemanticChecker::scan_for_bodies(const ast::Block& block, Scope scope, Shap
 // sem anotacao, infere-se do corpo (unanimidade dos `retornar`) numa
 // pre-passagem silenciosa (sem diagnostico duplo na passada real).
 void SemanticChecker::infer_funcao_returns() {
+  funcao_formas_retorno_.clear();
   for (const auto& item : program_.items) {
     if (!item || item->kind != ItemKind::Decl || item->key != "funcao" || !item->block) continue;
     const std::string nome = decl_name(*item);
@@ -1872,6 +1970,9 @@ void SemanticChecker::infer_funcao_returns() {
       if (auto t = annotation_cache_.find(item->value.get()); t != annotation_cache_.end()) {
         if (t->second.kind != sema::TypeKind::Unknown) {
           git->second.type.ret = std::make_shared<sema::Type>(t->second);
+          if (auto shape = tensor_annotation_dims(item->value.get())) {
+            funcao_formas_retorno_[nome] = *shape;
+          }
           continue;
         }
       }
@@ -1889,6 +1990,7 @@ void SemanticChecker::infer_funcao_returns() {
     silencioso_ = true;
     funcao_coleta_ = nome;
     retornos_coletados_.clear();
+    retornos_formas_coletadas_.clear();
     walk_stmt_block(*item->block, std::move(scope), std::move(shapes), std::move(types));
     silencioso_ = false;
     funcao_coleta_.clear();
@@ -1906,7 +2008,28 @@ void SemanticChecker::infer_funcao_returns() {
       sema::Type rt = sema::Type::scalar(unanim);
       git->second.type.ret = std::make_shared<sema::Type>(std::move(rt));
     }
+    bool formas_ok = !retornos_formas_coletadas_.empty();
+    std::optional<TensorShape> forma_retorno;
+    for (const auto& forma : retornos_formas_coletadas_) {
+      if (!forma) {
+        formas_ok = false;
+        break;
+      }
+      if (!forma_retorno) {
+        forma_retorno = *forma;
+      } else if (forma_retorno->size() != forma->size()) {
+        formas_ok = false;
+        break;
+      } else {
+        for (std::size_t i = 0; i < forma_retorno->size(); ++i) {
+          if ((*forma_retorno)[i] < 0) (*forma_retorno)[i] = (*forma)[i];
+          else if ((*forma)[i] >= 0 && (*forma_retorno)[i] != (*forma)[i]) formas_ok = false;
+        }
+      }
+    }
+    if (formas_ok && forma_retorno) funcao_formas_retorno_[nome] = *forma_retorno;
     retornos_coletados_.clear();
+    retornos_formas_coletadas_.clear();
   }
 }
 
@@ -1918,6 +2041,7 @@ void SemanticChecker::check_bodies() {
       ShapeEnv shapes;
       TypeEnv types;
       formas_mapa_.clear();  // por entidade (ver scan_for_bodies)
+      formas_tensor_mapa_.clear();
       elem_lista_.clear();
       for (const auto& p : item->params) {
         scope.insert(p.name);

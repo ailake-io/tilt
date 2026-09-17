@@ -1,0 +1,12 @@
+funcao extrair x: tensor[f32, _, 3, 8, 8], k: tensor[f32, 4, 3, 3, 3] -> tensor[f32, _, 4, 6, 6]:
+  retornar x.conv2d k
+
+pipeline p:
+  passos:
+    - x = uns [2, 3, 8, 8]
+    - k = uns [4, 3, 3, 3]
+    - y = extrair(x, k)
+    - m = { ativacao: y }
+    - m.ativacao = y
+    - erro_funcao = y.conv2d uns [2, 3, 3, 3]
+    - erro_membro = m.ativacao.conv2d uns [2, 3, 3, 3]
