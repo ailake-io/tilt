@@ -481,6 +481,6 @@ A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
     `%NN` podem corromper; só trocando o spawn por `CreateProcess`).
   - TLS carrega OpenSSL via DLL (`libssl-3-x64.dll`/`libcrypto-3-x64.dll`)
     no `PATH`; sem elas, `rediss://`/`mongodb+srv://`/kafka TLS erros claros.
-  - A suíte `ctest` é em shell script e só roda em Linux/macOS — o job
-    Windows valida build (`-Werror`) + smoke estendido (`versao`, `checar`,
-    `executar`, incluindo ETL Delta e agente mock).
+  - A suíte `ctest` continua em shell script e roda em Linux/macOS; o job
+    Windows também executa `tests/windows_functional.ps1` nativamente em
+    PowerShell, comparando interpretador, VM, JIT/fallback e exemplos ETL.

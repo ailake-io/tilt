@@ -84,6 +84,13 @@ jobs:
           $env:TILT_LLM = "mock"
           & $exe executar exemplos/agente.tilt
 
+      - name: functional tests (PowerShell)
+        shell: pwsh
+        run: |
+          $exe = (Get-ChildItem -Recurse -Filter tilt.exe build/release | Select-Object -First 1).FullName
+          if (-not $exe) { throw "tilt.exe nao encontrado em build/release" }
+          ./tests/windows_functional.ps1 -Bin $exe
+
   sanitizers:
     runs-on: ubuntu-latest
     steps:

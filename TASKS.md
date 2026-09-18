@@ -31,7 +31,7 @@
 - [x] 12-6.6 — Logs JSON opt-in com contexto de execução dos pipelines
 - [x] 12-6.7 — Vacuum conservador de arquivos órfãos Delta/Iceberg
 - [ ] Fase 12-7 — GPU real/CUDA + AMP
-- [ ] Fase 12-8 — CI Windows com testes funcionais
+- [x] Fase 12-8 — CI Windows com testes funcionais (build MSVC + `tests/windows_functional.ps1`)
 - [ ] GPU — validação em hardware real (deferida)
 
 
