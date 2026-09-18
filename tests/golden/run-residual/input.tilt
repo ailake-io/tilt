@@ -1,0 +1,25 @@
+modelo R:
+  entrada: tensor[f32, 2]
+  camadas:
+    - residual
+    - linear: [2, 2]
+    - softmax
+
+treino R:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.2
+  epocas: 2
+
+pipeline usar:
+  passos:
+    - modelo R.salvar_pesos "residual.json"
+    - modelo R.carregar_pesos "residual.json"
+    - modelo R.salvar_pesos "residual.safetensors"
+    - modelo R.carregar_pesos "residual.safetensors"
+    - modelo R.exportar_onnx "residual.onnx"
+    - modelo R.carregar_pesos "residual.onnx"
+    - a = modelo R.executar tensor([1.0, 0.5])
+    - imprimir "a:", a.argmax
+    - imprimir "forma:", a.forma

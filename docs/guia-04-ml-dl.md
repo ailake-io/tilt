@@ -191,11 +191,14 @@ Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmo
 `norma_lote` (affine por canal, com média/variância correntes),
 `incorporacao: [vocabulario, dimensao]` (indices inteiros; adiciona a dimensao D ao final; por exemplo entrada `[N, T]` vira `[N, T, D]`),
 `recorrente: [rnn|lstm|gru, oculta]` (sequencias `[tempo, atributos]` ou lotes `[N, tempo, atributos]`; retorna o ultimo estado),
+`residual` (bloco treinável de largura preservada, com entrada 1D conhecida),
 `agrupamento_max: [janela]` ou `[janela, passo]` e `achatar` (achata o lote
 `[N, ...]` para `[N, C]` antes da `densa`). Modelos convolucionais exigem a
 anotação completa da entrada, ex.: `entrada: tensor[f32, 1, 4, 4]` (sem o
 lote). No `treino`, `x` pode ser 3D `[N, T, F]` para recorrentes ou 4D `[N, C, H, W]` quando o modelo começa
 com `conv2d`.
+
+`residual` aplica `y = x + (x @ W + b)`, com `W` quadrada e `b` da mesma largura de `x`. A camada exige `entrada: tensor[f32, D]`, preserva a forma e participa do treino com SGD/Adam.
 
 ```tilt run
 modelo CNN:
@@ -219,7 +222,7 @@ pipeline cnn:
 
 `pesos: "caminho"` carrega pesos no formato **tilt-pesos** (JSON) ou **Safetensors** (F32 binário). O JSON é gerado por
 `modelo <Nome>.salvar_pesos`, com `w`/`b` por camada com parâmetros:
-`densa`/`linear`, `conv2d` — incluindo `passo` — e `norma_lote` — incluindo
+`densa`/`linear`, `residual`, `conv2d` — incluindo `passo` — e `norma_lote` — incluindo
 `media_running`/`var_running`). Forma
 incompatível com o modelo → erro `T901` mostrando o esperado vs. o encontrado;
 arquivo ausente → init Xavier com `[nota]`. O carregamento também pode ser
@@ -248,7 +251,7 @@ pipeline pesos:
 incluindo pós-`treino`) para **ONNX opset 20**, sem dependências externas:
 cada `densa`/`linear` vira um `Gemm`, ativações viram `Relu`/`Gelu`/
 `Sigmoid`+`Mul` (`silu`) /`Sigmoid`/`Tanh`, mais `Softmax` (eixo 1),
-`LayerNormalization`, `Conv`, `BatchNormalization`, `MaxPool`, `Flatten` e `RNN`/`LSTM`/`GRU`;
+`LayerNormalization`, `Conv`, `BatchNormalization`, `MaxPool`, `Flatten`, `RNN`/`LSTM`/`GRU` e `residual` (`Gemm` + `Add`);
 `abandono` é identidade na inferência e não é
 exportado. A entrada é `[lote, ...]` (`lote` dinâmico, resto de
 `entrada: tensor[...]`). O arquivo passa no `onnx.checker` e roda em
@@ -331,6 +334,7 @@ Perdas: `entropia_cruzada` (classificação, exige `softmax` final) e
 `softmax`). O backward cobre todas as camadas: `densa`/`linear` (com SGD/Adam),
 ativações (derivada exata da mesma aproximação da forward — inclusive `gelu`),
 `norma_camada` (sem affine), `conv2d` (núcleo + viés, com SGD/Adam),
+`residual` (ramo treinável mais conexão de atalho, com SGD/Adam),
 `incorporacao` (tabela treinável por SGD/Adam, com entrada de índices inteiros),
 `norma_lote` (gama/beta, com estatísticas do lote no treino e média/variância
 correntes na inferência), `agrupamento_max` e `achatar`. Resumo determinístico:

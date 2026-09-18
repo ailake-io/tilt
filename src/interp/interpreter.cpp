@@ -2068,9 +2068,9 @@ std::int64_t model_in_dim(const Item& decl) {
 }  // namespace
 
 bool Interpreter::camada_com_pesos(Interpreter::Layer::Kind kind) {
-  return kind == Interpreter::Layer::Dense || kind == Interpreter::Layer::Embedding ||
-         kind == Interpreter::Layer::Recorrente || kind == Interpreter::Layer::Conv2d ||
-         kind == Interpreter::Layer::NormaLote;
+  return kind == Interpreter::Layer::Dense || kind == Interpreter::Layer::Residual ||
+         kind == Interpreter::Layer::Embedding || kind == Interpreter::Layer::Recorrente ||
+         kind == Interpreter::Layer::Conv2d || kind == Interpreter::Layer::NormaLote;
 }
 
 rt::Tensor Interpreter::value_to_tensor(const Value& v, Span span) {
@@ -2146,6 +2146,16 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
           l.b = rt::Tensor::zeros({b});
           layers.push_back(std::move(l));
           forma = {b};
+        } else if (key == "residual") {
+          if (forma.size() != 1 || largura() <= 0) {
+            fail(decl.span, "modelo " + name + ": residual precisa de entrada 1D conhecida");
+          }
+          const std::int64_t d = largura();
+          Layer l;
+          l.kind = Layer::Residual;
+          l.w = rt::Tensor::xavier({d, d}, d, d, seed++);
+          l.b = rt::Tensor::zeros({d});
+          layers.push_back(std::move(l));
         } else if (key == "incorporacao") {
           if (!value || value->kind != ExprKind::ListLit || value->elems.size() != 2) {
             fail(decl.span, "modelo '" + name + "': incorporacao espera [vocabulario, dimensao]");
@@ -2444,16 +2454,19 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
             const std::string esperado =
                 l.kind == Layer::Dense
                     ? "densa"
-                    : (l.kind == Layer::Embedding
-                           ? "incorporacao"
-                           : (l.kind == Layer::Recorrente
-                                  ? "recorrente"
-                                  : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote")));
+                    : (l.kind == Layer::Residual
+                           ? "residual"
+                           : (l.kind == Layer::Embedding
+                                  ? "incorporacao"
+                                  : (l.kind == Layer::Recorrente
+                                         ? "recorrente"
+                                         : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote"))));
             if (t != esperado) {
               fail(span, "modelo '" + name + "': camada " + std::to_string(li) + " e '" + esperado +
                              "', mas o arquivo traz '" + t + "'");
             }
-            if (t == "densa" || t == "incorporacao" || t == "recorrente" || t == "conv2d") {
+            if (t == "densa" || t == "residual" || t == "incorporacao" || t == "recorrente" ||
+                t == "conv2d") {
               rt::Tensor w, b;
               const Value* wv = c.kind == ValueKind::Mapa && c.map ? c.map->find("w") : nullptr;
               const Value* bv = c.kind == ValueKind::Mapa && c.map ? c.map->find("b") : nullptr;
@@ -2467,10 +2480,12 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
                 const std::string rotulo =
                     l.kind == Layer::Dense
                         ? "camada densa "
-                        : (l.kind == Layer::Embedding
-                               ? "camada incorporacao "
-                               : (l.kind == Layer::Conv2d ? "camada conv2d "
-                                                          : "camada norma_lote "));
+                        : (l.kind == Layer::Residual
+                               ? "camada residual "
+                               : (l.kind == Layer::Embedding
+                                      ? "camada incorporacao "
+                                      : (l.kind == Layer::Conv2d ? "camada conv2d "
+                                                                 : "camada norma_lote ")));
                 fail(span, "modelo '" + name + "': forma de pesos incompativel na " + rotulo +
                                std::to_string(li) + " (modelo espera w " + l.w.shape_str() + " b " +
                                l.b.shape_str() + ", arquivo tem w " + w.shape_str() + " b " +
@@ -2540,10 +2555,12 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
                 const std::string rotulo =
                     l.kind == Layer::Dense
                         ? "camada densa "
-                        : (l.kind == Layer::Embedding
-                               ? "camada incorporacao "
-                               : (l.kind == Layer::Conv2d ? "camada conv2d "
-                                                          : "camada norma_lote "));
+                        : (l.kind == Layer::Residual
+                               ? "camada residual "
+                               : (l.kind == Layer::Embedding
+                                      ? "camada incorporacao "
+                                      : (l.kind == Layer::Conv2d ? "camada conv2d "
+                                                                 : "camada norma_lote ")));
                 fail(span, "modelo '" + name + "': forma de pesos incompativel na " + rotulo +
                                std::to_string(li) + " (modelo espera w " + l.w.shape_str() + " b " +
                                l.b.shape_str() + ", arquivo tem w " + w.shape_str() + " b " +
@@ -2579,6 +2596,11 @@ rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Ten
       case Layer::Dense:
         x = rt::add(mm(x, l.w), l.b);
         break;
+      case Layer::Residual: {
+        const rt::Tensor skip = x;
+        x = rt::add(rt::add(mm(x, l.w), l.b), skip);
+        break;
+      }
       case Layer::Embedding:
         x = rt::embedding(x, l.w);
         break;
@@ -2651,6 +2673,10 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
       rt::OnnxLayer o;
       if (l.kind == Layer::Dense) {
         o.kind = rt::OnnxLayer::Dense;
+        o.w = l.w;
+        o.b = l.b;
+      } else if (l.kind == Layer::Residual) {
+        o.kind = rt::OnnxLayer::Residual;
         o.w = l.w;
         o.b = l.b;
       } else if (l.kind == Layer::Activation) {
@@ -2742,6 +2768,8 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
         if (l.kind == Layer::Recorrente) {
           tensors[base + ".u"] = l.u;
           metadata[base + ".tipo"] = l.recorrente_tipo;
+        } else if (l.kind == Layer::Residual) {
+          metadata[base + ".tipo"] = "residual";
         } else if (l.kind == Layer::Embedding) {
           metadata[base + ".tipo"] = "incorporacao";
         } else if (l.kind == Layer::Conv2d) {
@@ -2765,12 +2793,16 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
     }
     Value cl = Value::lista();
     for (const Layer& l : layers) {
-      if (l.kind != Layer::Dense && l.kind != Layer::Embedding && l.kind != Layer::Recorrente &&
-          l.kind != Layer::Conv2d && l.kind != Layer::NormaLote)
+      if (l.kind != Layer::Dense && l.kind != Layer::Residual && l.kind != Layer::Embedding &&
+          l.kind != Layer::Recorrente && l.kind != Layer::Conv2d && l.kind != Layer::NormaLote)
         continue;
       Value c = Value::mapa();
       if (l.kind == Layer::Dense) {
         c.map->set("tipo", Value::texto("densa"));
+        c.map->set("w", Value::tensor_de(l.w));
+        c.map->set("b", Value::tensor_de(l.b));
+      } else if (l.kind == Layer::Residual) {
+        c.map->set("tipo", Value::texto("residual"));
         c.map->set("w", Value::tensor_de(l.w));
         c.map->set("b", Value::tensor_de(l.b));
       } else if (l.kind == Layer::Embedding) {
@@ -2870,6 +2902,12 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
           const std::string id = suffix(w->name, "W");
           l.w = copy_tensor(w->name, l.w.shape);
           l.b = copy_tensor("B" + id, l.b.shape);
+        } else if (l.kind == Layer::Residual) {
+          const rt::OnnxTensor* w = next_named("W_res");
+          if (!w) fail(inner.span, "pesos ONNX sem inicializador residual");
+          const std::string residual_id = suffix(w->name, "W_res");
+          l.w = copy_tensor(w->name, l.w.shape);
+          l.b = copy_tensor("B_res" + residual_id, l.b.shape);
         } else if (l.kind == Layer::Recorrente) {
           const rt::OnnxTensor* w = next_named("W_rec");
           if (!w) fail(inner.span, "pesos ONNX sem inicializador recorrente");
@@ -3017,16 +3055,19 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
         const std::string esperado =
             l.kind == Layer::Dense
                 ? "densa"
-                : (l.kind == Layer::Embedding
-                       ? "incorporacao"
-                       : (l.kind == Layer::Recorrente
-                              ? "recorrente"
-                              : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote")));
+                : (l.kind == Layer::Residual
+                       ? "residual"
+                       : (l.kind == Layer::Embedding
+                              ? "incorporacao"
+                              : (l.kind == Layer::Recorrente
+                                     ? "recorrente"
+                                     : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote"))));
         if (t != esperado) {
           fail(inner.span, "modelo '" + mname + "': camada " + std::to_string(li) + " e '" +
                                esperado + "', mas o arquivo traz '" + t + "'");
         }
-        if (t == "densa" || t == "incorporacao" || t == "recorrente" || t == "conv2d") {
+        if (t == "densa" || t == "residual" || t == "incorporacao" || t == "recorrente" ||
+            t == "conv2d") {
           rt::Tensor w, b;
           const Value* wv = c.kind == ValueKind::Mapa && c.map ? c.map->find("w") : nullptr;
           const Value* bv = c.kind == ValueKind::Mapa && c.map ? c.map->find("b") : nullptr;
@@ -3040,9 +3081,12 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
             const std::string rotulo =
                 l.kind == Layer::Dense
                     ? "camada densa "
-                    : (l.kind == Layer::Embedding
-                           ? "camada incorporacao "
-                           : (l.kind == Layer::Conv2d ? "camada conv2d " : "camada norma_lote "));
+                    : (l.kind == Layer::Residual
+                           ? "camada residual "
+                           : (l.kind == Layer::Embedding
+                                  ? "camada incorporacao "
+                                  : (l.kind == Layer::Conv2d ? "camada conv2d "
+                                                             : "camada norma_lote ")));
             fail(inner.span, "modelo '" + mname + "': forma de pesos incompativel na " + rotulo +
                                  std::to_string(li) + " (modelo espera w " + l.w.shape_str() +
                                  " b " + l.b.shape_str() + ", arquivo tem w " + w.shape_str() +
@@ -3165,6 +3209,10 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
       rt::OnnxLayer o;
       if (l.kind == Layer::Dense) {
         o.kind = rt::OnnxLayer::Dense;
+        o.w = l.w;
+        o.b = l.b;
+      } else if (l.kind == Layer::Residual) {
+        o.kind = rt::OnnxLayer::Residual;
         o.w = l.w;
         o.b = l.b;
       } else if (l.kind == Layer::Activation) {
@@ -3710,7 +3758,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
     }
     std::int64_t width = 1;
     for (auto rit = layers.rbegin(); rit != layers.rend(); ++rit) {
-      if (rit->kind == Layer::Dense) {
+      if (rit->kind == Layer::Dense || rit->kind == Layer::Residual) {
         width = rit->w.shape[1];
         break;
       }
@@ -3723,8 +3771,8 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
     }
   }
   for (Layer& l : layers) {
-    if (l.kind != Layer::Dense && l.kind != Layer::Embedding && l.kind != Layer::Recorrente &&
-        l.kind != Layer::Conv2d && l.kind != Layer::NormaLote)
+    if (l.kind != Layer::Dense && l.kind != Layer::Residual && l.kind != Layer::Embedding &&
+        l.kind != Layer::Recorrente && l.kind != Layer::Conv2d && l.kind != Layer::NormaLote)
       continue;
     l.m_w = rt::Tensor::zeros(l.w.shape);
     l.v_w = rt::Tensor::zeros(l.w.shape);
@@ -3744,13 +3792,16 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       Value c = Value::mapa();
       c.map->set(
           "tipo",
-          Value::texto(l.kind == Layer::Dense
-                           ? "densa"
-                           : (l.kind == Layer::Embedding
-                                  ? "incorporacao"
-                                  : (l.kind == Layer::Recorrente
-                                         ? "recorrente"
-                                         : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote")))));
+          Value::texto(
+              l.kind == Layer::Dense
+                  ? "densa"
+                  : (l.kind == Layer::Residual
+                         ? "residual"
+                         : (l.kind == Layer::Embedding
+                                ? "incorporacao"
+                                : (l.kind == Layer::Recorrente
+                                       ? "recorrente"
+                                       : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote"))))));
       c.map->set("w", Value::tensor_de(l.w));
       c.map->set("b", Value::tensor_de(l.b));
       c.map->set("m_w", Value::tensor_de(l.m_w));
@@ -4032,7 +4083,14 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         Layer& l = layers[layer_idx];
         ins.push_back(cur);
         switch (l.kind) {
-          case Layer::Dense: cur = rt::add(mm(cur, l.w), l.b); break;
+          case Layer::Dense:
+            cur = rt::add(mm(cur, l.w), l.b);
+            break;
+          case Layer::Residual: {
+            const rt::Tensor skip = cur;
+            cur = rt::add(rt::add(mm(cur, l.w), l.b), skip);
+            break;
+          }
           case Layer::Embedding:
             cur = rt::embedding(cur, l.w);
             break;
@@ -4169,6 +4227,14 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         }
         if (l.kind == Layer::MaxPool) {
           grad = rt::maxpool2d_backward(in, grad, l.janela, l.passo);
+          continue;
+        }
+        if (l.kind == Layer::Residual) {
+          rt::Tensor dw = rt::matmul(rt::transpose2d(in), grad);
+          rt::Tensor db = col_sum(grad);
+          rt::Tensor grad_in = rt::matmul(grad, rt::transpose2d(l.w));
+          aplicar_grad(l, dw, db);
+          grad = rt::add(grad_in, grad);
           continue;
         }
         if (l.kind == Layer::Recorrente) {

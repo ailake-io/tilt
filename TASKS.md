@@ -111,7 +111,7 @@
 ### 3.3 Modelos (P2)
 - [x] Adicionar camada `incorporacao` (embedding layer)
 - [x] Adicionar camada `recorrente` (RNN/LSTM/GRU, BPTT CPU)
-- [ ] Adicionar camada `residual`
+- [x] Adicionar camada `residual` (bloco treinável CPU, persistência e ONNX)
 - [x] Implementar `salvar_pesos`/`carregar_pesos` em formato ONNX
 - [x] Integrar Safetensors F32 para pesos de produção
 - [x] Implementar exportação GGUF v3 (escrita F32; quantização ainda pendente)

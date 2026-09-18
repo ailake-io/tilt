@@ -2291,6 +2291,12 @@ void SemanticChecker::check_model_shapes() {
           return;
         }
         if (forma.size() == 1) forma = {std::stoll(value->text)};
+      } else if (key == "residual") {
+        if (forma.size() == 2 || forma.size() == 3) {
+          report(DiagCode::TensorShapeMismatch, value ? value->span : item->span,
+                 "camada residual precisa de entrada 1D",
+                 {"use entrada: tensor[f32, atributos] ou achatar antes"});
+        }
       } else if (key == "linear" && value && value->kind == ExprKind::ListLit &&
                  value->elems.size() == 2 && value->elems[0]->kind == ExprKind::IntLit &&
                  value->elems[1]->kind == ExprKind::IntLit) {

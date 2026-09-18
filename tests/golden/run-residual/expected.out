@@ -1,0 +1,10 @@
+treino R: perda caiu sim | acuracia 2/4
+== pipeline usar ==
+modelo R: pesos salvos em residual.json (2 camadas)
+modelo R: pesos carregados de residual.json (2 camadas)
+modelo R: pesos Safetensors salvos em residual.safetensors (4 tensores)
+modelo R: pesos Safetensors carregados de residual.safetensors
+modelo R: onnx exportado para residual.onnx
+modelo R: pesos ONNX carregados de residual.onnx (2 camadas)
+a: 0
+forma: [2]

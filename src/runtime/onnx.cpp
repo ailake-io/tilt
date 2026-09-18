@@ -404,6 +404,22 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
       cur = out;
       dim = hidden;
       out_dim = hidden;
+    } else if (l.kind == OnnxLayer::Residual) {
+      if (l.w.rank() != 2 || l.b.rank() != 1 || l.w.shape[0] != l.w.shape[1] ||
+          l.w.shape[0] != dim || l.b.shape[0] != dim)
+        die("camada residual com dimensoes incompativeis");
+      const std::string wn = "W_res" + std::to_string(seq);
+      const std::string bn = "B_res" + std::to_string(seq);
+      initializers.push_back(tensor_proto(wn, l.w.shape, l.w.data));
+      initializers.push_back(tensor_proto(bn, l.b.shape, l.b.data));
+      const std::string branch = fresh("residual_branch");
+      nodes.push_back(
+          node_proto("Gemm", {cur, wn, bn}, {branch}, "residual_gemm" + std::to_string(seq), {}));
+      const std::string out = fresh("residual");
+      nodes.push_back(
+          node_proto("Add", {branch, cur}, {out}, "residual_add" + std::to_string(seq), {}));
+      cur = out;
+      out_dim = dim;
     } else if (l.kind == OnnxLayer::Dense) {
       if (l.w.rank() != 2) die("peso denso precisa ser 2D");
       if (l.w.shape[0] != dim) {

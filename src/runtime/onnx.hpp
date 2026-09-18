@@ -13,6 +13,7 @@ namespace tilt::rt {
 struct OnnxLayer {
   enum Kind {
     Dense,
+    Residual,
     Recorrente,
     Activation,
     Softmax,

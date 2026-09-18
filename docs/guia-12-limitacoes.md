@@ -18,7 +18,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   escopo global mais variáveis implícitas (`linha`, `entrada`, `epoca`,
   `metricas`, `passo`, `resultado`) e campos de `entrada:`. Nomes fora
   disso são reportados.
-- O solver de formas (`T012`) cobre a cadeia `densa`/`linear` nos `modelo`s
+- O solver de formas (`T012`) cobre a cadeia `densa`/`linear`/`residual` nos `modelo`s
   (propaga a última dimensão a partir da anotação `entrada: tensor[...]` e
   rejeita `linear: [a, b]` com `a` incompatível) e, nos corpos de
   `funcao`/`pipeline`/`servico`, operações de tensor com formas literais ou
@@ -327,19 +327,19 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
   tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20
   (Gemm + ativações + Softmax + LayerNormalization + Conv +
-  BatchNormalization + MaxPool + Flatten + RNN/LSTM/GRU). A camada `incorporacao` ainda nao e exportavel para ONNX;
+  BatchNormalization + MaxPool + Flatten + RNN/LSTM/GRU + residual). A camada `incorporacao` ainda nao e exportavel para ONNX;
   use pesos/treino nativos ou GGUF.
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
-  `agrupamento_max`, `achatar` e `recorrente` (RNN/LSTM/GRU com BPTT em CPU) (CNN de brinquedo em CPU, com mini-lotes).
+  `agrupamento_max`, `achatar`, `residual` e `recorrente` (RNN/LSTM/GRU com BPTT em CPU) (CNN de brinquedo em CPU, com mini-lotes).
 - `conv2d` e `norma_lote` existem como **operações de tensor** (guia 04);
   `incorporacao`, `recorrente`, `conv2d` e `norma_lote` existem como camadas de `modelo`/`treino` (`incorporacao: [vocabulario, dimensao]`,
   `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`
   com os três últimos elementos opcionais, `norma_lote`, `agrupamento_max:
   [janela]`/`[janela, passo]`, `achatar`; CNN exige `entrada: tensor[...]`
-  completa): `incorporacao` usa índices inteiros e produz `[N, T, D]`; `recorrente` recebe `[N, T, F]` e produz `[N, H]`; `conv2d` tem
+  completa): `incorporacao` usa índices inteiros e produz `[N, T, D]`; `recorrente` recebe `[N, T, F]` e produz `[N, H]`; `residual` recebe vetor 1D de largura conhecida e preserva `[D]`; `conv2d` tem
   padding/dilation explícitos e passo 1+ (com viés); `norma_lote`
   com `eps:`/`em_treino:` nas ops e gama/beta +   média/variância correntes nas
   camadas. `treino` roda em lote cheio por default, com `lote:` (mini-lotes

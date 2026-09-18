@@ -231,6 +231,7 @@ class Interpreter {
   struct Layer {
     enum Kind {
       Dense,
+      Residual,
       Embedding,
       Recorrente,
       Activation,
