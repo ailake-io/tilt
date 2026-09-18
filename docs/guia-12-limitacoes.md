@@ -428,10 +428,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   codegen é fail-closed (allow-list de ops + nomes de CallFunc).
 - Backends de codegen nativo: **x86-64** e **ARM64 (AArch64)**, o mesmo
   subconjunto nos dois (`--arch x86_64|arm64`, `auto` = host). O backend
-  ARM64 emite ELF/AAPCS (validado por geração + montagem cross no teste
-  `native_arm64`; a execução sob `qemu-aarch64` no ctest depende de toolchain
-  cross + qemu instalados — sem ela, a validação end-to-end fica para CI /
-  máquina ARM). Mach-O (macOS) e PE/COFF (Windows) ficam fora: o codegen
+  ARM64 emite ELF/AAPCS; o teste `native_arm64` gera, monta e executa sob
+  `qemu-aarch64` no job `arm64_codegen` do CI, que instala a toolchain cross.
+  Localmente, sem `gcc-aarch64-linux-gnu` + QEMU, ele fica limitado à geração
+  e montagem quando o assembler estiver disponível. Mach-O (macOS) e PE/COFF (Windows) ficam fora: o codegen
   é ELF-only. **JIT** (compilação em runtime, sem passar por `.s`+`cc`)
   segue como evolução futura.
 

@@ -58,7 +58,7 @@
   via `CallFunc`+hook; codegen fail-closed com rejeição clara; goldens
   `run-vm-interpola/membro/ler-csv` com paridade interp×VM verificada)
 - [ ] Implementar JIT (compilação em runtime sem passar por `.s`+`cc`)
-- [ ] Adicionar testes end-to-end para codegen ARM64 em qemu (atualmente depende de toolchain cross)
+- [x] Adicionar testes end-to-end para codegen ARM64 em qemu (job `arm64_codegen` instala toolchain cross + qemu)
 - [x] Cache de bytecode em disco (Sprint 3: `.tiltc`, SHA do fonte, fail-closed)
 
 ---

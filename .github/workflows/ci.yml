@@ -94,3 +94,22 @@ jobs:
         run: cmake --build --preset debug
       - name: test
         run: ctest --preset debug --output-on-failure
+
+  arm64_codegen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install ARM64 toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ gcc-aarch64-linux-gnu qemu-user
+
+      - name: configure (Release, -Werror)
+        run: cmake --preset release -DTILT_WERROR=ON
+
+      - name: build host compiler
+        run: cmake --build --preset release
+
+      - name: execute ARM64 codegen under QEMU
+        run: ctest --test-dir build/release -R '^native_arm64$' --output-on-failure

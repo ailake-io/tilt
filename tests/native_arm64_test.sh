@@ -62,7 +62,10 @@ CC_AARCH64="${CC_AARCH64:-aarch64-linux-gnu-gcc}"
 if command -v "$CC_AARCH64" >/dev/null 2>&1 && command -v qemu-aarch64 >/dev/null 2>&1; then
   "$CC_AARCH64" -O2 -o "$tmp/prog.a64" "$tmp/prog.o" "$tmp/prog.tilt.rt.c" -lm
   "$BIN" executar "$FIXTURE" >"$tmp/interp.out"
-  qemu-aarch64 "$tmp/prog.a64" >"$tmp/native.out"
+  qemu_args=""
+  if [ -d /usr/aarch64-linux-gnu ]; then qemu_args="-L /usr/aarch64-linux-gnu"; fi
+  # shellcheck disable=SC2086
+  qemu-aarch64 $qemu_args "$tmp/prog.a64" >"$tmp/native.out"
   if diff -u "$tmp/interp.out" "$tmp/native.out"; then
     echo "native_arm64 ok (execucao qemu): $(basename "$FIXTURE")"
   else
