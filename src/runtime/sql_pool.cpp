@@ -20,17 +20,12 @@ struct Registry {
   std::unordered_map<std::string, std::vector<IdleEntry>> idle;
 
   ~Registry() {
-    // Fecha ociosas no fim do processo (as em uso fecham no proprio release).
-    for (auto& [key, vec] : idle) {
-      for (auto& e : vec) {
-        if (e.handle) {
-          try {
-            e.close(e.handle);
-          } catch (...) {
-          }
-        }
-      }
-    }
+    // Não chame callbacks de clientes carregados via dlopen durante a
+    // destruição estática: a ordem de teardown entre a biblioteca dinâmica e
+    // este registry não é definida, e MySQL/MariaDB podem já ter desmontado
+    // o estado global. O processo vai liberar esses handles ao terminar;
+    // conexões em uso continuam sendo fechadas normalmente pelo release.
+    idle.clear();
   }
 };
 

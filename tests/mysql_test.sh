@@ -26,6 +26,7 @@ MYSQLD=""
 MYSQL=""
 MARIADB=""
 MARIADB_CLIENT=""
+MYSQL_PLUGIN_DIR=""
 for dir in $(echo "$PATH" | tr ':' ' ') /usr/sbin /usr/local/mysql/bin /usr/local/mariadb/bin /opt/mysql/bin; do
   [ -n "$dir" ] || continue
   if [ -z "$MYSQLD" ] && [ -x "$dir/mysqld" ]; then
@@ -60,11 +61,18 @@ trap 'rm -rf "$tmp"' EXIT
 # lib realmente esta la, para nao desviar a resolucao das demais libs).
 for srv in "$MYSQLD" "$MARIADB"; do
   [ -n "$srv" ] || continue
-  prefix_lib="$(dirname "$(dirname "$srv")")/lib"
+  prefix="$(dirname "$(dirname "$srv")")"
+prefix_lib="$prefix/lib"
   if ls "$prefix_lib"/libmariadb.so* "$prefix_lib"/libmysqlclient.so* >/dev/null 2>&1 \
      && [ "${LD_LIBRARY_PATH:-}" != *"$prefix_lib"* ]; then
     LD_LIBRARY_PATH="$prefix_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     export LD_LIBRARY_PATH
+  fi
+  # MySQL da Anaconda distribui componentes em lib/plugin, mas deixa o
+  # plugin-dir default apontando para o prefixo. Isso faz o mysqld procurar
+  # component_reference_cache.so no lugar errado durante o teste.
+  if [ -z "$MYSQL_PLUGIN_DIR" ] && [ -f "$prefix_lib/plugin/component_reference_cache.so" ]; then
+    MYSQL_PLUGIN_DIR="$prefix_lib/plugin"
   fi
 done
 
@@ -134,9 +142,15 @@ if [ -n "$MYSQLD" ] || [ -n "$MARIADB" ]; then
 
   start_local() {
     # shellcheck disable=SC2086
-    "$SERVER" --no-defaults --datadir="$data" --port="$1" --socket="$sock" \
-      --skip-networking=0 --bind-address=127.0.0.1 \
-      --pid-file="$tmp/mysqld.pid" --log-error="$tmp/server.log" $extra &
+    if [ -n "$MYSQL_PLUGIN_DIR" ]; then
+      "$SERVER" --no-defaults --plugin-dir="$MYSQL_PLUGIN_DIR" --datadir="$data" \
+        --port="$1" --socket="$sock" --skip-networking=0 --bind-address=127.0.0.1 \
+        --pid-file="$tmp/mysqld.pid" --log-error="$tmp/server.log" $extra &
+    else
+      "$SERVER" --no-defaults --datadir="$data" --port="$1" --socket="$sock" \
+        --skip-networking=0 --bind-address=127.0.0.1 \
+        --pid-file="$tmp/mysqld.pid" --log-error="$tmp/server.log" $extra &
+    fi
     srv_pid=$!
     for _ in $(seq 1 60); do
       if "$MYSQL_BIN" --socket="$sock" -uroot -e "select 1" >/dev/null 2>&1; then
