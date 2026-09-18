@@ -99,16 +99,17 @@ os `N` elementos do lote, mas apenas `N - M` saem do buffer — os `M` últimos
 repetem no início do próximo lote (janela deslizante clássica). Ex.: fonte
 `1..5`, `janela: 3`, `sobreposicao: 1` → lotes `[1,2,3]` e `[3,4,5]`.
 
-**Offset persistente**: em janela de contagem ou de tempo sobre fonte de arquivo
+**Estado persistente**: em janela de contagem ou de tempo sobre fonte de arquivo
 (`tipo: csv`/`json`/`parquet`), o offset fica gravado em `<caminho-da-fonte>.tilt-offset`
 (JSON com um mapa por pipeline; contagem usa o formato legado numero-puro, p.
-ex. `{"contagens": 120}`, e tempo/throttle guardam `{offset, last_run}` — a
+ex. `{"contagens": 120}`; quando houver linhas acumuladas, o mapa guarda
+`{offset, buffer}`; tempo/throttle guardam `{offset, last_run, buffer}` — a
 chave é o par pipeline + fonte, então pipelines diferentes sobre a mesma fonte
-não interferem). O arquivo é gravado atomicamente (tmp + rename) sempre que o
-offset avança, e lido na inicialização — reiniciar o processo continua de onde
-parou, sem reprocessar elementos. Defina `TILT_JANELA_ESTADO=memoria` para
-voltar ao comportamento antigo (só memória, sem arquivo — útil para testes e
-pipelines efêmeros). Fonte Kafka com `grupo:` não usa arquivo: o checkpoint é
+não interferem). O arquivo é gravado atomicamente (tmp + rename) quando o
+offset ou o buffer muda, e lido na inicialização — reiniciar o processo continua
+de onde parou, sem reprocessar nem perder elementos já acumulados. Defina
+`TILT_JANELA_ESTADO=memoria` para voltar ao comportamento antigo (só memória, sem
+arquivo — útil para testes e pipelines efêmeros). Fonte Kafka com `grupo:` não usa arquivo: o checkpoint é
 o commit de offsets do grupo no broker.
 
 **Cursor incremental**: para fontes de arquivo, `desde: <coluna>` troca o

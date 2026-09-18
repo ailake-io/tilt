@@ -309,8 +309,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   checkpoint é o offset commitado no broker).
 - `--agendar` entra em loop real de agenda, mas o parser cron é numérico
   (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
-  E (não pelo OU do cron clássico) e não há persistência de estado entre
-  disparos.
+  E (não pelo OU do cron clássico). Janelas sobre arquivos persistem offset,
+  buffer pendente e `last_run` entre disparos; conectores sem checkpoint de
+  grupo continuam sujeitos às limitações descritas nas seções próprias.
 
 ## ML / DL
 

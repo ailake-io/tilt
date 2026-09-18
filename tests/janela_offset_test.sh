@@ -60,4 +60,38 @@ echo "$out3" | grep -q "lote: 2 1 2" || {
   echo "TILT_JANELA_ESTADO=memoria nao deve criar arquivo de offset"; exit 1
 }
 
+# Janela parcial: as tres primeiras linhas ficam pendentes no checkpoint;
+# depois a fonte cresce e o segundo processo fecha o lote sem perder as tres.
+cat >"$tmp/parcial.csv" <<'EOF'
+id,nome
+1,ana
+2,bruno
+3,carla
+EOF
+cat >"$tmp/parcial.tilt" <<'EOF'
+fonte eventos:
+  tipo: csv
+  caminho: "parcial.csv"
+
+pipeline parcial:
+  agenda: "*/1 * * * *"
+  entrada: eventos
+  janela: 4
+  passos:
+    - imprimir "parcial:", tamanho(linhas), linhas[0].id, linhas[-1].id
+EOF
+
+out4=$(cd "$tmp" && TILT_AGORA=2026-01-05T02:50:00 TILT_AGENDAR_MAX=1 \
+  "$BIN" executar --agendar parcial.tilt)
+if echo "$out4" | grep -q "parcial:"; then
+  echo "run parcial 1: janela fechou antes de completar"; echo "$out4"; exit 1
+fi
+grep -q '"buffer"' "$tmp/parcial.csv.tilt-offset" || {
+  echo "buffer parcial nao foi persistido"; cat "$tmp/parcial.csv.tilt-offset"; exit 1; }
+printf '4,diego\n' >>"$tmp/parcial.csv"
+out5=$(cd "$tmp" && TILT_AGORA=2026-01-05T02:50:00 TILT_AGENDAR_MAX=1 \
+  "$BIN" executar --agendar parcial.tilt)
+echo "$out5" | grep -q "parcial: 4 1 4" || {
+  echo "run parcial 2: buffer persistido nao fechou o lote"; echo "$out5"; exit 1; }
+
 echo "janela_offset: ok"

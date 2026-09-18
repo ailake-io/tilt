@@ -1322,8 +1322,11 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
       }
     }
     // Grava so quando o offset avanca (nada consumido = sem arquivo novo).
+    // O buffer pendente tambem precisa ir para o checkpoint: se o processo
+    // parar antes de fechar a janela, essas linhas ja foram contabilizadas no
+    // offset e seriam perdidas no proximo disparo.
     if (!st.cursor_active && !offset_file.empty() && st.offset > st.persisted_offset) {
-      janela_offset_save(st, pipe_name, offset_file);
+      janela_offset_save(st, pipe_name, offset_file, spec.kind != JanelaSpec::Contagem);
     }
   }
 
@@ -1372,10 +1375,11 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
   if (roda) {
     st.ran_once = true;
     st.last_run = now;
-    // Persiste o relogio para janelas de tempo/throttle entre replicas
-    // (contagem mantem o formato legado numero-puro).
-    if (!offset_file.empty() && (st.cursor_active || spec.kind != JanelaSpec::Contagem)) {
-      janela_offset_save(st, pipe_name, offset_file, true);
+    // Persiste o relogio para janelas de tempo/throttle entre replicas e
+    // confirma a retirada do buffer de contagem (inclusive sobreposicao).
+    // Contagem sem pendencias continua no formato legado numero-puro.
+    if (!offset_file.empty()) {
+      janela_offset_save(st, pipe_name, offset_file, spec.kind != JanelaSpec::Contagem);
     }
   }
   return roda;
@@ -1527,7 +1531,8 @@ void Interpreter::janela_offset_load(WindowState& st, const std::string& pipelin
   if (parsed.kind != ValueKind::Mapa || !parsed.map) return;
   if (const Value* v = parsed.map->find(pipeline)) {
     // Formato legado: numero puro = offset. Formato 12-4: mapa por pipeline
-    // {offset, last_run} — permite retomar throttle/tempo entre replicas.
+    // {offset, last_run, buffer} — permite retomar janela parcial, throttle e
+    // tempo entre replicas.
     if (v->is_number()) {
       st.offset = static_cast<std::size_t>(v->as_number());
       st.persisted_offset = st.offset;
@@ -1546,6 +1551,9 @@ void Interpreter::janela_offset_load(WindowState& st, const std::string& pipelin
       if (const Value* lr = v->map->find("last_run"); lr && lr->is_number()) {
         st.last_run = static_cast<std::time_t>(lr->as_number());
         st.ran_once = true;
+      }
+      if (const Value* b = v->map->find("buffer"); b && b->kind == ValueKind::Lista && b->list) {
+        st.buffer.assign(b->list->begin(), b->list->end());
       }
     }
   }
@@ -1573,13 +1581,14 @@ void Interpreter::janela_offset_save(WindowState& st, const std::string& pipelin
   } catch (const std::exception&) {
     // backend fora do ar na leitura: segue com o mapa local
   }
-  if (st.cursor_active || (com_relogio && st.ran_once)) {
+  if (st.cursor_active || (com_relogio && st.ran_once) || !st.buffer.empty()) {
     Value entry = Value::mapa();
     entry.map->set("offset", Value::inteiro(static_cast<std::int64_t>(st.offset)));
     if (st.cursor_active && st.cursor_loaded) entry.map->set("cursor", st.cursor_watermark);
     if (com_relogio && st.ran_once) {
       entry.map->set("last_run", Value::inteiro(static_cast<std::int64_t>(st.last_run)));
     }
+    if (!st.buffer.empty()) entry.map->set("buffer", Value::lista(st.buffer));
     map.map->set(pipeline, std::move(entry));
   } else {
     map.map->set(pipeline, Value::inteiro(static_cast<std::int64_t>(st.offset)));
