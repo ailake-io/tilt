@@ -484,3 +484,7 @@ A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
   - A suíte `ctest` continua em shell script e roda em Linux/macOS; o job
     Windows também executa `tests/windows_functional.ps1` nativamente em
     PowerShell, comparando interpretador, VM, JIT/fallback e exemplos ETL.
+  - O job `connectors` do CI instala PostgreSQL, MariaDB e libmariadb, baixa
+    uma libduckdb oficial fixada e roda os testes reais de PostgreSQL, MySQL,
+    DuckDB e ClickHouse; o ambiente local pode continuar pulando esses testes
+    quando os servidores ou bibliotecas não estiverem instalados.

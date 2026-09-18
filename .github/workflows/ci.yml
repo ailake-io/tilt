@@ -91,6 +91,30 @@ jobs:
           if (-not $exe) { throw "tilt.exe nao encontrado em build/release" }
           ./tests/windows_functional.ps1 -Bin $exe
 
+  connectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install connector servers and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ curl unzip postgresql postgresql-client mariadb-server mariadb-client libmariadb-dev
+          mkdir -p "$RUNNER_TEMP/duckdb"
+          curl -fsSL -o "$RUNNER_TEMP/duckdb/libduckdb.zip" \
+            https://github.com/duckdb/duckdb/releases/download/v1.5.5/libduckdb-linux-amd64.zip
+          unzip -q "$RUNNER_TEMP/duckdb/libduckdb.zip" -d "$RUNNER_TEMP/duckdb"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/duckdb:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: configure (Release, -Werror)
+        run: cmake --preset release -DTILT_WERROR=ON
+
+      - name: build
+        run: cmake --build --preset release
+
+      - name: connector integration tests
+        run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse)$" --output-on-failure
+
   sanitizers:
     runs-on: ubuntu-latest
     steps:

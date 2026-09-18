@@ -67,7 +67,7 @@
 
 ### 2.1 Conectores de Dados (P1)
 - [x] Connector `delta` nativo (`src/runtime/delta.cpp`, escrita/leitura/append/evolução/widening)
-- [ ] Validar conectores PostgreSQL, MySQL, DuckDB, ClickHouse em CI real (apenas smoke test no Windows)
+- [x] Validar conectores PostgreSQL, MySQL, DuckDB, ClickHouse em CI real (job `connectors`, servidores/libs provisionados no runner)
 - [ ] Melhorar tratamento de erros em conectores TLS (redis/mongo/kafka) — certificados auto-assinados
 - [x] Adicionar pooling de conexões para bancos relacionais (Sprint 2:
   `src/runtime/sql_pool.*` genérico por (backend, url) — postgres/mysql/duckdb
