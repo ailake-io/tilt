@@ -51,9 +51,9 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `gradiente_impulsionado` e `svm`, com `prever` (`{classe, probabilidade}` /
   `{valor}` / `{grupo}`), divisão treino/validação/teste com semente,
   `validacao_cruzada:`, `imputar:`, métricas (acurácia, f1 ponderado, auc,
-  matriz_confusao, rmse, r2, inércia) e `registrar_em: mlflow://` como JSON
-  local. Detalhes e limites no guia 04 e no guia 12.
-- Resta: mlflow REST, busca de hiperparâmetros.
+  matriz_confusao, rmse, r2, inércia) e `registrar_em: mlflow://` via
+  Tracking REST. Detalhes e limites no guia 04 e no guia 12.
+- Resta: busca de hiperparâmetros.
 
 ## Deep learning — treino real, mas de brinquedo
 

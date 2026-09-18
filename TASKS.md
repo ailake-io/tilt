@@ -99,7 +99,7 @@
 - [x] `imputar` no `pre_processar` (já existe)
 - [x] `f1` ponderado pelo suporte (já existe)
 - [x] `validacao_cruzada` (já existe)
-- [ ] Implementar `registrar_em: mlflow://` (atualmente grava JSON local)
+- [x] Implementar `registrar_em: mlflow://` via Tracking REST
 
 ### 3.2 Treino (P1)
 - [ ] Implementar AMP (automatic mixed precision) — roteiro

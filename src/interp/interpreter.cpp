@@ -192,6 +192,191 @@ void Interpreter::Env::set(const std::string& name, Value value) {
   vars[name] = std::move(value);
 }
 
+namespace {
+
+struct MlflowTarget {
+  std::string base;
+  std::string experiment;
+};
+
+std::string mlflow_url_encode(const std::string& text) {
+  static constexpr char hex[] = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char c : text) {
+    if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('%');
+      out.push_back(hex[c >> 4]);
+      out.push_back(hex[c & 0x0f]);
+    }
+  }
+  return out;
+}
+
+MlflowTarget mlflow_target(const std::string& uri) {
+  constexpr std::string_view prefix = "mlflow://";
+  if (uri.rfind(prefix, 0) != 0) {
+    throw std::runtime_error("registrar_em espera mlflow://host/experimento");
+  }
+  const std::string resto = uri.substr(prefix.size());
+  const std::size_t barra = resto.find('/');
+  if (barra == std::string::npos || barra == 0 || barra + 1 >= resto.size()) {
+    throw std::runtime_error("registrar_em espera mlflow://host/experimento");
+  }
+  MlflowTarget out;
+  out.base = "http://" + resto.substr(0, barra);
+  out.experiment = resto.substr(barra + 1);
+  return out;
+}
+
+std::vector<std::pair<std::string, std::string>> mlflow_headers() {
+  std::vector<std::pair<std::string, std::string>> headers;
+  if (const char* token = std::getenv("MLFLOW_TRACKING_TOKEN"); token && *token) {
+    headers.emplace_back("Authorization", std::string("Bearer ") + token);
+  }
+  if (const char* workspace = std::getenv("MLFLOW_WORKSPACE"); workspace && *workspace) {
+    headers.emplace_back("X-MLFLOW-WORKSPACE", workspace);
+  }
+  return headers;
+}
+
+Value mlflow_post(const MlflowTarget& target, const std::string& endpoint, const Value& body) {
+  return rt::http_post_json(target.base + "/api/2.0/mlflow/" + endpoint, body, mlflow_headers());
+}
+
+std::string mlflow_value_text(const Value& value) {
+  if (value.kind == ValueKind::Texto) return value.s;
+  if (value.kind == ValueKind::Inteiro) return std::to_string(value.i);
+  if (value.kind == ValueKind::Decimal) return std::to_string(value.d);
+  return {};
+}
+
+std::string mlflow_id(const Value& reply, const std::string& top_key,
+                      const std::string& nested_key) {
+  if (reply.kind != ValueKind::Mapa || !reply.map) return {};
+  const Value* value = reply.map->find(top_key);
+  if (value && !nested_key.empty() && value->kind == ValueKind::Mapa && value->map) {
+    value = value->map->find(nested_key);
+  }
+  return value ? mlflow_value_text(*value) : std::string();
+}
+
+std::string mlflow_run_id(const Value& reply) {
+  if (reply.kind != ValueKind::Mapa || !reply.map) return {};
+  const Value* run = reply.map->find("run");
+  if (!run || run->kind != ValueKind::Mapa || !run->map) return {};
+  const Value* info = run->map->find("info");
+  if (!info || info->kind != ValueKind::Mapa || !info->map) return {};
+  const Value* id = info->map->find("run_id");
+  return id ? mlflow_value_text(*id) : std::string();
+}
+
+bool mlflow_metric(const std::string& line, std::string& key, double& value) {
+  const std::size_t colon = line.find(':');
+  if (colon == std::string::npos) return false;
+  key = line.substr(0, colon);
+  while (!key.empty() && key.front() == ' ') key.erase(key.begin());
+  while (!key.empty() && key.back() == ' ') key.pop_back();
+  std::string number = line.substr(colon + 1);
+  while (!number.empty() && number.front() == ' ') number.erase(number.begin());
+  const std::size_t spread = number.find(" +-");
+  if (spread != std::string::npos) number.resize(spread);
+  char* end = nullptr;
+  value = std::strtod(number.c_str(), &end);
+  if (end == number.c_str()) return false;
+  while (*end == ' ') ++end;
+  if (*end != 0) return false;
+  for (char& c : key) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    if (!(std::isalnum(u) || c == '_' || c == '-' || c == '.')) c = '_';
+  }
+  return !key.empty();
+}
+
+std::string mlflow_registrar_experimento(const std::string& uri, const std::string& name,
+                                         const std::string& model, std::size_t total,
+                                         std::int64_t seed,
+                                         const std::vector<std::string>& report) {
+  const MlflowTarget target = mlflow_target(uri);
+  const auto headers = mlflow_headers();
+  Value experiment;
+  const std::string get_url = target.base +
+                              "/api/2.0/mlflow/experiments/get-by-name?experiment_name=" +
+                              mlflow_url_encode(target.experiment);
+  const rt::HttpClientResponse found = rt::http_request("GET", get_url, headers);
+  if (found.error.empty() && found.status >= 200 && found.status < 300) {
+    experiment = rt::json_parse(found.body);
+  } else if (found.status == 404) {
+    Value request = Value::mapa();
+    request.map->set("name", Value::texto(target.experiment));
+    experiment = mlflow_post(target, "experiments/create", request);
+  } else {
+    throw std::runtime_error("MLflow: nao foi possivel localizar o experimento (" +
+                             std::to_string(found.status) + ")");
+  }
+  std::string experiment_id = mlflow_id(experiment, "experiment_id", "");
+  if (experiment_id.empty()) experiment_id = mlflow_id(experiment, "experiment", "experiment_id");
+  if (experiment_id.empty()) {
+    throw std::runtime_error("MLflow: resposta sem experiment_id");
+  }
+
+  const auto agora = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+  Value run_request = Value::mapa();
+  run_request.map->set("experiment_id", Value::texto(experiment_id));
+  run_request.map->set("run_name", Value::texto(name));
+  run_request.map->set("start_time", Value::inteiro(agora));
+  Value tags = Value::lista();
+  Value tag = Value::mapa();
+  tag.map->set("key", Value::texto("tilt.modelo"));
+  tag.map->set("value", Value::texto(model));
+  tags.list->push_back(std::move(tag));
+  run_request.map->set("tags", std::move(tags));
+  const Value run = mlflow_post(target, "runs/create", run_request);
+  const std::string run_id = mlflow_run_id(run);
+  if (run_id.empty()) throw std::runtime_error("MLflow: resposta sem run_id");
+
+  Value batch = Value::mapa();
+  batch.map->set("run_id", Value::texto(run_id));
+  Value metrics = Value::lista();
+  for (const std::string& line : report) {
+    std::string key;
+    double value = 0.0;
+    if (!mlflow_metric(line, key, value)) continue;
+    Value metric = Value::mapa();
+    metric.map->set("key", Value::texto(key));
+    metric.map->set("value", Value::decimal(value));
+    metric.map->set("timestamp", Value::inteiro(agora));
+    metric.map->set("step", Value::inteiro(0));
+    metrics.list->push_back(std::move(metric));
+  }
+  batch.map->set("metrics", std::move(metrics));
+  Value params = Value::lista();
+  auto add_param = [&params](const std::string& key, const std::string& value) {
+    Value param = Value::mapa();
+    param.map->set("key", Value::texto(key));
+    param.map->set("value", Value::texto(value));
+    params.list->push_back(std::move(param));
+  };
+  add_param("tilt.modelo", model);
+  add_param("tilt.linhas", std::to_string(total));
+  add_param("tilt.semente", std::to_string(seed));
+  batch.map->set("params", std::move(params));
+  batch.map->set("tags", Value::lista());
+  mlflow_post(target, "runs/log-batch", batch);
+
+  Value update = Value::mapa();
+  update.map->set("run_id", Value::texto(run_id));
+  update.map->set("status", Value::texto("FINISHED"));
+  update.map->set("end_time", Value::inteiro(agora));
+  mlflow_post(target, "runs/update", update);
+  return run_id;
+}
+
+}  // namespace
+
 // ------------------------------------------------------------------ setup
 
 std::mutex Interpreter::zumbis_mu_;
@@ -5267,30 +5452,15 @@ void Interpreter::run_experimento(const Item& decl) {
                           std::to_string(K) + " folds)");
     }
 
-    // ---- registrar_em (mlflow:// -> JSON local; REST fica p/ depois)
+    // ---- registrar_em (MLflow Tracking REST)
     if (const Item* fr = find_field(cfg, "registrar_em"); fr && fr->value) {
       Value rv = eval(*fr->value, root_);
-      if (rv.kind != ValueKind::Texto) throw std::runtime_error("'registrar_em' deve ser texto (ex.: \"mlflow://host/experimento\")");
-      if (rv.s.rfind("mlflow://", 0) != 0) {
-        throw std::runtime_error("'registrar_em' suporta 'mlflow://...' (1a passada grava o run em JSON local)");
+      if (rv.kind != ValueKind::Texto) {
+        throw std::runtime_error("'registrar_em' deve ser texto (ex.: mlflow://host/experimento)");
       }
-      Value doc = Value::mapa();
-      doc.map->set("experimento", Value::texto(name));
-      doc.map->set("modelo", Value::texto(kind));
-      doc.map->set("linhas", Value::inteiro(static_cast<std::int64_t>(total)));
-      doc.map->set("semente", Value::inteiro(semente));
-      Value mets = Value::mapa();
-      for (const std::string& lin : relatorio) {
-        const std::size_t p = lin.find(':');
-        if (p == std::string::npos) continue;
-        mets.map->set(lin.substr(0, p), Value::texto(lin.substr(p + 2)));
-      }
-      doc.map->set("metricas", mets);
-      const std::string caminho = "experimento_" + name + "_run.json";
-      std::ofstream out(caminho, std::ios::trunc);
-      if (!out) throw std::runtime_error("nao foi possivel gravar '" + caminho + "'");
-      out << rt::json_dump(doc) << "\n";
-      relatorio.push_back("run salvo em " + caminho + " (mlflow REST: 1a passada grava JSON local)");
+      const std::string run_id =
+          mlflow_registrar_experimento(rv.s, name, kind, total, semente, relatorio);
+      relatorio.push_back("run enviado ao MLflow: " + run_id);
     }
 
     // ---- saida

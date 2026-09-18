@@ -78,6 +78,10 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/rede_roundtrip.tilt)
 
 add_test(
+  NAME mlflow
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mlflow_test.sh
+          $<TARGET_FILE:tilt>)
+add_test(
   NAME kafka
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/kafka_test.sh
           $<TARGET_FILE:tilt>

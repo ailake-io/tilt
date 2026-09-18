@@ -321,8 +321,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `floresta_aleatoria`, `gradiente_impulsionado` e `svm`. Limites: sem
   busca de hiperparâmetros, `pre_processar` só `um_de_n`/`padronizar`/
   `imputar` (sintaxe `- chave: [cols]`; o `->` do esboço original não
-  parseia), `f1` ponderado pelo suporte, `registrar_em: mlflow://`
-  grava JSON local (sem POST REST).
+  parseia), `f1` ponderado pelo suporte, `registrar_em: mlflow://` envia
+  parâmetros e métricas ao Tracking REST do MLflow.
 - `pesos: "arquivo"` carrega no formato tilt-pesos (ver guia 04); arquivo
   ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
   tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20

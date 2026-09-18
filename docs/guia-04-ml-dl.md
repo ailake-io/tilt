@@ -156,9 +156,11 @@ regressão. Nulos com `- imputar: [cols]` (média/moda do treino).
 
 Métricas: classificação `acuracia` (default), `f1` (ponderado pelo suporte),
 `auc` (binária; exige exemplos das 2 classes no teste) e `matriz_confusao`;
-regressão `rmse` (default) e `r2`. `registrar_em: "mlflow://..."` grava o
-run (`experimento_<nome>_run.json` com métricas) — o POST REST do mlflow fica
-para depois. `dados:` aceita tabela inline, caminho `.csv`/`.parquet`/`.json`
+regressão `rmse` (default) e `r2`. `registrar_em: "mlflow://host/experimento"`
+usa o Tracking REST do MLflow: localiza/cria o experimento, cria um run, envia
+parâmetros e métricas em `log-batch` e finaliza o run. Para servidores
+protegidos, `MLFLOW_TRACKING_TOKEN` envia Bearer e `MLFLOW_WORKSPACE` envia
+o workspace. `dados:` aceita tabela inline, caminho `.csv`/`.parquet`/`.json`
 ou o valor de `ler_*`.
 
 ## `modelo`
