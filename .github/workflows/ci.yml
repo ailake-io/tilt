@@ -6,6 +6,22 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: install clang-format
+        run: sudo apt-get update && sudo apt-get install -y clang-format
+
+      - name: lint changed C/C++ files
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: tests/lint_test.sh "$BASE_SHA" "$HEAD_SHA"
+
   build:
     strategy:
       fail-fast: false

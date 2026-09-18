@@ -43,7 +43,7 @@
 - [x] Expandir cobertura de testes dourados em `tests/golden/` para todas as novas features (149 casos verdes; novos: `chk-tipo-registro` [T033], `run-experimento-preco`, `run-experimento-prever`; helper `tests/new_golden.sh`)
 - [x] Adicionar testes de regressão para bugs corrigidos (ex: T011, T012)
 - [x] Criar teste automatizado de compatibilidade entre interpretador e VM (`tests/native_test.sh`, `tests/native_arm64_test.sh`) — CTest nativo e ARM64 passam; QEMU roda quando toolchain estiver disponível
-- [ ] Integrar testes de lint/estilo no CI (`.github/workflows/ci.yml`)
+- [x] Integrar testes de lint/estilo no CI (`.github/workflows/ci.yml`) — job incremental com `git diff --check` + `clang-format`
 
 ### 1.2 Parser e Semântica (P1)
 - [x] Parse de `tipo` com valores padrão (Sprint 1: parseia, T011, aplica em formato/entrada)
