@@ -352,7 +352,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   em grade (`modelo:`, `grade:`, `criterio: perda|acuracia`, máx. 64
   combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
   (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
-  ao RAM. `exportar_gguf` grava GGUF v3 (só escrita) e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32. Limites: fluxo só modelo 2D;
+  ao RAM. `exportar_gguf` grava GGUF v3 (só escrita) e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32 e ONNX; ONNX cobre as camadas exportáveis e a camada `incorporacao` continua sem suporte. Limites: fluxo só modelo 2D;
   sem AMP.
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.

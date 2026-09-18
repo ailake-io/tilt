@@ -1,0 +1,5 @@
+== pipeline usar ==
+modelo M: pesos ONNX salvos em pesos.onnx
+modelo M: pesos ONNX carregados de pesos.onnx (1 camadas)
+a: 0
+forma: [2]

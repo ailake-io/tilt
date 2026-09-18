@@ -30,11 +30,18 @@ struct OnnxLayer {
   std::string act;              // valido quando kind == Activation (relu|gelu|silu|sigmoide|tanh)
   std::int64_t passo = 1;       // valido quando kind == Conv2d/MaxPool
   std::int64_t padding = 0;     // valido quando kind == Conv2d
-  std::int64_t dilatacao = 1;  // valido quando kind == Conv2d
-  std::int64_t janela = 0;     // valido quando kind == MaxPool
-  std::int64_t plano = 0;      // valido quando kind == Flatten (largura apos achatar)
-  Tensor media_running;        // valido quando kind == NormaLote
-  Tensor var_running;          // valido quando kind == NormaLote
+  std::int64_t dilatacao = 1;   // valido quando kind == Conv2d
+  std::int64_t janela = 0;      // valido quando kind == MaxPool
+  std::int64_t plano = 0;       // valido quando kind == Flatten (largura apos achatar)
+  Tensor media_running;         // valido quando kind == NormaLote
+  Tensor var_running;           // valido quando kind == NormaLote
+};
+
+struct OnnxTensor {
+  std::string name;
+  std::int64_t data_type = 1;
+  std::vector<std::int64_t> shape;
+  std::vector<float> data;
 };
 
 // Serializa o modelo como ONNX (protobuf binario, opset 20) e devolve os
@@ -49,5 +56,9 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
 bool onnx_salvar(const std::string& path, const std::vector<OnnxLayer>& layers,
                  const std::vector<std::int64_t>& forma_entrada, const std::string& model_name,
                  std::string& err);
+
+// Lê os inicializadores FLOAT32 de um arquivo ONNX.
+bool onnx_carregar_tensores(const std::string& path, std::vector<OnnxTensor>& tensors,
+                            std::string& err);
 
 }  // namespace tilt::rt

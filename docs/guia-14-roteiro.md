@@ -69,7 +69,7 @@ cruzada/quadrática, autograd manual.
   hardware real) + sem AMP real.
 - **Exportação**: `modelo <Nome>.exportar_onnx "modelo.onnx"` existe no
   interpretador (ONNX opset 20, sem dependências; ver guia 04) — o modelo
-  treinado sai da Tilt para qualquer runtime ONNX. `exportar_gguf` também grava
+  treinado sai da Tilt para qualquer runtime ONNX. `salvar_pesos`/`carregar_pesos` também aceitam `.onnx` para persistir e restaurar inicializadores FLOAT32, incluindo recorrentes. `exportar_gguf` também grava
   GGUF v3 em F32; quantização e importação ainda não existem.
 - **Feito (treino utilizável)**: mini-lotes (`lote:`) com embaralhamento,
   `semente:` reproduzível (init + embaralhamento), checkpoint com retomada

@@ -679,9 +679,10 @@ int comparar_janela_cursor(const Value& a, const Value& b, Span span) {
   if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) {
     return a.s < b.s ? -1 : (a.s > b.s ? 1 : 0);
   }
-  throw std::runtime_error("cursor/backfill: valores devem ter o mesmo tipo "
-                           "(inteiro/decimal ou texto) na linha " +
-                           std::to_string(span.line));
+  throw std::runtime_error(
+      "cursor/backfill: valores devem ter o mesmo tipo "
+      "(inteiro/decimal ou texto) na linha " +
+      std::to_string(span.line));
 }
 
 JanelaSpec parse_janela(const Item& field) {
@@ -2644,6 +2645,57 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
   const std::string mname = inner.lhs->lhs->text;
   const std::string method = inner.lhs->text;
 
+  auto make_onnx_layers = [&](const std::vector<Layer>& source) {
+    std::vector<rt::OnnxLayer> result;
+    for (const Layer& l : source) {
+      rt::OnnxLayer o;
+      if (l.kind == Layer::Dense) {
+        o.kind = rt::OnnxLayer::Dense;
+        o.w = l.w;
+        o.b = l.b;
+      } else if (l.kind == Layer::Activation) {
+        o.kind = rt::OnnxLayer::Activation;
+        o.act = l.act;
+      } else if (l.kind == Layer::Softmax) {
+        o.kind = rt::OnnxLayer::Softmax;
+      } else if (l.kind == Layer::LayerNorm) {
+        o.kind = rt::OnnxLayer::LayerNorm;
+      } else if (l.kind == Layer::Recorrente) {
+        o.kind = rt::OnnxLayer::Recorrente;
+        o.w = l.w;
+        o.u = l.u;
+        o.b = l.b;
+        o.recorrente_tipo = l.recorrente_tipo;
+      } else if (l.kind == Layer::Embedding) {
+        fail(inner.span, "modelo nao exportavel em ONNX: camada incorporacao");
+      } else if (l.kind == Layer::Conv2d) {
+        o.kind = rt::OnnxLayer::Conv2d;
+        o.w = l.w;
+        o.b = l.b;
+        o.passo = l.passo;
+        o.padding = l.padding;
+        o.dilatacao = l.dilatacao;
+      } else if (l.kind == Layer::NormaLote) {
+        o.kind = rt::OnnxLayer::NormaLote;
+        o.w = l.w;
+        o.b = l.b;
+        o.media_running = l.media_running;
+        o.var_running = l.var_running;
+      } else if (l.kind == Layer::Flatten) {
+        o.kind = rt::OnnxLayer::Flatten;
+        o.plano = l.plano;
+      } else if (l.kind == Layer::MaxPool) {
+        o.kind = rt::OnnxLayer::MaxPool;
+        o.janela = l.janela;
+        o.passo = l.passo;
+      } else {
+        o.kind = rt::OnnxLayer::Dropout;
+      }
+      result.push_back(std::move(o));
+    }
+    return result;
+  };
+
   auto it = entities_.find(mname);
   if (it == entities_.end() || it->second->key != "modelo") {
     fail(inner.span, "'" + mname + "' nao e um modelo declarado");
@@ -2667,6 +2719,17 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
                            "para inferir a dimensao de entrada");
     }
     const std::vector<Layer>& layers = build_model(*it->second, in_dim, inner.span);
+    if (path.size() >= 5 && path.compare(path.size() - 5, 5, ".onnx") == 0) {
+      std::vector<std::int64_t> forma_entrada = forma_entrada_modelo(*it->second);
+      if (forma_entrada.empty() && in_dim > 0) forma_entrada = {in_dim};
+      if (forma_entrada.empty())
+        fail(inner.span, "modelo precisa de forma de entrada conhecida para ONNX");
+      std::string erro;
+      if (!rt::onnx_salvar(path, make_onnx_layers(layers), forma_entrada, mname, erro))
+        fail(inner.span, "modelo nao pode salvar pesos ONNX (" + erro + ")");
+      out_ << "modelo " << mname << ": pesos ONNX salvos em " << path << "\n";
+      return Value::logico(true);
+    }
     if (path.size() >= 12 && path.compare(path.size() - 12, 12, ".safetensors") == 0) {
       std::map<std::string, rt::Tensor> tensors;
       std::map<std::string, std::string> metadata;
@@ -2757,6 +2820,113 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
       fail(inner.span, "modelo '" + mname +
                            "': 'carregar_pesos' precisa de 'entrada: tensor[..., N]' anotado "
                            "para inferir a dimensao de entrada");
+    }
+    if (path.size() >= 5 && path.compare(path.size() - 5, 5, ".onnx") == 0) {
+      std::vector<rt::OnnxTensor> imported;
+      std::string erro;
+      if (!rt::onnx_carregar_tensores(path, imported, erro))
+        fail(inner.span, "modelo nao pode carregar pesos ONNX (" + erro + ")");
+      std::lock_guard<std::mutex> lk(model_cache_mutex_);
+      if (model_cache_.find(mname) == model_cache_.end())
+        model_cache_.emplace(mname, build_layers(*it->second, in_dim));
+      auto& cached = model_cache_[mname];
+      std::map<std::string, const rt::OnnxTensor*> by_name;
+      for (const rt::OnnxTensor& tensor : imported) by_name[tensor.name] = &tensor;
+      std::size_t cursor = 0;
+      auto next_named = [&](const std::string& prefix) -> const rt::OnnxTensor* {
+        for (; cursor < imported.size(); ++cursor) {
+          if (imported[cursor].name.compare(0, prefix.size(), prefix) == 0)
+            return &imported[cursor++];
+        }
+        return nullptr;
+      };
+      auto next_dense = [&]() -> const rt::OnnxTensor* {
+        for (; cursor < imported.size(); ++cursor) {
+          const std::string& name = imported[cursor].name;
+          if (name.size() > 1 && name.compare(0, 1, "W") == 0 &&
+              std::isdigit(static_cast<unsigned char>(name[1])))
+            return &imported[cursor++];
+        }
+        return nullptr;
+      };
+      auto copy_tensor = [&](const std::string& name, const std::vector<std::int64_t>& shape) {
+        const auto found = by_name.find(name);
+        if (found == by_name.end() || found->second->shape != shape)
+          fail(inner.span, "peso ONNX ausente ou com forma incompativel: " + name);
+        rt::Tensor result;
+        result.shape = found->second->shape;
+        result.data = found->second->data;
+        return result;
+      };
+      auto suffix = [](const std::string& name, const std::string& prefix) {
+        return name.substr(prefix.size());
+      };
+      std::size_t loaded = 0;
+      for (Layer& l : cached) {
+        if (!camada_com_pesos(l.kind)) continue;
+        if (l.kind == Layer::Dense) {
+          const rt::OnnxTensor* w = next_dense();
+          if (!w) fail(inner.span, "pesos ONNX sem inicializador denso");
+          const std::string id = suffix(w->name, "W");
+          l.w = copy_tensor(w->name, l.w.shape);
+          l.b = copy_tensor("B" + id, l.b.shape);
+        } else if (l.kind == Layer::Recorrente) {
+          const rt::OnnxTensor* w = next_named("W_rec");
+          if (!w) fail(inner.span, "pesos ONNX sem inicializador recorrente");
+          const std::string id = suffix(w->name, "W_rec");
+          const std::int64_t input = l.w.shape[0];
+          const std::int64_t gates = l.w.shape[1];
+          const std::int64_t hidden = l.u.shape[0];
+          const std::vector<std::int64_t> onnx_w_shape = {1, input, gates};
+          const std::vector<std::int64_t> onnx_u_shape = {1, hidden, gates};
+          const rt::Tensor ow = copy_tensor(w->name, onnx_w_shape);
+          const rt::Tensor ou = copy_tensor("R_rec" + id, onnx_u_shape);
+          const rt::Tensor ob = copy_tensor("B_rec" + id, {1, 2 * gates});
+          const int gate_count =
+              l.recorrente_tipo == "rnn" ? 1 : (l.recorrente_tipo == "lstm" ? 4 : 3);
+          if (gates != static_cast<std::int64_t>(gate_count) * hidden)
+            fail(inner.span, "peso ONNX recorrente com quantidade de portas incompativel");
+          const std::vector<int> order = l.recorrente_tipo == "lstm" ? std::vector<int>{0, 3, 1, 2}
+                                                                     : std::vector<int>{0, 1, 2};
+          l.w = rt::Tensor::zeros(l.w.shape);
+          l.u = rt::Tensor::zeros(l.u.shape);
+          l.b = rt::Tensor::zeros(l.b.shape);
+          for (int gate = 0; gate < gate_count; ++gate) {
+            const int source = order[static_cast<std::size_t>(gate)];
+            for (std::int64_t i = 0; i < input; ++i)
+              for (std::int64_t j = 0; j < hidden; ++j)
+                l.w.data[static_cast<std::size_t>(i * gates + source * hidden + j)] =
+                    ow.data[static_cast<std::size_t>(i * gates + gate * hidden + j)];
+            for (std::int64_t i = 0; i < hidden; ++i)
+              for (std::int64_t j = 0; j < hidden; ++j)
+                l.u.data[static_cast<std::size_t>(i * gates + source * hidden + j)] =
+                    ou.data[static_cast<std::size_t>(i * gates + gate * hidden + j)];
+            for (std::int64_t j = 0; j < hidden; ++j)
+              l.b.data[static_cast<std::size_t>(source * hidden + j)] =
+                  ob.data[static_cast<std::size_t>(gate * hidden + j)];
+          }
+        } else if (l.kind == Layer::Conv2d) {
+          const rt::OnnxTensor* w = next_named("W_conv");
+          if (!w) fail(inner.span, "pesos ONNX sem inicializador conv2d");
+          const std::string id = suffix(w->name, "W_conv");
+          l.w = copy_tensor(w->name, l.w.shape);
+          l.b = copy_tensor("B_conv" + id, l.b.shape);
+        } else if (l.kind == Layer::NormaLote) {
+          const rt::OnnxTensor* scale = next_named("BN_scale");
+          if (!scale) fail(inner.span, "pesos ONNX sem inicializador norma_lote");
+          const std::string id = suffix(scale->name, "BN_scale");
+          l.w = copy_tensor(scale->name, l.w.shape);
+          l.b = copy_tensor("BN_bias" + id, l.b.shape);
+          l.media_running = copy_tensor("BN_mean" + id, l.media_running.shape);
+          l.var_running = copy_tensor("BN_var" + id, l.var_running.shape);
+        } else {
+          fail(inner.span, "camada com pesos nao suportada na importacao ONNX");
+        }
+        ++loaded;
+      }
+      out_ << "modelo " << mname << ": pesos ONNX carregados de " << path << " (" << loaded
+           << " camadas)\n";
+      return Value::logico(true);
     }
     if (path.size() >= 12 && path.compare(path.size() - 12, 12, ".safetensors") == 0) {
       std::map<std::string, rt::Tensor> tensors;

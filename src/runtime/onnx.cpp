@@ -2,7 +2,9 @@
 
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace tilt::rt {
 
@@ -186,6 +188,145 @@ std::string node_proto(const std::string& op, const std::vector<std::string>& in
 
 [[noreturn]] void die(const std::string& m) { throw std::runtime_error("onnx: " + m); }
 
+struct Reader {
+  const std::string& bytes;
+  std::size_t pos = 0;
+
+  std::uint64_t varint() {
+    std::uint64_t value = 0;
+    for (int shift = 0; shift < 64; shift += 7) {
+      if (pos >= bytes.size()) throw std::runtime_error("protobuf truncado");
+      const unsigned char c = static_cast<unsigned char>(bytes[pos++]);
+      value |= static_cast<std::uint64_t>(c & 0x7fU) << shift;
+      if ((c & 0x80U) == 0) return value;
+    }
+    throw std::runtime_error("varint protobuf invalido");
+  }
+
+  std::string length_delimited() {
+    const std::uint64_t n = varint();
+    if (n > bytes.size() - pos) throw std::runtime_error("campo protobuf truncado");
+    const std::string out = bytes.substr(pos, static_cast<std::size_t>(n));
+    pos += static_cast<std::size_t>(n);
+    return out;
+  }
+
+  void skip(std::uint32_t wire) {
+    if (wire == 0) {
+      (void)varint();
+    } else if (wire == 1) {
+      if (bytes.size() - pos < 8) throw std::runtime_error("campo protobuf truncado");
+      pos += 8;
+    } else if (wire == 2) {
+      (void)length_delimited();
+    } else if (wire == 5) {
+      if (bytes.size() - pos < 4) throw std::runtime_error("campo protobuf truncado");
+      pos += 4;
+    } else {
+      throw std::runtime_error("wire type protobuf nao suportado");
+    }
+  }
+};
+
+std::uint32_t field_number(std::uint64_t key) { return static_cast<std::uint32_t>(key >> 3); }
+std::uint32_t wire_type(std::uint64_t key) { return static_cast<std::uint32_t>(key & 7U); }
+
+void parse_packed_dims(const std::string& packed, std::vector<std::int64_t>& dims) {
+  Reader r{packed};
+  while (r.pos < packed.size()) dims.push_back(static_cast<std::int64_t>(r.varint()));
+}
+
+void parse_float_bytes(const std::string& raw, std::vector<float>& out) {
+  if (raw.size() % 4 != 0) throw std::runtime_error("raw_data FLOAT32 com tamanho invalido");
+  out.resize(raw.size() / 4);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    std::uint32_t bits = 0;
+    for (int b = 0; b < 4; ++b) {
+      bits |= static_cast<std::uint32_t>(static_cast<unsigned char>(raw[i * 4 + b])) << (8 * b);
+    }
+    std::memcpy(&out[i], &bits, sizeof(float));
+  }
+}
+
+OnnxTensor parse_tensor_proto(const std::string& bytes) {
+  Reader r{bytes};
+  OnnxTensor tensor;
+  std::int64_t data_type = 0;
+  std::string raw_data;
+  std::vector<float> float_data;
+  while (r.pos < bytes.size()) {
+    const std::uint64_t key = r.varint();
+    const std::uint32_t field = field_number(key);
+    const std::uint32_t wire = wire_type(key);
+    if (field == 1 && wire == 2) {
+      parse_packed_dims(r.length_delimited(), tensor.shape);
+    } else if (field == 1 && wire == 0) {
+      tensor.shape.push_back(static_cast<std::int64_t>(r.varint()));
+    } else if (field == 2 && wire == 0) {
+      data_type = static_cast<std::int64_t>(r.varint());
+    } else if (field == 4 && wire == 2) {
+      parse_float_bytes(r.length_delimited(), float_data);
+    } else if (field == 4 && wire == 5) {
+      std::uint32_t bits = 0;
+      if (r.bytes.size() - r.pos < 4) throw std::runtime_error("campo FLOAT32 truncado");
+      for (int b = 0; b < 4; ++b)
+        bits |= static_cast<std::uint32_t>(static_cast<unsigned char>(r.bytes[r.pos++])) << (8 * b);
+      float value = 0.0F;
+      std::memcpy(&value, &bits, sizeof(value));
+      float_data.push_back(value);
+    } else if (field == 8 && wire == 2) {
+      tensor.name = r.length_delimited();
+    } else if (field == 9 && wire == 2) {
+      raw_data = r.length_delimited();
+    } else {
+      r.skip(wire);
+    }
+  }
+  tensor.data_type = data_type;
+  if (data_type != 1) return tensor;
+  std::size_t count = 1;
+  for (std::int64_t dim : tensor.shape) {
+    if (dim <= 0 || static_cast<std::uint64_t>(dim) >
+                        static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) / count)
+      throw std::runtime_error("forma invalida no inicializador");
+    count *= static_cast<std::size_t>(dim);
+  }
+  if (!raw_data.empty())
+    parse_float_bytes(raw_data, tensor.data);
+  else
+    tensor.data = std::move(float_data);
+  if (tensor.data.size() != count)
+    throw std::runtime_error("dados com tamanho errado no inicializador");
+  return tensor;
+}
+
+void parse_graph(const std::string& bytes, std::vector<OnnxTensor>& tensors) {
+  Reader r{bytes};
+  while (r.pos < bytes.size()) {
+    const std::uint64_t key = r.varint();
+    const std::uint32_t field = field_number(key);
+    const std::uint32_t wire = wire_type(key);
+    if (field == 5 && wire == 2) {
+      OnnxTensor tensor = parse_tensor_proto(r.length_delimited());
+      if (tensor.data_type == 1) tensors.push_back(std::move(tensor));
+    } else
+      r.skip(wire);
+  }
+}
+
+void parse_model(const std::string& bytes, std::vector<OnnxTensor>& tensors) {
+  Reader r{bytes};
+  while (r.pos < bytes.size()) {
+    const std::uint64_t key = r.varint();
+    const std::uint32_t field = field_number(key);
+    const std::uint32_t wire = wire_type(key);
+    if (field == 7 && wire == 2)
+      parse_graph(r.length_delimited(), tensors);
+    else
+      r.skip(wire);
+  }
+}
+
 }  // namespace
 
 std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
@@ -315,8 +456,7 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
           tensor_proto(bi, {dim}, std::vector<float>(static_cast<std::size_t>(dim), 0.0F)));
       const std::string out = fresh("n");
       nodes.push_back(node_proto("LayerNormalization", {cur, sc, bi}, {out},
-                                 "layernorm" + std::to_string(seq),
-                                 {attr_int("axis", -1)}));
+                                 "layernorm" + std::to_string(seq), {attr_int("axis", -1)}));
       cur = out;
     } else if (l.kind == OnnxLayer::Conv2d) {
       // Conv: Y = Conv(X, W, B) com kernel shape [C_out, C_in, KH, KW].
@@ -357,8 +497,7 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
       initializers.push_back(tensor_proto(vn, {dim}, l.var_running.data));
       const std::string out = fresh("bn");
       nodes.push_back(node_proto("BatchNormalization", {cur, wn, bn, mn, vn}, {out},
-                                 "batchnorm" + std::to_string(seq),
-                                 {attr_float("eps", 1e-5f)}));
+                                 "batchnorm" + std::to_string(seq), {attr_float("eps", 1e-5f)}));
       cur = out;
     } else if (l.kind == OnnxLayer::Flatten) {
       if (l.plano <= 0) die("camada achatar sem largura conhecida");
@@ -371,10 +510,10 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
     } else if (l.kind == OnnxLayer::MaxPool) {
       if (l.janela < 1 || l.passo < 1) die("agrupamento_max com janela/passo invalidos");
       const std::string out = fresh("p");
-      nodes.push_back(node_proto("MaxPool", {cur}, {out}, "maxpool" + std::to_string(seq),
-                                 {attr_ints("kernel_shape", {l.janela, l.janela}),
-                                  attr_ints("strides", {l.passo, l.passo}),
-                                  attr_ints("pads", {0, 0, 0, 0})}));
+      nodes.push_back(
+          node_proto("MaxPool", {cur}, {out}, "maxpool" + std::to_string(seq),
+                     {attr_ints("kernel_shape", {l.janela, l.janela}),
+                      attr_ints("strides", {l.passo, l.passo}), attr_ints("pads", {0, 0, 0, 0})}));
       cur = out;
     } else if (l.kind == OnnxLayer::Dropout) {
       continue;  // identidade na inferencia
@@ -427,6 +566,26 @@ bool onnx_salvar(const std::string& path, const std::vector<OnnxLayer>& layers,
   f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
   if (!f) {
     err = "falha ao gravar '" + path + "'";
+    return false;
+  }
+  return true;
+}
+
+bool onnx_carregar_tensores(const std::string& path, std::vector<OnnxTensor>& tensors,
+                            std::string& err) {
+  tensors.clear();
+  std::ifstream f(path, std::ios::binary);
+  if (!f) {
+    err = "nao foi possivel abrir o arquivo ONNX";
+    return false;
+  }
+  const std::string bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  try {
+    parse_model(bytes, tensors);
+    if (tensors.empty()) throw std::runtime_error("modelo sem inicializadores");
+  } catch (const std::exception& e) {
+    tensors.clear();
+    err = e.what();
     return false;
   }
   return true;

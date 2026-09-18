@@ -1,0 +1,51 @@
+modelo R:
+  entrada: tensor[f32, 2, 1]
+  camadas:
+    - recorrente: [rnn, 2]
+    - linear: [2, 2]
+    - softmax
+
+modelo L:
+  entrada: tensor[f32, 2, 1]
+  camadas:
+    - recorrente: [lstm, 2]
+    - linear: [2, 2]
+    - softmax
+
+modelo G:
+  entrada: tensor[f32, 2, 1]
+  camadas:
+    - recorrente: [gru, 2]
+    - linear: [2, 2]
+    - softmax
+
+treino R:
+  dados: { x: [[[0], [0]], [[0], [1]], [[1], [0]], [[1], [1]]], y: [0, 0, 1, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.2
+  epocas: 2
+
+treino L:
+  dados: { x: [[[0], [0]], [[0], [1]], [[1], [0]], [[1], [1]]], y: [0, 0, 1, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.2
+  epocas: 2
+
+treino G:
+  dados: { x: [[[0], [0]], [[0], [1]], [[1], [0]], [[1], [1]]], y: [0, 0, 1, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.2
+  epocas: 2
+
+pipeline p:
+  passos:
+    - modelo R.salvar_pesos "r.onnx"
+    - modelo R.carregar_pesos "r.onnx"
+    - modelo L.salvar_pesos "l.onnx"
+    - modelo L.carregar_pesos "l.onnx"
+    - modelo G.salvar_pesos "g.onnx"
+    - modelo G.carregar_pesos "g.onnx"
+    - imprimir "ok"

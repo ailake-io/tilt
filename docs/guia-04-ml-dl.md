@@ -225,7 +225,7 @@ incompatível com o modelo → erro `T901` mostrando o esperado vs. o encontrado
 arquivo ausente → init Xavier com `[nota]`. O carregamento também pode ser
 feito em tempo de execução com `modelo <Nome>.carregar_pesos "caminho"`
 (mesma validação de formas; o modelo passa a usar os pesos carregados nas
-chamadas seguintes de `executar`). Safetensors também pode ser salvo/carregado com a extensão `.safetensors`; ele usa tensores nomeados `camada_<i>.w`, `.b` e `.u` para recorrentes.
+chamadas seguintes de `executar`). Safetensors também pode ser salvo/carregado com a extensão `.safetensors`; ele usa tensores nomeados `camada_<i>.w`, `.b` e `.u` para recorrentes. A extensão `.onnx` em `salvar_pesos` grava o mesmo grafo ONNX interoperável; `carregar_pesos` importa os inicializadores FLOAT32 desse grafo, incluindo RNN/LSTM/GRU (com reversão da ordem de portas LSTM).
 
 ```tilt run
 modelo Mini:
