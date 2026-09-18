@@ -81,6 +81,7 @@ add_library(tilt_core STATIC
   src/runtime/chroma.cpp
   src/vm/compiler.cpp
   src/vm/vm.cpp
+  src/vm/jit.cpp
   src/vm/bytecode_cache.cpp
   src/codegen/codegen_x86_64.cpp
   src/codegen/codegen_arm64.cpp

@@ -1,0 +1,13 @@
+pipeline jit:
+  passos:
+    - a = 7
+    - b = 3
+    - imprimir a * b + 2
+    - se a > b:
+        imprimir a - b, a == 7
+    - senao:
+        imprimir 0
+    - i = 0
+    - enquanto i < 2:
+        imprimir i
+        i = i + 1

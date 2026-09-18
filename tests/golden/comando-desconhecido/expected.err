@@ -8,6 +8,7 @@ comandos:
   checar <arquivo>                   verifica sintaxe, indentacao e tipos
   executar <arquivo> [--agendar]     roda o programa no interpretador
   executar --vm <arquivo>            roda pipelines pelo bytecode VM
+  executar --jit <arquivo>           JIT nativo; fallback para a VM
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
                                      [--requisicoes N] [--threads N]
   servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via

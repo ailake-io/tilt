@@ -15,13 +15,14 @@
 #include "common/source.hpp"
 #include "diagnostics/diagnostic.hpp"
 #include "parser/ast.hpp"
-#include "runtime/llm.hpp"
 #include "runtime/gpu_runtime.hpp"
+#include "runtime/llm.hpp"
 #include "runtime/tensor.hpp"
 #include "runtime/value.hpp"
 #include "runtime/vectorstore.hpp"
 #include "vm/bytecode.hpp"
 #include "vm/bytecode_cache.hpp"
+#include "vm/jit.hpp"
 
 namespace tilt {
 
@@ -117,6 +118,9 @@ class Interpreter {
   // esta no subconjunto compilavel; cai de volta para o interpretador de
   // arvore por pipeline quando nao esta. Saida identica a run().
   int run_vm();
+  // `tilt executar --jit`: tenta emitir codigo nativo em runtime para cada
+  // chunk inteiro; bytecode fora desse subconjunto cai na VM automaticamente.
+  int run_jit();
   // Hook de CallFunc da VM: `ler_csv` via runtime; o resto, funcoes de
   // usuario (com escopo de modulo). *handled=false = nome desconhecido.
   rt::Value vm_call_hook(const std::string& name, std::vector<rt::Value>& args, bool* handled);
@@ -371,6 +375,7 @@ class Interpreter {
   std::string tiltc_path_;
   bool tiltc_loaded_ = false;
   bool tiltc_dirty_ = false;
+  bool jit_mode_ = false;
   void tiltc_load();
   void tiltc_flush();
   void tiltc_note(const char* what);

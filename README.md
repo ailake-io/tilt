@@ -124,6 +124,7 @@ total: 102 -> grande
 | `tilt checar <a> [--json]` | valida sintaxe, indentação, tipos, segredos, dispositivos, referências |
 | `tilt executar <a> [--agendar]` | roda no interpretador (VM para `funcao` pura) |
 | `tilt executar --vm <a>` | roda pipelines pelo bytecode VM (fall-back por pipeline) |
+| `tilt executar --jit <a>` | JIT nativo do subconjunto inteiro; fallback para VM |
 | `tilt servir <a> [--porta N] [--requisicoes N] [--threads N]` | sobe o `servico` HTTP declarado |
 | `tilt compilar <a> --saida <bin> [--asm] [--arch x86_64\|arm64]` | binário nativo x86-64/ARM64 (programa inteiro no subconjunto da VM) |
 | `tilt completar <a> --linha L --coluna C [--json]` | candidatos de autocomplete |
@@ -141,6 +142,7 @@ Detalhe de cada flag e código de saída em [`docs/guia-08-cli.md`](docs/guia-08
 | `TILT_LLM` | `mock` (respostas/embeddings determinísticos, offline) · vazio → `curl` real |
 | `TILT_GPU` | `off` (padrão) · `auto` (CUDA se `dispositivo:` pedir) · `fake` (dispatch de GPU com math de CPU) |
 | `TILT_VM_DEBUG` | `1` despeja o bytecode das `funcao`s compiladas |
+| `TILT_JIT_DEBUG` | `1` informa no stderr se cada pipeline usou JIT nativo ou fallback para VM |
 | `TILT_STDLIB_PATH` | diretórios com módulos `importar` (sep. `:`), consultados antes de `../share/tilt/stdlib` |
 | `TILT_JANELA_ESTADO` | `memoria` desliga o offset persistente do streaming `janela:` |
 | `TILT_TLS_SKIP_VERIFY` | `1` desliga verificação de certificado TLS nos clientes (testes com cert auto-assinado) |

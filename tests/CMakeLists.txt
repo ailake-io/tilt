@@ -151,6 +151,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nativo2.tilt)
 
 add_test(
+  NAME jit
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/jit_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
+
+add_test(
   NAME iceberg
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/iceberg_test.sh
           $<TARGET_FILE:tilt>

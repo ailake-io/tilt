@@ -57,7 +57,7 @@
   de tensor, `?.` — interpolação `{{nome}}` sobre locais via `+`, `ler_csv`
   via `CallFunc`+hook; codegen fail-closed com rejeição clara; goldens
   `run-vm-interpola/membro/ler-csv` com paridade interp×VM verificada)
-- [ ] Implementar JIT (compilação em runtime sem passar por `.s`+`cc`)
+- [x] Implementar JIT (compilação em runtime sem passar por `.s`+`cc`) — backend x86-64 direto em memória para o subconjunto inteiro; fallback fail-closed para a VM; teste `jit_test.sh`
 - [x] Adicionar testes end-to-end para codegen ARM64 em qemu (job `arm64_codegen` instala toolchain cross + qemu)
 - [x] Cache de bytecode em disco (Sprint 3: `.tiltc`, SHA do fonte, fail-closed)
 
@@ -317,7 +317,7 @@ arquivo e só o par treino+modelo é isento de duplicata.
 ### Sprint 3 (restante)
 
 ### Sprint 3
-1. JIT compiler (1.3)
+1. [x] JIT compiler (1.3) — backend x86-64 direto em memória, fallback para VM
 2. Evolução de schema Iceberg/Delta (2.2)
 3. Agentes com memória vetorial (5.2)
 4. Windows port improvements (7.1)

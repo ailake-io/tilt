@@ -432,8 +432,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `qemu-aarch64` no job `arm64_codegen` do CI, que instala a toolchain cross.
   Localmente, sem `gcc-aarch64-linux-gnu` + QEMU, ele fica limitado à geração
   e montagem quando o assembler estiver disponível. Mach-O (macOS) e PE/COFF (Windows) ficam fora: o codegen
-  é ELF-only. **JIT** (compilação em runtime, sem passar por `.s`+`cc`)
-  segue como evolução futura.
+  é ELF-only. O JIT (`tilt executar --jit`) emite x86-64 diretamente em memória para o subconjunto inteiro (constantes, locais, aritmética, comparações, condicionais, laços e `imprimir`); decimal, texto, listas, membros e chamadas caem automaticamente para a VM. Arquiteturas sem backend JIT usam o mesmo fallback.
 
 ## Stdlib
 

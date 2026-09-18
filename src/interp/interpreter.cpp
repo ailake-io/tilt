@@ -824,6 +824,23 @@ int Interpreter::run_vm() {
           continue;
         }
         out_ << "== pipeline " << decl_name(*p) << " ==\n";
+        if (jit_mode_) {
+          vm::Jit jit(out_);
+          std::string why;
+          if (jit.can_compile(*chunk, &why)) {
+            if (std::getenv("TILT_JIT_DEBUG"))
+              std::cerr << "[jit native] pipeline " << decl_name(*p) << "\n";
+            try {
+              jit.run(*chunk, {});
+              continue;
+            } catch (const std::exception& e) {
+              fail(p->span, std::string("JIT: ") + e.what());
+              continue;
+            }
+          } else if (std::getenv("TILT_JIT_DEBUG")) {
+            std::cerr << "[jit fallback] pipeline " << decl_name(*p) << ": " << why << "\n";
+          }
+        }
         vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
           return vm_call_hook(name, a, handled);
         });
@@ -7586,6 +7603,11 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
   fail(expr.span, "chamada invalida");
 }
 
+int Interpreter::run_jit() {
+  jit_mode_ = true;
+  return run_vm();
+}
+
 Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span,
                                  Env* module_scope) {
   // Funcoes de modulo rodam pela arvore: o subconjunto da VM resolve chamadas
@@ -7637,6 +7659,25 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
     chunk = cit->second;
   }
   if (chunk) {
+    if (jit_mode_) {
+      bool integer_args = true;
+      for (const Value& arg : args) {
+        if (arg.kind != ValueKind::Inteiro) {
+          integer_args = false;
+          break;
+        }
+      }
+      vm::Jit jit(out_);
+      std::string why;
+      if (integer_args && jit.can_compile(*chunk, &why)) {
+        try {
+          return jit.run(*chunk, std::move(args));
+        } catch (const std::exception& e) {
+          fail(fn.span, std::string("JIT: ") + e.what());
+          return Value::nulo();
+        }
+      }
+    }
     vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
       return vm_call_hook(name, a, handled);
     });

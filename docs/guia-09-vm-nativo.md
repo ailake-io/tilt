@@ -45,6 +45,18 @@ executado pela VM; os demais caem no interpretador de árvore, pipeline a
 pipeline. A saída é idêntica à de `tilt executar` — todo o suíte de golden
 `run-*` passa nos dois modos.
 
+## `tilt executar --jit`
+
+Emite código x86-64 diretamente em memória executável, sem gerar `.s` nem
+chamar `cc`. O backend cobre chunks de inteiros com constantes, locais,
+`+ - *`, comparações, `nao`, condicionais, laços e `imprimir`, preservando
+os tipos `inteiro`/`logico` na saída. Bytecode com decimal, texto, listas,
+membros, chamadas ou outras operações cai automaticamente para a VM. Em
+arquiteturas sem backend JIT o fallback também é automático.
+
+`TILT_JIT_DEBUG=1` informa no stderr se cada pipeline usou `native` ou
+`fallback`.
+
 ## Codegen nativo — `tilt compilar`
 
 ```bash

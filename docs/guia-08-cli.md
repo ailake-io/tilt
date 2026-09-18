@@ -20,12 +20,11 @@ sugestão). Com `--json`:
 }
 ```
 
-## `tilt executar <arquivo> [--agendar]`
+## `tilt executar <arquivo> [--agendar|--vm|--jit]`
 
 Roda `checar` e, se limpo, executa: todo `pipeline` de topo na ordem do arquivo;
 sem pipeline, `funcao principal`; sem nenhum, roda os `treino` de topo.
-Funções puras compilam para bytecode e rodam na VM. `--agendar` valida o
-`agenda:` cron e reconhece o modo.
+Funções puras compilam para bytecode e rodam na VM. `--vm` força pipelines compiláveis pela VM. `--jit` emite código nativo em runtime para o subconjunto inteiro; pipelines fora dele caem para a VM automaticamente. `--agendar` valida o `agenda:` cron e reconhece o modo.
 
 ## `tilt servir <arquivo> [--porta N] [--requisicoes N]`
 
@@ -88,6 +87,7 @@ Despejam a árvore sintática (S-expression) e o fluxo de tokens. Debug.
 | `TILT_LLM` | executar, servir | `mock` = offline determinístico; vazio = `curl` real |
 | `TILT_GPU` | executar | `off` (padrão) · `auto` · `fake` |
 | `TILT_VM_DEBUG` | executar | `1` despeja o bytecode das funções |
+| `TILT_JIT_DEBUG` | executar | `1` informa JIT nativo ou fallback por pipeline |
 | `TILT_STDLIB_PATH` | executar, servir | diretórios com módulos `importar` (sep. `:`), consultados antes de `../share/tilt/stdlib` |
 | `TILT_JANELA_ESTADO` | executar | `memoria` desliga o offset persistente do streaming `janela:` |
 | `TILT_TLS_SKIP_VERIFY` | executar, servir | `1` desliga verificação de certificado TLS nos clientes (testes com cert auto-assinado) |

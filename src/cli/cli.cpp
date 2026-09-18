@@ -97,6 +97,7 @@ void print_usage(std::ostream& os) {
      << "  checar <arquivo>                   verifica sintaxe, indentacao e tipos\n"
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
      << "  executar --vm <arquivo>            roda pipelines pelo bytecode VM\n"
+     << "  executar --jit <arquivo>           JIT nativo; fallback para a VM\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "                                     [--requisicoes N] [--threads N]\n"
      << "  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via\n"
@@ -294,11 +295,14 @@ int cmd_executar(const std::vector<std::string_view>& args) {
   std::string_view path;
   bool schedule = false;
   bool vm = false;
+  bool jit = false;
   for (std::size_t k = 1; k < args.size(); ++k) {
     if (args[k] == "--agendar") {
       schedule = true;
     } else if (args[k] == "--vm") {
       vm = true;
+    } else if (args[k] == "--jit") {
+      jit = true;
     } else if (args[k].rfind("--", 0) == 0) {
       std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
       return kUsage;
@@ -307,7 +311,7 @@ int cmd_executar(const std::vector<std::string_view>& args) {
     }
   }
   if (path.empty()) {
-    std::cerr << "tilt: uso: tilt executar <arquivo> [--agendar] [--vm]\n";
+    std::cerr << "tilt: uso: tilt executar <arquivo> [--agendar] [--vm|--jit]\n";
     return kUsage;
   }
 
@@ -335,7 +339,8 @@ int cmd_executar(const std::vector<std::string_view>& args) {
   Interpreter interp(program, diag, std::cout);
   interp.set_entry_dir(std::filesystem::path(std::string(path)).parent_path().string());
   interp.set_schedule_mode(schedule);
-  int rc = schedule ? interp.run_scheduled() : (vm ? interp.run_vm() : interp.run());
+  int rc = schedule ? interp.run_scheduled()
+                    : (jit ? interp.run_jit() : (vm ? interp.run_vm() : interp.run()));
   if (diag.has_errors()) {
     diag.render(std::cerr, want_color());
     return kDiagnostics;
