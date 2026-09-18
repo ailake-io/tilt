@@ -48,9 +48,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   corpo por unanimidade dos `retornar`), campos de mapas (literais e
   variáveis com literal, com erro de campo inexistente), índice em lista de
   elemento homogêneo e agregações (`somar`/`min`/`max` refinam pelo elemento;
-  `media` é decimal). Fluxo-insensível a ramos (o estado anterior é
-  restaurado) e por entidade — fora daí o tipo vira "desconhecido" e segue
-  sem verificação: campos de `tipo` Registro, campos dinâmicos de tabelas e
+  `media` é decimal). Fluxo condicional funde tipos definidos em todos os
+  ramos de `se`/`senao` (com promoção `inteiro` → `decimal`); caminhos
+  parcialmente definidos continuam desconhecidos. Por entidade — fora daí o tipo
+  vira "desconhecido" e segue sem verificação: campos de `tipo` Registro, campos dinâmicos de tabelas e
   `verificar`/`ao_falhar`.
 
 ## Dados

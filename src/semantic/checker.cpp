@@ -654,6 +654,16 @@ bool kind_in_vec(TypeKind k, const std::vector<TypeKind>& set) {
   return false;
 }
 
+// Fusão conservadora de tipos que sobrevivem a caminhos diferentes. Só
+// widenings já suportados pelo checker atravessam o merge; conflitos viram
+// Unknown e deixam a decisão para o runtime.
+TypeKind merge_flow_type(TypeKind a, TypeKind b) {
+  if (a == b) return a;
+  if (a == TypeKind::Inteiro && b == TypeKind::Decimal) return TypeKind::Decimal;
+  if (a == TypeKind::Decimal && b == TypeKind::Inteiro) return TypeKind::Decimal;
+  return TypeKind::Unknown;
+}
+
 // Assinaturas parciais dos builtins de runtime: aridade minima, tipos
 // esperados dos dois primeiros args posicionais (vazio = qualquer) e tipo
 // de retorno. So espelha falhas que o runtime ja teria (fail por tipo/arity).
@@ -1816,24 +1826,71 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       return;
     case ast::StmtKind::If: {
       if (s.a) check_expr(*s.a, scope);
-      // Formas sao fluxo-insensiveis: ramos restauram o estado anterior
-      // (sem falsos positivos; perde-se precisao dentro de ramos).
+      const Scope scope_salva = scope;
+      const TypeEnv types_salvos = types;
+      // Formas continuam fluxo-insensíveis: o solver de shapes só mantém
+      // fatos lineares. Tipos, porém, podem ser fundidos quando a variável é
+      // definida em todos os caminhos do if/elif/else.
       const MapShapes formas_salvas = formas_mapa_;
       const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
-      walk_stmt_block(s.body, scope, shapes, types);
+
+      std::vector<Scope> escopos_ramos;
+      std::vector<TypeEnv> tipos_ramos;
+      auto roda_ramo = [&](const ast::Block& body) {
+        Scope ramo_scope = scope_salva;
+        ShapeEnv ramo_shapes = shapes;
+        TypeEnv ramo_types = types_salvos;
+        formas_mapa_ = formas_salvas;
+        formas_tensor_mapa_ = formas_tensor_salvas;
+        elem_lista_ = elems_salvos;
+        walk_stmt_block_ref(body, ramo_scope, ramo_shapes, ramo_types);
+        escopos_ramos.push_back(std::move(ramo_scope));
+        tipos_ramos.push_back(std::move(ramo_types));
+      };
+
+      roda_ramo(s.body);
       for (const auto& ei : s.elifs) {
         if (ei.cond) check_expr(*ei.cond, scope);
-        formas_mapa_ = formas_salvas;
-        formas_tensor_mapa_ = formas_tensor_salvas;
-        elem_lista_ = elems_salvos;
-        walk_stmt_block(ei.body, scope, shapes, types);
+        roda_ramo(ei.body);
       }
       if (s.else_body) {
-        formas_mapa_ = formas_salvas;
-        formas_tensor_mapa_ = formas_tensor_salvas;
-        elem_lista_ = elems_salvos;
-        walk_stmt_block(*s.else_body, scope, shapes, types);
+        roda_ramo(*s.else_body);
+      } else {
+        // Sem else, o caminho em que nenhuma condição casa preserva o
+        // ambiente anterior e também participa da fusão.
+        escopos_ramos.push_back(scope_salva);
+        tipos_ramos.push_back(types_salvos);
+      }
+
+      scope = scope_salva;
+      types.clear();
+      if (!tipos_ramos.empty()) {
+        for (const auto& [name, first] : tipos_ramos.front()) {
+          TypeKind merged = first;
+          bool presente_em_todos = true;
+          for (std::size_t i = 1; i < tipos_ramos.size(); ++i) {
+            auto it = tipos_ramos[i].find(name);
+            if (it == tipos_ramos[i].end()) {
+              presente_em_todos = false;
+              break;
+            }
+            merged = merge_flow_type(merged, it->second);
+          }
+          if (presente_em_todos && merged != TypeKind::Unknown) types[name] = merged;
+        }
+      }
+      if (!escopos_ramos.empty()) {
+        for (const std::string& name : escopos_ramos.front()) {
+          bool presente_em_todos = true;
+          for (std::size_t i = 1; i < escopos_ramos.size(); ++i) {
+            if (!escopos_ramos[i].count(name)) {
+              presente_em_todos = false;
+              break;
+            }
+          }
+          if (presente_em_todos) scope.insert(name);
+        }
       }
       formas_mapa_ = formas_salvas;
       formas_tensor_mapa_ = formas_tensor_salvas;
@@ -1887,6 +1944,11 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
 
 void SemanticChecker::walk_stmt_block(const ast::Block& block, Scope scope, ShapeEnv shapes,
                                       TypeEnv types) {
+  walk_stmt_block_ref(block, scope, shapes, types);
+}
+
+void SemanticChecker::walk_stmt_block_ref(const ast::Block& block, Scope& scope, ShapeEnv& shapes,
+                                          TypeEnv& types) {
   for (const auto& raw : block.items) {
     if (!raw) continue;
     const Item* it = raw.get();

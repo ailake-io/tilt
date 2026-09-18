@@ -1,0 +1,8 @@
+erro[T030]: nome 'valor' nao definido
+  --> input.tilt:5:16
+   |
+ 5 |     - imprimir valor.tamanho
+   |                ^^^^^
+   |
+
+1 erro(s) em input.tilt

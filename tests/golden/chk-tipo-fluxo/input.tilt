@@ -1,0 +1,9 @@
+pipeline fluxo:
+  passos:
+    - se verdadeiro:
+        valor = "a"
+    senao se falso:
+        valor = "b"
+    senao:
+        valor = "c"
+    - imprimir valor.tamanho

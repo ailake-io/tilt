@@ -1,0 +1,9 @@
+erro[T011]: 'decimal' nao tem o campo 'maiusculas'
+  --> input.tilt:7:19
+   |
+ 7 |     - resultado = valor.maiusculas
+   |                   ^^^^^
+   |
+   = tipos numericos e logicos nao tem campos
+
+1 erro(s) em input.tilt

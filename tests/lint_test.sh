@@ -25,6 +25,19 @@ command -v clang-format >/dev/null 2>&1 || {
   exit 1
 }
 
-# shellcheck disable=SC2086
-clang-format --dry-run --Werror $files
-echo "lint: ok ($(printf '%s\n' "$files" | wc -l | tr -d ' ') arquivos)"
+# Formata apenas as linhas tocadas. Alguns arquivos antigos ainda não seguem
+# o .clang-format inteiro; exigir a reformatacao completa deles bloquearia
+# mudancas sem relacao com o diff.
+for file in $files; do
+  ranges=$(git diff --unified=0 "$BASE" "$HEAD" -- "$file" |
+    sed -nE 's/^@@ .* \+([0-9]+)(,([0-9]+))? .*$/\1:\3/p')
+  for range in $ranges; do
+    start=${range%%:*}
+    count=${range#*:}
+    if [ -z "$count" ]; then count=1; fi
+    if [ "$count" -eq 0 ]; then continue; fi
+    end=$((start + count - 1))
+    clang-format --dry-run --Werror --lines="$start:$end" "$file"
+  done
+done
+echo "lint: ok ($(printf '%s\n' "$files" | wc -l | tr -d ' ') arquivos, linhas alteradas)"

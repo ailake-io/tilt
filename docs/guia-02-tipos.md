@@ -151,5 +151,6 @@ primeiro literal da união.
 > `matmul` com formas literais ou anotadas (ver guia 04), e `tilt checar`
 > agora infere e verifica tipos entre expressões (`T011`): operadores
 > aritméticos/comparação, builtins (aridade e 1º/2º argumentos), métodos e
-> campos de receiver conhecido e o retorno de `funcao` anotada. Ainda não há
+> campos de receiver conhecido, fluxo condicional com definições em todos os
+> ramos (incluindo promoção `inteiro` → `decimal`) e o retorno de `funcao` anotada. Ainda não há
 > unificação de tipos genericos nem checagem de `verificar`/`ao_falhar`.

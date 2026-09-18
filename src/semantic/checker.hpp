@@ -80,6 +80,7 @@ class SemanticChecker {
 
   void scan_for_bodies(const ast::Block& block, Scope scope, ShapeEnv shapes, TypeEnv types);
   void walk_stmt_block(const ast::Block& block, Scope scope, ShapeEnv shapes, TypeEnv types);
+  void walk_stmt_block_ref(const ast::Block& block, Scope& scope, ShapeEnv& shapes, TypeEnv& types);
   void walk_stmt(const ast::Stmt& stmt, Scope& scope, ShapeEnv& shapes, TypeEnv& types);
   void check_expr(const ast::Expr& expr, const Scope& scope);
 

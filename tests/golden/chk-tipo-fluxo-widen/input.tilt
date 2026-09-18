@@ -1,0 +1,7 @@
+pipeline fluxo:
+  passos:
+    - se verdadeiro:
+        valor = 1
+    senao:
+        valor = 2.5
+    - resultado = valor.maiusculas

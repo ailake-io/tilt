@@ -1,0 +1,5 @@
+pipeline fluxo:
+  passos:
+    - se verdadeiro:
+        valor = "a"
+    - imprimir valor.tamanho
