@@ -2,8 +2,8 @@
 
 Levantamento do estado real (parser × checker × interpretador × runtime) e
 dos gaps por domínio para a Tilt ficar excelente em engenharia de dados,
-machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fase 12-6.5
-concluída; a próxima frente é fechar a operação de pipelines.
+machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fases 12-5a e
+12-6 concluídas; GPU real/AMP permanecem deferidos para hardware CUDA.
 
 ## Fase 12-5a — formatos e formas de tensor
 
@@ -53,7 +53,7 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `validacao_cruzada:`, `imputar:`, métricas (acurácia, f1 ponderado, auc,
   matriz_confusao, rmse, r2, inércia) e `registrar_em: mlflow://` via
   Tracking REST. Detalhes e limites no guia 04 e no guia 12.
-- Resta: busca de hiperparâmetros.
+- Restam busca aleatória/bayesiana e outras estratégias além da grade.
 
 ## Deep learning — treino real, mas de brinquedo
 
@@ -145,7 +145,7 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 3. ~~Operação de pipelines~~ feito (1ª passada: `ao_falhar` com
    `espera:`/`backoff:`, `tempo_limite:` por passo, `quarentena:` no
    `para cada`, `saude:`/`metricas:` no `servico`, latências por rota no
-   `/metricas`; sem log estruturado com `trace_id`, Retry-After/cache no LLM).
+   `/metricas`; sem cache de respostas no LLM).
 4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
 3. Operação de pipelines (timeout por passo, backoff, quarentena,
    `/saude` + `/metricas`).

@@ -125,7 +125,7 @@
 - [x] Adicionar suporte a `Retry-After` header em retry de LLM
 - [ ] Implementar cache de respostas LLM — roteiro
 - [ ] Implementar streaming com retry (atualmente sem retry em streaming)
-- [ ] Adicionar `tempo_limite` configurável por tentativa (atualmente timeout fixo)
+- [x] Adicionar `tempo_limite` configurável por tentativa
 
 ### 4.2 RAG / Bancos Vetoriais (P2)
 - [x] Implementar pruning de partições no Delta Lake (Fase 6: igualdade em partições compostas + filtro residual)
@@ -149,8 +149,8 @@
 
 ### 5.2 Agentes (P2)
 - [x] `memoria: vetorial` (Sprint 3: índice por agente, top-3, T011 em valor inválido)
-- [ ] Adicionar suporte a múltiplos LLMs em `equipe` (supervisor com fallback)
-- [ ] Implementar `max_passos` com logging detalhado de cada passo
+- [x] Adicionar suporte a múltiplos LLMs em `equipe` (supervisor com fallback)
+- [x] Implementar `max_passos` com logging detalhado de cada passo
 
 ---
 
@@ -160,7 +160,7 @@
 - [x] Implementar observabilidade completa (`/metricas` em formato Prometheus)
 - [x] Implementar latências por rota em `/metricas`
 - [x] Graceful shutdown (Sprint 1: SIGINT/SIGTERM drenam e encerram)
-- [ ] Implementar conexões persistentes (keep-alive) em Windows (`select()` loop)
+- [x] Implementar conexões persistentes (keep-alive) em Windows (`select()` loop)
 
 ### 6.2 Serviços (P1)
 - [x] `meio:` (middleware) em `servico` (já existe)
@@ -173,20 +173,20 @@
 
 ### 7.1 Windows Port (P1)
 - [x] Quoting `cmd.exe` (Sprint 3: `tilt_shell_quote`, `quote_test.sh`; residual % documentado)
-- [ ] Implementar TLS via DLL no Windows (`libssl-3-x64.dll`)
-- [ ] Adicionar suporte a SQLite/Postgres/MySQL no Windows via dlopen/LoadLibrary
+- [x] Implementar TLS via DLL no Windows (`libssl-3-x64.dll`)
+- [x] Adicionar suporte a SQLite/Postgres/MySQL no Windows via dlopen/LoadLibrary
 - [ ] Migrar `tests/ctest` para Windows (atualmente shell-script only)
 
 ### 7.2 Packaging (P2)
-- [ ] Implementar installer Windows com WIX (`.msi`) com upgrade path
+- [x] Implementar installer Windows com WIX (`.msi`) com upgrade path
 - [ ] Adicionar assinatura de binário para releases Linux
 - [ ] Implementar auto-updater para o tilt CLI
 - [ ] Criar snap extension points para integrações (banco de dados, GPU)
 
 ### 7.3 CI/CD (P2)
-- [ ] Adicionar testes de interoperabilidade Spark real no CI (atualmente local)
-- [ ] Adicionar testes de regression para conectores TLS
-- [ ] Implementar testes cross-compilation ARM64 no CI
+- [x] Adicionar testes de interoperabilidade Spark real no CI (CTest roda `spark_test` e `spark_catalog`)
+- [x] Adicionar testes de regression para conectores TLS (`tests/tls_test.sh`)
+- [x] Implementar testes cross-compilation ARM64 no CI (`arm64_codegen`)
 - [ ] Adicionar linting de código C++ (clang-tidy, cpplint) no CI
 
 ---
@@ -194,10 +194,10 @@
 ## 8. Documentação e Exemplos
 
 ### 8.1 Documentação (P2)
-- [ ] Completar `guia-14-roteiro.md` com roadmap detalhado de fases restantes
+- [x] Completar `guia-14-roteiro.md` com roadmap detalhado de fases restantes
 - [ ] Adicionar exemplos executáveis para todas as features novas em cada guia
 - [ ] Criar guia de troubleshooting com erros comuns e soluções
-- [ ] Documentar limitações de cada conector (atualmente em `guia-12-limitacoes.md`)
+- [x] Documentar limitações de cada conector em `guia-12-limitacoes.md`
 - [ ] Adicionar glossary de termos técnicos em português
 
 ### 8.2 Exemplos (P2)
@@ -207,7 +207,7 @@
 - [x] Adicionar exemplo de RAG completo (existia `exemplos/agente.tilt` —
   validado com mock e incluído no smoke do CI)
 - [ ] Adicionar exemplo de agente multi-étapas com ferramentas reais
-- [ ] Adicionar exemplo de treino de modelo com dados reais (CSV → treino → prever)
+- [x] Adicionar exemplo de treino de modelo com dados reais (`exemplos/treino.tilt`)
 - [ ] Adicionar exemplo de streaming com Kafka (tema de eventos)
 
 ---

@@ -82,10 +82,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   encoding PLAIN ou PLAIN_DICTIONARY, páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
   gzip/deflate (zlib via `dlopen`) e **snappy** (codec próprio, sem dlopen).
-  Ainda fora do subconjunto: 4+ níveis de lista, struct/map/lista-aninhada
-  como campo de elemento struct (só escalar e lista-1-nível), structs com
-  `field_ids` explícitos (caminho Iceberg), decimais com mais de 8 bytes e
-  UUID como tipo próprio.
+  Ainda fora do subconjunto: 4+ níveis de lista e criptografia Parquet;
+  compressão ZSTD ainda não está disponível.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
@@ -151,9 +149,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
    evolução adiciona (sub)coluna optional no fim com id novo, com projeção
    de nulo em arquivos antigos — validado com pyiceberg), com **pruning**
    em `ler_iceberg ... onde: {...}` (igualdade; predicados em coluna de partição pulam data files
-   inteiros pelos manifests, o resto filtra linhas). Outros transforms
-   (`truncate`, `year`, `month`, `day`, `hour`) são aceitos na leitura sem
-   poda por valor. **Deletes (Fase 12-5a)**: `apagar_iceberg` (position e
+   inteiros pelos manifests, o resto filtra linhas). Os transforms `truncate`,
+   `year`, `month`, `day` e `hour` também participam da poda por valor.
+   **Deletes (Fase 12-5a)**: `apagar_iceberg` (position e
    equality) + leitura filtrada; pyiceberg aplica os position deletes do
    tilt (equality deletes o próprio pyiceberg ainda não suporta — upstream).
    Os manifest lists carregam `partitions` com `contains_null`, `lower_bound` e
