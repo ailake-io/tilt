@@ -42,7 +42,7 @@
 ### 1.1 Infraestrutura de Testes (P1)
 - [x] Expandir cobertura de testes dourados em `tests/golden/` para todas as novas features (149 casos verdes; novos: `chk-tipo-registro` [T033], `run-experimento-preco`, `run-experimento-prever`; helper `tests/new_golden.sh`)
 - [x] Adicionar testes de regressão para bugs corrigidos (ex: T011, T012)
-- [ ] Criar teste automatizado de compatibilidade entre interpretador e VM (`tests/native_test.sh`, `tests/native_arm64_test.sh`)
+- [x] Criar teste automatizado de compatibilidade entre interpretador e VM (`tests/native_test.sh`, `tests/native_arm64_test.sh`) — CTest nativo e ARM64 passam; QEMU roda quando toolchain estiver disponível
 - [ ] Integrar testes de lint/estilo no CI (`.github/workflows/ci.yml`)
 
 ### 1.2 Parser e Semântica (P1)
