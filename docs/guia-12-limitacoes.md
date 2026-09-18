@@ -29,10 +29,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `atencao(q, k, v, escala)` (bare ou `nn.atencao`). Dimensões `_`
   (simbólicas, `-1`) são compatíveis com tudo e se propagam; contratos de
   funções locais com entrada/retorno tensor instanciam `_` no chamador, e
-  `m.campo = tensor` preserva a forma conhecida do campo. Incompatível
+  `m.campo = tensor` preserva a forma conhecida do campo. Formas
+  definidas em todos os ramos de `se`/`senao` também são fundidas; dimensões
+  divergentes viram `_` e seguem para `atencao`/`conv2d` sem falso positivo. Incompatível
   evidente continua sem veredito (runtime decide). Fora do
-  solver: formas através de chamadas de `funcao` genéricas ou condicionais,
-  e `conv2d` com formas dinâmicas sem contrato —
+  solver: formas através de chamadas de `funcao` genéricas e operações cujo
+  rank não é conhecido —
   nesses casos a validação de dimensão continua acontecendo em runtime. No
   runtime, `_` em forma avaliada falha com mensagem própria, exceto em
   `reformar([...])` (inferido) e anotação/`checar`.

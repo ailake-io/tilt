@@ -1,0 +1,9 @@
+erro[T012]: conv2d espera uma entrada [N, C_in, H, W], mas a entrada tem forma [_, 5, 4]
+  --> input.tilt:12:14
+    |
+ 12 |     - erro = s.conv2d uns [4, 4, 3, 3]
+    |              ^
+    |
+   = use um tensor 4D, ex.: uns [1, 3, 32, 32]
+
+1 erro(s) em input.tilt

@@ -664,6 +664,19 @@ TypeKind merge_flow_type(TypeKind a, TypeKind b) {
   return TypeKind::Unknown;
 }
 
+// Fusão conservadora de formas que sobrevivem a caminhos diferentes. O rank
+// precisa ser estável; dimensões diferentes perdem precisão e viram `_`, que
+// o shape solver já trata como compatível/desconhecido.
+std::optional<TensorShape> merge_flow_shape(const TensorShape& a, const TensorShape& b) {
+  if (a.size() != b.size()) return std::nullopt;
+  TensorShape out = a;
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (out[i] == b[i]) continue;
+    out[i] = -1;
+  }
+  return out;
+}
+
 // Assinaturas parciais dos builtins de runtime: aridade minima, tipos
 // esperados dos dois primeiros args posicionais (vazio = qualquer) e tipo
 // de retorno. So espelha falhas que o runtime ja teria (fail por tipo/arity).
@@ -1837,6 +1850,7 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
 
       std::vector<Scope> escopos_ramos;
       std::vector<TypeEnv> tipos_ramos;
+      std::vector<ShapeEnv> formas_ramos;
       auto roda_ramo = [&](const ast::Block& body) {
         Scope ramo_scope = scope_salva;
         ShapeEnv ramo_shapes = shapes;
@@ -1847,6 +1861,7 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
         walk_stmt_block_ref(body, ramo_scope, ramo_shapes, ramo_types);
         escopos_ramos.push_back(std::move(ramo_scope));
         tipos_ramos.push_back(std::move(ramo_types));
+        formas_ramos.push_back(std::move(ramo_shapes));
       };
 
       roda_ramo(s.body);
@@ -1861,6 +1876,7 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
         // ambiente anterior e também participa da fusão.
         escopos_ramos.push_back(scope_salva);
         tipos_ramos.push_back(types_salvos);
+        formas_ramos.push_back(shapes);
       }
 
       scope = scope_salva;
@@ -1878,6 +1894,21 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
             merged = merge_flow_type(merged, it->second);
           }
           if (presente_em_todos && merged != TypeKind::Unknown) types[name] = merged;
+        }
+      }
+      shapes.clear();
+      if (!formas_ramos.empty()) {
+        for (const auto& [name, first] : formas_ramos.front()) {
+          std::optional<TensorShape> merged = first;
+          for (std::size_t i = 1; i < formas_ramos.size() && merged; ++i) {
+            auto it = formas_ramos[i].find(name);
+            if (it == formas_ramos[i].end()) {
+              merged.reset();
+              break;
+            }
+            merged = merge_flow_shape(*merged, it->second);
+          }
+          if (merged) shapes[name] = std::move(*merged);
         }
       }
       if (!escopos_ramos.empty()) {

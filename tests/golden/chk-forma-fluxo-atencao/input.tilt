@@ -1,0 +1,12 @@
+pipeline p:
+  passos:
+    - se verdadeiro:
+        q = uns [2, 5, 8]
+        k = uns [2, 6, 8]
+        v = uns [2, 6, 4]
+    senao:
+        q = uns [1, 5, 16]
+        k = uns [1, 6, 16]
+        v = uns [1, 6, 4]
+    - s = atencao q, k, v, 1.0
+    - erro = s.conv2d uns [4, 4, 3, 3]

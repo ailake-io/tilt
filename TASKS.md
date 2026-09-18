@@ -49,7 +49,7 @@
 - [x] Parse de `tipo` com valores padrão (Sprint 1: parseia, T011, aplica em formato/entrada)
 - [x] Aridade de funções de usuário (Sprint 1: T011, faltantes sempre; sobra só em f(...))
 - [x] Implementar inferência de tipos para fluxo condicional (T011 — merge conservador de tipos definidos em todos os ramos, com promoção inteiro→decimal)
-- [ ] Completar solver de formas para `atencao` dinâmica e `conv2d` com formas dinâmicas (T012)
+- [x] Completar solver de formas para `atencao` dinâmica e `conv2d` com formas dinâmicas (T012 — ShapeEnv fundido entre ramos condicionais; dimensões divergentes viram `_`)
 
 ### 1.3 VM e Codegen (P1)
 - [x] Expandir subconjunto VM para cobrir mais builtins (`ler_csv`, interpolação, membros)
