@@ -1,13 +1,13 @@
 #include "runtime/tls.hpp"
 
-#include "runtime/compat.hpp"
-
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <algorithm>
 #include <stdexcept>
+
+#include "runtime/compat.hpp"
 
 namespace tilt::rt {
 
@@ -28,6 +28,7 @@ constexpr int kSslErrorZeroReturn = 6;         // SSL_ERROR_ZERO_RETURN
 
 // OpenSSL carregada via dlopen — mesmo padrao de sqlite.cpp/parquet.cpp.
 struct SslApi {
+  std::string load_error;
   void* ssl_lib = nullptr;
   void* crypto_lib = nullptr;
   const void* (*tls_client_method)(void) = nullptr;
@@ -56,6 +57,19 @@ bool bind_sym(void* lib, F& fn, const char* name) {
   return fn != nullptr;
 }
 
+void* open_library(std::string& errors, const char* name) {
+  void* lib = tilt_dlopen(name);
+  if (lib) return lib;
+  const char* detail = tilt_dlerror();
+  if (!errors.empty()) errors += "; ";
+  errors += name;
+  if (detail && *detail) {
+    errors += ": ";
+    errors += detail;
+  }
+  return nullptr;
+}
+
 const SslApi& openssl() {
   static const SslApi instance = [] {
     SslApi a;
@@ -63,56 +77,64 @@ const SslApi& openssl() {
     // OpenSSL para Windows (MSVC/MinGW): libssl-3-x64.dll e libcrypto-3-x64.dll
     // (instaladores slproweb/MSYS2); o SSL_set_fd do OpenSSL aceita o
     // SOCKET do Winsock diretamente.
-    a.ssl_lib = tilt_dlopen("libssl-3-x64.dll");
-    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl-3.dll");
-    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.dll");
-    a.crypto_lib = tilt_dlopen("libcrypto-3-x64.dll");
-    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto-3.dll");
-    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.dll");
+    a.ssl_lib = open_library(a.load_error, "libssl-3-x64.dll");
+    if (!a.ssl_lib) a.ssl_lib = open_library(a.load_error, "libssl-3.dll");
+    if (!a.ssl_lib) a.ssl_lib = open_library(a.load_error, "libssl.dll");
+    a.crypto_lib = open_library(a.load_error, "libcrypto-3-x64.dll");
+    if (!a.crypto_lib) a.crypto_lib = open_library(a.load_error, "libcrypto-3.dll");
+    if (!a.crypto_lib) a.crypto_lib = open_library(a.load_error, "libcrypto.dll");
     if (!a.ssl_lib || !a.crypto_lib) {
       if (a.ssl_lib) tilt_dlclose(a.ssl_lib);
       if (a.crypto_lib) tilt_dlclose(a.crypto_lib);
-      return SslApi{};
+      a.ssl_lib = nullptr;
+      a.crypto_lib = nullptr;
+      return a;
     }
 #else
-    a.ssl_lib = tilt_dlopen("libssl.so.3");
-    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.so");
-    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.3.dylib");
-    if (!a.ssl_lib) a.ssl_lib = tilt_dlopen("libssl.dylib");
-    a.crypto_lib = tilt_dlopen("libcrypto.so.3");
-    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.so");
-    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.3.dylib");
-    if (!a.crypto_lib) a.crypto_lib = tilt_dlopen("libcrypto.dylib");
+    a.ssl_lib = open_library(a.load_error, "libssl.so.3");
+    if (!a.ssl_lib) a.ssl_lib = open_library(a.load_error, "libssl.so");
+    if (!a.ssl_lib) a.ssl_lib = open_library(a.load_error, "libssl.3.dylib");
+    if (!a.ssl_lib) a.ssl_lib = open_library(a.load_error, "libssl.dylib");
+    a.crypto_lib = open_library(a.load_error, "libcrypto.so.3");
+    if (!a.crypto_lib) a.crypto_lib = open_library(a.load_error, "libcrypto.so");
+    if (!a.crypto_lib) a.crypto_lib = open_library(a.load_error, "libcrypto.3.dylib");
+    if (!a.crypto_lib) a.crypto_lib = open_library(a.load_error, "libcrypto.dylib");
     if (!a.ssl_lib || !a.crypto_lib) {
       if (a.ssl_lib) tilt_dlclose(a.ssl_lib);
       if (a.crypto_lib) tilt_dlclose(a.crypto_lib);
-      return SslApi{};
+      a.ssl_lib = nullptr;
+      a.crypto_lib = nullptr;
+      return a;
     }
 #endif
-    const bool ok = bind_sym(a.ssl_lib, a.tls_client_method, "TLS_client_method") &&
-                    bind_sym(a.ssl_lib, a.ssl_ctx_new, "SSL_CTX_new") &&
-                    bind_sym(a.ssl_lib, a.ssl_ctx_free, "SSL_CTX_free") &&
-                    bind_sym(a.ssl_lib, a.ssl_ctrl, "SSL_ctrl") &&
-                    bind_sym(a.ssl_lib, a.ssl_ctx_set_verify, "SSL_CTX_set_verify") &&
-                    bind_sym(a.ssl_lib, a.ssl_ctx_set_default_verify_paths,
-                             "SSL_CTX_set_default_verify_paths") &&
-                    bind_sym(a.ssl_lib, a.ssl_new, "SSL_new") &&
-                    bind_sym(a.ssl_lib, a.ssl_free, "SSL_free") &&
-                    bind_sym(a.ssl_lib, a.ssl_set_fd, "SSL_set_fd") &&
-                    bind_sym(a.ssl_lib, a.ssl_connect, "SSL_connect") &&
-                    bind_sym(a.ssl_lib, a.ssl_write, "SSL_write") &&
-                    bind_sym(a.ssl_lib, a.ssl_read, "SSL_read") &&
-                    bind_sym(a.ssl_lib, a.ssl_get_error, "SSL_get_error") &&
-                    bind_sym(a.ssl_lib, a.ssl_shutdown, "SSL_shutdown") &&
-                    bind_sym(a.ssl_lib, a.ssl_get0_param, "SSL_get0_param") &&
-                    bind_sym(a.crypto_lib, a.err_get_error, "ERR_get_error") &&
-                    bind_sym(a.crypto_lib, a.err_error_string_n, "ERR_error_string_n") &&
-                    bind_sym(a.crypto_lib, a.x509_verify_param_set1_host,
-                             "X509_VERIFY_PARAM_set1_host");
+    const bool ok =
+        bind_sym(a.ssl_lib, a.tls_client_method, "TLS_client_method") &&
+        bind_sym(a.ssl_lib, a.ssl_ctx_new, "SSL_CTX_new") &&
+        bind_sym(a.ssl_lib, a.ssl_ctx_free, "SSL_CTX_free") &&
+        bind_sym(a.ssl_lib, a.ssl_ctrl, "SSL_ctrl") &&
+        bind_sym(a.ssl_lib, a.ssl_ctx_set_verify, "SSL_CTX_set_verify") &&
+        bind_sym(a.ssl_lib, a.ssl_ctx_set_default_verify_paths,
+                 "SSL_CTX_set_default_verify_paths") &&
+        bind_sym(a.ssl_lib, a.ssl_new, "SSL_new") && bind_sym(a.ssl_lib, a.ssl_free, "SSL_free") &&
+        bind_sym(a.ssl_lib, a.ssl_set_fd, "SSL_set_fd") &&
+        bind_sym(a.ssl_lib, a.ssl_connect, "SSL_connect") &&
+        bind_sym(a.ssl_lib, a.ssl_write, "SSL_write") &&
+        bind_sym(a.ssl_lib, a.ssl_read, "SSL_read") &&
+        bind_sym(a.ssl_lib, a.ssl_get_error, "SSL_get_error") &&
+        bind_sym(a.ssl_lib, a.ssl_shutdown, "SSL_shutdown") &&
+        bind_sym(a.ssl_lib, a.ssl_get0_param, "SSL_get0_param") &&
+        bind_sym(a.crypto_lib, a.err_get_error, "ERR_get_error") &&
+        bind_sym(a.crypto_lib, a.err_error_string_n, "ERR_error_string_n") &&
+        bind_sym(a.crypto_lib, a.x509_verify_param_set1_host, "X509_VERIFY_PARAM_set1_host");
     if (!ok) {
+      const char* detail = tilt_dlerror();
+      a.load_error = detail && *detail ? std::string("API OpenSSL incompleta: ") + detail
+                                       : "API OpenSSL incompleta: simbolo ausente";
       tilt_dlclose(a.ssl_lib);
       tilt_dlclose(a.crypto_lib);
-      return SslApi{};
+      a.ssl_lib = nullptr;
+      a.crypto_lib = nullptr;
+      return a;
     }
     return a;
   }();
@@ -139,10 +161,12 @@ TlsStream::TlsStream(int fd, const std::string& host) : fd_(fd) {
   const SslApi& api = openssl();
   if (!api.ssl_lib) {
 #if defined(_WIN32)
-    die("OpenSSL nao encontrado: instale o OpenSSL para Windows "
-        "(libssl-3-x64.dll / libcrypto-3-x64.dll no PATH)");
+    die("OpenSSL indisponivel: instale o OpenSSL para Windows "
+        "(libssl-3-x64.dll / libcrypto-3-x64.dll no PATH)" +
+        (api.load_error.empty() ? std::string{} : "; carregador: " + api.load_error));
 #else
-    die("OpenSSL nao encontrado: instale libssl3 (libssl.so.3 / libcrypto.so.3)");
+    die("OpenSSL indisponivel: instale libssl3 (libssl.so.3 / libcrypto.so.3)" +
+        (api.load_error.empty() ? std::string{} : "; carregador: " + api.load_error));
 #endif
   }
 
@@ -191,8 +215,9 @@ TlsStream::TlsStream(int fd, const std::string& host) : fd_(fd) {
     if (err == kSslErrorSsl) {
       msg += ": " + erro_openssl(api);
       if (!skip_verify()) {
-        msg += " (certificado auto-assinado ou host divergente? defina TILT_TLS_SKIP_VERIFY=1 "
-               "para ignorar a verificacao em testes)";
+        msg +=
+            " (certificado auto-assinado ou host divergente? defina TILT_TLS_SKIP_VERIFY=1 "
+            "para ignorar a verificacao em testes)";
       }
     } else if (err == kSslErrorSyscall && errno != 0) {
       msg += ": " + std::string(std::strerror(errno));

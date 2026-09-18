@@ -270,7 +270,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   autenticação mútua, o handshake falha com erro do OpenSSL. `mongodb+srv://`
   não faz lookup DNS SRV (usa o host como `mongodb://`). Coberto por
   `tests/tls_test.sh` (mock RESP sobre TLS com cert auto-assinado gerado na
-  hora com a CLI `openssl`).
+  hora com a CLI `openssl`). Quando OpenSSL ou uma DLL/SO estiver ausente, o erro
+  preserva os nomes tentados e o detalhe do carregador para orientar a instalação.
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
   id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
   `texto`, que fica no payload do ponto).
