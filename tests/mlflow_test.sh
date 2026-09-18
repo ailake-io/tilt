@@ -105,6 +105,24 @@ experimento demo:
 EOF
 
 out=$(cd "$tmp" && MLFLOW_TRACKING_TOKEN=token123 MLFLOW_WORKSPACE=workspace   "$BIN" executar input.tilt)
+
+cat >"$tmp/eval.tilt" <<EOF
+avaliacao qualidade:
+  dados:
+    - { v: 1, esperado: 1 }
+    - { v: 2, esperado: 2 }
+  executar:
+    - retornar caso.v
+  registrar_em: "mlflow://127.0.0.1:$port/exp-eval"
+EOF
+
+eval_out=$(cd "$tmp" && MLFLOW_TRACKING_TOKEN=token123 MLFLOW_WORKSPACE=workspace \
+  "$BIN" executar eval.tilt)
+echo "$eval_out" | grep -q "run enviado ao MLflow: run-1" || {
+  echo "run de avaliacao MLflow ausente:"; echo "$eval_out"; exit 1; }
+[ ! -f "$tmp/avaliacao_qualidade_run.json" ] || {
+  echo "JSON local de avaliacao foi criado"; exit 1; }
+
 echo "$out" | grep -q "run enviado ao MLflow: run-1" || {
   echo "run MLflow ausente:"; echo "$out"; exit 1; }
 [ ! -f "$tmp/experimento_demo_run.json" ] || {

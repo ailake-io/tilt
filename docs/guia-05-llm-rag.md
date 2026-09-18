@@ -251,9 +251,7 @@ A métrica `juiz` delega o veredito a um `llm`: exige o bloco `juiz:` com
 
 `amostra: N` + `semente:` (default 7) rodam no máximo N casos, embaralhados
 de forma determinística (xorshift64*, o mesmo do init Xavier) — o resumo
-mostra `(amostra N/total, semente S)`. `registrar_em: "run.json"` grava o
-run (média, limiar, métricas, amostra/semente e por caso `{indice, passou,
-motivo, saida}`).
+mostra `(amostra N/total, semente S)`. `registrar_em: "run.json"` grava o run local (média, limiar, métricas, amostra/semente e por caso `{indice, passou, motivo, saida}`). Para enviar ao MLflow Tracking REST, use `registrar_em: "mlflow://host/experimento"`.
 
 ```tilt run
 llm gpt:
@@ -277,5 +275,5 @@ avaliacao com_juiz:
 ```
 
 Limites: juiz sem cadeia de pensamento estruturada nem multi-juiz com voto;
-amostra só por contagem (sem fração); `registrar_em` grava JSON local
-(sem POST REST).
+amostra só por contagem (sem fração); o registro MLflow envia métricas e
+parâmetros, mas ainda não publica artefatos ou detalhes de cada caso.

@@ -5831,40 +5831,55 @@ void Interpreter::run_avaliacao(const Item& decl) {
     }
     out_ << "\n";
 
-    // ---- registrar_em (run em JSON local; mlflow REST fica p/ depois)
+    // ---- registrar_em (JSON local ou MLflow Tracking REST)
     if (const Item* fr = find_field(cfg, "registrar_em"); fr && fr->value) {
       Value rv = eval(*fr->value, root_);
-      if (rv.kind != ValueKind::Texto || rv.s.size() < 6 ||
-          rv.s.compare(rv.s.size() - 5, 5, ".json") != 0) {
-        throw std::runtime_error("'registrar_em' deve ser um caminho .json (ex.: \"avaliacao_" + name + "_run.json\")");
+      if (rv.kind != ValueKind::Texto) {
+        throw std::runtime_error(
+            "'registrar_em' deve ser texto (caminho .json ou mlflow://host/experimento)");
       }
-      Value doc = Value::mapa();
-      doc.map->set("avaliacao", Value::texto(name));
-      doc.map->set("media", Value::decimal(media));
-      doc.map->set("limiar", Value::decimal(limiar));
-      doc.map->set("passou", Value::inteiro(static_cast<std::int64_t>(passou)));
-      doc.map->set("total", Value::inteiro(static_cast<std::int64_t>(n_rodar)));
-      Value mets = Value::lista();
-      for (const std::string& mt : metricas) mets.list->push_back(Value::texto(mt));
-      doc.map->set("metricas", std::move(mets));
-      if (amostrada) {
-        doc.map->set("amostra", Value::inteiro(static_cast<std::int64_t>(n_rodar)));
-        doc.map->set("semente", Value::inteiro(semente));
+      if (rv.s.rfind("mlflow://", 0) == 0) {
+        std::vector<std::string> report = {
+            "media: " + std::string(media_s), "limiar: " + std::string(limiar_s),
+            "passou: " + std::to_string(passou), "total: " + std::to_string(n_rodar)};
+        const std::string run_id =
+            mlflow_registrar_experimento(rv.s, name, "avaliacao", n_rodar, semente, report);
+        out_ << "run enviado ao MLflow: " << run_id << "\n";
+      } else {
+        if (rv.s.size() < 6 || rv.s.compare(rv.s.size() - 5, 5, ".json") != 0) {
+          throw std::runtime_error("'registrar_em' deve ser um caminho .json (ex.: \"avaliacao_" +
+                                   name + "_run.json\")");
+        }
+        Value doc = Value::mapa();
+        doc.map->set("avaliacao", Value::texto(name));
+        doc.map->set("media", Value::decimal(media));
+        doc.map->set("limiar", Value::decimal(limiar));
+        doc.map->set("passou", Value::inteiro(static_cast<std::int64_t>(passou)));
+        doc.map->set("total", Value::inteiro(static_cast<std::int64_t>(n_rodar)));
+        Value mets = Value::lista();
+        for (const std::string& mt : metricas) mets.list->push_back(Value::texto(mt));
+        doc.map->set("metricas", std::move(mets));
+        if (amostrada) {
+          doc.map->set("amostra", Value::inteiro(static_cast<std::int64_t>(n_rodar)));
+          doc.map->set("semente", Value::inteiro(semente));
+        }
+        Value rcs = Value::lista();
+        for (const Registro& r : registros) {
+          Value rc = Value::mapa();
+          rc.map->set("indice", Value::inteiro(static_cast<std::int64_t>(r.indice)));
+          rc.map->set("passou", Value::logico(r.passou));
+          if (!r.passou) rc.map->set("motivo", Value::texto(r.motivo));
+          rc.map->set("saida", r.saida);
+          rcs.list->push_back(std::move(rc));
+        }
+        doc.map->set("casos", std::move(rcs));
+        std::ofstream rout(rv.s, std::ios::trunc);
+        if (!rout)
+          throw std::runtime_error("nao foi possivel gravar '" + rv.s +
+                                   "' (crie o diretorio antes?)");
+        rout << rt::json_dump(doc) << "\n";
+        out_ << "run salvo em " << rv.s << "\n";
       }
-      Value rcs = Value::lista();
-      for (const Registro& r : registros) {
-        Value rc = Value::mapa();
-        rc.map->set("indice", Value::inteiro(static_cast<std::int64_t>(r.indice)));
-        rc.map->set("passou", Value::logico(r.passou));
-        if (!r.passou) rc.map->set("motivo", Value::texto(r.motivo));
-        rc.map->set("saida", r.saida);
-        rcs.list->push_back(std::move(rc));
-      }
-      doc.map->set("casos", std::move(rcs));
-      std::ofstream rout(rv.s, std::ios::trunc);
-      if (!rout) throw std::runtime_error("nao foi possivel gravar '" + rv.s + "' (crie o diretorio antes?)");
-      rout << rt::json_dump(doc) << "\n";
-      out_ << "run salvo em " << rv.s << "\n";
     }
 
     if (media + 1e-12 < limiar) {

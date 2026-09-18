@@ -98,8 +98,8 @@ com backoff, `reserva:`, `teto_tokens:` e `tokens:` na resposta.
   avaliação de recuperação.
 - **Evals**: bloco `avaliacao` em 1ª passada (dataset em `dados:`, métricas
   `exata`/`contem`/`regex`/`tolerancia`/`juiz`, gate no `limiar:`,
-  `amostra:` + `semente:`, `registrar_em:` em JSON local; ver guia 05 e
-  guia 12). Restam juiz com voto, amostra por fração e mlflow REST.
+  `amostra:` + `semente:`, `registrar_em:` local ou via MLflow REST; ver guia 05 e
+  guia 12). Restam juiz com voto e amostra por fração.
 - **Observabilidade LLM**: sem log de prompts/respostas nem contagem de
   tokens e custo por chamada/fluxo.
 

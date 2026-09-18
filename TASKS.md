@@ -135,7 +135,7 @@
 ### 4.3 Avaliação (P2)
 - [ ] Implementar juiz multi-cadeia estruturada (atualmente sem cadeia)
 - [ ] Implementar amostragem estratificada (atualmente só por contagem)
-- [ ] Adicionar `registrar_em` com POST REST (atualmente apenas JSON local)
+- [x] Adicionar `registrar_em` com POST REST para experimento e avaliação
 
 ---
 
