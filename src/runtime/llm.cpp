@@ -1,5 +1,6 @@
 #include "runtime/llm.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -8,10 +9,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <initializer_list>
+#include <iomanip>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -67,11 +71,57 @@ std::string run(const std::string& cmd) {
 struct HttpResult {
   long status = 0;
   std::string body;
+  long retry_after = -1;  // segundos; -1 = ausente/invalido
 };
+
+std::string trim_http(std::string value) {
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  const auto last = value.find_last_not_of(" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+long retry_after_seconds(const std::string& headers) {
+  long result = -1;
+  std::istringstream lines(headers);
+  std::string line;
+  while (std::getline(lines, line)) {
+    const std::size_t colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    std::string name = line.substr(0, colon);
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (name != "retry-after") continue;
+    const std::string value = trim_http(line.substr(colon + 1));
+    try {
+      std::size_t used = 0;
+      const long seconds = std::stol(value, &used);
+      if (used == value.size() && seconds >= 0) result = std::min(seconds, 300L);
+      continue;
+    } catch (...) {
+    }
+    std::tm date{};
+    std::istringstream parsed(value);
+    parsed >> std::get_time(&date, "%a, %d %b %Y %H:%M:%S GMT");
+    if (parsed.fail()) continue;
+#if defined(_WIN32)
+    const std::time_t target = _mkgmtime(&date);
+#else
+    const std::time_t target = timegm(&date);
+#endif
+    const std::time_t now = std::time(nullptr);
+    if (target >= now)
+      result = std::min(static_cast<long>(target - now), 300L);
+    else
+      result = 0;
+  }
+  return result;
+}
 
 HttpResult http_post_status(const std::string& url, const std::vector<std::string>& headers,
                             const std::string& body, int timeout_s) {
   std::string body_file;
+  std::string header_file;
   const int fd = tilt_tempfile("llm", body_file);
   if (fd < 0) throw std::runtime_error("nao foi possivel criar arquivo temporario");
   tilt_close_file(fd);
@@ -84,20 +134,32 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
     }
   }
 
+  const int fd_headers = tilt_tempfile("llm-h", header_file);
+  if (fd_headers < 0) {
+    std::remove(body_file.c_str());
+    throw std::runtime_error("nao foi possivel criar arquivo temporario de cabecalhos");
+  }
+  tilt_close_file(fd_headers);
+
   std::string cmd = "curl -sS -X POST -H 'content-type: application/json'";
   for (const std::string& h : headers) cmd += " -H " + tilt_shell_quote(h);
   if (timeout_s > 0) cmd += " --max-time " + std::to_string(timeout_s);
-  cmd += " --data @" + tilt_shell_quote(body_file) + " -w " + tilt_shell_quote("\n%{http_code}") +
-         " " + tilt_shell_quote(url);
+  cmd += " -D " + tilt_shell_quote(header_file) + " --data @" + tilt_shell_quote(body_file) +
+         " -w " + tilt_shell_quote("\n%{http_code}") + " " + tilt_shell_quote(url);
 
   std::string resp;
   try {
     resp = run(cmd);
   } catch (const std::exception& e) {
     std::remove(body_file.c_str());
+    std::remove(header_file.c_str());
     throw std::runtime_error(std::string("falha de transporte: ") + e.what());
   }
   std::remove(body_file.c_str());
+  std::ifstream header_in(header_file);
+  std::ostringstream header_text;
+  header_text << header_in.rdbuf();
+  std::remove(header_file.c_str());
   // Ultima linha = codigo HTTP; o resto = corpo (pode conter \n).
   std::size_t nl = resp.rfind('\n');
   long status = 0;
@@ -111,7 +173,7 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
     corpo = resp.substr(0, nl);
     if (!corpo.empty() && corpo.back() == '\r') corpo.pop_back();
   }
-  return {status, corpo};
+  return {status, corpo, retry_after_seconds(header_text.str())};
 }
 
 // Contabilidade de tokens por llm (processo; protege rotas paralelas).
@@ -137,9 +199,9 @@ long long mock_tokens(const std::string& s) {
 }
 
 // Dorme entre tentativas: 1s, 2s, 4s... teto 15s (sem jitter: deterministico).
-void espera_retry(int tentativa) {
-  long espera = 1L << (tentativa - 1);
-  if (espera > 15) espera = 15;
+void espera_retry(int tentativa, long retry_after = -1) {
+  long espera = retry_after >= 0 ? retry_after : 1L << (tentativa - 1);
+  if (espera > 300) espera = 300;
   std::this_thread::sleep_for(std::chrono::seconds(espera));
 }
 
@@ -337,7 +399,7 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
     } catch (const std::exception& e) {
       ultimo_erro = e.what();
       if (t < tents) {
-        espera_retry(t);
+        espera_retry(t, r.retry_after);
         continue;
       }
       throw std::runtime_error(std::string(ultimo_erro) + " apos " + std::to_string(tents) +
@@ -354,7 +416,7 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
     if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
       ultimo_erro = "HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 200);
       if (t < tents) {
-        espera_retry(t);
+        espera_retry(t, r.retry_after);
         continue;
       }
       throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
@@ -434,7 +496,7 @@ std::vector<float> llm_embed(const std::string& model, const std::string& text) 
     } catch (const std::exception& e) {
       ultimo_erro = e.what();
       if (t < 3) {
-        espera_retry(t);
+        espera_retry(t, r.retry_after);
         continue;
       }
       throw std::runtime_error(std::string(ultimo_erro) + " apos 3 tentativa(s)");
@@ -446,7 +508,7 @@ std::vector<float> llm_embed(const std::string& model, const std::string& text) 
     if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
       ultimo_erro = "HTTP " + std::to_string(r.status);
       if (t < 3) {
-        espera_retry(t);
+        espera_retry(t, r.retry_after);
         continue;
       }
       throw std::runtime_error(ultimo_erro + " apos 3 tentativa(s): " + truncate(r.body, 200));

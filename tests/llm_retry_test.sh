@@ -3,7 +3,8 @@
 # sobe um mock HTTP em python3 que finge dois endpoints —
 # POST /v1/messages (shape Anthropic) e POST /chat/completions (shape
 # OpenAI) — com o comportamento roteado pelo "model" do corpo:
-#   instavel -> 429, 429, 200 (usage 7+3)
+#   instavel -> 429, 429, 200 (usage 7+3; Retry-After)
+#   retry-after -> 429 com Retry-After: 2, 200
 #   quebrado -> sempre 500
 #   ok       -> sempre 200 (usage 10+5)
 #   lento    -> dorme 5s e devolve 200
@@ -64,7 +65,9 @@ class MockLLM(http.server.BaseHTTPRequestHandler):
         elif modelo == "quebrado":
             self._erro(500, {"error": "quebrou"})
         elif modelo == "instavel" and vez <= 2:
-            self._erro(429, {"error": {"message": "limite"}})
+            self._erro(429, {"error": {"message": "limite"}}, retry_after="0")
+        elif modelo == "retry-after" and vez == 1:
+            self._erro(429, {"error": {"message": "limite"}}, retry_after="2")
         elif self.path == "/v1/messages":
             self._ok("resposta instavel",
                      {"input_tokens": 7, "output_tokens": 3}, aberto=False)
@@ -84,9 +87,11 @@ class MockLLM(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-    def _erro(self, codigo, corpo):
+    def _erro(self, codigo, corpo, retry_after=None):
         raw = json.dumps(corpo).encode("utf-8")
         self.send_response(codigo)
+        if retry_after is not None:
+            self.send_header("Retry-After", retry_after)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
@@ -122,6 +127,13 @@ done
 sed "s/@PORTA@/$PORTA/g" "$FIXTURE" >"$tmp/llm_robusto.tilt"
 out=$("$BIN" executar "$tmp/llm_robusto.tilt")
 printf '%s\n' "$out"
+
+sed "s/@PORTA@/$PORTA/g" "${0%/*}/fixtures/llm_retry_after.tilt" >"$tmp/llm_retry_after.tilt"
+inicio=$(date +%s)
+out_retry=$("$BIN" executar "$tmp/llm_retry_after.tilt")
+duracao=$(( $(date +%s) - inicio ))
+printf '%s\n' "$out_retry"
+[ "$duracao" -ge 2 ] || { echo "Retry-After ignorado: ${duracao}s"; exit 1; }
 
 fail=0
 confere() {

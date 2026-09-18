@@ -85,15 +85,14 @@ cruzada/quadrática, autograd manual.
 
 Funciona: cliente real anthropic/openai via curl, saída estruturada via
 JSON Schema derivado de `tipo`, streaming SSE, embeddings, 6 backends
-vetoriais. Robustez entregue (1ª passada): `tempo_limite`, `tentativas`
-com backoff, `reserva:`, `teto_tokens:` e `tokens:` na resposta.
+vetoriais. Robustez entregue: `tempo_limite`, `tentativas` com backoff (incluindo
+`Retry-After` em 429), `reserva:`, `teto_tokens:` e `tokens:` na resposta.
 
-- **Resta de robustez**: `Retry-After` em 429, cache de respostas e
-  retry em streaming.
+- **Resta de robustez**: cache de respostas e retry em streaming.
 
-- **Robustez**: sem retry com backoff em 429/5xx, timeout configurável,
-  fallback entre modelos, cache de respostas, teto de custo/tokens por
-  período. Hoje um 429 aborta tudo.
+- **Robustez**: timeout configurável, fallback entre modelos e teto de
+  custo/tokens por período. `Retry-After` em 429 já é respeitado; ainda faltam
+  cache de respostas e retry em streaming.
 - **RAG**: sem reranking, chunking só de tamanho fixo (sem respeito a
   sentença/código), sem busca híbrida (vetor + keyword/BM25), sem
   avaliação de recuperação.

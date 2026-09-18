@@ -24,7 +24,8 @@ pipeline declara:
 
 - `tempo_limite:` aborta a tentativa (`curl --max-time`); `tentativas:`
   repete com backoff 1s → 2s → 4s… (teto 15s) em erro de transporte
-  (inclui timeout), HTTP 429 e 5xx. Outros 4xx falham rápido, sem retry.
+  (inclui timeout), HTTP 429 e 5xx. Em 429, respeita `Retry-After` numérico
+  ou HTTP-date quando presente (limitado a 300s); outros 4xx falham rápido, sem retry.
 - `reserva: [b, c]` tenta outro `llm` declarado quando o primeiro esgota
   as tentativas (um nível, sem cadeia; repetido ou inexistente é erro
   claro antes da rede). Vale para `perguntar`, agentes e supervisor.

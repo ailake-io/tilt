@@ -1,0 +1,11 @@
+llm retry_after:
+  provedor: "openai"
+  modelo: "retry-after"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+  tentativas: 2
+
+pipeline teste_retry_after:
+  passos:
+    - r = perguntar retry_after, usuario: "oi"
+    - imprimir "modelo:", r.modelo

@@ -366,8 +366,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `reserva: [outro_llm]` (fallback em ordem, sem cadeia) e `teto_tokens:`
   (barreira no acumulado entrada+saída por `llm` antes de cada chamada).
   `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` (tokens do
-  `usage` da API; no mock, heurística chars/4). Sem `Retry-After`,
-  sem cache e sem streaming com retry (timeout vale para o SSE inteiro).
+  `usage` da API; no mock, heurística chars/4). O retry respeita `Retry-After`
+  numérico ou HTTP-date em respostas 429 (limitado a 300s). Ainda não há cache
+  de respostas nem retry em streaming (timeout vale para o SSE inteiro).
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
   `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
