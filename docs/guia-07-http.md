@@ -33,7 +33,7 @@ servico Loja:
 servico Ops:
   porta: 8080
   saude: verdadeiro      # GET /saude -> {"status": "ok", "servico", "rotas"}
-  metricas: verdadeiro   # GET /metricas -> contadores (ver abaixo)
+  metricas: verdadeiro   # GET /metricas -> contadores + latencia (ver abaixo)
   rota post "/eco":
     passos:
       - responder:
@@ -43,10 +43,20 @@ servico Ops:
 
 - `GET /saude` → `200 {"status": "ok", "servico": "<nome>", "rotas": N}`.
 - `GET /metricas` → `200 {"inicio": "<UTC>", "requisicoes": T,
-  "erros": E, "por_rota": {"METODO /caminho": {"total": T, "erros": E}}}` —
-  `erros` conta respostas 5xx (404 entra no total, não nos erros).
+  "erros": E, "por_rota": {"METODO /caminho": {"total": T, "erros": E,
+  "latencia_us": {"total": S, "media": M, "max": X}}}}` — as latências
+  são medidas com relógio monotônico em microssegundos; `total` é a soma,
+  `media` a média por requisição e `max` o maior valor. `erros` conta
+  respostas 5xx (404 entra no total, não nos erros).
+- `GET /metricas/prometheus` (ou `/metricas?formato=prometheus`) → `200` em
+  texto no formato Prometheus, com contadores globais e soma/máximo de
+  latência por `service`, `method` e `route`. A saída também é excluída da
+  própria contagem.
 - As duas são excluídas da própria contagem. Sem os campos, os caminhos
   voltam a ser 404 como qualquer rota inexistente.
+- Cada requisição também gera uma linha JSON compacta no log do servidor, com
+  `trace_id`, `metodo`, `rota`, `status` e `latencia_us`. O `trace_id` é único
+  durante a vida do processo e permite correlacionar a requisição ao log.
 
 - `rota <metodo> "/caminho":` — casa método (`get`/`post`/...) e caminho exatos.
 - O corpo JSON da requisição vira a variável `entrada` no escopo dos `passos:`.

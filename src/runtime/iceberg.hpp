@@ -78,4 +78,8 @@ std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igua
 // podam data files, o resto filtra linhas. Resultado pode ser tabela vazia.
 Value iceberg_read(const std::string& dir, const Value* onde = nullptr);  // -> tabela (lista de mapas)
 
+// Remove somente Parquet órfãos sob data/ que não aparecem em nenhum metadata
+// ou snapshot Iceberg; devolve a quantidade removida.
+std::int64_t iceberg_vacuum(const std::string& dir);
+
 }  // namespace tilt::rt

@@ -708,10 +708,12 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
        nullptr},
       {"anexar_delta", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
        nullptr},
+      {"vacuum_delta", 1, {TypeKind::Texto}, {}, TypeKind::Inteiro, nullptr},
       {"escrever_iceberg", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
        nullptr},
       {"anexar_iceberg", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Texto}, TypeKind::Nulo,
        nullptr},
+      {"vacuum_iceberg", 1, {TypeKind::Texto}, {}, TypeKind::Inteiro, nullptr},
       {"apagar_iceberg", 1, {TypeKind::Texto}, {}, TypeKind::Inteiro, nullptr},
       {"escrever_json", 2, {}, {TypeKind::Texto}, TypeKind::Nulo, "escrever_json valor, \"saida.json\""},
       // LLM / utilidades

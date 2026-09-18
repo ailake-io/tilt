@@ -3363,6 +3363,19 @@ Value iceberg_read_rest(const RestCfg& rc, const std::string& dir, const Value* 
   return read_core(meta, onde);
 }
 
+void list_iceberg_parquets(const std::string& current, std::vector<std::string>& out) {
+  std::vector<std::string> entries;
+  if (!tilt_listdir(current, entries)) return;
+  for (const std::string& name : entries) {
+    const std::string child = current + "/" + name;
+    if (tilt_is_directory(child)) {
+      list_iceberg_parquets(child, out);
+    } else if (name.size() > 8 && name.compare(name.size() - 8, 8, ".parquet") == 0) {
+      out.push_back(child);
+    }
+  }
+}
+
 }  // namespace
 
 void iceberg_write(const std::string& dir, const Value& tabela,
@@ -3647,6 +3660,39 @@ Value iceberg_read(const std::string& dir, const Value* onde) {
   TableMeta meta;
   latest_metadata_path(dir, meta);
   return read_core(meta, onde);
+}
+
+std::int64_t iceberg_vacuum(const std::string& dir) {
+  const std::string location = abs_path(dir);
+  const std::vector<std::string> metadata = list_metadata_files(location + "/metadata");
+  if (metadata.empty()) {
+    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
+  }
+
+  std::set<std::string> referenced;
+  for (const std::string& path : metadata) {
+    TableMeta meta;
+    parse_metadata(path, meta);
+    for (const Snapshot& snapshot : meta.snapshots) {
+      std::vector<ActiveEntry> entries;
+      collect_manifest_entries(snapshot, entries);
+      for (const ActiveEntry& entry : entries) {
+        const std::string ref = strip_scheme(entry.path);
+        referenced.insert(ref);
+        referenced.insert(abs_path(ref));
+        if (!ref.empty() && ref.front() != '/') referenced.insert(location + "/" + ref);
+      }
+    }
+  }
+
+  std::vector<std::string> parquet;
+  list_iceberg_parquets(location + "/data", parquet);
+  std::int64_t removed = 0;
+  for (const std::string& path : parquet) {
+    if (referenced.find(path) != referenced.end()) continue;
+    if (std::remove(path.c_str()) == 0) ++removed;
+  }
+  return removed;
 }
 
 }  // namespace tilt::rt

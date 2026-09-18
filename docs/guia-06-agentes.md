@@ -78,7 +78,12 @@ Retorna (ilustração da forma; ver exemplo executável no fim do guia):
 ```
 
 `memoria: conversa` mantém um histórico por agente, prefixado no prompt das
-chamadas seguintes. No modo `TILT_LLM=mock` o planner é determinístico: cada
+chamadas seguintes. `memoria: vetorial` guarda cada turno (pergunta+resposta)
+num índice em memória e prefixa os 3 mais similares (`Lembretes relevantes:`)
+— usa `embeddings:` do agente (default `text-embedding-3-small`; no mock,
+vetores determinísticos de 16 dimensões). Sem poda: acima de 200 turnos por
+agente, turnos novos não entram. Outro valor em `memoria:` é erro (`T011`).
+No modo `TILT_LLM=mock` o planner é determinístico: cada
 ferramenta é chamada uma vez, na ordem declarada, e depois o mock responde.
 
 ## `equipe`

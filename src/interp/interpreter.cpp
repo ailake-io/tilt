@@ -13,6 +13,7 @@
 #include <functional>
 #include <future>
 #include <initializer_list>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <ostream>
@@ -257,6 +258,43 @@ void Interpreter::register_decls() {
       entities_[name] = item.get();
     }
   }
+  tiltc_load();
+}
+
+// ------------------------------------------------------------------ tiltc
+
+bool tiltc_off() {
+  const char* v = std::getenv("TILT_VM_NOCACHE");
+  return v && std::string(v) == "1";
+}
+
+void Interpreter::tiltc_note(const char* what) {
+  if (std::getenv("TILT_VM_DEBUG")) std::cerr << "[tiltc " << what << "]\n";
+}
+
+void Interpreter::tiltc_load() {
+  if (tiltc_loaded_ || tiltc_off()) return;
+  tiltc_loaded_ = true;
+  const SourceFile* src = diag_.source();
+  if (!src || src->path().empty()) return;
+  tiltc_path_ = vm::tiltc_path_for(src->path());
+  vm::CachedProgram prog;
+  if (vm::tiltc_load(tiltc_path_, std::string(src->text()), prog)) {
+    tiltc_prog_ = std::move(prog);
+    tiltc_note("hit");
+  } else {
+    tiltc_note("miss");
+  }
+}
+
+void Interpreter::tiltc_flush() {
+  if (!tiltc_dirty_ || tiltc_path_.empty() || tiltc_off()) return;
+  tiltc_dirty_ = false;
+  const SourceFile* src = diag_.source();
+  if (!src) return;
+  if (vm::tiltc_save(tiltc_path_, std::string(src->text()), tiltc_prog_)) {
+    tiltc_note("save");
+  }
 }
 
 // ------------------------------------------------------------------ modules
@@ -422,6 +460,44 @@ bool parse_duracao(const std::string& s, std::time_t& out) {
   return true;
 }
 
+bool parse_duracao_com_zero(const std::string& s, std::time_t& out) {
+  if (s == "0s" || s == "0min" || s == "0h") {
+    out = 0;
+    return true;
+  }
+  return parse_duracao(s, out);
+}
+
+Value janela_literal(const Expr& e, Span span) {
+  switch (e.kind) {
+    case ExprKind::IntLit:
+      return Value::inteiro(std::strtoll(e.text.c_str(), nullptr, 10));
+    case ExprKind::DecimalLit:
+      return Value::decimal(std::strtod(e.text.c_str(), nullptr));
+    case ExprKind::TextLit:
+      return Value::texto(e.text);
+    case ExprKind::NullLit:
+      return Value::nulo();
+    default:
+      throw std::runtime_error("valor de cursor/backfill deve ser literal (linha " +
+                               std::to_string(span.line) + ")");
+  }
+}
+
+int comparar_janela_cursor(const Value& a, const Value& b, Span span) {
+  if (a.is_number() && b.is_number()) {
+    const double x = a.as_number();
+    const double y = b.as_number();
+    return x < y ? -1 : (x > y ? 1 : 0);
+  }
+  if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) {
+    return a.s < b.s ? -1 : (a.s > b.s ? 1 : 0);
+  }
+  throw std::runtime_error("cursor/backfill: valores devem ter o mesmo tipo "
+                           "(inteiro/decimal ou texto) na linha " +
+                           std::to_string(span.line));
+}
+
 JanelaSpec parse_janela(const Item& field) {
   JanelaSpec spec;
   const Expr* v = field.value.get();
@@ -447,12 +523,14 @@ JanelaSpec parse_janela(const Item& field) {
 }
 
 // Especificacao completa de `ao_falhar: repetir N[, espera: "5s"][, backoff: 2]`:
-// tentativas extras, espera base entre elas e fator multiplicativo (1 = fixo).
+// tentativas extras, espera base entre elas, fator multiplicativo (1 = fixo)
+// e jitter adicional aleatorio (0..jitter).
 // Valida duracao e fator; joga runtime_error com mensagem acionavel.
 struct RetrySpec {
   int tentativas = 0;
   std::time_t espera = 0;
   long backoff = 1;
+  std::time_t jitter = 0;
 };
 
 RetrySpec retry_spec(const Item& pipeline) {
@@ -473,6 +551,12 @@ RetrySpec retry_spec(const Item& pipeline) {
       if (a.value->kind != ExprKind::IntLit ||
           (spec.backoff = std::strtol(a.value->text.c_str(), nullptr, 10)) < 1) {
         throw std::runtime_error("ao_falhar: 'backoff' deve ser inteiro >= 1 (1 = espera fixa)");
+      }
+    } else if (a.name == "jitter") {
+      if (a.value->kind != ExprKind::TextLit ||
+          !parse_duracao_com_zero(a.value->text, spec.jitter)) {
+        throw std::runtime_error(
+            "ao_falhar: 'jitter' deve ser duracao (\"0s\", \"5s\", \"2min\", \"1h\")");
       }
     }
   }
@@ -642,8 +726,10 @@ int Interpreter::run() {
 
     if (!pipelines_.empty()) {
       for (const Item* p : pipelines_) run_pipeline(*p);
+      tiltc_flush();
     } else if (auto it = functions_.find("principal"); it != functions_.end()) {
       call_function(*it->second, {}, it->second->span);
+      tiltc_flush();
     } else if (!did_something) {
       out_ << "nada para executar: nenhum 'pipeline', 'treino', 'experimento', 'avaliacao' nem 'funcao principal'\n";
     }
@@ -711,12 +797,27 @@ int Interpreter::run_vm() {
       std::unordered_set<std::string> names;
       for (const auto& kv : functions_) names.insert(kv.first);
       for (const Item* p : pipelines_) {
-        // Pipeline no subconjunto -> bytecode VM; fora dele -> arvore.
+        // Pipeline no subconjunto -> bytecode VM (.tiltc, senao compila);
+        // fora dele -> arvore.
         std::shared_ptr<vm::Chunk> chunk;
-        try {
-          chunk = std::make_shared<vm::Chunk>(vm::compile_pipeline(*p, names));
-        } catch (const vm::NotCompilable&) {
-          chunk = nullptr;
+        const std::string tkey = "pipeline " + decl_name(*p);
+        if (auto it = tiltc_prog_.entries.find(tkey);
+            it != tiltc_prog_.entries.end() && it->second.is_pipeline) {
+          chunk = std::make_shared<vm::Chunk>(it->second.chunk);
+          tiltc_note("hit");
+        } else {
+          try {
+            chunk = std::make_shared<vm::Chunk>(vm::compile_pipeline(*p, names));
+          } catch (const vm::NotCompilable&) {
+            chunk = nullptr;
+          }
+          if (chunk) {
+            vm::CachedChunk cc;
+            cc.is_pipeline = true;
+            cc.chunk = *chunk;
+            tiltc_prog_.entries[tkey] = std::move(cc);
+            tiltc_dirty_ = true;
+          }
         }
         if (!chunk) {
           run_pipeline(*p);
@@ -732,8 +833,10 @@ int Interpreter::run_vm() {
           fail(p->span, std::string("VM: ") + e.what());
         }
       }
+      tiltc_flush();
     } else if (auto it = functions_.find("principal"); it != functions_.end()) {
       call_function(*it->second, {}, it->second->span);
+      tiltc_flush();
     } else if (!did_something) {
       out_ << "nada para executar: nenhum 'pipeline', 'treino', 'experimento', 'avaliacao' nem 'funcao principal'\n";
     }
@@ -856,6 +959,58 @@ int Interpreter::run_scheduled() {
 void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
   out_ << "== pipeline " << decl_name(pipeline) << " ==\n";
   if (!pipeline.block) return;
+  const auto inicio_pipeline = std::chrono::steady_clock::now();
+  const bool log_pipeline_json = [] {
+    const char* valor = std::getenv("TILT_PIPELINE_LOG_JSON");
+    return valor && std::string(valor) == "1";
+  }();
+  auto json_escape_pipeline = [](const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    for (const char c : value) {
+      switch (c) {
+        case '"': escaped += "\\\""; break;
+        case '\\': escaped += "\\\\"; break;
+        case '\n': escaped += "\\n"; break;
+        case '\r': escaped += "\\r"; break;
+        case '\t': escaped += "\\t"; break;
+        default: escaped += c; break;
+      }
+    }
+    return escaped;
+  };
+  auto log_pipeline = [&](const char* status, int tentativas, const std::string& erro) {
+    if (!log_pipeline_json) return;
+    const auto decorrido = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - inicio_pipeline);
+    out_ << "{\"evento\":\"pipeline\",\"nome\":\""
+         << json_escape_pipeline(decl_name(pipeline)) << "\",\"status\":\"" << status
+         << "\",\"tentativas\":" << tentativas << ",\"duracao_us\":"
+         << std::max<long long>(1, decorrido.count());
+    if (!erro.empty()) {
+      out_ << ",\"erro\":\"" << json_escape_pipeline(erro) << "\"";
+    }
+    out_ << "}\n";
+  };
+  log_pipeline("iniciado", 0, "");
+  std::time_t sla = 0;
+  if (const Item* sf = find_field(*pipeline.block, "sla")) {
+    if (!sf->value || sf->value->kind != ExprKind::TextLit ||
+        !parse_duracao(sf->value->text, sla)) {
+      fail(sf->span, "sla: espera duracao (\"30s\", \"5min\", \"1h\")");
+    }
+  }
+  auto alerta_sla = [&]() {
+    if (sla <= 0) return;
+    const auto decorrido = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - inicio_pipeline);
+    const auto limite = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::seconds(sla));
+    if (decorrido > limite) {
+      out_ << "[sla] alerta: pipeline " << decl_name(pipeline) << " excedeu " << sla
+           << "s (decorrido " << decorrido.count() << "ms)\n";
+    }
+  };
 
   if (const Item* ag = find_field(*pipeline.block, "agenda");
       ag && ag->value && ag->value->kind == ExprKind::TextLit) {
@@ -868,6 +1023,7 @@ void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
   const Item* passos = find_field(*pipeline.block, "passos");
   if (!passos || !passos->block) {
     out_ << "  (sem passos)\n";
+    log_pipeline("sem_passos", 0, "");
     return;
   }
 
@@ -882,6 +1038,7 @@ void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
     }
     if (!run_janela(*janela, pipeline, now, janela_lotes)) {
       out_ << "  (janela nao fechou; passos nao executados)\n";
+      log_pipeline("janela_pendente", 0, "");
       return;
     }
   }
@@ -914,7 +1071,28 @@ void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
     qst = std::make_shared<QuarentenaState>();
     qst->caminho = qf->value->text;
   }
+  auto executar_callback = [&](const char* nome, const std::string& erro,
+                               int tentativas_executadas) {
+    const Item* callback = find_field(*pipeline.block, nome);
+    if (!callback) return;
+    if (!callback->block) {
+      fail(callback->span, std::string(nome) + ": espera um bloco de passos");
+    }
+    Env env;
+    env.parent = &root_;
+    if (janela) env.vars["linhas"] = Value::lista(janela_lotes);
+    env.vars["pipeline"] = Value::texto(decl_name(pipeline));
+    env.vars["tentativas"] = Value::inteiro(tentativas_executadas);
+    env.vars["status"] = Value::texto(erro.empty() ? "sucesso" : "falha");
+    if (!erro.empty()) env.vars["erro"] = Value::texto(erro);
+    env.quarentena = qst;
+    exec_block(*callback->block, env);
+  };
+  std::exception_ptr falha_final;
+  std::string mensagem_falha;
+  int tentativas_executadas = 0;
   for (int attempt = 0; attempt <= retries; ++attempt) {
+    tentativas_executadas = attempt + 1;
     try {
       if (com_prazo) {
         auto senv = std::make_shared<Env>();
@@ -933,9 +1111,13 @@ void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
       if (qst && qst->n > 0) {
         out_ << "quarentena: " << qst->n << " linha(s) desviadas para " << qst->caminho << "\n";
       }
-      return;
+      break;
     } catch (const RuntimeAbort& a) {
-      if (attempt >= retries) throw;
+      if (attempt >= retries) {
+        falha_final = std::current_exception();
+        mensagem_falha = a.message;
+        break;
+      }
       // Espera com backoff: espera * backoff^attempt, teto de 5min.
       long espera = retry.espera;
       for (int k = 0; k < attempt; ++k) {
@@ -945,9 +1127,17 @@ void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
           break;
         }
       }
+      if (retry.jitter > 0) {
+        std::random_device rd;
+        std::mt19937 gerador(rd());
+        std::uniform_int_distribution<long> distribuicao(0, static_cast<long>(retry.jitter));
+        espera += distribuicao(gerador);
+      }
+      espera = std::min<long>(espera, 300);
       if (espera > 0) {
         out_ << "[retry] passo falhou (" << a.message << "); nova tentativa em " << espera
-             << "s (" << (attempt + 2) << "/" << (retries + 1) << ")\n";
+             << "s" << (retry.jitter > 0 ? " (com jitter)" : "") << " ("
+             << (attempt + 2) << "/" << (retries + 1) << ")\n";
         std::this_thread::sleep_for(std::chrono::seconds(espera));
       } else {
         out_ << "[retry] passo falhou (" << a.message << "); tentativa " << (attempt + 2) << "/"
@@ -955,6 +1145,21 @@ void Interpreter::run_pipeline(const Item& pipeline, std::time_t now) {
       }
     }
   }
+  if (falha_final) {
+    if (find_field(*pipeline.block, "on_failure")) {
+      try {
+        executar_callback("on_failure", mensagem_falha, tentativas_executadas);
+      } catch (const std::exception& callback_error) {
+        out_ << "[callback] on_failure falhou: " << callback_error.what() << "\n";
+      }
+    }
+    log_pipeline("falha", tentativas_executadas, mensagem_falha);
+    alerta_sla();
+    std::rethrow_exception(falha_final);
+  }
+  executar_callback("on_success", "", tentativas_executadas);
+  log_pipeline("sucesso", tentativas_executadas, "");
+  alerta_sla();
 }
 
 bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time_t now,
@@ -994,8 +1199,50 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
     fail(janela.span, "janela: contagem exige 'entrada:' (fonte)");
   }
 
+  std::string cursor_col;
+  if (const Item* desde = find_field(*pipeline.block, "desde")) {
+    if (!desde->value ||
+        (desde->value->kind != ExprKind::Name && desde->value->kind != ExprKind::TextLit) ||
+        desde->value->text.empty()) {
+      fail(desde->span, "desde: espera o nome da coluna de cursor (ex.: desde: criado_em)");
+    }
+    cursor_col = desde->value->text;
+    if (fonte.empty()) fail(desde->span, "desde: exige 'entrada:' (fonte)");
+  }
+
+  bool tem_backfill = false;
+  Value backfill_desde;
+  Value backfill_ate;
+  if (const Item* bf = find_field(*pipeline.block, "backfill")) {
+    if (!bf->value || bf->value->kind != ExprKind::MapLit) {
+      fail(bf->span, "backfill: espera { desde: valor, ate: valor }");
+    }
+    const Expr* from = nullptr;
+    const Expr* to = nullptr;
+    for (const auto& entry : bf->value->entries) {
+      if (entry.key == "desde") from = entry.value.get();
+      if (entry.key == "ate") to = entry.value.get();
+    }
+    if (!from || !to) fail(bf->span, "backfill: exige os limites 'desde' e 'ate'");
+    try {
+      backfill_desde = janela_literal(*from, from->span);
+      backfill_ate = janela_literal(*to, to->span);
+      if (backfill_desde.kind == ValueKind::Nulo || backfill_ate.kind == ValueKind::Nulo ||
+          comparar_janela_cursor(backfill_desde, backfill_ate, bf->span) > 0) {
+        fail(bf->span, "backfill: 'desde' deve ser menor ou igual a 'ate'");
+      }
+    } catch (const std::exception& e) {
+      fail(bf->span, e.what());
+    }
+    tem_backfill = true;
+    if (cursor_col.empty()) {
+      fail(bf->span, "backfill: exige 'desde: coluna' para definir o cursor");
+    }
+  }
+
   const std::string pipe_name = decl_name(pipeline);
   WindowState& st = window_states_[pipe_name];
+  st.cursor_active = !cursor_col.empty();
   // Offset persistente: janela de contagem OU de tempo com fonte de arquivo, e
   // nunca com TILT_JANELA_ESTADO=memoria (pipelines efemeros/testes).
   // Fase 12-4: o arquivo mora em TILT_CHECKPOINT_DIR quando configurado.
@@ -1008,17 +1255,57 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
     }
   }
   if (!fonte.empty()) {
-    // Le a fonte inteira a cada tick; so os elementos alem do offset acumulam.
+    // Le a fonte inteira a cada tick. Cursor e backfill filtram por valor;
+    // o modo sem cursor preserva o offset posicional legado.
     Value data = read_fonte(fonte, entrada->span);
     if (data.list) {
-      if (st.offset > data.list->size()) st.offset = data.list->size();  // fonte encolheu
-      for (std::size_t i = st.offset; i < data.list->size(); ++i) {
-        st.buffer.push_back((*data.list)[i]);
+      if (st.cursor_active) {
+        if (tem_backfill && st.backfill_loaded) {
+          // Backfill e uma leitura delimitada de uma vez; o buffer continua
+          // podendo fechar em ticks seguintes quando a janela e de contagem.
+        } else {
+          Value maior_lido = st.cursor_observed_valid
+                                 ? st.cursor_observed
+                                 : (st.cursor_loaded ? st.cursor_watermark : Value::nulo());
+          bool tem_maior = st.cursor_observed_valid || st.cursor_loaded;
+          for (const Value& row : *data.list) {
+            if (row.kind != ValueKind::Mapa || !row.map) {
+              fail(entrada->span, "cursor '" + cursor_col + "' exige linhas em mapas");
+            }
+            const Value* cursor = row.map->find(cursor_col);
+            if (!cursor || cursor->kind == ValueKind::Nulo) {
+              fail(entrada->span, "cursor '" + cursor_col + "' ausente ou nulo na fonte");
+            }
+            bool inclui = true;
+            if (tem_backfill) {
+              inclui = comparar_janela_cursor(*cursor, backfill_desde, entrada->span) >= 0 &&
+                       comparar_janela_cursor(*cursor, backfill_ate, entrada->span) <= 0;
+            } else if (tem_maior) {
+              inclui = comparar_janela_cursor(*cursor, maior_lido, entrada->span) > 0;
+            }
+            if (!inclui) continue;
+            st.buffer.push_back(row);
+            if (!tem_maior || comparar_janela_cursor(*cursor, maior_lido, entrada->span) > 0) {
+              maior_lido = *cursor;
+              tem_maior = true;
+            }
+          }
+          if (tem_maior) {
+            st.cursor_observed = maior_lido;
+            st.cursor_observed_valid = true;
+          }
+          if (tem_backfill) st.backfill_loaded = true;
+        }
+      } else {
+        if (st.offset > data.list->size()) st.offset = data.list->size();  // fonte encolheu
+        for (std::size_t i = st.offset; i < data.list->size(); ++i) {
+          st.buffer.push_back((*data.list)[i]);
+        }
+        st.offset = data.list->size();
       }
-      st.offset = data.list->size();
     }
     // Grava so quando o offset avanca (nada consumido = sem arquivo novo).
-    if (!offset_file.empty() && st.offset > st.persisted_offset) {
+    if (!st.cursor_active && !offset_file.empty() && st.offset > st.persisted_offset) {
       janela_offset_save(st, pipe_name, offset_file);
     }
   }
@@ -1031,6 +1318,17 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
     const long consome = spec.count - sobreposicao;
     if (st.buffer.size() >= static_cast<std::size_t>(spec.count)) {
       batch.assign(st.buffer.begin(), st.buffer.begin() + spec.count);
+      if (st.cursor_active) {
+        for (long i = 0; i < consome; ++i) {
+          const Value& row = batch[static_cast<std::size_t>(i)];
+          const Value* cursor = row.map ? row.map->find(cursor_col) : nullptr;
+          if (cursor && (!st.cursor_loaded ||
+                         comparar_janela_cursor(*cursor, st.cursor_watermark, janela.span) > 0)) {
+            st.cursor_watermark = *cursor;
+            st.cursor_loaded = true;
+          }
+        }
+      }
       st.buffer.erase(st.buffer.begin(), st.buffer.begin() + consome);
       roda = true;
     }
@@ -1040,6 +1338,16 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
       roda = decorreu;  // throttle: no maximo 1 execucao por duracao
     } else if (decorreu && !st.buffer.empty()) {
       batch = st.buffer;  // janela de tempo: entrega tudo que acumulou e zera
+      if (st.cursor_active) {
+        for (const Value& row : batch) {
+          const Value* cursor = row.map ? row.map->find(cursor_col) : nullptr;
+          if (cursor && (!st.cursor_loaded ||
+                         comparar_janela_cursor(*cursor, st.cursor_watermark, janela.span) > 0)) {
+            st.cursor_watermark = *cursor;
+            st.cursor_loaded = true;
+          }
+        }
+      }
       st.buffer.clear();
       roda = true;
     }
@@ -1049,7 +1357,7 @@ bool Interpreter::run_janela(const Item& janela, const Item& pipeline, std::time
     st.last_run = now;
     // Persiste o relogio para janelas de tempo/throttle entre replicas
     // (contagem mantem o formato legado numero-puro).
-    if (!offset_file.empty() && spec.kind != JanelaSpec::Contagem) {
+    if (!offset_file.empty() && (st.cursor_active || spec.kind != JanelaSpec::Contagem)) {
       janela_offset_save(st, pipe_name, offset_file, true);
     }
   }
@@ -1168,7 +1476,7 @@ std::string Interpreter::janela_offset_file(const std::string& fonte) {
   const Item* decl = entities_.at(fonte);
   if (!decl->block) return "";
   const std::string tipo = fonte_field_text(*decl->block, "tipo");
-  if (tipo != "csv" && tipo != "json") return "";
+  if (tipo != "csv" && tipo != "json" && tipo != "parquet") return "";
   std::string path = fonte_field_text(*decl->block, "caminho");
   if (path.empty()) path = fonte_field_text(*decl->block, "arquivo");
   if (path.empty()) path = fonte_field_text(*decl->block, "url");
@@ -1211,6 +1519,13 @@ void Interpreter::janela_offset_load(WindowState& st, const std::string& pipelin
         st.offset = static_cast<std::size_t>(o->as_number());
         st.persisted_offset = st.offset;
       }
+      if (const Value* cursor = v->map->find("cursor");
+          cursor && cursor->kind != ValueKind::Nulo) {
+        st.cursor_watermark = *cursor;
+        st.cursor_loaded = true;
+        st.cursor_observed = *cursor;
+        st.cursor_observed_valid = true;
+      }
       if (const Value* lr = v->map->find("last_run"); lr && lr->is_number()) {
         st.last_run = static_cast<std::time_t>(lr->as_number());
         st.ran_once = true;
@@ -1241,10 +1556,13 @@ void Interpreter::janela_offset_save(WindowState& st, const std::string& pipelin
   } catch (const std::exception&) {
     // backend fora do ar na leitura: segue com o mapa local
   }
-  if (com_relogio && st.ran_once) {
+  if (st.cursor_active || (com_relogio && st.ran_once)) {
     Value entry = Value::mapa();
     entry.map->set("offset", Value::inteiro(static_cast<std::int64_t>(st.offset)));
-    entry.map->set("last_run", Value::inteiro(static_cast<std::int64_t>(st.last_run)));
+    if (st.cursor_active && st.cursor_loaded) entry.map->set("cursor", st.cursor_watermark);
+    if (com_relogio && st.ran_once) {
+      entry.map->set("last_run", Value::inteiro(static_cast<std::int64_t>(st.last_run)));
+    }
     map.map->set(pipeline, std::move(entry));
   } else {
     map.map->set(pipeline, Value::inteiro(static_cast<std::int64_t>(st.offset)));
@@ -2335,6 +2653,13 @@ void Interpreter::ler_cfg_treino(const ast::Block& cfg, std::int64_t n, const st
   const Item* vf = find_field(cfg, "verboso");
   out.verbose = vf && vf->value && vf->value->kind == ExprKind::BoolLit && vf->value->boolean;
   out.lote = field_int(cfg, "lote", static_cast<int>(n));
+  out.embaralhar = true;
+  if (const Item* ef = find_field(cfg, "embaralhar"); ef && ef->value) {
+    if (ef->value->kind != ExprKind::BoolLit) {
+      fail(span, ctx + ": 'embaralhar' deve ser verdadeiro ou falso");
+    }
+    out.embaralhar = ef->value->boolean;
+  }
   if (out.lote < 1) fail(span, ctx + ": 'lote' deve ser >= 1");
   out.seed_init = 0xC1A5;
   out.seed_mistura = 7;
@@ -2425,6 +2750,12 @@ void Interpreter::ler_cfg_treino(const ast::Block& cfg, std::int64_t n, const st
   if (const Item* rf = find_field(cfg, "retomar");
       rf && rf->value && rf->value->kind == ExprKind::TextLit) {
     out.retomar = rf->value->text;
+  }
+  if (const Item* cb = find_field(cfg, "ao_epoca")) {
+    if (!cb->block) {
+      fail(span, ctx + ": 'ao_epoca' deve ser um bloco de passos");
+    }
+    out.ao_epoca = cb->block.get();
   }
   out.bloco = field_int(cfg, "bloco", 1024);
   if (out.bloco < 1) fail(span, ctx + ": 'bloco' deve ser >= 1");
@@ -2924,7 +3255,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       std::vector<std::int64_t> ordem(static_cast<std::size_t>(n_full));
       for (std::int64_t i = 0; i < n_full; ++i) ordem[static_cast<std::size_t>(i)] = i;
       // Embaralhamento deterministico pela semente (so quando ha >1 lote).
-      if (tamanho_lote < n_full) {
+      if (cfg.embaralhar && tamanho_lote < n_full) {
         std::mt19937_64 rng(cfg.seed_mistura + seed_sufixo);
         std::shuffle(ordem.begin(), ordem.end(), rng);
       }
@@ -3140,7 +3471,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           const std::int64_t n_blocos = (n + cfg.bloco - 1) / cfg.bloco;
           std::vector<std::int64_t> ob(static_cast<std::size_t>(n_blocos));
           for (std::int64_t i = 0; i < n_blocos; ++i) ob[static_cast<std::size_t>(i)] = i;
-          {
+          if (cfg.embaralhar) {
             std::mt19937_64 rngb(cfg.seed_mistura + static_cast<std::uint64_t>(epoch) +
                                  0xBF58476D1CE4E5B9ULL);
             std::shuffle(ob.begin(), ob.end(), rngb);
@@ -3160,7 +3491,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           // Parquet: vaos de row groups em ordem embaralhada por epoca.
           std::vector<std::int64_t> ov(vaos.size());
           for (std::size_t i = 0; i < vaos.size(); ++i) ov[i] = static_cast<std::int64_t>(i);
-          {
+          if (cfg.embaralhar) {
             std::mt19937_64 rngv(cfg.seed_mistura + static_cast<std::uint64_t>(epoch) +
                                  0x94D049BB133111EBULL);
             std::shuffle(ov.begin(), ov.end(), rngv);
@@ -3215,10 +3546,24 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         }
       }
       relato.epocas_feitas = epoch;
+      double perda_val_epoca = -1.0;
       if (cfg.f_val > 0.0) {
         // Perda de validacao em modo inferencia (usa media/var correntes do BN).
-        const double perda_val =
-            n_val_feito > 0 ? soma_val / static_cast<double>(n_val_feito) : 0.0;
+        perda_val_epoca = n_val_feito > 0 ? soma_val / static_cast<double>(n_val_feito) : 0.0;
+      }
+      if (cfg.ao_epoca) {
+        Env callback;
+        callback.parent = &root_;
+        callback.vars["epoca"] = Value::inteiro(epoch);
+        callback.vars["perda"] = Value::decimal(perda_epoca);
+        callback.vars["perda_validacao"] =
+            perda_val_epoca >= 0.0 ? Value::decimal(perda_val_epoca) : Value::nulo();
+        callback.vars["taxa"] = Value::decimal(lr);
+        callback.vars["modelo"] = Value::texto(name);
+        exec_block(*cfg.ao_epoca, callback);
+      }
+      if (cfg.f_val > 0.0) {
+        const double perda_val = perda_val_epoca;
         if (perda_val < melhor_val - cfg.melhorar_min) {
           melhor_val = perda_val;
           melhor_epoca = epoch;
@@ -3386,6 +3731,9 @@ void Interpreter::run_busca(const Item& decl) {
   const std::int64_t n = dt0.n;
 
   ler_cfg_treino(cfg, n, ctx, decl.span, base);
+  if (base.ao_epoca) {
+    fail(decl.span, ctx + ": 'ao_epoca' nao se aplica a busca (use treino)");
+  }
   if (!base.checkpoint.empty() || !base.retomar.empty()) {
     fail(decl.span, ctx + ": 'checkpoint'/'retomar' nao se aplicam a busca (use treino)");
   }
@@ -5999,6 +6347,26 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
     }
     if (!mem.empty()) prompt = mem + "\n" + message;
   }
+  // Memoria vetorial: recupera os turnos mais similares e prefixa no prompt
+  // (mesmo ponto onde a conversa entraria; os dois modos sao exclusivos).
+  // O modelo de embeddings vem de `embeddings:` (default text-embedding-3-small).
+  std::vector<float> mem_vec;
+  if (memoria == "vetorial") {
+    const std::string emb_model = field_str(cfg, "embeddings");
+    const std::string& modelo = emb_model.empty() ? "text-embedding-3-small" : emb_model;
+    mem_vec = rt::llm_embed(modelo, message);
+    std::vector<rt::MemoryIndex::Hit> hits;
+    {
+      std::lock_guard<std::mutex> lk(agent_memory_mutex_);
+      auto it = agent_vector_memory_.find(agent_name);
+      if (it != agent_vector_memory_.end()) hits = it->second.search(mem_vec, 3);
+    }
+    if (!hits.empty()) {
+      std::string lembretes = "Lembretes relevantes:";
+      for (const auto& h : hits) lembretes += "\n- " + h.text;
+      prompt = lembretes + "\n" + message;
+    }
+  }
 
   Value rastro = Value::lista();
   std::string answer;
@@ -6105,6 +6473,17 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
     std::lock_guard<std::mutex> lk(agent_memory_mutex_);
     std::string& mem = agent_memory_[agent_name];
     mem += (mem.empty() ? "" : "\n") + ("usuario: " + message) + "\nagente: " + answer;
+  }
+  if (memoria == "vetorial" && !mem_vec.empty()) {
+    // Guarda o turno com o embedding da pergunta (o mesmo usado na busca).
+    // Sem poda no indice: acima do teto, turnos novos nao entram.
+    constexpr std::size_t kMaxMemoriaTurnos = 200;
+    std::lock_guard<std::mutex> lk(agent_memory_mutex_);
+    rt::MemoryIndex& store = agent_vector_memory_[agent_name];
+    if (store.size() < kMaxMemoriaTurnos) {
+      store.insert(std::to_string(store.size()), "usuario: " + message + "\nagente: " + answer,
+                   mem_vec);
+    }
   }
 
   Value out = Value::mapa();
@@ -6313,14 +6692,55 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
 
   int port = port_override > 0 ? port_override : field_int(*svc->block, "porta", 8080);
   const std::vector<Route> routes = collect_routes(*svc->block);
-  // Observabilidade opt-in: GET /saude e GET /metricas implicitos (rotas do
-  // usuario com o mesmo metodo+caminho vencem).
+  // Observabilidade opt-in: GET /saude, GET /metricas e a variante Prometheus
+  // sao implicitos (rotas do usuario com o mesmo metodo+caminho vencem).
   auto campo_ligado = [&](const char* nome) {
     const Item* f = find_field(*svc->block, nome);
     return f && f->value && f->value->kind == ExprKind::BoolLit && f->value->boolean;
   };
   const bool tem_saude = campo_ligado("saude");
   const bool tem_metricas = campo_ligado("metricas");
+  auto prometheus_escape = [](const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    for (const char c : value) {
+      if (c == '\\' || c == '"' || c == '\n') escaped += '\\';
+      escaped += c;
+    }
+    return escaped;
+  };
+  auto metricas_prometheus = [&]() {
+    std::ostringstream out;
+    out << "# HELP tilt_http_requests_total Total de requisicoes HTTP.\n"
+        << "# TYPE tilt_http_requests_total counter\n"
+        << "tilt_http_requests_total{service=\""
+        << prometheus_escape(decl_name(*svc)) << "\"} ";
+    {
+      std::lock_guard<std::mutex> lk(metricas_mutex_);
+      out << metricas_.requisicoes << "\n"
+          << "# HELP tilt_http_errors_total Total de respostas HTTP 5xx.\n"
+          << "# TYPE tilt_http_errors_total counter\n"
+          << "tilt_http_errors_total{service=\"" << prometheus_escape(decl_name(*svc))
+          << "\"} " << metricas_.erros << "\n"
+          << "# HELP tilt_http_request_duration_microseconds_total Soma das latencias HTTP.\n"
+          << "# TYPE tilt_http_request_duration_microseconds_total counter\n"
+          << "# HELP tilt_http_request_duration_microseconds_max Maior latencia HTTP observada.\n"
+          << "# TYPE tilt_http_request_duration_microseconds_max gauge\n";
+      for (const auto& kv : metricas_.por_rota) {
+        const std::size_t sep = kv.first.find(' ');
+        const std::string metodo = sep == std::string::npos ? kv.first : kv.first.substr(0, sep);
+        const std::string rota = sep == std::string::npos ? "/" : kv.first.substr(sep + 1);
+        const std::string labels = "{service=\"" + prometheus_escape(decl_name(*svc)) +
+                                   "\",method=\"" + prometheus_escape(metodo) +
+                                   "\",route=\"" + prometheus_escape(rota) + "\"}";
+        out << "tilt_http_request_duration_microseconds_total" << labels << ' '
+            << kv.second.latencia_total_us << "\n"
+            << "tilt_http_request_duration_microseconds_max" << labels << ' '
+            << kv.second.latencia_max_us << "\n";
+      }
+    }
+    return out.str();
+  };
   {
     const std::time_t agora = std::time(nullptr);
     char iso[32];
@@ -6359,6 +6779,9 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
   const int served = server.run(
       [&](const rt::HttpRequest& req) -> rt::HttpResponse {
         rt::HttpResponse resp;
+        const auto inicio_requisicao = std::chrono::steady_clock::now();
+        const std::string trace_id =
+            "req-" + std::to_string(proximo_trace_id_.fetch_add(1, std::memory_order_relaxed));
         const Route* match = nullptr;
         for (const Route& r : routes) {
           if (r.method == req.method && r.path == req.path) {
@@ -6367,6 +6790,10 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
           }
         }
 
+        const bool metricas_prometheus_request =
+            req.method == "GET" &&
+            (req.path == "/metricas/prometheus" || req.path == "/metricas?formato=prometheus" ||
+             req.path == "/metricas?format=prometheus");
         // Rotas implicitas de observabilidade (so GET; rota do usuario vence).
         if (!match && req.method == "GET" && req.path == "/saude" && tem_saude) {
           Value corpo = Value::mapa();
@@ -6375,6 +6802,10 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
           corpo.map->set("rotas", Value::inteiro(static_cast<std::int64_t>(routes.size())));
           resp.status = 200;
           resp.body = json_dump(corpo);
+        } else if (!match && metricas_prometheus_request && tem_metricas) {
+          resp.status = 200;
+          resp.content_type = "text/plain; version=0.0.4; charset=utf-8";
+          resp.body = metricas_prometheus();
         } else if (!match && req.method == "GET" && req.path == "/metricas" && tem_metricas) {
           Value corpo = Value::mapa();
           Value rotas = Value::mapa();
@@ -6385,8 +6816,17 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
             corpo.map->set("erros", Value::inteiro(metricas_.erros));
             for (const auto& kv : metricas_.por_rota) {
               Value m = Value::mapa();
-              m.map->set("total", Value::inteiro(kv.second.first));
-              m.map->set("erros", Value::inteiro(kv.second.second));
+              m.map->set("total", Value::inteiro(kv.second.total));
+              m.map->set("erros", Value::inteiro(kv.second.erros));
+              Value lat = Value::mapa();
+              lat.map->set("total", Value::inteiro(kv.second.latencia_total_us));
+              const double media = kv.second.total > 0
+                                       ? static_cast<double>(kv.second.latencia_total_us) /
+                                             static_cast<double>(kv.second.total)
+                                       : 0.0;
+              lat.map->set("media", Value::decimal(media));
+              lat.map->set("max", Value::inteiro(kv.second.latencia_max_us));
+              m.map->set("latencia_us", std::move(lat));
               rotas.map->set(kv.first, m);
             }
           }
@@ -6480,20 +6920,50 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
           }
         }
 
+        const auto duracao = std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now() - inicio_requisicao)
+                                 .count();
+        const long long latencia_us = std::max<long long>(1, duracao);
+        auto json_log_escape = [](const std::string& value) {
+          std::string escaped;
+          escaped.reserve(value.size() + 2);
+          for (const char c : value) {
+            switch (c) {
+              case '"': escaped += "\\\""; break;
+              case '\\': escaped += "\\\\"; break;
+              case '\n': escaped += "\\n"; break;
+              case '\r': escaped += "\\r"; break;
+              case '\t': escaped += "\\t"; break;
+              default: escaped += c; break;
+            }
+          }
+          return escaped;
+        };
         {
           std::lock_guard<std::mutex> lk(log_mutex_);
-          out_ << req.method << " " << req.path << " -> " << resp.status << "\n" << std::flush;
+          out_ << "{\"trace_id\":\"" << json_log_escape(trace_id)
+               << "\",\"metodo\":\"" << json_log_escape(req.method)
+               << "\",\"rota\":\"" << json_log_escape(req.path)
+               << "\",\"status\":" << resp.status << ",\"latencia_us\":" << latencia_us
+               << "}\n"
+               << std::flush;
         }
         // Contabilidade (menos as implicitas, para nao poluir).
         if (!((req.method == "GET" && req.path == "/saude" && tem_saude) ||
               (req.method == "GET" && req.path == "/metricas" && tem_metricas))) {
+          const auto duracao = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::steady_clock::now() - inicio_requisicao)
+                                   .count();
+          const long long latencia_us = std::max<long long>(1, duracao);
           std::lock_guard<std::mutex> lk(metricas_mutex_);
           metricas_.requisicoes += 1;
           auto& par = metricas_.por_rota[req.method + " " + req.path];
-          par.first += 1;
+          par.total += 1;
+          par.latencia_total_us += latencia_us;
+          par.latencia_max_us = std::max(par.latencia_max_us, latencia_us);
           if (resp.status >= 500) {
             metricas_.erros += 1;
-            par.second += 1;
+            par.erros += 1;
           }
         }
         return resp;
@@ -6634,7 +7104,7 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
       if (stmt.a && stmt.a->kind == ExprKind::Name) {
         env.set(stmt.a->text, std::move(v));
       } else if (stmt.a) {
-        eval(*stmt.a, env);  // evaluate target for side effects; member assign unsupported
+        *lookup_lvalue(*stmt.a, env) = std::move(v);
       }
       return;
     }
@@ -6731,6 +7201,67 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
 }
 
 // ------------------------------------------------------------------ expressions
+
+// Resolve an assignment target without evaluating it to a temporary. Values
+// are returned by value by eval(), so member/index assignment must walk through
+// the owning object and return the actual slot in the map/list.
+Value* Interpreter::lookup_lvalue(const Expr& target, Env& env) {
+  switch (target.kind) {
+    case ExprKind::Name: {
+      if (Value* slot = env.lookup(target.text)) return slot;
+      fail(target.span, "nome '" + target.text + "' nao definido");
+      return nullptr;
+    }
+    case ExprKind::Member: {
+      if (!target.lhs) {
+        fail(target.span, "alvo de atribuicao invalido");
+        return nullptr;
+      }
+      Value* base = lookup_lvalue(*target.lhs, env);
+      if (!base || base->kind != ValueKind::Mapa || !base->map) {
+        fail(target.span, std::string("'") + (base ? base->type_name() : "nulo") +
+             "' nao permite atribuicao de campo");
+        return nullptr;
+      }
+      if (Value* slot = base->map->find(target.text)) return slot;
+      base->map->items.emplace_back(target.text, Value::nulo());
+      return &base->map->items.back().second;
+    }
+    case ExprKind::Index: {
+      if (!target.lhs || target.elems.empty()) {
+        fail(target.span, "alvo de atribuicao indexado invalido");
+        return nullptr;
+      }
+      Value* base = lookup_lvalue(*target.lhs, env);
+      Value idx = eval(*target.elems.front(), env);
+      if (base->kind == ValueKind::Lista || base->kind == ValueKind::Tabela) {
+        if (!base->list) {
+          fail(target.span, "lista sem armazenamento para atribuicao");
+          return nullptr;
+        }
+        const std::int64_t n = static_cast<std::int64_t>(base->list->size());
+        std::int64_t i = idx.is_number() ? static_cast<std::int64_t>(idx.as_number()) : 0;
+        if (i < 0) i += n;
+        if (i < 0 || i >= n) {
+          fail(target.span, "indice fora dos limites");
+          return nullptr;
+        }
+        return &(*base->list)[static_cast<std::size_t>(i)];
+      }
+      if (base->kind == ValueKind::Mapa && base->map) {
+        const std::string key = idx.kind == ValueKind::Texto ? idx.s : to_display(idx);
+        if (Value* slot = base->map->find(key)) return slot;
+        base->map->items.emplace_back(key, Value::nulo());
+        return &base->map->items.back().second;
+      }
+      fail(target.span, std::string("nao e possivel atribuir em '") + base->type_name() + "'");
+      return nullptr;
+    }
+    default:
+      fail(target.span, "alvo de atribuicao deve ser um nome, campo ou indice");
+      return nullptr;
+  }
+}
 
 std::string Interpreter::interpolate(const std::string& text, Env& env) {
   std::string out;
@@ -6903,7 +7434,7 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
     }
     case ExprKind::Assign: {
       Value v = eval(*expr.rhs, env);
-      if (expr.lhs && expr.lhs->kind == ExprKind::Name) env.set(expr.lhs->text, v);
+      if (expr.lhs) *lookup_lvalue(*expr.lhs, env) = v;
       return v;
     }
     case ExprKind::Device:
@@ -7068,12 +7599,29 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
     std::lock_guard<std::mutex> lk(vm_chunks_mutex_);
     auto cit = vm_chunks_.find(&fn);
     if (cit == vm_chunks_.end()) {
-      try {
-        std::unordered_set<std::string> names;
-        for (const auto& kv : functions_) names.insert(kv.first);
-        chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
-      } catch (const vm::NotCompilable&) {
-        chunk = nullptr;
+      // Disco antes de compilar (.tiltc; nparams valida contra a assinatura).
+      const std::string tkey = "funcao " + decl_name(fn);
+      if (auto tit = tiltc_prog_.entries.find(tkey);
+          tit != tiltc_prog_.entries.end() && !tit->second.is_pipeline &&
+          tit->second.nparams == static_cast<int>(fn.params.size())) {
+        chunk = std::make_shared<vm::Chunk>(tit->second.chunk);
+        tiltc_note("hit");
+      } else {
+        try {
+          std::unordered_set<std::string> names;
+          for (const auto& kv : functions_) names.insert(kv.first);
+          chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
+        } catch (const vm::NotCompilable&) {
+          chunk = nullptr;
+        }
+        if (chunk) {
+          vm::CachedChunk cc;
+          cc.is_pipeline = false;
+          cc.nparams = static_cast<int>(fn.params.size());
+          cc.chunk = *chunk;
+          tiltc_prog_.entries[tkey] = std::move(cc);
+          tiltc_dirty_ = true;
+        }
       }
       cit = vm_chunks_.emplace(&fn, chunk).first;
       if (std::getenv("TILT_VM_DEBUG") && chunk) {
@@ -7488,6 +8036,17 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "vacuum_delta") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "vacuum_delta espera (diretorio)");
+    }
+    try {
+      return Value::inteiro(rt::delta_vacuum(a[0].s));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "ler_iceberg") {
     auto a = args();
     rt::ValueMap kw = eval_kwargs(call, env);
@@ -7532,6 +8091,17 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
     return Value::nulo();
+  }
+  if (name == "vacuum_iceberg") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "vacuum_iceberg espera (diretorio)");
+    }
+    try {
+      return Value::inteiro(rt::iceberg_vacuum(a[0].s));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
   }
   if (name == "apagar_iceberg") {
     auto a = args();

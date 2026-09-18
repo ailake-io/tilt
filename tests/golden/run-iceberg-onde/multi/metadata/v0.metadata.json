@@ -1,9 +1,9 @@
 {
   "format-version": 2,
-  "table-uuid": "33c71b12-32ae-451c-aee0-298cfc99d285",
+  "table-uuid": "04ead4cf-8227-4173-a4c9-e2dd3d106cc3",
   "location": "/home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi",
-  "last-sequence-number": 0,
-  "last-updated-ms": 1789552574750,
+  "last-sequence-number": 1,
+  "last-updated-ms": 1789730652742,
   "last-column-id": 4,
   "last-partition-id": 1001,
   "schemas": [
@@ -19,17 +19,18 @@
     { "spec-id": 0, "fields": [{ "field-id": 1000, "source-id": 1, "transform": "identity", "name": "estado" }, { "field-id": 1001, "source-id": 2, "transform": "identity", "name": "ano" }] }
   ],
   "default-spec-id": 0,
-  "current-snapshot-id": 6528517541185310975,
+  "current-snapshot-id": 6366925918471022539,
   "snapshots": [
     {
-      "snapshot-id": 6528517541185310975,
-      "timestamp-ms": 1789552574750,
+      "snapshot-id": 6366925918471022539,
+      "sequence-number": 1,
+      "timestamp-ms": 1789730652742,
       "summary": { "operation": "overwrite" },
-      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-6528517541185310975-0-1c7a1c7b-5a2e-4a8c-9a1a-4b03ff1f6a59.avro"
+      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-6366925918471022539-0-615cb73a-5236-484c-b3cc-dce084e5ca2e.avro"
     }
   ],
   "snapshot-log": [
-    { "timestamp-ms": 1789552574750, "snapshot-id": 6528517541185310975 }
+    { "timestamp-ms": 1789730652742, "snapshot-id": 6366925918471022539 }
   ],
   "metadata-log": [],
   "sort-orders": [ { "order-id": 0, "fields": [] } ],

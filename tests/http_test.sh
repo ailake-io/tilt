@@ -41,8 +41,12 @@ fail=0
 echo "$r1" | grep -q '"recebido": "oi"' || { echo "POST /eco inesperado: $r1"; fail=1; }
 echo "$r2" | grep -q '"ok": true' || { echo "GET /saude inesperado: $r2"; fail=1; }
 [ "$r3" = "404" ] || { echo "esperado 404, obtido $r3"; fail=1; }
-grep -q "POST /eco -> 200" "$tmp/log" || { echo "log sem 'POST /eco -> 200'"; cat "$tmp/log"; fail=1; }
-grep -q "GET /nao-existe -> 404" "$tmp/log" || { echo "log sem 404"; cat "$tmp/log"; fail=1; }
+grep -q '"metodo":"POST","rota":"/eco","status":200' "$tmp/log" || {
+  echo "log sem POST /eco -> 200"; cat "$tmp/log"; fail=1;
+}
+grep -q '"metodo":"GET","rota":"/nao-existe","status":404' "$tmp/log" || {
+  echo "log sem GET /nao-existe -> 404"; cat "$tmp/log"; fail=1;
+}
 
 # --- 2) keep-alive: duas requisicoes na MESMA conexao (uma so delas close) --
 if command -v python3 >/dev/null 2>&1; then

@@ -6,6 +6,15 @@ Toda `funcao` cujo corpo cabe no **subconjunto puro** é compilada para bytecode
 de pilha (`src/vm/`) e executada pela VM em vez do interpretador de árvore, com
 cache por função. É transparente — não há flag.
 
+## Cache `.tiltc` em disco
+
+Chunks compilados (pipelines no `--vm`, funções no lazy) são gravados em
+`<fonte>.tiltc` ao lado do fonte, chaveados pelo SHA-256 do conteúdo:
+fonte diferente = cache ignorado; arquivo corrompido ou de outra versão =
+recompila em silêncio. `TILT_VM_NOCACHE=1` desliga;
+`TILT_VM_DEBUG=1` loga `hit`/`miss`/`save` no stderr. Só consts escalares
+serializam (lista/mapa/tabela/tensor pulam o chunk, sem erro).
+
 Subconjunto suportado:
 
 - literais `inteiro`, `decimal`, `texto` (com `{{nome}}` interpolado sobre

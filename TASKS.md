@@ -22,8 +22,15 @@
 - [x] 12-5a.7 — Goldens, documentação e commit da fase concluídos
 
 ### Próximas fases
-- [ ] Fase 12-6 — Operação de pipelines
-- [ ] Fase 12-7 — GPU real/CUDA + AMP + dataloader Parquet
+- [x] Fase 12-6 — Operação de pipelines
+- [x] 12-6.1 — Métricas HTTP com latência monotônica por rota
+- [x] 12-6.2 — Log HTTP estruturado em JSON com `trace_id`
+- [x] 12-6.3 — Cursor incremental com watermark persistente e backfill inclusivo
+- [x] 12-6.4 — Exportação Prometheus de métricas HTTP
+- [x] 12-6.5 — Callbacks de pipeline, alerta de SLA e jitter no backoff
+- [x] 12-6.6 — Logs JSON opt-in com contexto de execução dos pipelines
+- [x] 12-6.7 — Vacuum conservador de arquivos órfãos Delta/Iceberg
+- [ ] Fase 12-7 — GPU real/CUDA + AMP
 - [ ] Fase 12-8 — CI Windows com testes funcionais
 - [ ] GPU — validação em hardware real (deferida)
 
@@ -69,17 +76,17 @@
   `sql_pool_test.sh` + driver standalone sem servidor)
 
 ### 2.2 Parquet/Delta/Iceberg (P2)
-- [ ] Suportar 3+ níveis de lista no Parquet (atualmente limitado)
-- [ ] Suportar structs com `field_ids` explícitos (caminho Iceberg)
+- [x] Suportar 3+ níveis de lista no Parquet
+- [x] Suportar structs com `field_ids` explícitos (caminho Iceberg)
 - [x] Evolução de schema Delta (fase 27 add-column + widening int->long/float->double)
 - [x] Evolução de schema Iceberg (fase 27 add-column + widening, ids estáveis)
-- [ ] Implementar REST catalog do Iceberg (fase 29)
-- [ ] Implementar `tilt servir-catalogo` (fase 30)
+- [x] Implementar REST catalog do Iceberg (fase 29)
+- [x] Implementar `tilt servir-catalogo` (fase 30)
 - [x] Adicionar deletes (position/equality) para Iceberg (fase 12-5a; leitura
   nativa aplica ambos, pyiceberg aplica position e ainda não suporta equality)
 
 ### 2.3 Streaming (P2)
-- [ ] Implementar streaming de Parquet no treino (`carregador ..., fluxo: verdadeiro` — apenas CSV)
+- [x] Implementar streaming de Parquet no treino (`carregador ..., fluxo: verdadeiro`; CSV e Parquet)
 - [ ] Adicionar suporte a Kafka transactions multi-partição
 - [ ] Adicionar persistência de estado entre disparos cron (`--agendar`)
 
@@ -96,17 +103,17 @@
 
 ### 3.2 Treino (P1)
 - [ ] Implementar AMP (automatic mixed precision) — roteiro
-- [ ] Implementar `ao_epoca` (callback por época) — roteiro
-- [ ] Adicionar dataloader de Parquet para treino — roteiro
+- [x] Implementar `ao_epoca` (callback por época; bloco com contexto da época)
+- [x] Adicionar dataloader de Parquet para treino (row groups, fluxo 2D)
 - [ ] Implementar dilation e padding explícito em conv2d
-- [ ] Implementar dataloader com `shuffle` configurável
+- [x] Implementar dataloader com `shuffle` configurável (`embaralhar: verdadeiro|falso`)
 
 ### 3.3 Modelos (P2)
 - [ ] Adicionar camada `incorporacao` (embedding layer)
 - [ ] Adicionar camada `recorrente` (RNN/LSTM/GRU)
 - [ ] Adicionar camada `residual`
 - [ ] Implementar `salvar_pesos`/`carregar_pesos` em formato ONNX
-- [ ] Implementar exportação GGUF v3 (roteiro — apenas escrita F32)
+- [x] Implementar exportação GGUF v3 (escrita F32; quantização ainda pendente)
 
 ---
 
@@ -149,8 +156,8 @@
 ## 6. HTTP e Serviços
 
 ### 6.1 Servidor HTTP (P1)
-- [ ] Implementar observabilidade completa (`/metricas` em formato Prometheus)
-- [ ] Implementar latências por rota em `/metricas` (atualmente ausente)
+- [x] Implementar observabilidade completa (`/metricas` em formato Prometheus)
+- [x] Implementar latências por rota em `/metricas`
 - [x] Graceful shutdown (Sprint 1: SIGINT/SIGTERM drenam e encerram)
 - [ ] Implementar conexões persistentes (keep-alive) em Windows (`select()` loop)
 

@@ -69,7 +69,11 @@ Filtro por prefixo (case-insensitive).
 - autocomplete com gatilhos `.` e `:` (contexto por posição, ver tabela acima);
 - **hover** (`hoverProvider`): documentação em markdown para builtins
   (assinatura + o que faz + exemplo), palavras-chave da linguagem, métodos de
-  tabela/tensor e nomes declarados no arquivo (com a linha da declaração);
+  tabela/tensor e nomes declarados no arquivo (com a linha da declaração) —
+  mais tipos: assinatura `funcao (params) -> ret` e campos de `tipo` vindos do
+  checker, tipo do valor em usos de variável e tipo da expressão mais interna
+  sob o cursor (tensor mostra a forma quando conhecida; desconhecido mantém o
+  texto atual, sem falsos positivos);
 - **go-to-definition** (`definitionProvider`): mesma arquivo — variáveis de
   `seja`/`constante`, atribuições, parâmetros de `funcao`, variáveis de
   `para cada`/`capturar` e nomes de declarações (`pipeline x:`, `funcao y`,

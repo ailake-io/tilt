@@ -1,8 +1,9 @@
 # Editores
 
 O servidor `tilt lsp` fala Language Server Protocol por stdio: diagnósticos
-(`textDocument/publishDiagnostics`) e autocomplete (`textDocument/completion`,
-gatilhos `.` e `:`).
+(`textDocument/publishDiagnostics`), autocomplete (`textDocument/completion`,
+gatilhos `.` e `:`), hover com tipos, go-to-definition (same-file),
+signatureHelp e formatação. Detalhes em `docs/guia-10-ia-editores.md`.
 
 ## Neovim (nvim-lspconfig)
 

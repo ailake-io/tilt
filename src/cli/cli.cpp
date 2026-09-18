@@ -50,22 +50,28 @@ constexpr const char* host_arch() {
 #endif
 }
 
-// Procura uma ferramenta no PATH (sem execucao).
+// Procura uma ferramenta no PATH (sem execucao). No Windows divide por ';'
+// e tenta o nome puro + extensoes executaveis (PATHEXT essencial).
 bool in_path(const std::string& tool) {
-#if defined(_WIN32)
-  (void)tool;
-  return false;  // toolchain cross fica fora do port Windows (1a passada)
-#else
   const char* path_env = std::getenv("PATH");
   if (!path_env) return false;
+#if defined(_WIN32)
+  const char sep = ';';
+  const char* exts[] = {"", ".exe", ".bat", ".cmd"};
+#else
+  const char sep = ':';
+  const char* exts[] = {""};
+#endif
   std::string dir;
   std::istringstream ps(path_env);
-  while (std::getline(ps, dir, ':')) {
-    std::error_code ec;
-    if (std::filesystem::exists(std::filesystem::path(dir) / tool, ec)) return true;
+  while (std::getline(ps, dir, sep)) {
+    if (dir.empty()) continue;
+    for (const char* ext : exts) {
+      std::error_code ec;
+      if (std::filesystem::exists(std::filesystem::path(dir) / (tool + ext), ec)) return true;
+    }
   }
   return false;
-#endif
 }
 
 constexpr int kOk = 0;
@@ -73,12 +79,12 @@ constexpr int kDiagnostics = 1;
 constexpr int kUsage = 2;
 constexpr int kNotImplemented = 3;
 
-// Cores no stderr: 1a passada do port Windows roda sem VT processing
-// (ENABLE_VIRTUAL_TERMINAL_PROCESSING fica para uma fase posterior); POSIX
-// segue com isatty + NO_COLOR.
+// Cores no stderr: Windows habilita VT processing no console
+// (tilt_enable_vt); POSIX segue com isatty + NO_COLOR.
 bool want_color() {
 #if defined(_WIN32)
-  return false;
+  if (std::getenv("NO_COLOR") != nullptr) return false;
+  return rt::tilt_enable_vt();
 #else
   return std::getenv("NO_COLOR") == nullptr && isatty(STDERR_FILENO) != 0;
 #endif

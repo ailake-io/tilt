@@ -554,8 +554,11 @@ std::uint32_t expr_end(const ast::Expr& e) {
 }
 
 // Expressao mais interna contendo o offset (para hover de tipos).
+// `<=` no fim porque spans de nos compostos nao cobrem o fechamento
+// (`]`/`)`): pairar o fechamento mostra o tipo do no. Efeito colateral
+// benigno: espaco colado apos a expressao mostra o tipo dela.
 const ast::Expr* inner_expr(const ast::Expr& e, std::uint32_t off) {
-  if (!(e.span.offset <= off && off < expr_end(e))) return nullptr;
+  if (!(e.span.offset <= off && off <= expr_end(e))) return nullptr;
   const ast::Expr* best = &e;
   each_child_expr(e, [&](const ast::Expr& c) {
     if (const ast::Expr* f = inner_expr(c, off)) best = f;
@@ -829,7 +832,7 @@ std::string hover(const SourceFile& src, std::uint32_t line, std::uint32_t colum
     const ast::Program pr = p2.parse_program();
     SemanticChecker s2(pr, d2);
     s2.run();
-    if (const ast::Expr* e = inner_prog_expr(pr, src.offset_of(line + 1, column + 1))) {
+    if (const ast::Expr* e = inner_prog_expr(pr, src.offset_of(line, column))) {
       if (std::string t = render_hover_type(s2, e); !t.empty()) return "`" + t + "`";
     }
     return {};
@@ -882,8 +885,8 @@ std::string hover(const SourceFile& src, std::uint32_t line, std::uint32_t colum
     return md;
   }
   // Sem declaracao: tipo da expressao mais interna sob o cursor.
-  // (LSP e 0-based; offset_of e 1-based.)
-  const std::uint32_t off = src.offset_of(line + 1, column + 1);
+  // (lsp_server ja converte para 1-based antes de chamar hover().)
+  const std::uint32_t off = src.offset_of(line, column);
   if (const ast::Expr* e = inner_prog_expr(prog, off)) {
     if (std::string t = render_hover_type(sema, e); !t.empty()) {
       std::string md = "`" + t + "`";

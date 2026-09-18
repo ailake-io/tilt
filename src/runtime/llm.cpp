@@ -37,19 +37,6 @@ std::string truncate(const std::string& s, std::size_t n) {
   return s.size() <= n ? s : s.substr(0, n) + "...";
 }
 
-std::string shell_quote(const std::string& s) {
-  std::string out = "'";
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\\''";
-    } else {
-      out += c;
-    }
-  }
-  out += "'";
-  return out;
-}
-
 // Runs a command, returns its stdout. Throws on non-zero exit.
 std::string run(const std::string& cmd) {
   std::string out;
@@ -98,9 +85,10 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
   }
 
   std::string cmd = "curl -sS -X POST -H 'content-type: application/json'";
-  for (const std::string& h : headers) cmd += " -H " + shell_quote(h);
+  for (const std::string& h : headers) cmd += " -H " + tilt_shell_quote(h);
   if (timeout_s > 0) cmd += " --max-time " + std::to_string(timeout_s);
-  cmd += " --data @" + body_file + " -w '\n%{http_code}' " + shell_quote(url);
+  cmd += " --data @" + tilt_shell_quote(body_file) + " -w " + tilt_shell_quote("\n%{http_code}") +
+         " " + tilt_shell_quote(url);
 
   std::string resp;
   try {

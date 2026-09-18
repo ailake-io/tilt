@@ -219,15 +219,15 @@ def main() -> int:
         "    - x = 2 + 3\n"
         "    - nomes = [\"a\", \"b\"]\n"
         "    - primeiro = nomes[0]\n"
-        "    - imprimir x\n"
+        "    - imprimir x, primeiro\n"
     )
     eframes = run_lsp(
         binary,
         exprdoc,
         [
             hover_req(40, 2, 12),  # 2 + 3 (binaria => inteiro)
-            hover_req(41, 5, 15),  # x em `imprimir x` (uso => valor: inteiro)
-            hover_req(42, 4, 24),  # ] de nomes[0] (indice em lista de texto)
+            hover_req(41, 5, 15),  # x em `imprimir` (uso => valor: inteiro)
+            hover_req(42, 5, 18),  # primeiro em `imprimir` (uso => valor: texto)
         ],
     )
     if eframes is None:
@@ -241,8 +241,8 @@ def main() -> int:
     if "valor: inteiro" not in h:
         problems.append(f"hover uso de x: {h[:160]!r}")
     h = (er.get(42, {}).get("result") or {}).get("contents", {}).get("value", "")
-    if "`texto`" not in h:
-        problems.append(f"hover nomes[0]: {h[:160]!r}")
+    if "valor: texto" not in h:
+        problems.append(f"hover uso de primeiro: {h[:160]!r}")
 
     # ----------------------------------------------------------- definition
     def def_req(i, line, ch):

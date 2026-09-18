@@ -23,6 +23,16 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
 
 add_test(
+  NAME pipeline_callbacks
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/pipeline_callbacks_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME table_maintenance
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/table_maintenance_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME servico_ops
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/servico_ops_test.sh
           $<TARGET_FILE:tilt>
@@ -106,6 +116,20 @@ add_test(
 add_test(
   NAME sql_pool
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sql_pool_test.sh)
+
+add_test(
+  NAME tiltc
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tiltc_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME schema_widen
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/schema_widen_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME quote
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/quote_test.sh)
 
 add_test(
   NAME parquet
@@ -200,6 +224,11 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/janela_offset_test.sh
           $<TARGET_FILE:tilt>
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/janela_offset)
+
+add_test(
+  NAME cursor_backfill
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cursor_backfill_test.sh
+          $<TARGET_FILE:tilt>)
 
 add_test(
   NAME leader_checkpoint

@@ -781,7 +781,8 @@ tilt/
 
 ### Fase 6 — VM de bytecode (desempenho)
 - [ ] Loop de despacho da `vm.cpp` sobre o bytecode serializado.
-- [ ] Cache de bytecode em disco (`.tiltc`).
+- [x] Cache de bytecode em disco (`.tiltc` — `src/vm/bytecode_cache.*`, chave
+  SHA-256 do fonte, fail-closed; teste `tiltc_test.sh`).
 
 ### Fase 7 — Emissor nativo (opcional)
 - [ ] `codegen_x86_64` / `codegen_arm64`: emitir `.s`, chamadas `extern "C"` para o runtime (`tilt_http_listen`, `tilt_gpu_alloc`, `tilt_tensor_matmul`, `tilt_llm_chamar`, `tilt_pipeline_rodar`).

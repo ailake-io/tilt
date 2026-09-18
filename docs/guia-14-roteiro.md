@@ -2,8 +2,8 @@
 
 Levantamento do estado real (parser × checker × interpretador × runtime) e
 dos gaps por domínio para a Tilt ficar excelente em engenharia de dados,
-machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fase 12-5a.6
-concluída; consolidação da 12-5a.7 em andamento.
+machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fase 12-6.5
+concluída; a próxima frente é fechar a operação de pipelines.
 
 ## Fase 12-5a — formatos e formas de tensor
 
@@ -25,21 +25,24 @@ checker semântico e seus goldens. O estado consolidado é:
 Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 `verificar`, `janela`, `--agendar` com checkpoint e eleição de líder.
 
-- **Orquestração de verdade**: `ao_falhar: repetir N` com `espera:` e
-  `backoff:` e `tempo_limite:` por passo existem; restam callbacks
-  `on_success`/`on_failure`, SLA com alerta e jitter no backoff.
-- **Observabilidade**: `saude:`/`metricas:` no `servico` existem; restam
-  log estruturado (JSON) com `trace_id` por execução e latências no
-  `/metricas`. Dead-letter existe via `quarentena:` no `para cada`.
-- **Incremental/backfill**: `janela` + offset cobrem streaming simples, mas
-  falta carga incremental por cursor (`desde: <coluna>`, watermark) e
-  reprocessamento de intervalo (backfill) — o pão com manteiga de DE.
+- **Orquestração de verdade**: `ao_falhar: repetir N` com `espera:`,
+  `backoff:` e jitter, `tempo_limite:` por passo, callbacks
+  `on_success`/`on_failure` e alerta de SLA existem.
+- **Observabilidade**: `saude:`/`metricas:` no `servico` existem; o log de
+  cada requisição é JSON compacto com `trace_id`, status e latência, e o
+  `/metricas` reporta latência monotônica total/média/máxima por rota;
+  `/metricas/prometheus` exporta contadores e latência por labels.
+  `TILT_PIPELINE_LOG_JSON=1` adiciona contexto de execução dos pipelines.
+- **Incremental/backfill**: `janela` + offset cobrem streaming simples; `desde:
+  <coluna>` adiciona watermark numérico/textual persistente e
+  `backfill: { desde: valor, ate: valor }` permite reprocessar um intervalo
+  inclusivo sem avançar o cursor.
 - **Qualidade de dados**: `verificar` valida, mas sem quarentena (desviar
   linhas ruins), sem perfilagem/estatísticas, sem contrato de schema
   versionado na entrada.
-- **Escrita analítica**: Delta/Iceberg particionam, mas falta
-  `ordenar_por`/z-order e compactação (`vacuum`/`optimize`) — tabelas
-  degradam com o tempo.
+- **Escrita analítica**: Delta/Iceberg particionam e já têm `vacuum_*`
+  conservador para Parquet órfão; falta compactação (`optimize`) e
+  `ordenar_por`/z-order.
 
 ## Machine learning clássico — feito (1ª passada)
 
@@ -60,23 +63,22 @@ cruzada/quadrática, autograd manual.
 
 - **CNN de brinquedo**: `conv2d` (com viés), `norma_lote` (gama/beta +
   média/variância correntes), `agrupamento_max` e `achatar` treinam de
-  verdade (lote cheio, CPU). Sem `incorporacao` treinável, sem recorrência,
-  sem abandono no treino, sem dilation/padding explícito, sem mini-lotes.
+  verdade (mini-lotes em CPU). Sem `incorporacao` treinável, sem recorrência,
+  sem abandono no treino, sem dilation/padding explícito.
 - **GPU não validada** (`TILT_GPU=fake` em CPU; CUDA nunca rodou em
   hardware real) + sem AMP real.
 - **Exportação**: `modelo <Nome>.exportar_onnx "modelo.onnx"` existe no
   interpretador (ONNX opset 20, sem dependências; ver guia 04) — o modelo
-  treinado sai da Tilt para qualquer runtime ONNX. Resta `gguf`.
+  treinado sai da Tilt para qualquer runtime ONNX. `exportar_gguf` também grava
+  GGUF v3 em F32; quantização e importação ainda não existem.
 - **Feito (treino utilizável)**: mini-lotes (`lote:`) com embaralhamento,
   `semente:` reproduzível (init + embaralhamento), checkpoint com retomada
   (`checkpoint:`/`a_cada:`/`retomar:`, bit-idêntico ao contínuo), agendador
   de taxa (`cosseno`/`degrau`), `validacao:` + `parar_cedo:` (restaura
-  melhores pesos), `busca` em grade com `criterio:`, dataloader streaming
-  de CSV (`carregador ..., fluxo: verdadeiro` + `bloco:`) e exportação
-  `gguf` (v3, só escrita).
-- **Faltam**: dataloader de arquivos grandes em outros formatos (Parquet),
-  busca de hiperparâmetros além de grade (random/bayesiana), `gguf` com
-  quantização (hoje só F32).
+  melhores pesos), `busca` em grade com `criterio:`, dataloader streaming de CSV e Parquet (`carregador ..., fluxo: verdadeiro` + `bloco:`)
+  e exportação `gguf` (v3, só escrita).
+- **Faltam**: busca de hiperparâmetros além de grade (random/bayesiana),
+  `gguf` com quantização (hoje só F32).
 
 ## LLM / RAG — funcional, falta engenharia de produção
 
@@ -118,9 +120,9 @@ supervisor.
 
 Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 
-- Sem `/saude`, `/metricas`, graceful shutdown, limite de
-  payload/concorrência por rota, versionamento de modelo servido (A/B,
-  canário, rollback).
+- `/saude`, `/metricas` (com latência por rota) e graceful shutdown existem;
+  faltam limite de payload/concorrência por rota e versionamento de modelo
+  servido (A/B, canário, rollback).
 - Sem registro de modelos: `pesos:` é arquivo solto — sem registry
   (nome/versão/stage, lineage experimento→modelo→serviço).
 - Sem inferência em lote (rodar o modelo sobre uma tabela inteira,
@@ -142,8 +144,8 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 2. ~~Robustez LLM~~ feito (1ª passada; ver acima).
 3. ~~Operação de pipelines~~ feito (1ª passada: `ao_falhar` com
    `espera:`/`backoff:`, `tempo_limite:` por passo, `quarentena:` no
-   `para cada`, `saude:`/`metricas:` no `servico`; sem latências no
-   `/metricas`, sem Retry-After/cache no LLM).
+   `para cada`, `saude:`/`metricas:` no `servico`, latências por rota no
+   `/metricas`; sem log estruturado com `trace_id`, Retry-After/cache no LLM).
 4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
 3. Operação de pipelines (timeout por passo, backoff, quarentena,
    `/saude` + `/metricas`).

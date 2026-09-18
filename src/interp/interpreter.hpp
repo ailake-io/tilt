@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <ctime>
 #include <iosfwd>
 #include <map>
@@ -19,6 +21,7 @@
 #include "runtime/value.hpp"
 #include "runtime/vectorstore.hpp"
 #include "vm/bytecode.hpp"
+#include "vm/bytecode_cache.hpp"
 
 namespace tilt {
 
@@ -199,6 +202,7 @@ class Interpreter {
   void exec_block(const ast::Block& block, Env& env, const PrazoPasso* prazo = nullptr);
   void exec_item(const ast::Item& item, Env& env);
   void exec_stmt(const ast::Stmt& stmt, Env& env);
+  rt::Value* lookup_lvalue(const ast::Expr& target, Env& env);
 
   rt::Value eval(const ast::Expr& expr, Env& env);
   rt::Value eval_binary(const ast::Expr& expr, Env& env);
@@ -259,6 +263,7 @@ class Interpreter {
     double lr = 0.1;
     int epocas = 50;
     int lote = -1;  // -1 = lote cheio
+    bool embaralhar = true;
     std::uint64_t seed_init = 0xC1A5;
     std::uint64_t seed_mistura = 7;
     double f_val = 0.0;
@@ -270,6 +275,7 @@ class Interpreter {
     std::string checkpoint;
     std::string retomar;
     int a_cada = 0;
+    const ast::Block* ao_epoca = nullptr;
     bool verbose = false;
     bool silencioso = false;
     // Dataloader streaming: quando `fluxo_csv` nao vazio, `x` vem em blocos
@@ -358,8 +364,21 @@ class Interpreter {
   static std::mutex zumbis_mu_;
   static std::vector<std::shared_ptr<Env>> zumbis_;
   std::unordered_map<const ast::Item*, std::shared_ptr<vm::Chunk>> vm_chunks_;  // null = not compilable
+  // Cache .tiltc em disco (Fase 6): chunks por "pipeline N"/"funcao N",
+  // chaveado pelo sha do fonte. Carregado em register_decls, descarregado
+  // (se sujo) no fim de run()/run_vm(). TILT_VM_NOCACHE=1 desliga.
+  vm::CachedProgram tiltc_prog_;
+  std::string tiltc_path_;
+  bool tiltc_loaded_ = false;
+  bool tiltc_dirty_ = false;
+  void tiltc_load();
+  void tiltc_flush();
+  void tiltc_note(const char* what);
   std::unordered_map<std::string, rt::MemoryIndex> index_stores_;
   std::unordered_map<std::string, std::string> agent_memory_;  // memoria: conversa
+  // memoria: vetorial — um indice por agente (top-3 recuperado no prompt;
+  // sem poda: acima de kMaxMemoriaTurnos, turnos novos nao entram).
+  std::unordered_map<std::string, rt::MemoryIndex> agent_vector_memory_;
   // Streaming (`janela:`) por pipeline: offset de elementos ja consumidos da
   // fonte, buffer de pendentes e relogio da ultima execucao dos passos. Para
   // janela de contagem sobre fonte de arquivo (csv/json) o offset persiste em
@@ -371,10 +390,16 @@ class Interpreter {
     std::time_t last_run = 0;
     std::size_t persisted_offset = 0;  // ultimo offset gravado no arquivo
     bool offset_loaded = false;        // arquivo de offset ja foi consultado
+    bool cursor_active = false;
+    bool cursor_loaded = false;
+    rt::Value cursor_watermark;  // ultimo cursor consumido e persistido
+    rt::Value cursor_observed;   // maior cursor lido no processo atual
+    bool cursor_observed_valid = false;
+    bool backfill_loaded = false;
   };
   std::unordered_map<std::string, WindowState> window_states_;
   // Offset persistente da janela: resolve o arquivo `<fonte>.tilt-offset`
-  // quando a fonte e baseada em arquivo (csv/json) — vazio para os demais
+  // quando a fonte e baseada em arquivo (csv/json/parquet) — vazio para os demais
   // conectores. Gravacao atomica (tmp + rename). Fase 12-4: com
   // TILT_CHECKPOINT_DIR o arquivo mora no diretorio compartilhado; janelas
   // de tempo/throttle tambem persistem `last_run` (com_relogio).
@@ -399,16 +424,23 @@ class Interpreter {
   // anterior. Fora desse par, 'senao' executa incondicionalmente (legado).
   // Estado por thread: rotas paralelas nao podem interferir uma na outra.
 
-  // Metricas do servir (`metricas: verdadeiro`): contadores por rota,
-  // protegidos por mutex (workers concorrentes).
+  // Metricas do servir (`metricas: verdadeiro`): contadores e latencia por
+  // rota, protegidos por mutex (workers concorrentes).
+  struct MetricasRota {
+    long long total = 0;
+    long long erros = 0;
+    long long latencia_total_us = 0;
+    long long latencia_max_us = 0;
+  };
   struct MetricasServico {
     std::string inicio;
     long long requisicoes = 0;
     long long erros = 0;
-    std::map<std::string, std::pair<long long, long long>> por_rota;  // rota -> {total, erros}
+    std::map<std::string, MetricasRota> por_rota;
   };
   MetricasServico metricas_;
   std::mutex metricas_mutex_;
+  std::atomic<std::uint64_t> proximo_trace_id_{1};
 
   bool schedule_mode_ = false;
 };

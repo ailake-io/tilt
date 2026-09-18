@@ -328,7 +328,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
-  `agrupamento_max` e `achatar` (CNN de brinquedo em CPU, lote cheio).
+  `agrupamento_max` e `achatar` (CNN de brinquedo em CPU, com mini-lotes).
 - `conv2d`/`norma_lote` existem como **operações de tensor** (guia 04) e
   como camadas de `modelo`/`treino` (`conv2d: [C_saida, C_entrada, KH, KW]`
   com 5º elemento opcional de passo, `norma_lote`, `agrupamento_max:
@@ -343,11 +343,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `validacao:` (fração) + `parar_cedo:` (`N` ou
   `{ paciencia:, melhorar_min: }`, restaura os melhores pesos) e `busca`
   em grade (`modelo:`, `grade:`, `criterio: perda|acuracia`, máx. 64
-  combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro`
-  treina CSV grande   em blocos (`bloco:`, default 1024) sem materializar —
-  bit-idêntico ao RAM. `exportar_gguf` grava GGUF v3 (só escrita).
-  Limites: fluxo só CSV e só modelo 2D; sem dilation nem padding
-  explícito; sem AMP; sem dataloader de Parquet.
+  combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
+  (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
+  ao RAM. `exportar_gguf` grava GGUF v3 (só escrita). Limites: fluxo só modelo 2D;
+  sem dilation nem padding explícito; sem AMP.
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.
 
@@ -400,8 +399,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   tocam o **mesmo** `indice` em memória se serializam por um mutex global do
   índice — para alta concorrência, use Qdrant/pgvector como armazenamento.
 - Observabilidade opt-in no `servico`: `saude: verdadeiro` (GET /saude) e
-  `metricas: verdadeiro` (GET /metricas com totais/erros por rota; sem
-  latências por enquanto, e sem `/metricas` em formato Prometheus).
+  `metricas: verdadeiro` (GET /metricas com totais/erros e latência monotônica
+  em microssegundos por rota), além de `/metricas/prometheus` em formato
+  Prometheus. O log de cada requisição é JSON compacto com `trace_id`.
 - No Linux: epoll + keep-alive + arena por requisição + pool de rotas com
   ordenação por sequência por conexão (M10.2 + paralelismo entregues).
   Em outros sistemas, o servidor é bloqueante, uma conexão por vez,

@@ -179,6 +179,30 @@ std::tm tilt_localtime(std::time_t t);
 int tilt_getpid();
 bool tilt_getcwd(std::string& out);
 
+// Habilita sequencias VT (cores ANSI) no stderr do console. Windows:
+// GetConsoleMode + ENABLE_VIRTUAL_TERMINAL_PROCESSING (idempotente; false
+// sem console ou sem sucesso). POSIX: no-op, devolve true (o caller filtra
+// com isatty + NO_COLOR).
+bool tilt_enable_vt();
+
+// Aspas para um argumento em linha de comando rodada via shell (_popen).
+// POSIX: aspas simples ('it\'s'); Windows (cmd.exe + regra CommandLineToArgvW
+// do curl MSVC): aspas duplas com '\' dobrada antes de '"' e no fim.
+// Residual conhecido no Windows: pares %...% sofrem expansao do cmd
+// (URLs com dois escapes %NN podem corromper; sem solucao sem trocar o
+// spawn — documentado na guia-12).
+// tilt_shell_quote escolhe conforme a build; as duas variantes sao
+// chamaveis em qualquer plataforma (para teste unitario).
+std::string tilt_posix_quote(const std::string& s);
+std::string tilt_win_quote(const std::string& s);
+inline std::string tilt_shell_quote(const std::string& s) {
+#if defined(_WIN32)
+  return tilt_win_quote(s);
+#else
+  return tilt_posix_quote(s);
+#endif
+}
+
 // Caminho absoluto do executavel do processo (para localizar a stdlib ao
 // lado do binario). Windows: GetModuleFileNameW; macOS: _NSGetExecutablePath
 // + realpath; demais POSIX: readlink(/proc/self/exe). Se a deteccao nativa

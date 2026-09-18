@@ -57,4 +57,9 @@ void delta_append(const std::string& dir, const Value& tabela,
 // podam arquivos, o resto filtra linhas. Resultado pode ser tabela vazia.
 Value delta_read(const std::string& dir, const Value* onde = nullptr);
 
+// Remove somente Parquet órfãos que não aparecem em nenhum log Delta. Mantém
+// arquivos históricos referenciados por versões antigas, preservando leitura
+// externa/time travel; devolve a quantidade removida.
+std::int64_t delta_vacuum(const std::string& dir);
+
 }  // namespace tilt::rt

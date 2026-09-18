@@ -100,7 +100,7 @@ repetem no início do próximo lote (janela deslizante clássica). Ex.: fonte
 `1..5`, `janela: 3`, `sobreposicao: 1` → lotes `[1,2,3]` e `[3,4,5]`.
 
 **Offset persistente**: em janela de contagem ou de tempo sobre fonte de arquivo
-(`tipo: csv`/`json`), o offset fica gravado em `<caminho-da-fonte>.tilt-offset`
+(`tipo: csv`/`json`/`parquet`), o offset fica gravado em `<caminho-da-fonte>.tilt-offset`
 (JSON com um mapa por pipeline; contagem usa o formato legado numero-puro, p.
 ex. `{"contagens": 120}`, e tempo/throttle guardam `{offset, last_run}` — a
 chave é o par pipeline + fonte, então pipelines diferentes sobre a mesma fonte
@@ -110,6 +110,20 @@ parou, sem reprocessar elementos. Defina `TILT_JANELA_ESTADO=memoria` para
 voltar ao comportamento antigo (só memória, sem arquivo — útil para testes e
 pipelines efêmeros). Fonte Kafka com `grupo:` não usa arquivo: o checkpoint é
 o commit de offsets do grupo no broker.
+
+**Cursor incremental**: para fontes de arquivo, `desde: <coluna>` troca o
+offset posicional por um watermark. A cada leitura, entram apenas as linhas
+cujo valor da coluna é maior que o último valor consumido; cursores numéricos
+e textuais são aceitos. O checkpoint usa o formato de mapa
+`{"offset": 0, "cursor": valor}` (e mantém `last_run` quando aplicável),
+permitindo retomar o pipeline sem reler valores já consumidos. O cursor deve
+ser não nulo e comparável dentro da mesma fonte.
+
+**Backfill**: um pipeline com cursor pode declarar
+`backfill: { desde: valor, ate: valor }`. O intervalo é inclusivo e é lido uma
+vez por processo para reprocessamento controlado; ele não avança o watermark
+do fluxo incremental. Os limites precisam ser literais numéricos ou textuais
+e compatíveis com a coluna indicada em `desde:`.
 
 **Checkpoint distribuído (Marco 1)**: com `TILT_CHECKPOINT_DIR=<dir
 compartilhado>` (NFS/EFS), o `.tilt-offset` mora nesse diretório (mesmo
@@ -133,16 +147,16 @@ Fora de `--agendar`, um pipeline com `janela:` executa normalmente **uma vez**
 (a janela "fecha" na primeira execução). Durações aceitas: `"Ns"`, `"Nmin"`,
 `"Nh"` com `N` inteiro positivo.
 
-## Operação: retry, timeout, quarentena
+## Operação: retry, callbacks, SLA, timeout, quarentena
 
-Três campos de `pipeline` para produção (combináveis):
+Campos de `pipeline` para produção (combináveis):
 
 ```tilt run
 importar io
 
 pipeline instavel:
   # 1a tentativa: sem o marcador, falha e espera 1s; 2a: recupera.
-  ao_falhar: repetir 2, espera: "1s", backoff: 2
+  ao_falhar: repetir 2, espera: "1s", backoff: 2, jitter: "5s"
   passos:
     - se io.existe_arquivo "tentativa.txt":
         imprimir "recuperado na retentativa"
@@ -152,9 +166,20 @@ pipeline instavel:
         x = ler_csv "sempre_ausente.csv"
 ```
 
-- `ao_falhar: repetir N[, espera: "5s"][, backoff: F]`: reexecuta os passos
-  do zero até N vezes com escopo limpo. Sem `espera:`, retenta de imediato;
-  com `espera:`, dorme `espera × F^tentativa` (F default 1 = fixo).
+- `ao_falhar: repetir N[, espera: "5s"][, backoff: F][, jitter: "2s"]`:
+  reexecuta os passos do zero até N vezes com escopo limpo. Sem `espera:`,
+  retenta de imediato; com `espera:`, dorme `espera × F^tentativa`. `jitter`
+  adiciona aleatoriamente de zero até a duração informada (use `"0s"` para
+  desativar); o atraso total permanece limitado a 5 minutos.
+- `on_success:` e `on_failure:` executam blocos após sucesso ou depois que
+  todas as tentativas falharem. Os callbacks recebem `pipeline`, `status`,
+  `tentativas` e, no caminho de falha, `erro`; com `janela:` também recebem
+  `linhas`.
+- `sla: "30s"`: emite um alerta quando a duração total do pipeline excede o
+  limite, sem transformar o alerta em falha. A medição usa relógio monotônico.
+- Com `TILT_PIPELINE_LOG_JSON=1`, cada pipeline emite eventos JSON compactos
+  com `evento`, `nome`, `status`, `tentativas` e `duracao_us`; falhas também
+  incluem `erro`. O modo opt-in preserva a saída textual padrão.
 - `tempo_limite: "30s"`: cada passo de topo tem esse teto; ao estourar, o
   passo falha (`passo K excedeu tempo_limite de 30s`) e o `ao_falhar` decide.
   A thread do passo segue destacada (o `Env` sobrevive), então use para
@@ -299,9 +324,11 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   existir na tabela anexada, colunas em comum com o mesmo tipo (a ordem é
   livre), e **colunas novas são permitidas** (evolução de schema): entram
   `nullable` no fim do `schemaString` e o commit carrega um `metaData` novo
-  com o schema estendido. Arquivos antigos ficam sem a coluna nova e a leitura
-  projeta `nulo` nas linhas deles (union-by-name). Remover coluna ou mudar o
-  tipo de uma existente → erro claro. Grava um novo `part-*.parquet` e commita
+  com o schema estendido. **Widening** sem perda também é evolução:
+  `integer`→`long` e `float`→`double` (tabelas externas, ex. Spark) promovem o
+  tipo no `schemaString` do commit, com field-id/posição estáveis. Arquivos
+  antigos ficam sem a coluna nova e a leitura projeta `nulo` nas linhas deles
+  (union-by-name). Remover coluna ou outra mudança de tipo → erro claro. Grava um novo `part-*.parquet` e commita
   a próxima versão (`00000000000000000001.json`, ...) com `commitInfo` (+
   `metaData`, se houve evolução) + `add`. O commit é
   atômico: o JSONL é gravado num temporário do mesmo diretório e publicado
@@ -347,6 +374,14 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   (Marco 1)**: `_last_checkpoint` + `<v>.checkpoint*.parquet` no schema
   oficial (add/remove/metaData, partitionValues MAP) é honrado como base —
   usa-se o de maior versão entre padrão e tilt-native.
+
+### Manutenção de tabelas
+
+`vacuum_delta "diretorio"` e `vacuum_iceberg "diretorio"` removem Parquet
+órfãos que não são referenciados por nenhum log Delta ou metadata/snapshot
+Iceberg. Ambos devolvem a quantidade de arquivos removidos. A operação é
+conservadora: mantém arquivos históricos ainda referenciados, portanto não
+quebra leitores externos nem time travel.
 
 ## Iceberg (catálogo Hadoop)
 
@@ -424,8 +459,11 @@ pipeline iceberg_demo:
   do schema com **field-id novo** (`last-column-id` + 1); o metadata
   versionado ganha um `schema-id` novo mantendo o histórico de schemas (ids
   antigos estáveis) e os data files do append são gravados com esses
-  field-ids. Arquivos antigos ficam sem a coluna e a leitura projeta `nulo`
-  nas linhas deles (union-by-name por field-id/nome — lido pelo pyiceberg).
+  field-ids. **Widening** sem perda (`int`→`long`, `float`→`double`, inclusive
+  em subcolunas de struct) promove o tipo **mantendo o field-id** (promoção
+  primitiva válida pela spec) com `schema-id` novo. Arquivos antigos ficam sem
+  a coluna e a leitura projeta `nulo` nas linhas deles (union-by-name por
+  field-id/nome — lido pelo pyiceberg).
   Remover coluna ou mudar o tipo de uma existente → erro claro. O append
   herda o partition spec da tabela (erro se `particionar_por` diverge ou se a
   tabela não é particionada), grava os novos data files e commita a próxima

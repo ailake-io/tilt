@@ -169,6 +169,17 @@ bool tilt_getcwd(std::string& out) {
   return true;
 }
 
+bool tilt_enable_vt() {
+  // Console moderno (Windows 10+) entende ANSI com a flag; sem console
+  // (pipe/arquivo) GetConsoleMode falha e seguimos sem cores.
+  HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+  if (!h || h == INVALID_HANDLE_VALUE) return false;
+  DWORD mode = 0;
+  if (!GetConsoleMode(h, &mode)) return false;
+  if (mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) return true;
+  return SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+}
+
 std::string tilt_exe_path(const char* argv0) {
   // GetModuleFileNameW trunca para o tamanho do buffer (retorno == tamanho);
   // cresce o buffer ate caber.
@@ -253,6 +264,54 @@ std::tm tilt_localtime(std::time_t t) {
 }
 
 int tilt_getpid() { return ::getpid(); }
+
+bool tilt_enable_vt() { return true; }  // POSIX entende ANSI; o caller filtra com isatty
+
+std::string tilt_posix_quote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'') {
+      out += "'\\''";
+    } else {
+      out += c;
+    }
+  }
+  out += "'";
+  return out;
+}
+
+std::string tilt_win_quote(const std::string& s) {
+  if (s.empty()) return "\"\"";
+  bool need = false;
+  for (char c : s) {
+    if (c == ' ' || c == '\t' || c == '\n' || c == '"' || c == '&' || c == '|' || c == '<' ||
+        c == '>' || c == '^' || c == '%') {
+      need = true;
+      break;
+    }
+  }
+  if (!need) return s;
+  std::string out = "\"";
+  std::size_t bs = 0;
+  for (char c : s) {
+    if (c == '\\') {
+      ++bs;
+      continue;
+    }
+    if (c == '"') {
+      out.append(bs * 2 + 1, '\\');
+      out += '"';
+      bs = 0;
+      continue;
+    }
+    out.append(bs, '\\');
+    bs = 0;
+    out += c;
+  }
+  out.append(bs * 2, '\\');  // barras finais dobram (senao escapam a aspa final)
+  out += '"';
+  return out;
+}
 
 bool tilt_getcwd(std::string& out) {
   char buf[4096];

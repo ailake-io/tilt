@@ -319,6 +319,7 @@ treino Xor:
   epocas: 3
   lote: 4                            # mini-lote (default: lote cheio); embaralha por época
   semente: 7                         # init Xavier + embaralhamento (reproduzível)
+  embaralhar: verdadeiro              # falso preserva a ordem dos dados
 ```
 
 Perdas: `entropia_cruzada` (classificação, exige `softmax` final) e
@@ -333,9 +334,26 @@ correntes na inferência), `agrupamento_max` e `achatar`. Resumo determinístico
 treino Xor: perda caiu sim | acuracia 2/4
 ```
 
-Pós-treino os pesos ficam no `modelo` — chamadas seguintes de
-`modelo Xor.executar` usam o modelo treinado. (`verboso: verdadeiro`
+Pós-treino os pesos ficam no `modelo` — chamadas seguintes de `modelo Xor.executar` usam o modelo treinado. (`verboso: verdadeiro`
 imprime a perda a cada ~epocas/10.)
+
+O bloco opcional `ao_epoca:` roda ao final de cada época concluída, inclusive antes
+de uma parada antecipada, com as variáveis `epoca`, `modelo`, `perda`, `taxa` e
+`perda_validacao` (nulo quando `validacao:` não foi configurada):
+
+```tilt run
+modelo Xor:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 2
+    - softmax
+
+treino Xor:
+  dados: { x: [[0, 0], [1, 1]], y: [0, 1] }
+  epocas: 2
+  ao_epoca:
+    - imprimir "época", epoca, "perda", perda
+```
 
 ### Checkpoint e retomada
 
@@ -416,11 +434,11 @@ e deixa os melhores pesos no `modelo`. Aceita os mesmos campos do `treino`
 
 ### Dataloader streaming
 
-`carregador "dados.csv", alvo: "y", fluxo: verdadeiro` não materializa
-nada: o `treino` varre o arquivo uma vez (contagem + rótulos) e o relê em
-blocos de `bloco:` linhas por época — só o bloco corrente vive na RAM.
-Equivalente bit a bit ao treino em RAM (mesma semente, mesmos lotes) e à
-retomada. Limites: só CSV, só modelo 2D (denso).
+`carregador "dados.csv" ou "dados.parquet", alvo: "y", fluxo: verdadeiro` não materializa
+nada: o `treino` varre o arquivo uma vez e relê CSV em blocos de `bloco:` linhas
+ou Parquet por row groups — só o bloco corrente vive na RAM. Equivalente bit a bit
+ao treino em RAM (mesma semente, mesmos lotes) e à retomada. Limite: modelo 2D
+(denso); CNN continua exigindo dados em RAM.
 
 ## GPU
 

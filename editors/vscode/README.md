@@ -1,7 +1,8 @@
 # Tilt para VS Code
 
 Realce de sintaxe + cliente Language Server (`tilt lsp`): diagnósticos ao
-salvar/editar e autocomplete sensível a contexto (gatilhos `.` e `:`).
+salvar/editar, autocomplete sensível a contexto (gatilhos `.` e `:`), hover
+com tipos, go-to-definition, signatureHelp e formatação.
 
 ## Pré-requisito
 
@@ -38,8 +39,8 @@ code --install-extension tilt-0.1.0.vsix
 ## O que vem de onde
 
 - **Realce**: `syntaxes/tilt.tmLanguage.json` (TextMate) — funciona sem o binário.
-- **Diagnósticos + autocomplete**: `tilt lsp`, iniciado por `extension.js` via
-  `vscode-languageclient`.
+- **LSP** (diagnósticos, autocomplete, hover, definição, assinatura, formatação):
+  `tilt lsp`, iniciado por `extension.js` via `vscode-languageclient`.
 
 ## Publicar no Marketplace (opcional)
 

@@ -30,6 +30,8 @@ class DiagnosticEngine {
 
   void report(Diagnostic diag);
 
+  const SourceFile* source() const { return source_; }
+
   bool has_errors() const { return errors_ > 0; }
   std::size_t error_count() const { return errors_; }
   const std::vector<Diagnostic>& all() const { return diags_; }

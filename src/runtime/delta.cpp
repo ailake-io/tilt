@@ -10,6 +10,7 @@
 #include <fstream>
 #include <optional>
 #include <random>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -305,6 +306,13 @@ bool fields_contains(const std::vector<std::pair<std::string, std::string>>& fie
     if (f.first == col) return true;
   }
   return false;
+}
+
+// Promocao de tipo sem perda (widening, como Spark/mergeSchema): integer->long,
+// float->double. Todo o resto divergente continua erro.
+bool is_widening(const std::string& stored, const std::string& deduced) {
+  return ((stored == "int" || stored == "integer") && deduced == "long") ||
+         (stored == "float" && deduced == "double");
 }
 
 // partitionColumns do metaData mais recente do log (ordem de versao).
@@ -800,6 +808,42 @@ std::optional<StdCheckpoint> load_standard_checkpoint(const std::string& log_dir
   }
 }
 
+void list_delta_parquets(const std::string& dir, const std::string& rel,
+                         std::vector<std::string>& out) {
+  const std::string current = rel.empty() ? dir : dir + "/" + rel;
+  std::vector<std::string> entries;
+  if (!tilt_listdir(current, entries)) return;
+  for (const std::string& name : entries) {
+    if (name == "_delta_log" && rel.empty()) continue;
+    const std::string child_rel = rel.empty() ? name : rel + "/" + name;
+    const std::string child = dir + "/" + child_rel;
+    if (tilt_is_directory(child)) {
+      list_delta_parquets(dir, child_rel, out);
+    } else if (name.size() > 8 && name.compare(name.size() - 8, 8, ".parquet") == 0) {
+      out.push_back(child_rel);
+    }
+  }
+}
+
+std::set<std::string> delta_logged_files(const std::vector<std::string>& versions) {
+  std::set<std::string> referenced;
+  for (const std::string& path : versions) {
+    std::ifstream in(path);
+    if (!in) die("nao foi possivel abrir '" + path + "'");
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.empty()) continue;
+      Value row = json_parse(line);
+      if (row.kind != ValueKind::Mapa || !row.map) continue;
+      const Value* add = row.map->find("add");
+      if (!add || add->kind != ValueKind::Mapa || !add->map) continue;
+      const Value* p = add->map->find("path");
+      if (p && p->kind == ValueKind::Texto) referenced.insert(p->s);
+    }
+  }
+  return referenced;
+}
+
 }  // namespace
 
 void delta_write(const std::string& dir, const Value& tabela,
@@ -892,6 +936,8 @@ void delta_append(const std::string& dir, const Value& tabela,
   const std::vector<std::pair<std::string, std::string>> new_types =
       deduced_column_types(tabela, "anexar_delta");
   std::vector<std::pair<std::string, std::string>> added_cols;
+  // Nome -> tipo promovido (widening int->long, float->double).
+  std::vector<std::pair<std::string, std::string>> widened_cols;
   for (const auto& old : cur_fields) {
     const std::string* ty = nullptr;
     for (const auto& nt : new_types) {
@@ -902,18 +948,24 @@ void delta_append(const std::string& dir, const Value& tabela,
           "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)");
     }
     if (!ty->empty() && *ty != old.second) {
-      die("anexar_delta: coluna '" + old.first + "' com tipo divergente (esperado " + old.second +
-          "; recebido " + *ty +
-          ") (evolucao de schema suporta apenas adicao de colunas)");
+      if (is_widening(old.second, *ty)) {
+        widened_cols.emplace_back(old.first, *ty);
+      } else {
+          die("anexar_delta: coluna '" + old.first + "' com tipo divergente (esperado " +
+            old.second + "; recebido " + *ty +
+            ") (evolucao de schema: apenas adicao de colunas e widening integer->long, "
+            "float->double)");
+      }
     }
   }
   for (const auto& nt : new_types) {
     if (!contains_col(cur_fields, nt.first)) added_cols.push_back(nt);
   }
 
-  // schemaString estendido (colunas novas nullable no fim) para o commit.
+  // schemaString estendido (colunas novas nullable no fim; tipos promovidos
+  // reescritos) para o commit.
   std::string new_schema;
-  if (!added_cols.empty()) {
+  if (!added_cols.empty() || !widened_cols.empty()) {
     Value schema;
     try {
       schema = json_parse(cur_schema_v->s);
@@ -923,6 +975,14 @@ void delta_append(const std::string& dir, const Value& tabela,
     Value* fields = schema.map ? schema.map->find("fields") : nullptr;
     if (!fields || fields->kind != ValueKind::Lista || !fields->list) {
       die("schemaString invalido no log (sem fields)");
+    }
+    for (Value& f : *fields->list) {
+      if (f.kind != ValueKind::Mapa || !f.map) continue;
+      const Value* nm = f.map->find("name");
+      if (!nm || nm->kind != ValueKind::Texto) continue;
+      for (const auto& [wname, wty] : widened_cols) {
+        if (nm->s == wname) f.map->set("type", Value::texto(wty));
+      }
     }
     for (const auto& [name, ty] : added_cols) {
       Value f = Value::mapa();
@@ -1256,6 +1316,20 @@ Value delta_read(const std::string& dir, const Value* onde) {
     }
   }
   return out;
+}
+
+std::int64_t delta_vacuum(const std::string& dir) {
+  const std::string log_dir = dir + "/_delta_log";
+  const std::vector<std::string> versions = list_delta_versions(log_dir);
+  const std::set<std::string> referenced = delta_logged_files(versions);
+  std::vector<std::string> parquet;
+  list_delta_parquets(dir, "", parquet);
+  std::int64_t removed = 0;
+  for (const std::string& rel : parquet) {
+    if (referenced.find(rel) != referenced.end()) continue;
+    if (std::remove((dir + "/" + rel).c_str()) == 0) ++removed;
+  }
+  return removed;
 }
 
 }  // namespace tilt::rt

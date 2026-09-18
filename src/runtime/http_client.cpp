@@ -17,18 +17,7 @@ namespace tilt::rt {
 
 namespace {
 
-std::string shell_quote(const std::string& s) {
-  std::string out = "'";
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\\''";
-    } else {
-      out += c;
-    }
-  }
-  out += "'";
-  return out;
-}
+
 
 std::string truncar(const std::string& s, std::size_t n) {
   return s.size() <= n ? s : s.substr(0, n);
@@ -133,19 +122,19 @@ HttpClientResponse http_request(
   std::string cmd = "curl -s ";
   if (falhar) cmd += "--fail-with-body ";
   if (timeout_s > 0) cmd += "--max-time " + std::to_string(timeout_s) + " ";
-  cmd += "-o " + shell_quote(out_path) + " ";
-  if (resp_headers) cmd += "-D " + shell_quote(hdr_path) + " ";
-  cmd += "-w '%{http_code}' ";
+  cmd += "-o " + tilt_shell_quote(out_path) + " ";
+  if (resp_headers) cmd += "-D " + tilt_shell_quote(hdr_path) + " ";
+  cmd += "-w " + tilt_shell_quote("%{http_code}") + " ";
   if (metodo == "HEAD") {
     cmd += "-I";
   } else {
     cmd += "-X " + metodo;
   }
   for (const auto& [nome, valor] : headers) {
-    cmd += " -H " + shell_quote(nome + ": " + valor);
+    cmd += " -H " + tilt_shell_quote(nome + ": " + valor);
   }
-  if (!body_file.empty()) cmd += " --data @" + body_file;
-  cmd += " " + shell_quote(url);
+  if (!body_file.empty()) cmd += " --data @" + tilt_shell_quote(body_file);
+  cmd += " " + tilt_shell_quote(url);
 
   std::string resp;
   int rc = 0;

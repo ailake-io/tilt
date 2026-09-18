@@ -2,5 +2,5 @@
 3
 ana 40 carla
 delta: anexar_delta: coluna 'idade' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)
-delta: anexar_delta: coluna 'idade' com tipo divergente (esperado long; recebido string) (evolucao de schema suporta apenas adicao de colunas)
+delta: anexar_delta: coluna 'idade' com tipo divergente (esperado long; recebido string) (evolucao de schema: apenas adicao de colunas e widening integer->long, float->double)
 4

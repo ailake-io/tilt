@@ -41,15 +41,16 @@ jobs:
           TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente.tilt
 
   # Port Windows (MSVC, windows-latest): a suíte de testes é em shell script
-  # (bash/sh), então aqui o job garante apenas que o projeto compila com o
-  # MSVC e o binário responde. Cobertura funcional segue em Linux/macOS.
+  # (bash/sh), então aqui o job garante que o projeto compila com o MSVC
+  # (-Werror) e o binário responde no smoke estendido (paridade com o linux).
+  # Cobertura funcional completa (ctest) segue em Linux/macOS.
   windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: configure (Release, MSVC)
-        run: cmake --preset release
+      - name: configure (Release, MSVC, -Werror)
+        run: cmake --preset release -DTILT_WERROR=ON
 
       - name: build
         run: cmake --build --preset release
@@ -63,6 +64,9 @@ jobs:
           & $exe versao
           & $exe checar exemplos/soma.tilt
           & $exe executar exemplos/resumo_vendas.tilt
+          & $exe executar exemplos/etl_delta.tilt
+          $env:TILT_LLM = "mock"
+          & $exe executar exemplos/agente.tilt
 
   sanitizers:
     runs-on: ubuntu-latest
