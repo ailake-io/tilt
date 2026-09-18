@@ -939,6 +939,14 @@ pipeline eventos:
   resolve o líder da partição via metadata e conecta nele. `{tls: verdadeiro}`
   liga TLS (todas as conexões da chamada: metadata, produce/fetch e coordenação
   de grupo; ver nota de TLS na seção Redis).
+- `transacao_kafka id, registros, {broker:, acks:, tentativas:, tls:}`: inicia uma
+  transação Kafka real com `FindCoordinator`, `InitProducerId`,
+  `AddPartitionsToTxn`, Produce v3 com o bit transacional e `EndTxn`. Cada item
+  de `registros` é `{topico:, valor:, particao:, chave:?}`; todas as partições
+  são adicionadas antes da primeira publicação e o commit confirma o lote
+  atomicamente. Em falha, o cliente envia `EndTxn` abortado; `tentativas:`
+  repete produces retriáveis com a mesma sequência. O broker deve suportar
+  transações Kafka (não há fallback silencioso para brokers 0.9-era).
 - `ler_kafka topico, {desde:, max:, broker:, tls:}`: stateless — devolve `lista`
   de `texto` na ordem do log. `desde: "inicio"` (default) lê do earliest;
   `"fim"` lê do high watermark (só mensagens novas). `max` limita a

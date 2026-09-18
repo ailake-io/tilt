@@ -14,6 +14,8 @@ namespace tilt::rt {
 // FetchRequest (api 1, v1), com CRC32-IEEE proprio para o message set.
 // Fase 12-4: produce com acks=all + retry + chave + InitProducerId
 // best-effort (API 22; fallback legado quando o broker nao suporta).
+// Transacoes multi-particao usam FindCoordinator (10), InitProducerId (22),
+// AddPartitionsToTxn (24), Produce v3 transacional e EndTxn (26).
 // Consumer groups com rebalanceamento real: FindCoordinator (api 10, v0),
 // JoinGroup (api 11, v0), Heartbeat (api 12, v0), LeaveGroup (api 13, v0),
 // SyncGroup (api 14, v0), OffsetFetch (api 9, v0) e OffsetCommit (api 8, v1).
@@ -42,9 +44,26 @@ struct ProduceOptions {
   int tentativas = 3;
   bool idempotente = true;
 };
+
+struct KafkaTransactionRecord {
+  std::string topico;
+  std::string valor;
+  std::string chave;
+  std::int32_t particao = 0;
+};
+
+struct KafkaTransactionOptions {
+  std::string broker;
+  int acks = -1;
+  int tentativas = 3;
+  bool tls = false;
+};
+
+void kafka_transacao(const std::string& id, const std::vector<KafkaTransactionRecord>& registros,
+                     const KafkaTransactionOptions& opt = {});
+
 std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
-                            std::int32_t particao, const ProduceOptions& opt,
-                            bool tls = false);
+                            std::int32_t particao, const ProduceOptions& opt, bool tls = false);
 std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,
                             std::int32_t particao, bool tls = false);
 

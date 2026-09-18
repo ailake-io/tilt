@@ -8688,6 +8688,74 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "transacao_kafka") {
+    auto a = args();
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[0].s.empty() ||
+        a[1].kind != ValueKind::Lista || !a[1].list) {
+      fail(call.span,
+           "transacao_kafka espera (id, registros, {broker:, acks:, tentativas:, tls:}), "
+           "com registros [{topico:, valor:, particao:, chave:?}]");
+    }
+    rt::KafkaTransactionOptions opt;
+    if (a.size() >= 3) {
+      if (a[2].kind != ValueKind::Mapa || !a[2].map) {
+        fail(call.span,
+             "transacao_kafka: opcoes devem ser um mapa {broker:, acks:, tentativas:, tls:}");
+      }
+      if (const Value* bv = a[2].map->find("broker")) {
+        if (bv->kind != ValueKind::Texto) fail(call.span, "transacao_kafka: broker deve ser texto");
+        opt.broker = bv->s;
+      }
+      if (const Value* av = a[2].map->find("acks")) {
+        if (av->kind != ValueKind::Inteiro || (av->i != -1 && av->i != 1)) {
+          fail(call.span, "transacao_kafka: acks deve ser -1 (all) ou 1 (leader)");
+        }
+        opt.acks = static_cast<int>(av->i);
+      }
+      if (const Value* tv = a[2].map->find("tentativas")) {
+        if (tv->kind != ValueKind::Inteiro || tv->i < 1 || tv->i > 10) {
+          fail(call.span, "transacao_kafka: tentativas deve ser inteiro entre 1 e 10");
+        }
+        opt.tentativas = static_cast<int>(tv->i);
+      }
+      if (const Value* tv = a[2].map->find("tls")) {
+        if (tv->kind != ValueKind::Logico) fail(call.span, "transacao_kafka: tls deve ser logico");
+        opt.tls = tv->b;
+      }
+    }
+    std::vector<rt::KafkaTransactionRecord> registros;
+    registros.reserve(a[1].list->size());
+    for (const Value& item : *a[1].list) {
+      if (item.kind != ValueKind::Mapa || !item.map) {
+        fail(call.span, "transacao_kafka: cada registro deve ser um mapa");
+      }
+      const Value* tv = item.map->find("topico");
+      const Value* vv = item.map->find("valor");
+      if (!tv || tv->kind != ValueKind::Texto || tv->s.empty() || !vv) {
+        fail(call.span, "transacao_kafka: cada registro precisa de topico e valor");
+      }
+      rt::KafkaTransactionRecord r;
+      r.topico = tv->s;
+      r.valor = vv->kind == ValueKind::Texto ? vv->s : rt::json_dump(*vv);
+      if (const Value* pv = item.map->find("particao")) {
+        if (pv->kind != ValueKind::Inteiro || pv->i < 0 || pv->i > 2147483647) {
+          fail(call.span, "transacao_kafka: particao deve ser inteiro >= 0");
+        }
+        r.particao = static_cast<std::int32_t>(pv->i);
+      }
+      if (const Value* kv = item.map->find("chave")) {
+        if (kv->kind != ValueKind::Texto) fail(call.span, "transacao_kafka: chave deve ser texto");
+        r.chave = kv->s;
+      }
+      registros.push_back(std::move(r));
+    }
+    try {
+      rt::kafka_transacao(a[0].s, registros, opt);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
   if (name == "mongo_inserir") {
     auto a = args();
     if (a.size() < 2 || a[0].kind != ValueKind::Texto) {

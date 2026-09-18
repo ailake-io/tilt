@@ -1,0 +1,10 @@
+# Publica duas particoes e confirma as duas em uma unica transacao Kafka.
+pipeline kafka_transacao:
+  passos:
+    - transacao_kafka "tilt-tx-1", [
+        {topico: "vendas", valor: "v-0", particao: 0, chave: "a"},
+        {topico: "vendas", valor: {id: 2, origem: "tx"}, particao: 1}
+      ]
+    - msgs = ler_kafka "vendas", {desde: "inicio", max: 10}
+    - imprimir tamanho msgs
+    - imprimir msgs[0]

@@ -18,9 +18,7 @@ namespace tilt::lsp {
 
 namespace {
 
-bool ident_char(char c) {
-  return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-}
+bool ident_char(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
 
 bool starts_with_ci(std::string_view s, std::string_view prefix) {
   if (prefix.size() > s.size()) return false;
@@ -34,38 +32,87 @@ bool starts_with_ci(std::string_view s, std::string_view prefix) {
 }
 
 const std::array<std::string_view, 22> kDeclKeywords = {
-    "tipo",   "funcao",   "seja",   "constante", "importar", "de",     "fonte",
-    "pipeline", "verificar", "modelo", "treino",  "busca",    "tarefa",   "experimento", "avaliacao", "llm",
-    "indice", "fluxo",    "ferramenta", "agente", "equipe",  "servico"};
+    "tipo",       "funcao",      "seja",      "constante", "importar", "de",
+    "fonte",      "pipeline",    "verificar", "modelo",    "treino",   "busca",
+    "tarefa",     "experimento", "avaliacao", "llm",       "indice",   "fluxo",
+    "ferramenta", "agente",      "equipe",    "servico"};
 
 const std::array<std::string_view, 7> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
 
-const std::array<std::string_view, 64> kBuiltins = {
-    "imprimir",  "registrar",  "env",        "tamanho",     "contar",  "somar",
-    "media",     "min",        "max",        "intervalo",   "dividir", "ler_csv",
-    "escrever_csv", "ler_json", "escrever_json", "ler",      "carregador", "perguntar",
-    "incorporar", "dividir_texto", "responder", "tensor",   "zeros",   "checar_tilt",
-    "executar_sql", "consultar_sql", "transacao", "spark_sql", "spark_executar",
-    "ler_parquet", "escrever_parquet", "ler_delta", "escrever_delta", "anexar_delta",
-    "ler_iceberg", "escrever_iceberg", "anexar_iceberg", "apagar_iceberg",
-    "ler_redis", "escrever_redis", "redis_executar", "redis_lote", "ler_kafka",
-    "escrever_kafka", "mongo_inserir",
-    "mongo_buscar", "mongo_atualizar", "mongo_deletar", "mongo_criar_indice",
-    "mongo_agregar",
-    "ler_s3", "escrever_s3", "listar_s3", "apagar_s3",
-    "copiar_s3", "cabecalho_s3", "s3_iniciar_upload", "s3_enviar_parte",
-    "s3_concluir_upload", "s3_abortar_upload", "http_get_json", "http_post_json",
-    "es_buscar", "es_executar"};
+const std::array<std::string_view, 65> kBuiltins = {"imprimir",
+                                                    "registrar",
+                                                    "env",
+                                                    "tamanho",
+                                                    "contar",
+                                                    "somar",
+                                                    "media",
+                                                    "min",
+                                                    "max",
+                                                    "intervalo",
+                                                    "dividir",
+                                                    "ler_csv",
+                                                    "escrever_csv",
+                                                    "ler_json",
+                                                    "escrever_json",
+                                                    "ler",
+                                                    "carregador",
+                                                    "perguntar",
+                                                    "incorporar",
+                                                    "dividir_texto",
+                                                    "responder",
+                                                    "tensor",
+                                                    "zeros",
+                                                    "checar_tilt",
+                                                    "executar_sql",
+                                                    "consultar_sql",
+                                                    "transacao",
+                                                    "spark_sql",
+                                                    "spark_executar",
+                                                    "ler_parquet",
+                                                    "escrever_parquet",
+                                                    "ler_delta",
+                                                    "escrever_delta",
+                                                    "anexar_delta",
+                                                    "ler_iceberg",
+                                                    "escrever_iceberg",
+                                                    "anexar_iceberg",
+                                                    "apagar_iceberg",
+                                                    "ler_redis",
+                                                    "escrever_redis",
+                                                    "redis_executar",
+                                                    "redis_lote",
+                                                    "ler_kafka",
+                                                    "escrever_kafka",
+                                                    "transacao_kafka",
+                                                    "mongo_inserir",
+                                                    "mongo_buscar",
+                                                    "mongo_atualizar",
+                                                    "mongo_deletar",
+                                                    "mongo_criar_indice",
+                                                    "mongo_agregar",
+                                                    "ler_s3",
+                                                    "escrever_s3",
+                                                    "listar_s3",
+                                                    "apagar_s3",
+                                                    "copiar_s3",
+                                                    "cabecalho_s3",
+                                                    "s3_iniciar_upload",
+                                                    "s3_enviar_parte",
+                                                    "s3_concluir_upload",
+                                                    "s3_abortar_upload",
+                                                    "http_get_json",
+                                                    "http_post_json",
+                                                    "es_buscar",
+                                                    "es_executar"};
 
 const std::array<std::string_view, 11> kTableMethods = {
-    "filtrar",  "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",
-    "limite",   "primeiros", "distinto", "tamanho",     "inserir"};
+    "filtrar", "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",
+    "limite",  "primeiros", "distinto", "tamanho",     "inserir"};
 
 const std::array<std::string_view, 17> kTensorMethods = {
-    "forma",      "dados", "matmul", "transposta", "reformar", "conv2d", "norma_lote",
-    "relu",       "gelu",  "silu",   "sigmoide",   "tanh",     "softmax",
-    "soma",       "media", "argmax", "item"};
+    "forma", "dados",    "matmul", "transposta", "reformar", "conv2d", "norma_lote", "relu", "gelu",
+    "silu",  "sigmoide", "tanh",   "softmax",    "soma",     "media",  "argmax",     "item"};
 
 struct FieldSet {
   std::string_view decl;
@@ -85,7 +132,9 @@ const std::vector<FieldSet>& field_sets() {
         "parar_cedo", "agendador", "grade", "criterio", "verboso"}},
       {"tarefa", {"entrada", "executar"}},
       {"indice", {"embeddings", "armazenamento", "dimensao", "metrica"}},
-      {"fonte", {"tipo", "caminho", "arquivo", "url", "consulta", "formato", "brokers", "topico", "lingua", "conf"}},
+      {"fonte",
+       {"tipo", "caminho", "arquivo", "url", "consulta", "formato", "brokers", "topico", "lingua",
+        "conf"}},
       {"pipeline", {"passos", "agenda", "ao_falhar"}},
       {"fluxo", {"entrada", "passos"}},
       {"ferramenta", {"descricao", "entrada", "executar"}},
@@ -93,7 +142,9 @@ const std::vector<FieldSet>& field_sets() {
       {"equipe", {"agentes", "estrategia", "supervisor", "objetivo"}},
       {"servico", {"porta", "dispositivo", "meio", "rota"}},
       {"verificar", {"nao_nulo", "unico", "intervalo", "ao_violar"}},
-      {"avaliacao", {"dados", "executar", "metricas", "limiar", "tolerancia", "ao_reprovar", "verboso", "amostra", "semente", "juiz", "registrar_em"}},
+      {"avaliacao",
+       {"dados", "executar", "metricas", "limiar", "tolerancia", "ao_reprovar", "verboso",
+        "amostra", "semente", "juiz", "registrar_em"}},
   };
   return sets;
 }
@@ -129,7 +180,7 @@ std::string enclosing_decl(const std::vector<Token>& toks, std::uint32_t line, s
         break;
       case TokenKind::Indent:
         stack.push_back(!pending_open.empty() ? pending_open
-                                             : (stack.empty() ? std::string() : stack.back()));
+                                              : (stack.empty() ? std::string() : stack.back()));
         pending_open.clear();
         at_line_start = true;
         break;
@@ -170,12 +221,10 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "imprimir \"ola\", 42"},
       {"registrar", "registrar(mensagem, ...)", "mensagem", "Registra uma mensagem de log.",
        "registrar \"iniciando etapa\""},
-      {"env", "env(nome)", "nome", "Le o valor de uma variavel de ambiente.",
-       "env \"HOME\""},
+      {"env", "env(nome)", "nome", "Le o valor de uma variavel de ambiente.", "env \"HOME\""},
       {"tamanho", "tamanho(colecao)", "colecao", "Tamanho de lista, texto, mapa ou tabela.",
        nullptr},
-      {"contar", "contar(colecao)", "colecao", "Conta elementos de uma tabela ou lista.",
-       nullptr},
+      {"contar", "contar(colecao)", "colecao", "Conta elementos de uma tabela ou lista.", nullptr},
       {"somar", "somar(lista)", "lista", "Soma os elementos de uma lista numerica.",
        "somar [1, 2, 3]"},
       {"media", "media(lista)", "lista", "Media aritmetica dos elementos de uma lista.",
@@ -205,11 +254,11 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Divide um texto em pedacos de tamanho fixo.", "dividir_texto texto, tamanho: 4"},
       {"responder", "responder(valor)", "valor",
        "Define a resposta de uma ferramenta/agente dentro de um fluxo.", nullptr},
-      {"tensor", "tensor([[...], [...]])", "dados",
-       "Cria um tensor a partir de listas aninhadas.", "tensor [[1, 2], [3, 4]]"},
+      {"tensor", "tensor([[...], [...]])", "dados", "Cria um tensor a partir de listas aninhadas.",
+       "tensor [[1, 2], [3, 4]]"},
       {"zeros", "zeros([dim, ...])", "dims", "Tensor preenchido com zeros.", nullptr},
-      {"checar_tilt", "checar_tilt(caminho)", "caminho",
-       "Valida a sintaxe de um arquivo .tilt.", nullptr},
+      {"checar_tilt", "checar_tilt(caminho)", "caminho", "Valida a sintaxe de um arquivo .tilt.",
+       nullptr},
       {"executar_sql", "executar_sql(conexao, consulta)", "conexao,consulta",
        "Executa uma consulta SQL em uma conexao.", nullptr},
       {"consultar_sql", "consultar_sql(conexao, consulta, [params])", "conexao,consulta,params",
@@ -236,8 +285,7 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Anexa linhas a uma tabela Iceberg.", nullptr},
       {"apagar_iceberg", "apagar_iceberg(caminho, onde: {...})", "caminho",
        "Apaga linhas de uma tabela Iceberg (position/equality deletes).", nullptr},
-      {"ler_redis", "ler_redis(conexao, chave)", "conexao,chave", "Le um valor do Redis.",
-       nullptr},
+      {"ler_redis", "ler_redis(conexao, chave)", "conexao,chave", "Le um valor do Redis.", nullptr},
       {"escrever_redis", "escrever_redis(conexao, chave, valor)", "conexao,chave,valor",
        "Grava um valor no Redis.", nullptr},
       {"redis_executar", "redis_executar(conexao, comando)", "conexao,comando",
@@ -248,6 +296,8 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        nullptr},
       {"escrever_kafka", "escrever_kafka(topico, mensagem)", "topico,mensagem",
        "Publica uma mensagem em um topico Kafka.", nullptr},
+      {"transacao_kafka", "transacao_kafka(id, registros, opcoes?)", "id,registros,opcoes",
+       "Publica registros em varias particoes com commit atomico Kafka.", nullptr},
       {"mongo_inserir", "mongo_inserir(colecao, documento)", "colecao,documento",
        "Insere um documento no MongoDB.", nullptr},
       {"mongo_buscar", "mongo_buscar(colecao, filtro?)", "colecao,filtro",
@@ -264,8 +314,8 @@ const std::vector<BuiltinDoc>& builtin_docs() {
       {"escrever_s3", "escrever_s3(uri, dados)", "uri,dados", "Grava um objeto no S3.", nullptr},
       {"listar_s3", "listar_s3(uri)", "uri", "Lista objetos de um prefixo no S3.", nullptr},
       {"apagar_s3", "apagar_s3(uri)", "uri", "Apaga um objeto do S3.", nullptr},
-      {"copiar_s3", "copiar_s3(origem, destino)", "origem,destino",
-       "Copia um objeto no S3.", nullptr},
+      {"copiar_s3", "copiar_s3(origem, destino)", "origem,destino", "Copia um objeto no S3.",
+       nullptr},
       {"cabecalho_s3", "cabecalho_s3(uri)", "uri", "Retorna os metadados de um objeto S3.",
        nullptr},
       {"s3_iniciar_upload", "s3_iniciar_upload(uri)", "uri", "Inicia um upload multipart no S3.",
@@ -319,7 +369,8 @@ const std::vector<KeywordDoc>& keyword_docs() {
       {"busca", "Busca em grade de hiperparametros (`modelo:`, `grade:`, `criterio:`)."},
       {"tarefa", "Declara uma tarefa de um experimento."},
       {"experimento", "Declara um experimento de ML."},
-      {"avaliacao", "Declara uma avaliacao (evals: `dados:`, `executar:`, `metricas:`, `limiar:`)."},
+      {"avaliacao",
+       "Declara uma avaliacao (evals: `dados:`, `executar:`, `metricas:`, `limiar:`)."},
       {"llm", "Declara uma configuracao de LLM (`provedor:`, `modelo:`, `temperatura:`, ...)."},
       {"indice", "Declara um indice de embeddings para RAG."},
       {"fluxo", "Declara um fluxo de agente (`entrada:`, `passos:`)."},
@@ -649,9 +700,10 @@ const ast::Expr* assign_rhs_at(const ast::Block& b, std::uint32_t target_off) {
       if (!it || found) return;
       const ast::Item* node = it.get();
       if (node->kind == ast::ItemKind::ListEntry && node->child) node = node->child.get();
-      if (node->kind == ast::ItemKind::Stmt && node->stmt && node->stmt->kind == ast::StmtKind::Assign &&
-          node->stmt->a && node->stmt->a->kind == ast::ExprKind::Name &&
-          node->stmt->a->span.offset == target_off && node->stmt->b) {
+      if (node->kind == ast::ItemKind::Stmt && node->stmt &&
+          node->stmt->kind == ast::StmtKind::Assign && node->stmt->a &&
+          node->stmt->a->kind == ast::ExprKind::Name && node->stmt->a->span.offset == target_off &&
+          node->stmt->b) {
         found = node->stmt->b.get();
         return;
       }
@@ -717,9 +769,8 @@ std::string hover_type_suffix(const ast::Program& prog, const SemanticChecker& s
     }
     md += ")";
     std::string ret = "?";
-    if (auto it = globals.find(d.name);
-        it != globals.end() && it->second.type.ret &&
-        it->second.type.ret->kind != sema::TypeKind::Unknown) {
+    if (auto it = globals.find(d.name); it != globals.end() && it->second.type.ret &&
+                                        it->second.type.ret->kind != sema::TypeKind::Unknown) {
       ret = sema::type_to_string(*it->second.type.ret);
     } else if (const sema::Type* t = sema.annotation_of(decl->value.get())) {
       if (t->kind != sema::TypeKind::Unknown) ret = sema::type_to_string(*t);
@@ -744,10 +795,12 @@ std::string hover_type_suffix(const ast::Program& prog, const SemanticChecker& s
       }
       for (const auto& p : it->params) {
         std::string pname = p.name;
-        if (pname.size() > 2 && pname.compare(pname.size() - 2, 2, "[]") == 0) pname.erase(pname.size() - 2);
+        if (pname.size() > 2 && pname.compare(pname.size() - 2, 2, "[]") == 0)
+          pname.erase(pname.size() - 2);
         if (pname != d.name) continue;
         if (const sema::Type* t = sema.annotation_of(p.value.get())) {
-          if (t->kind != sema::TypeKind::Unknown) return "\n\n`" + d.name + ": " + sema::type_to_string(*t) + "`";
+          if (t->kind != sema::TypeKind::Unknown)
+            return "\n\n`" + d.name + ": " + sema::type_to_string(*t) + "`";
         }
         return {};
       }
@@ -758,7 +811,8 @@ std::string hover_type_suffix(const ast::Program& prog, const SemanticChecker& s
 
 }  // namespace
 
-std::vector<CompletionItem> complete(const SourceFile& src, std::uint32_t line, std::uint32_t column) {
+std::vector<CompletionItem> complete(const SourceFile& src, std::uint32_t line,
+                                     std::uint32_t column) {
   std::vector<CompletionItem> out;
 
   const std::string_view text = src.line_text(line);
@@ -769,7 +823,8 @@ std::vector<CompletionItem> complete(const SourceFile& src, std::uint32_t line, 
   while (start > 0 && ident_char(text[start - 1])) --start;
   const std::string_view prefix = text.substr(start, c - start);
   const bool dot = start > 0 && text[start - 1] == '.';
-  const bool at_line_head = text.substr(0, start).find_first_not_of(" \t") == std::string_view::npos;
+  const bool at_line_head =
+      text.substr(0, start).find_first_not_of(" \t") == std::string_view::npos;
 
   DiagnosticEngine diag(&src);
   Lexer lexer(src, diag);
@@ -811,7 +866,8 @@ std::vector<CompletionItem> complete(const SourceFile& src, std::uint32_t line, 
   const ast::Program prog = parser.parse_program();
   for (const auto& it : prog.items) {
     if (!it || it->kind != ast::ItemKind::Decl) continue;
-    if (it->header.empty() || !it->header[0] || it->header[0]->kind != ast::ExprKind::Name) continue;
+    if (it->header.empty() || !it->header[0] || it->header[0]->kind != ast::ExprKind::Name)
+      continue;
     push(out, prefix, it->header[0]->text, "name", "declarado em '" + it->key + "'");
   }
 
@@ -891,7 +947,8 @@ std::string hover(const SourceFile& src, std::uint32_t line, std::uint32_t colum
     if (std::string t = render_hover_type(sema, e); !t.empty()) {
       std::string md = "`" + t + "`";
       const std::string_view text = src.text();
-      if (e->span.length > 0 && e->span.length <= 60 && e->span.offset + e->span.length <= text.size()) {
+      if (e->span.length > 0 && e->span.length <= 60 &&
+          e->span.offset + e->span.length <= text.size()) {
         std::string slice(text.substr(e->span.offset, e->span.length));
         md += " — `" + slice + "`";
       }
@@ -954,15 +1011,24 @@ SigHelp signature_help(const SourceFile& src, std::uint32_t line, std::uint32_t 
         continue;
       }
       switch (ch) {
-        case '"': in_text = true; break;
+        case '"':
+          in_text = true;
+          break;
         case '(':
         case '[':
-        case '{': ++depth; break;
+        case '{':
+          ++depth;
+          break;
         case ')':
         case ']':
-        case '}': if (depth > 0) --depth; break;
-        case ',': if (depth == count_at && commas) ++*commas; break;
-        default: break;
+        case '}':
+          if (depth > 0) --depth;
+          break;
+        case ',':
+          if (depth == count_at && commas) ++*commas;
+          break;
+        default:
+          break;
       }
     }
     return depth;
@@ -1011,16 +1077,23 @@ std::string format_document(const std::string& text) {
   int bracket_depth = 0;
   for (const Token& t : toks) {
     switch (t.kind) {
-      case TokenKind::Indent: ++level; continue;
-      case TokenKind::Dedent: if (level > 0) --level; continue;
+      case TokenKind::Indent:
+        ++level;
+        continue;
+      case TokenKind::Dedent:
+        if (level > 0) --level;
+        continue;
       case TokenKind::Newline:
-      case TokenKind::EndOfFile: continue;
-      default: break;
+      case TokenKind::EndOfFile:
+        continue;
+      default:
+        break;
     }
     if (t.span.line < line_level.size() && line_level[t.span.line] < 0) {
       line_level[t.span.line] = bracket_depth == 0 ? level : -1;
     }
-    if (t.kind == TokenKind::LBracket || t.kind == TokenKind::LBrace || t.kind == TokenKind::LParen) {
+    if (t.kind == TokenKind::LBracket || t.kind == TokenKind::LBrace ||
+        t.kind == TokenKind::LParen) {
       ++bracket_depth;
     } else if (t.kind == TokenKind::RBracket || t.kind == TokenKind::RBrace ||
                t.kind == TokenKind::RParen) {

@@ -87,7 +87,7 @@
 
 ### 2.3 Streaming (P2)
 - [x] Implementar streaming de Parquet no treino (`carregador ..., fluxo: verdadeiro`; CSV e Parquet)
-- [ ] Adicionar suporte a Kafka transactions multi-partição
+- [x] Adicionar suporte a Kafka transactions multi-partição
 - [ ] Adicionar persistência de estado entre disparos cron (`--agendar`)
 
 ---

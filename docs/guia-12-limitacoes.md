@@ -303,8 +303,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `s3://` ou num topico `kafka:` (mapa inteiro por save, last-wins) e janelas
   de tempo/throttle tambem persistem `last_run`; eleicao de lider por lease em
   arquivo (`TILT_LEADER_LEASE`, `TILT_LEADER_TTL`) garante escritor unico no
-  `--agendar` multi-replica. Transações Kafka multi-partição ficam para
-  depois.
+  `--agendar` multi-replica.
   Kafka, Mongo etc. sem `grupo:` nao têm checkpoint local; sem `grupo:` na fonte Kafka ela é relida do início por
   inteiro a cada tick, o que não escala para tópicos grandes (com `grupo:` o
   checkpoint é o offset commitado no broker).

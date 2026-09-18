@@ -549,11 +549,11 @@ std::string encode_record(const std::string& valor, const std::string& chave) {
 
 // RecordBatch (message format v2) com 1 record. baseOffset 0: o broker
 // reatribui offsets no append; a deduplicacao usa (producerId, sequence).
-std::string build_record_batch(const std::string& valor, const std::string& chave,
-                               std::int64_t pid, std::int16_t epoch, std::int32_t seq) {
+std::string build_record_batch(const std::string& valor, const std::string& chave, std::int64_t pid,
+                               std::int16_t epoch, std::int32_t seq, bool transacional = false) {
   const std::int64_t now = now_ms();
   std::string body;
-  put_i16(body, 0);      // attributes (sem compressao, nao transacional)
+  put_i16(body, transacional ? 0x10 : 0);  // bit transacional, sem compressao
   put_i32(body, 0);      // lastOffsetDelta
   put_i64(body, now);    // firstTimestamp
   put_i64(body, now);    // maxTimestamp
@@ -594,6 +594,8 @@ std::map<std::string, std::int32_t>& eos_seqs() {
 std::string seq_key(const std::string& topico, std::int32_t particao) {
   return topico + '\0' + std::to_string(particao);
 }
+
+BrokerAddr find_coordinator(Conn& conn, const std::string& grupo);
 
 }  // namespace
 
@@ -646,11 +648,16 @@ bool erro_retriavel_produce(const std::string& what) {
 // InitProducerId (api 22, v0): devolve {producer_id, epoch} ou nullopt
 // quando o broker nao suporta (0.9-era fecha a conexao) ou rejeita.
 std::optional<std::pair<std::int64_t, std::int16_t>> init_producer_id(const BrokerAddr& addr,
-                                                                      bool tls) {
+                                                                      bool tls,
+                                                                      const std::string& id = {}) {
   try {
     Conn conn(addr.host, addr.port, tls);
     std::string payload;
-    put_i16(payload, -1);  // transactional_id = NULL
+    if (id.empty()) {
+      put_i16(payload, -1);  // transactional_id = NULL
+    } else {
+      put_str(payload, id);
+    }
     put_i32(payload, 60000);
     const std::string resp = roundtrip(conn, 22, 0, kClientIdCorrBase + 9, payload);
     Reader r{resp};
@@ -669,16 +676,24 @@ std::optional<std::pair<std::int64_t, std::int16_t>> init_producer_id(const Brok
 // Produce v3 (RecordBatch idempotente). Devolve o base offset atribuido.
 std::int64_t kafka_produzir_v3(const std::string& topico, const std::string& valor,
                                const std::string& chave, std::int32_t particao, int acks,
-                               std::int64_t pid, std::int16_t epoch, std::int32_t seq,
-                               bool tls) {
+                               std::int64_t pid, std::int16_t epoch, std::int32_t seq, bool tls,
+                               const std::string& transactional_id = {},
+                               const std::string& broker = {}) {
   Metadata md;
-  const BrokerAddr addr = lider_addr(topico, particao, md, tls);
+  const BrokerAddr boot = broker.empty() ? bootstrap_addr() : parse_addr(broker);
+  md = metadata(topico, boot, tls);
+  const BrokerAddr addr = lider_addr_md(topico, particao, md);
   Conn conn(addr.host, addr.port, tls);
 
-  const std::string batch = build_record_batch(valor, chave, pid, epoch, seq);
+  const std::string batch =
+      build_record_batch(valor, chave, pid, epoch, seq, !transactional_id.empty());
 
   std::string payload;
-  put_i16(payload, -1);  // transactional_id = NULL
+  if (transactional_id.empty()) {
+    put_i16(payload, -1);  // transactional_id = NULL
+  } else {
+    put_str(payload, transactional_id);
+  }
   put_i16(payload, static_cast<std::int16_t>(acks));
   put_i32(payload, 5000);  // timeout ms
   put_i32(payload, 1);     // [topic_data]
@@ -748,6 +763,113 @@ bool erro_nao_suportado(const std::string& what) {
          what.find("correlation_id") != std::string::npos ||
          what.find("resposta malformada") != std::string::npos ||
          what.find("(kafka codigo 35)") != std::string::npos;  // UnsupportedVersion
+}
+
+void add_partitions_to_txn(const BrokerAddr& coord, const std::string& id, std::int64_t pid,
+                           std::int16_t epoch,
+                           const std::map<std::string, std::set<std::int32_t>>& partes, bool tls) {
+  Conn conn(coord.host, coord.port, tls);
+  std::string payload;
+  put_str(payload, id);
+  put_i64(payload, pid);
+  put_i16(payload, epoch);
+  put_i32(payload, static_cast<std::int32_t>(partes.size()));
+  for (const auto& [topico, ps] : partes) {
+    put_str(payload, topico);
+    put_i32(payload, static_cast<std::int32_t>(ps.size()));
+    for (const std::int32_t p : ps) put_i32(payload, p);
+  }
+  const std::string resp = roundtrip(conn, 24, 0, kClientIdCorrBase + 10, payload);
+  Reader r{resp};
+  r.i32();  // throttle_ms
+  const std::int32_t nt = r.i32();
+  if (nt < 0) die("resposta de AddPartitionsToTxn malformada");
+  for (std::int32_t t = 0; t < nt; ++t) {
+    const std::string topico = r.str();
+    const std::int32_t np = r.i32();
+    if (np < 0) die("resposta de AddPartitionsToTxn malformada");
+    for (std::int32_t p = 0; p < np; ++p) {
+      const std::int32_t particao = r.i32();
+      const std::int16_t erro = r.i16();
+      if (erro != 0) {
+        die_code(
+            "AddPartitionsToTxn em particao " + std::to_string(particao) + " do topico " + topico,
+            erro);
+      }
+    }
+  }
+}
+
+void end_txn(const BrokerAddr& coord, const std::string& id, std::int64_t pid, std::int16_t epoch,
+             bool committed, bool tls) {
+  Conn conn(coord.host, coord.port, tls);
+  std::string payload;
+  put_str(payload, id);
+  put_i64(payload, pid);
+  put_i16(payload, epoch);
+  put_i8(payload, committed ? 1 : 0);
+  const std::string resp = roundtrip(conn, 26, 0, kClientIdCorrBase + 11, payload);
+  Reader r{resp};
+  r.i32();  // throttle_ms
+  const std::int16_t erro = r.i16();
+  if (erro != 0) die_code(committed ? "commit Kafka" : "abort Kafka", erro);
+}
+
+void kafka_transacao(const std::string& id, const std::vector<KafkaTransactionRecord>& registros,
+                     const KafkaTransactionOptions& opt) {
+  if (id.empty()) die("id da transacao nao pode ser vazio");
+  if (registros.empty()) die("transacao precisa de pelo menos um registro");
+  if (opt.acks != -1 && opt.acks != 1) die("acks deve ser -1 (all) ou 1 (leader)");
+  if (opt.tentativas < 1 || opt.tentativas > 10) die("tentativas deve ser inteiro entre 1 e 10");
+
+  const BrokerAddr bootstrap = opt.broker.empty() ? bootstrap_addr() : parse_addr(opt.broker);
+  const BrokerAddr coord = [&] {
+    Conn conn(bootstrap.host, bootstrap.port, opt.tls);
+    return find_coordinator(conn, id);
+  }();
+  const auto pid = init_producer_id(coord, opt.tls, id);
+  if (!pid) die("broker sem InitProducerId transacional");
+
+  std::map<std::string, std::set<std::int32_t>> partes;
+  for (const KafkaTransactionRecord& r : registros) {
+    if (r.topico.empty()) die("topico da transacao nao pode ser vazio");
+    if (r.particao < 0) die("particao da transacao deve ser >= 0");
+    partes[r.topico].insert(r.particao);
+  }
+
+  bool finalizada = false;
+  try {
+    add_partitions_to_txn(coord, id, pid->first, pid->second, partes, opt.tls);
+    std::map<std::string, std::int32_t> seqs;
+    for (const KafkaTransactionRecord& r : registros) {
+      const std::string chave = seq_key(r.topico, r.particao);
+      const std::int32_t seq = seqs[chave]++;
+      std::string ultimo_erro;
+      for (int tentativa = 0; tentativa < opt.tentativas; ++tentativa) {
+        try {
+          kafka_produzir_v3(r.topico, r.valor, r.chave, r.particao, opt.acks, pid->first,
+                            pid->second, seq, opt.tls, id, opt.broker);
+          ultimo_erro.clear();
+          break;
+        } catch (const std::exception& e) {
+          ultimo_erro = e.what();
+          if (tentativa + 1 >= opt.tentativas || !erro_retriavel_produce(ultimo_erro)) throw;
+          std::this_thread::sleep_for(std::chrono::milliseconds(100 * (tentativa + 1)));
+        }
+      }
+      if (!ultimo_erro.empty()) throw std::runtime_error(ultimo_erro);
+    }
+    end_txn(coord, id, pid->first, pid->second, true, opt.tls);
+    finalizada = true;
+  } catch (...) {
+    if (!finalizada) {
+      try {
+        end_txn(coord, id, pid->first, pid->second, false, opt.tls);
+      } catch (...) {
+      }
+    }
+    throw;
+  }
 }
 
 std::int64_t kafka_produzir(const std::string& topico, const std::string& valor,

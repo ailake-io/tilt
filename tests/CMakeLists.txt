@@ -82,6 +82,12 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/kafka_test.sh
           $<TARGET_FILE:tilt>
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/kafka_roundtrip.tilt)
+add_test(
+  NAME kafka_txn
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/kafka_txn_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/kafka_transacao.tilt)
+
 
 add_test(
   NAME redis

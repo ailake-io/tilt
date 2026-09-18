@@ -35,7 +35,7 @@ BUILTINS
   ler_delta escrever_delta anexar_delta
   ler_iceberg escrever_iceberg anexar_iceberg apagar_iceberg
   ler_redis escrever_redis redis_executar redis_lote
-  ler_kafka escrever_kafka
+  ler_kafka escrever_kafka transacao_kafka
   mongo_inserir mongo_buscar mongo_atualizar mongo_deletar mongo_criar_indice
   mongo_agregar
   ler_s3 escrever_s3 listar_s3 apagar_s3 copiar_s3 cabecalho_s3
