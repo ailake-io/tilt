@@ -1,0 +1,7 @@
+treino R: perda caiu sim | acuracia 3/4
+treino L: perda caiu sim | acuracia 1/4
+treino G: perda caiu sim | acuracia 1/4
+== pipeline p ==
+[1, 2]
+[1, 2]
+[1, 2]

@@ -189,12 +189,12 @@ Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmo
 última dimensão, sem affine — na inferência e no treino),
 `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]` (os três últimos são opcionais),
 `norma_lote` (affine por canal, com média/variância correntes),
-`incorporacao: [vocabulario, dimensao]` (índices inteiros; adiciona a dimensão D ao final,
-por exemplo entrada `[N, T]` vira `[N, T, D]`),
+`incorporacao: [vocabulario, dimensao]` (indices inteiros; adiciona a dimensao D ao final; por exemplo entrada `[N, T]` vira `[N, T, D]`),
+`recorrente: [rnn|lstm|gru, oculta]` (sequencias `[tempo, atributos]` ou lotes `[N, tempo, atributos]`; retorna o ultimo estado),
 `agrupamento_max: [janela]` ou `[janela, passo]` e `achatar` (achata o lote
 `[N, ...]` para `[N, C]` antes da `densa`). Modelos convolucionais exigem a
 anotação completa da entrada, ex.: `entrada: tensor[f32, 1, 4, 4]` (sem o
-lote). No `treino`, `x` pode ser 4D `[N, C, H, W]` quando o modelo começa
+lote). No `treino`, `x` pode ser 3D `[N, T, F]` para recorrentes ou 4D `[N, C, H, W]` quando o modelo começa
 com `conv2d`.
 
 ```tilt run
@@ -217,7 +217,7 @@ pipeline cnn:
 
 ### Pesos de arquivo
 
-`pesos: "caminho"` carrega pesos no formato **tilt-pesos** (JSON gerado por
+`pesos: "caminho"` carrega pesos no formato **tilt-pesos** (JSON) ou **Safetensors** (F32 binário). O JSON é gerado por
 `modelo <Nome>.salvar_pesos`, com `w`/`b` por camada com parâmetros:
 `densa`/`linear`, `conv2d` — incluindo `passo` — e `norma_lote` — incluindo
 `media_running`/`var_running`). Forma
@@ -225,7 +225,7 @@ incompatível com o modelo → erro `T901` mostrando o esperado vs. o encontrado
 arquivo ausente → init Xavier com `[nota]`. O carregamento também pode ser
 feito em tempo de execução com `modelo <Nome>.carregar_pesos "caminho"`
 (mesma validação de formas; o modelo passa a usar os pesos carregados nas
-chamadas seguintes de `executar`).
+chamadas seguintes de `executar`). Safetensors também pode ser salvo/carregado com a extensão `.safetensors`; ele usa tensores nomeados `camada_<i>.w`, `.b` e `.u` para recorrentes.
 
 ```tilt run
 modelo Mini:
@@ -248,7 +248,7 @@ pipeline pesos:
 incluindo pós-`treino`) para **ONNX opset 20**, sem dependências externas:
 cada `densa`/`linear` vira um `Gemm`, ativações viram `Relu`/`Gelu`/
 `Sigmoid`+`Mul` (`silu`) /`Sigmoid`/`Tanh`, mais `Softmax` (eixo 1),
-`LayerNormalization`, `Conv`, `BatchNormalization`, `MaxPool` e `Flatten`;
+`LayerNormalization`, `Conv`, `BatchNormalization`, `MaxPool`, `Flatten` e `RNN`/`LSTM`/`GRU`;
 `abandono` é identidade na inferência e não é
 exportado. A entrada é `[lote, ...]` (`lote` dinâmico, resto de
 `entrada: tensor[...]`). O arquivo passa no `onnx.checker` e roda em

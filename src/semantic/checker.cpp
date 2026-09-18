@@ -2310,6 +2310,10 @@ void SemanticChecker::check_model_shapes() {
                   std::to_string(b) + "]"});
         }
         if (forma.size() == 1) forma = {b};
+      } else if (key == "recorrente" && value && value->kind == ExprKind::ListLit &&
+                 value->elems.size() == 2 && value->elems[1]->kind == ExprKind::IntLit) {
+        const std::int64_t h = ler(value->elems[1].get());
+        if (forma.size() == 2 && h > 0) forma = {h};
       } else if (key == "incorporacao" && value && value->kind == ExprKind::ListLit &&
                  value->elems.size() == 2) {
         const std::int64_t vocabulario = ler(value->elems[0].get());

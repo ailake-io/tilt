@@ -95,6 +95,14 @@ std::string attr_float(const std::string& name, float v) {
   return w.out;
 }
 
+// AttributeProto: name (1) + type (20) + s (4)
+std::string attr_string(const std::string& name, const std::string& value) {
+  Writer w;
+  w.bytes_field(1, name);
+  w.varint_field(20, 3);  // STRING
+  w.bytes_field(4, value);
+  return w.out;
+}
 // Dim: dim_param (1, string) | dim_value (2, varint)
 std::string dim_param(const std::string& p) {
   Writer w;
@@ -126,7 +134,8 @@ std::string tensor_type_proto_forma(const std::vector<std::int64_t>& forma_sem_l
 }
 
 // ValueInfoProto: name (1) + type (2)
-std::string value_info_forma(const std::string& name, const std::vector<std::int64_t>& forma_sem_lote) {
+std::string value_info_forma(const std::string& name,
+                             const std::vector<std::int64_t>& forma_sem_lote) {
   Writer w;
   w.bytes_field(1, name);
   w.msg_field(2, tensor_type_proto_forma(forma_sem_lote));
@@ -142,6 +151,23 @@ std::string tensor_proto(const std::string& name, const std::vector<std::int64_t
   w.bytes_field(8, name);
   w.bytes_field(9, encode_raw_floats(data));
   // float_data (4) vazio: leitores aceitam raw_data.
+  return w.out;
+}
+
+std::string tensor_proto_int64(const std::string& name, const std::vector<std::int64_t>& dims,
+                               const std::vector<std::int64_t>& data) {
+  Writer w;
+  w.bytes_field(1, encode_packed_int64(dims));
+  w.varint_field(2, 7);  // INT64
+  w.bytes_field(8, name);
+  std::string raw;
+  for (std::int64_t v : data) {
+    for (int i = 0; i < 8; ++i) {
+      raw.push_back(static_cast<char>(static_cast<std::uint64_t>(v) & 0xffU));
+      v >>= 8;
+    }
+  }
+  w.bytes_field(9, raw);
   return w.out;
 }
 
@@ -185,7 +211,59 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
   auto fresh = [&](const char* base) { return std::string(base) + std::to_string(seq++); };
 
   for (const auto& l : layers) {
-    if (l.kind == OnnxLayer::Dense) {
+    if (l.kind == OnnxLayer::Recorrente) {
+      if (l.w.rank() != 2 || l.u.rank() != 2 || l.b.rank() != 1 || l.w.shape[1] != l.b.shape[0] ||
+          l.u.shape[1] != l.b.shape[0])
+        die("peso recorrente com forma invalida");
+      const std::int64_t input_size = l.w.shape[0];
+      const std::int64_t gate_width = l.b.shape[0];
+      const std::int64_t hidden = l.u.shape[0];
+      const int gate_count = l.recorrente_tipo == "rnn" ? 1 : (l.recorrente_tipo == "lstm" ? 4 : 3);
+      if (gate_width != static_cast<std::int64_t>(gate_count) * hidden || input_size != dim)
+        die("camada recorrente com dimensoes incompativeis");
+      const std::vector<int> order =
+          l.recorrente_tipo == "lstm" ? std::vector<int>{0, 3, 1, 2} : std::vector<int>{0, 1, 2};
+      std::vector<float> ow(static_cast<std::size_t>(input_size * gate_width));
+      std::vector<float> orr(static_cast<std::size_t>(hidden * gate_width));
+      std::vector<float> ob(static_cast<std::size_t>(2 * gate_width), 0.0F);
+      for (int gate = 0; gate < gate_count; ++gate) {
+        const int source = order[static_cast<std::size_t>(gate)];
+        for (std::int64_t i = 0; i < input_size; ++i)
+          for (std::int64_t j = 0; j < hidden; ++j)
+            ow[static_cast<std::size_t>(i * gate_width + gate * hidden + j)] =
+                l.w.data[static_cast<std::size_t>(i * gate_width + source * hidden + j)];
+        for (std::int64_t i = 0; i < hidden; ++i)
+          for (std::int64_t j = 0; j < hidden; ++j)
+            orr[static_cast<std::size_t>(i * gate_width + gate * hidden + j)] =
+                l.u.data[static_cast<std::size_t>(i * gate_width + source * hidden + j)];
+        for (std::int64_t j = 0; j < hidden; ++j)
+          ob[static_cast<std::size_t>(gate * hidden + j)] =
+              l.b.data[static_cast<std::size_t>(source * hidden + j)];
+      }
+      const std::string wn = "W_rec" + std::to_string(seq);
+      const std::string rn = "R_rec" + std::to_string(seq);
+      const std::string bn = "B_rec" + std::to_string(seq);
+      initializers.push_back(tensor_proto(wn, {1, input_size, gate_width}, ow));
+      initializers.push_back(tensor_proto(rn, {1, hidden, gate_width}, orr));
+      initializers.push_back(tensor_proto(bn, {1, 2 * gate_width}, ob));
+      const std::string y = fresh("ry");
+      const std::string yh = fresh("rh");
+      std::vector<std::string> outputs = {y, yh};
+      if (l.recorrente_tipo == "lstm") outputs.push_back(fresh("rc"));
+      const std::string op =
+          l.recorrente_tipo == "rnn" ? "RNN" : (l.recorrente_tipo == "lstm" ? "LSTM" : "GRU");
+      nodes.push_back(
+          node_proto(op, {cur, wn, rn, bn}, outputs, "recurrent" + std::to_string(seq),
+                     {attr_int("hidden_size", hidden), attr_string("direction", "forward")}));
+      const std::string axes = "rec_axes" + std::to_string(seq);
+      initializers.push_back(tensor_proto_int64(axes, {1}, {0}));
+      const std::string out = fresh("r");
+      nodes.push_back(
+          node_proto("Squeeze", {yh, axes}, {out}, "recurrent_squeeze" + std::to_string(seq), {}));
+      cur = out;
+      dim = hidden;
+      out_dim = hidden;
+    } else if (l.kind == OnnxLayer::Dense) {
       if (l.w.rank() != 2) die("peso denso precisa ser 2D");
       if (l.w.shape[0] != dim) {
         die("camada densa espera entrada " + std::to_string(l.w.shape[0]) + ", grafo tem " +

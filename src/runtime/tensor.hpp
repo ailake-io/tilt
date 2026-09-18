@@ -39,6 +39,27 @@ Tensor reshape(const Tensor& a, std::vector<std::int64_t> shape);
 Tensor embedding(const Tensor& indices, const Tensor& tabela);
 void embedding_backward(const Tensor& indices, const Tensor& grad_saida, Tensor& grad_tabela);
 
+enum class RecurrentKind { Rnn, Lstm, Gru };
+
+// Estado intermediario da recorrencia para BPTT. A entrada pode ser [T, F]
+// (uma sequencia) ou [N, T, F] (mini-lote); a saida e o ultimo estado.
+struct RecurrentCache {
+  RecurrentKind kind = RecurrentKind::Rnn;
+  std::int64_t lote = 0;
+  std::int64_t tempo = 0;
+  std::int64_t entrada = 0;
+  std::int64_t oculta = 0;
+  std::vector<float> estados_h;  // [T+1, N, H]
+  std::vector<float> estados_c;  // [T+1, N, H], somente LSTM
+  std::vector<float> portas;     // [T, N, G*H], pos-ativacao
+};
+
+Tensor recorrente(const Tensor& x, const Tensor& w, const Tensor& u, const Tensor& b,
+                  RecurrentKind kind, RecurrentCache* cache = nullptr);
+void recorrente_backward(const Tensor& x, const Tensor& w, const Tensor& u, const Tensor& b,
+                         RecurrentKind kind, const RecurrentCache& cache, const Tensor& grad_saida,
+                         Tensor& grad_x, Tensor& grad_w, Tensor& grad_u, Tensor& grad_b);
+
 // Fatia linhas da dimensao 0 (mini-lote): saida [idx.size(), ...].
 Tensor fatiar_lote(const Tensor& a, const std::vector<std::int64_t>& idx);
 

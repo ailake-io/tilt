@@ -57,15 +57,14 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 
 ## Deep learning — treino real, mas de brinquedo
 
-Funciona: `treino` em CPU com camadas `densa`, `incorporacao`, `conv2d`, `norma_lote`,
+Funciona: `treino` em CPU com camadas `densa`, `incorporacao`, `recorrente` (RNN/LSTM/GRU), `conv2d`, `norma_lote`,
 `agrupamento_max` e `achatar`, adam/SGD, perdas entropia
 cruzada/quadrática, autograd manual.
 
 - **CNN de brinquedo**: `conv2d` (com viés), `norma_lote` (gama/beta +
   média/variância correntes), `agrupamento_max` e `achatar` treinam de
   verdade (mini-lotes em CPU). `incorporacao` também treina a tabela por SGD/Adam;
-  sem recorrência,
-  sem abandono no treino.
+  com recorrência RNN/LSTM/GRU e BPTT; abandono ainda é identidade no treino.
 - **GPU não validada** (`TILT_GPU=fake` em CPU; CUDA nunca rodou em
   hardware real) + sem AMP real.
 - **Exportação**: `modelo <Nome>.exportar_onnx "modelo.onnx"` existe no
@@ -77,7 +76,7 @@ cruzada/quadrática, autograd manual.
   (`checkpoint:`/`a_cada:`/`retomar:`, bit-idêntico ao contínuo), agendador
   de taxa (`cosseno`/`degrau`), `validacao:` + `parar_cedo:` (restaura
   melhores pesos), `busca` em grade com `criterio:`, dataloader streaming de CSV e Parquet (`carregador ..., fluxo: verdadeiro` + `bloco:`)
-  e exportação `gguf` (v3, só escrita).
+  e exportação `gguf` (v3, só escrita), Safetensors F32 e exportação ONNX das recorrentes.
 - **Faltam**: busca de hiperparâmetros além de grade (random/bayesiana),
   `gguf` com quantização (hoje só F32).
 

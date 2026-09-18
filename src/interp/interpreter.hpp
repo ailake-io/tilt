@@ -232,6 +232,7 @@ class Interpreter {
     enum Kind {
       Dense,
       Embedding,
+      Recorrente,
       Activation,
       Softmax,
       Dropout,
@@ -247,8 +248,12 @@ class Interpreter {
     // Embedding: tabela [vocabulario, dimensao].
     std::int64_t vocabulario = 0;
     std::int64_t dimensao = 0;
+    // Recorrente: W [entrada, portas*oculta], U [oculta, portas*oculta].
+    rt::Tensor u;
+    std::string recorrente_tipo;
+    std::int64_t oculta = 0;
     // Adam moment estimates (allocated lazily during training).
-    rt::Tensor m_w, v_w, m_b, v_b;
+    rt::Tensor m_w, v_w, m_b, v_b, m_u, v_u;
     // Running statistics for NormaLote (populated during training, used in inference).
     rt::Tensor media_running, var_running;
     // Batch statistics from the most recent training forward (per BN layer).

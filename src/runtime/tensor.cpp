@@ -260,6 +260,244 @@ void embedding_backward(const Tensor& indices, const Tensor& grad_saida, Tensor&
   }
 }
 
+namespace {
+int recurrent_gate_count(RecurrentKind k) {
+  return k == RecurrentKind::Rnn ? 1 : (k == RecurrentKind::Lstm ? 4 : 3);
+}
+void recurrent_check(const Tensor& x, const Tensor& w, const Tensor& u, const Tensor& b,
+                     RecurrentKind k) {
+  if (x.rank() != 2 && x.rank() != 3) die("recorrente espera entrada [T,F] ou [N,T,F]");
+  const std::int64_t f = x.shape.back(), h = u.rank() == 2 ? u.shape[0] : 0;
+  const std::int64_t g = static_cast<std::int64_t>(recurrent_gate_count(k)) * h;
+  if (w.rank() != 2 || u.rank() != 2 || b.rank() != 1 || f <= 0 || h <= 0 || w.shape[0] != f ||
+      w.shape[1] != g || u.shape[1] != g || b.shape[0] != g)
+    die("recorrente espera pesos W [F,G*H], U [H,G*H] e b [G*H]");
+}
+float rsig(float x) {
+  if (x >= 0.0F) {
+    const float e = std::exp(-x);
+    return 1.0F / (1.0F + e);
+  }
+  const float e = std::exp(x);
+  return e / (1.0F + e);
+}
+}  // namespace
+Tensor recorrente(const Tensor& x, const Tensor& w, const Tensor& u, const Tensor& b,
+                  RecurrentKind kind, RecurrentCache* cache) {
+  recurrent_check(x, w, u, b, kind);
+  const bool batched = x.rank() == 3;
+  const std::int64_t n = batched ? x.shape[0] : 1;
+  const std::int64_t tmax = batched ? x.shape[1] : x.shape[0];
+  const std::int64_t f = x.shape.back(), h = u.shape[0];
+  const std::int64_t g = static_cast<std::int64_t>(recurrent_gate_count(kind)) * h;
+  if (tmax <= 0) die("recorrente espera sequencia nao vazia");
+  RecurrentCache local, *c = cache ? cache : &local;
+  c->kind = kind;
+  c->lote = n;
+  c->tempo = tmax;
+  c->entrada = f;
+  c->oculta = h;
+  c->estados_h.assign(static_cast<std::size_t>((tmax + 1) * n * h), 0.0F);
+  c->estados_c.assign(
+      kind == RecurrentKind::Lstm ? static_cast<std::size_t>((tmax + 1) * n * h) : 0, 0.0F);
+  c->portas.assign(kind == RecurrentKind::Rnn ? 0 : static_cast<std::size_t>(tmax * n * g), 0.0F);
+  auto xi = [&](std::int64_t bn, std::int64_t t, std::int64_t j) {
+    return x.data[static_cast<std::size_t>(batched ? (bn * tmax + t) * f + j : t * f + j)];
+  };
+  auto hi = [&](std::int64_t t, std::int64_t bn, std::int64_t j) -> float& {
+    return c->estados_h[static_cast<std::size_t>((t * n + bn) * h + j)];
+  };
+  auto ci = [&](std::int64_t t, std::int64_t bn, std::int64_t j) -> float& {
+    return c->estados_c[static_cast<std::size_t>((t * n + bn) * h + j)];
+  };
+  auto pi = [&](std::int64_t t, std::int64_t bn, std::int64_t gate, std::int64_t j) -> float& {
+    return c->portas[static_cast<std::size_t>((t * n + bn) * g + gate * h + j)];
+  };
+  for (std::int64_t t = 0; t < tmax; ++t)
+    for (std::int64_t bn = 0; bn < n; ++bn) {
+      if (kind == RecurrentKind::Rnn) {
+        for (std::int64_t j = 0; j < h; ++j) {
+          float z = b.data[static_cast<std::size_t>(j)];
+          for (std::int64_t q = 0; q < f; ++q)
+            z += xi(bn, t, q) * w.data[static_cast<std::size_t>(q * h + j)];
+          for (std::int64_t q = 0; q < h; ++q)
+            z += hi(t, bn, q) * u.data[static_cast<std::size_t>(q * h + j)];
+          hi(t + 1, bn, j) = std::tanh(z);
+        }
+      } else if (kind == RecurrentKind::Lstm) {
+        for (std::int64_t j = 0; j < h; ++j) {
+          float z[4] = {};
+          for (int gate = 0; gate < 4; ++gate) {
+            z[gate] = b.data[static_cast<std::size_t>(gate * h + j)];
+            for (std::int64_t q = 0; q < f; ++q)
+              z[gate] += xi(bn, t, q) * w.data[static_cast<std::size_t>(q * g + gate * h + j)];
+            for (std::int64_t q = 0; q < h; ++q)
+              z[gate] += hi(t, bn, q) * u.data[static_cast<std::size_t>(q * g + gate * h + j)];
+          }
+          const float i = rsig(z[0]), ff = rsig(z[1]), gg = std::tanh(z[2]), o = rsig(z[3]);
+          pi(t, bn, 0, j) = i;
+          pi(t, bn, 1, j) = ff;
+          pi(t, bn, 2, j) = gg;
+          pi(t, bn, 3, j) = o;
+          ci(t + 1, bn, j) = ff * ci(t, bn, j) + i * gg;
+          hi(t + 1, bn, j) = o * std::tanh(ci(t + 1, bn, j));
+        }
+      } else {
+        for (std::int64_t j = 0; j < h; ++j) {
+          float z = b.data[static_cast<std::size_t>(j)],
+                r = b.data[static_cast<std::size_t>(h + j)];
+          for (std::int64_t q = 0; q < f; ++q) {
+            z += xi(bn, t, q) * w.data[static_cast<std::size_t>(q * g + j)];
+            r += xi(bn, t, q) * w.data[static_cast<std::size_t>(q * g + h + j)];
+          }
+          for (std::int64_t q = 0; q < h; ++q) {
+            z += hi(t, bn, q) * u.data[static_cast<std::size_t>(q * g + j)];
+            r += hi(t, bn, q) * u.data[static_cast<std::size_t>(q * g + h + j)];
+          }
+          const float zz = rsig(z), rr = rsig(r);
+          float nn = b.data[static_cast<std::size_t>(2 * h + j)];
+          for (std::int64_t q = 0; q < f; ++q)
+            nn += xi(bn, t, q) * w.data[static_cast<std::size_t>(q * g + 2 * h + j)];
+          for (std::int64_t q = 0; q < h; ++q)
+            nn += rr * hi(t, bn, q) * u.data[static_cast<std::size_t>(q * g + 2 * h + j)];
+          const float nh = std::tanh(nn);
+          pi(t, bn, 0, j) = zz;
+          pi(t, bn, 1, j) = rr;
+          pi(t, bn, 2, j) = nh;
+          hi(t + 1, bn, j) = (1.0F - zz) * nh + zz * hi(t, bn, j);
+        }
+      }
+    }
+  Tensor out;
+  out.shape = batched ? std::vector<std::int64_t>{n, h} : std::vector<std::int64_t>{h};
+  out.data.resize(static_cast<std::size_t>(n * h));
+  for (std::int64_t bn = 0; bn < n; ++bn)
+    for (std::int64_t j = 0; j < h; ++j)
+      out.data[static_cast<std::size_t>(bn * h + j)] = hi(tmax, bn, j);
+  return out;
+}
+void recorrente_backward(const Tensor& x, const Tensor& w, const Tensor& u, const Tensor& b,
+                         RecurrentKind kind, const RecurrentCache& c, const Tensor& gy, Tensor& gx,
+                         Tensor& gw, Tensor& gu, Tensor& gb) {
+  recurrent_check(x, w, u, b, kind);
+  const bool batched = x.rank() == 3;
+  const std::int64_t n = batched ? x.shape[0] : 1, tmax = batched ? x.shape[1] : x.shape[0];
+  const std::int64_t f = x.shape.back(), h = u.shape[0];
+  const std::int64_t g = static_cast<std::int64_t>(recurrent_gate_count(kind)) * h;
+  const std::vector<std::int64_t> yshape =
+      batched ? std::vector<std::int64_t>{n, h} : std::vector<std::int64_t>{h};
+  if (c.kind != kind || c.lote != n || c.tempo != tmax || c.entrada != f || c.oculta != h ||
+      gy.shape != yshape)
+    die("recorrente_backward: cache ou gradiente com forma inesperada");
+  gx = Tensor::zeros(x.shape);
+  gw = Tensor::zeros(w.shape);
+  gu = Tensor::zeros(u.shape);
+  gb = Tensor::zeros(b.shape);
+  auto xi = [&](std::int64_t bn, std::int64_t t, std::int64_t j) {
+    return x.data[static_cast<std::size_t>(batched ? (bn * tmax + t) * f + j : t * f + j)];
+  };
+  auto gxi = [&](std::int64_t bn, std::int64_t t, std::int64_t j) -> float& {
+    return gx.data[static_cast<std::size_t>(batched ? (bn * tmax + t) * f + j : t * f + j)];
+  };
+  auto hi = [&](std::int64_t t, std::int64_t bn, std::int64_t j) {
+    return c.estados_h[static_cast<std::size_t>((t * n + bn) * h + j)];
+  };
+  auto ci = [&](std::int64_t t, std::int64_t bn, std::int64_t j) {
+    return c.estados_c[static_cast<std::size_t>((t * n + bn) * h + j)];
+  };
+  auto pi = [&](std::int64_t t, std::int64_t bn, std::int64_t gate, std::int64_t j) {
+    return c.portas[static_cast<std::size_t>((t * n + bn) * g + gate * h + j)];
+  };
+  auto go = [&](std::int64_t bn, std::int64_t j) {
+    return gy.data[static_cast<std::size_t>(bn * h + j)];
+  };
+  std::vector<float> dh(static_cast<std::size_t>(n * h), 0.0F),
+      dc(static_cast<std::size_t>(n * h), 0.0F);
+  for (std::int64_t t = tmax - 1; t >= 0; --t) {
+    std::vector<float> dhp(static_cast<std::size_t>(n * h), 0.0F),
+        dcp(static_cast<std::size_t>(n * h), 0.0F);
+    for (std::int64_t bn = 0; bn < n; ++bn) {
+      if (kind == RecurrentKind::Rnn) {
+        for (std::int64_t j = 0; j < h; ++j) {
+          const float d =
+              (dh[static_cast<std::size_t>(bn * h + j)] + (t == tmax - 1 ? go(bn, j) : 0.0F)) *
+              (1.0F - hi(t + 1, bn, j) * hi(t + 1, bn, j));
+          gb.data[static_cast<std::size_t>(j)] += d;
+          for (std::int64_t q = 0; q < f; ++q) {
+            gw.data[static_cast<std::size_t>(q * h + j)] += xi(bn, t, q) * d;
+            gxi(bn, t, q) += w.data[static_cast<std::size_t>(q * h + j)] * d;
+          }
+          for (std::int64_t q = 0; q < h; ++q) {
+            gu.data[static_cast<std::size_t>(q * h + j)] += hi(t, bn, q) * d;
+            dhp[static_cast<std::size_t>(bn * h + q)] +=
+                u.data[static_cast<std::size_t>(q * h + j)] * d;
+          }
+        }
+      } else if (kind == RecurrentKind::Lstm) {
+        for (std::int64_t j = 0; j < h; ++j) {
+          const float i = pi(t, bn, 0, j), ff = pi(t, bn, 1, j), gg = pi(t, bn, 2, j),
+                      o = pi(t, bn, 3, j);
+          const float dht =
+              dh[static_cast<std::size_t>(bn * h + j)] + (t == tmax - 1 ? go(bn, j) : 0.0F);
+          const float tc = std::tanh(ci(t + 1, bn, j));
+          const float dct = dc[static_cast<std::size_t>(bn * h + j)] + dht * o * (1.0F - tc * tc);
+          const float dz[4] = {dct * gg * i * (1.0F - i), dct * ci(t, bn, j) * ff * (1.0F - ff),
+                               dct * i * (1.0F - gg * gg), dht * tc * o * (1.0F - o)};
+          dcp[static_cast<std::size_t>(bn * h + j)] = dct * ff;
+          for (int gate = 0; gate < 4; ++gate) {
+            const std::int64_t col = static_cast<std::int64_t>(gate) * h + j;
+            gb.data[static_cast<std::size_t>(col)] += dz[gate];
+            for (std::int64_t q = 0; q < f; ++q) {
+              gw.data[static_cast<std::size_t>(q * g + col)] += xi(bn, t, q) * dz[gate];
+              gxi(bn, t, q) += w.data[static_cast<std::size_t>(q * g + col)] * dz[gate];
+            }
+            for (std::int64_t q = 0; q < h; ++q) {
+              gu.data[static_cast<std::size_t>(q * g + col)] += hi(t, bn, q) * dz[gate];
+              dhp[static_cast<std::size_t>(bn * h + q)] +=
+                  u.data[static_cast<std::size_t>(q * g + col)] * dz[gate];
+            }
+          }
+        }
+      } else {
+        for (std::int64_t j = 0; j < h; ++j) {
+          const float z = pi(t, bn, 0, j), r = pi(t, bn, 1, j), nh = pi(t, bn, 2, j);
+          const float dht =
+              dh[static_cast<std::size_t>(bn * h + j)] + (t == tmax - 1 ? go(bn, j) : 0.0F);
+          const float dz = dht * (hi(t, bn, j) - nh) * z * (1.0F - z);
+          const float dn = dht * (1.0F - z) * (1.0F - nh * nh);
+          float qn = 0.0F;
+          for (std::int64_t q = 0; q < h; ++q)
+            qn += hi(t, bn, q) * u.data[static_cast<std::size_t>(q * g + 2 * h + j)];
+          const float dr = dn * qn * r * (1.0F - r), dnr = dn * r;
+          gb.data[static_cast<std::size_t>(j)] += dz;
+          gb.data[static_cast<std::size_t>(h + j)] += dr;
+          gb.data[static_cast<std::size_t>(2 * h + j)] += dn;
+          for (std::int64_t q = 0; q < f; ++q) {
+            gxi(bn, t, q) += w.data[static_cast<std::size_t>(q * g + j)] * dz +
+                             w.data[static_cast<std::size_t>(q * g + h + j)] * dr +
+                             w.data[static_cast<std::size_t>(q * g + 2 * h + j)] * dn;
+            gw.data[static_cast<std::size_t>(q * g + j)] += xi(bn, t, q) * dz;
+            gw.data[static_cast<std::size_t>(q * g + h + j)] += xi(bn, t, q) * dr;
+            gw.data[static_cast<std::size_t>(q * g + 2 * h + j)] += xi(bn, t, q) * dn;
+          }
+          for (std::int64_t q = 0; q < h; ++q) {
+            const std::int64_t uz = q * g + j, ur = q * g + h + j, un = q * g + 2 * h + j;
+            const float hp = hi(t, bn, q);
+            gu.data[static_cast<std::size_t>(uz)] += hp * dz;
+            gu.data[static_cast<std::size_t>(ur)] += hp * dr;
+            gu.data[static_cast<std::size_t>(un)] += hp * dnr;
+            dhp[static_cast<std::size_t>(bn * h + q)] += u.data[static_cast<std::size_t>(uz)] * dz +
+                                                         u.data[static_cast<std::size_t>(ur)] * dr +
+                                                         u.data[static_cast<std::size_t>(un)] * dnr;
+          }
+        }
+      }
+    }
+    dh.swap(dhp);
+    dc.swap(dcp);
+  }
+}
+
 Tensor fatiar_lote(const Tensor& a, const std::vector<std::int64_t>& idx) {
   if (a.shape.empty()) die("fatiar_lote espera um tensor nao escalar");
   const std::int64_t linha = a.size() / a.shape[0];

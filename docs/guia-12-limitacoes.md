@@ -327,19 +327,19 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
   tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20
   (Gemm + ativações + Softmax + LayerNormalization + Conv +
-  BatchNormalization + MaxPool + Flatten). A camada `incorporacao` ainda nao e exportavel para ONNX;
+  BatchNormalization + MaxPool + Flatten + RNN/LSTM/GRU). A camada `incorporacao` ainda nao e exportavel para ONNX;
   use pesos/treino nativos ou GGUF.
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
-  `agrupamento_max` e `achatar` (CNN de brinquedo em CPU, com mini-lotes).
+  `agrupamento_max`, `achatar` e `recorrente` (RNN/LSTM/GRU com BPTT em CPU) (CNN de brinquedo em CPU, com mini-lotes).
 - `conv2d` e `norma_lote` existem como **operações de tensor** (guia 04);
-  `incorporacao`, `conv2d` e `norma_lote` existem como camadas de `modelo`/`treino` (`incorporacao: [vocabulario, dimensao]`,
+  `incorporacao`, `recorrente`, `conv2d` e `norma_lote` existem como camadas de `modelo`/`treino` (`incorporacao: [vocabulario, dimensao]`,
   `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`
   com os três últimos elementos opcionais, `norma_lote`, `agrupamento_max:
   [janela]`/`[janela, passo]`, `achatar`; CNN exige `entrada: tensor[...]`
-  completa): `incorporacao` usa índices inteiros e produz `[N, T, D]`; `conv2d` tem
+  completa): `incorporacao` usa índices inteiros e produz `[N, T, D]`; `recorrente` recebe `[N, T, F]` e produz `[N, H]`; `conv2d` tem
   padding/dilation explícitos e passo 1+ (com viés); `norma_lote`
   com `eps:`/`em_treino:` nas ops e gama/beta +   média/variância correntes nas
   camadas. `treino` roda em lote cheio por default, com `lote:` (mini-lotes
@@ -352,7 +352,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   em grade (`modelo:`, `grade:`, `criterio: perda|acuracia`, máx. 64
   combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
   (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
-  ao RAM. `exportar_gguf` grava GGUF v3 (só escrita). Limites: fluxo só modelo 2D;
+  ao RAM. `exportar_gguf` grava GGUF v3 (só escrita) e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32. Limites: fluxo só modelo 2D;
   sem AMP.
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.

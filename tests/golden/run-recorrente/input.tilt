@@ -1,0 +1,50 @@
+modelo R:
+  entrada: tensor[f32, 2, 1]
+  camadas:
+    - recorrente: [rnn, 2]
+    - linear: [2, 2]
+    - softmax
+
+modelo L:
+  entrada: tensor[f32, 2, 1]
+  camadas:
+    - recorrente: [lstm, 2]
+    - linear: [2, 2]
+    - softmax
+
+modelo G:
+  entrada: tensor[f32, 2, 1]
+  camadas:
+    - recorrente: [gru, 2]
+    - linear: [2, 2]
+    - softmax
+
+treino R:
+  dados: { x: [[[0], [0]], [[0], [1]], [[1], [0]], [[1], [1]]], y: [0, 0, 1, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.2
+  epocas: 2
+
+treino L:
+  dados: { x: [[[0], [0]], [[0], [1]], [[1], [0]], [[1], [1]]], y: [0, 0, 1, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.2
+  epocas: 2
+
+treino G:
+  dados: { x: [[[0], [0]], [[0], [1]], [[1], [0]], [[1], [1]]], y: [0, 0, 1, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.2
+  epocas: 2
+
+pipeline p:
+  passos:
+    - xr = modelo R.executar tensor [[[1], [0]]]
+    - imprimir xr.forma
+    - xl = modelo L.executar tensor [[[1], [0]]]
+    - imprimir xl.forma
+    - xg = modelo G.executar tensor [[[1], [0]]]
+    - imprimir xg.forma

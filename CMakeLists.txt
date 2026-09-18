@@ -47,6 +47,7 @@ add_library(tilt_core STATIC
   src/runtime/value.cpp
   src/runtime/json.cpp
   src/runtime/tensor.cpp
+  src/runtime/safetensors.cpp
   src/runtime/onnx.cpp
   src/runtime/gguf.cpp
   src/runtime/llm.cpp
