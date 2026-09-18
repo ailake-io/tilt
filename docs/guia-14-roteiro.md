@@ -57,13 +57,14 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 
 ## Deep learning — treino real, mas de brinquedo
 
-Funciona: `treino` em CPU com camadas `densa`, `conv2d`, `norma_lote`,
+Funciona: `treino` em CPU com camadas `densa`, `incorporacao`, `conv2d`, `norma_lote`,
 `agrupamento_max` e `achatar`, adam/SGD, perdas entropia
 cruzada/quadrática, autograd manual.
 
 - **CNN de brinquedo**: `conv2d` (com viés), `norma_lote` (gama/beta +
   média/variância correntes), `agrupamento_max` e `achatar` treinam de
-  verdade (mini-lotes em CPU). Sem `incorporacao` treinável, sem recorrência,
+  verdade (mini-lotes em CPU). `incorporacao` também treina a tabela por SGD/Adam;
+  sem recorrência,
   sem abandono no treino.
 - **GPU não validada** (`TILT_GPU=fake` em CPU; CUDA nunca rodou em
   hardware real) + sem AMP real.

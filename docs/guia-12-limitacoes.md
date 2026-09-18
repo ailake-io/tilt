@@ -327,17 +327,20 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
   tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20
   (Gemm + ativações + Softmax + LayerNormalization + Conv +
-  BatchNormalization + MaxPool + Flatten).
+  BatchNormalization + MaxPool + Flatten). A camada `incorporacao` ainda nao e exportavel para ONNX;
+  use pesos/treino nativos ou GGUF.
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
   `agrupamento_max` e `achatar` (CNN de brinquedo em CPU, com mini-lotes).
-- `conv2d`/`norma_lote` existem como **operações de tensor** (guia 04) e
-  como camadas de `modelo`/`treino` (`conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`
+- `conv2d` e `norma_lote` existem como **operações de tensor** (guia 04);
+  `incorporacao`, `conv2d` e `norma_lote` existem como camadas de `modelo`/`treino` (`incorporacao: [vocabulario, dimensao]`,
+  `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`
   com os três últimos elementos opcionais, `norma_lote`, `agrupamento_max:
   [janela]`/`[janela, passo]`, `achatar`; CNN exige `entrada: tensor[...]`
-  completa): `conv2d` com padding/dilation explícitos e passo 1+ (com viés); `norma_lote`
+  completa): `incorporacao` usa índices inteiros e produz `[N, T, D]`; `conv2d` tem
+  padding/dilation explícitos e passo 1+ (com viés); `norma_lote`
   com `eps:`/`em_treino:` nas ops e gama/beta +   média/variância correntes nas
   camadas. `treino` roda em lote cheio por default, com `lote:` (mini-lotes
   embaralhados por época), `semente:` (init + embaralhamento reproduzíveis),

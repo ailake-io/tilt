@@ -1,0 +1,19 @@
+modelo E:
+  entrada: tensor[i64, 3]
+  camadas:
+    - incorporacao: [5, 2]
+    - achatar
+    - linear: [6, 2]
+    - softmax
+
+treino E:
+  dados: { x: [[0, 1, 2], [2, 3, 4], [0, 1, 1], [3, 4, 2]], y: [0, 1, 0, 1] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  taxa: 0.1
+  epocas: 2
+
+pipeline p:
+  passos:
+    - y = modelo E.executar tensor [[0, 1, 2]]
+    - imprimir y.forma

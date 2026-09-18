@@ -229,10 +229,24 @@ class Interpreter {
 
   // Deep learning.
   struct Layer {
-    enum Kind { Dense, Activation, Softmax, Dropout, LayerNorm, Conv2d, NormaLote, Flatten, MaxPool } kind = Dense;
+    enum Kind {
+      Dense,
+      Embedding,
+      Activation,
+      Softmax,
+      Dropout,
+      LayerNorm,
+      Conv2d,
+      NormaLote,
+      Flatten,
+      MaxPool
+    } kind = Dense;
     rt::Tensor w;
     rt::Tensor b;
     std::string act;
+    // Embedding: tabela [vocabulario, dimensao].
+    std::int64_t vocabulario = 0;
+    std::int64_t dimensao = 0;
     // Adam moment estimates (allocated lazily during training).
     rt::Tensor m_w, v_w, m_b, v_b;
     // Running statistics for NormaLote (populated during training, used in inference).

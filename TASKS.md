@@ -109,7 +109,7 @@
 - [x] Implementar dataloader com `shuffle` configurável (`embaralhar: verdadeiro|falso`)
 
 ### 3.3 Modelos (P2)
-- [ ] Adicionar camada `incorporacao` (embedding layer)
+- [x] Adicionar camada `incorporacao` (embedding layer)
 - [ ] Adicionar camada `recorrente` (RNN/LSTM/GRU)
 - [ ] Adicionar camada `residual`
 - [ ] Implementar `salvar_pesos`/`carregar_pesos` em formato ONNX

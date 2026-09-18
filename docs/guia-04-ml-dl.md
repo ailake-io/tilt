@@ -189,6 +189,8 @@ Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmo
 última dimensão, sem affine — na inferência e no treino),
 `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]` (os três últimos são opcionais),
 `norma_lote` (affine por canal, com média/variância correntes),
+`incorporacao: [vocabulario, dimensao]` (índices inteiros; adiciona a dimensão D ao final,
+por exemplo entrada `[N, T]` vira `[N, T, D]`),
 `agrupamento_max: [janela]` ou `[janela, passo]` e `achatar` (achata o lote
 `[N, ...]` para `[N, C]` antes da `densa`). Modelos convolucionais exigem a
 anotação completa da entrada, ex.: `entrada: tensor[f32, 1, 4, 4]` (sem o
@@ -329,6 +331,7 @@ Perdas: `entropia_cruzada` (classificação, exige `softmax` final) e
 `softmax`). O backward cobre todas as camadas: `densa`/`linear` (com SGD/Adam),
 ativações (derivada exata da mesma aproximação da forward — inclusive `gelu`),
 `norma_camada` (sem affine), `conv2d` (núcleo + viés, com SGD/Adam),
+`incorporacao` (tabela treinável por SGD/Adam, com entrada de índices inteiros),
 `norma_lote` (gama/beta, com estatísticas do lote no treino e média/variância
 correntes na inferência), `agrupamento_max` e `achatar`. Resumo determinístico:
 

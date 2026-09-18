@@ -1,5 +1,6 @@
 #include "runtime/tensor.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
@@ -205,6 +206,58 @@ Tensor reshape(const Tensor& a, std::vector<std::int64_t> shape) {
   out.shape = std::move(shape);
   if (out.size() != a.size()) die("reformar: numero de elementos difere");
   return out;
+}
+
+Tensor embedding(const Tensor& indices, const Tensor& tabela) {
+  if (indices.rank() < 1) die("embedding espera indices com pelo menos um eixo");
+  if (tabela.rank() != 2 || tabela.shape[0] <= 0 || tabela.shape[1] <= 0) {
+    die("embedding espera tabela [vocabulario, dimensao]");
+  }
+  const std::int64_t vocabulario = tabela.shape[0];
+  const std::int64_t dimensao = tabela.shape[1];
+  Tensor out;
+  out.shape = indices.shape;
+  out.shape.push_back(dimensao);
+  out.data.resize(static_cast<std::size_t>(indices.size() * dimensao));
+  for (std::int64_t i = 0; i < indices.size(); ++i) {
+    const float valor = indices.data[static_cast<std::size_t>(i)];
+    const auto id = static_cast<std::int64_t>(std::llround(valor));
+    if (std::fabs(valor - static_cast<float>(id)) > 1e-5F || id < 0 || id >= vocabulario) {
+      die("embedding: indice fora do intervalo [0," + std::to_string(vocabulario) + ")");
+    }
+    const std::size_t origem = static_cast<std::size_t>(id * dimensao);
+    const std::size_t destino = static_cast<std::size_t>(i * dimensao);
+    for (std::int64_t d = 0; d < dimensao; ++d) {
+      out.data[destino + static_cast<std::size_t>(d)] =
+          tabela.data[origem + static_cast<std::size_t>(d)];
+    }
+  }
+  return out;
+}
+
+void embedding_backward(const Tensor& indices, const Tensor& grad_saida, Tensor& grad_tabela) {
+  if (indices.rank() < 1 || grad_tabela.rank() != 2) {
+    die("embedding_backward: formas incompativeis");
+  }
+  const std::int64_t dimensao = grad_tabela.shape[1];
+  std::vector<std::int64_t> esperado = indices.shape;
+  esperado.push_back(dimensao);
+  if (grad_saida.shape != esperado) die("embedding_backward: gradiente com forma inesperada");
+  const std::vector<std::int64_t> forma_tabela = grad_tabela.shape;
+  grad_tabela = Tensor::zeros(forma_tabela);
+  for (std::int64_t i = 0; i < indices.size(); ++i) {
+    const float valor = indices.data[static_cast<std::size_t>(i)];
+    const auto id = static_cast<std::int64_t>(std::llround(valor));
+    if (std::fabs(valor - static_cast<float>(id)) > 1e-5F || id < 0 || id >= grad_tabela.shape[0]) {
+      die("embedding_backward: indice fora do intervalo");
+    }
+    const std::size_t destino = static_cast<std::size_t>(id * dimensao);
+    const std::size_t origem = static_cast<std::size_t>(i * dimensao);
+    for (std::int64_t d = 0; d < dimensao; ++d) {
+      grad_tabela.data[destino + static_cast<std::size_t>(d)] +=
+          grad_saida.data[origem + static_cast<std::size_t>(d)];
+    }
+  }
 }
 
 Tensor fatiar_lote(const Tensor& a, const std::vector<std::int64_t>& idx) {

@@ -2284,7 +2284,7 @@ void SemanticChecker::check_model_shapes() {
     };
     for_each_layer(*camadas->block, [&](const std::string& key, const ast::Expr* value) {
       if (key == "densa" && value && value->kind == ExprKind::IntLit) {
-        if (forma.size() == 3) {
+        if (forma.size() == 2 || forma.size() == 3) {
           report(DiagCode::TensorShapeMismatch, value->span,
                  "camada 'densa' precisa de entrada 1D; insira 'achatar' antes da densa",
                  {"insira '- achatar' depois do bloco convolucional"});
@@ -2296,7 +2296,7 @@ void SemanticChecker::check_model_shapes() {
                  value->elems[1]->kind == ExprKind::IntLit) {
         const std::int64_t a = std::stoll(value->elems[0]->text);
         const std::int64_t b = std::stoll(value->elems[1]->text);
-        if (forma.size() == 3) {
+        if (forma.size() == 2 || forma.size() == 3) {
           report(DiagCode::TensorShapeMismatch, value->span,
                  "camada 'linear' precisa de entrada 1D; insira 'achatar' antes da densa",
                  {"insira '- achatar' depois do bloco convolucional"});
@@ -2310,6 +2310,12 @@ void SemanticChecker::check_model_shapes() {
                   std::to_string(b) + "]"});
         }
         if (forma.size() == 1) forma = {b};
+      } else if (key == "incorporacao" && value && value->kind == ExprKind::ListLit &&
+                 value->elems.size() == 2) {
+        const std::int64_t vocabulario = ler(value->elems[0].get());
+        const std::int64_t dimensao = ler(value->elems[1].get());
+        if (vocabulario <= 0 || dimensao <= 0) return;
+        if (!forma.empty()) forma.push_back(dimensao);
       } else if (key == "conv2d" && value && value->kind == ExprKind::ListLit &&
                  (value->elems.size() >= 4 && value->elems.size() <= 7)) {
         const std::int64_t c_saida = ler(value->elems[0].get());
@@ -2333,8 +2339,11 @@ void SemanticChecker::check_model_shapes() {
       } else if (key == "norma_lote") {
         return;  // preserva canais/forma
       } else if (key == "achatar") {
-        if (forma.size() == 3 && forma[0] > 0 && forma[1] > 0 && forma[2] > 0) {
-          forma = {forma[0] * forma[1] * forma[2]};
+        if ((forma.size() == 2 || forma.size() == 3) &&
+            std::all_of(forma.begin(), forma.end(), [](std::int64_t d) { return d > 0; })) {
+          std::int64_t total = 1;
+          for (std::int64_t d : forma) total *= d;
+          forma = {total};
         }
       } else if (key == "agrupamento_max" &&
                  (value == nullptr || value->kind == ExprKind::IntLit ||

@@ -35,6 +35,10 @@ Tensor matmul(const Tensor& a, const Tensor& b);
 Tensor transpose2d(const Tensor& a);
 Tensor reshape(const Tensor& a, std::vector<std::int64_t> shape);
 
+// Lookup de embeddings: indices [...], tabela [vocabulario, dimensao] -> [..., dimensao].
+Tensor embedding(const Tensor& indices, const Tensor& tabela);
+void embedding_backward(const Tensor& indices, const Tensor& grad_saida, Tensor& grad_tabela);
+
 // Fatia linhas da dimensao 0 (mini-lote): saida [idx.size(), ...].
 Tensor fatiar_lote(const Tensor& a, const std::vector<std::int64_t>& idx);
 
