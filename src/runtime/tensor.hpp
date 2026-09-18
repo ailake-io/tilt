@@ -42,12 +42,15 @@ Tensor apply_unary(const Tensor& a, const std::string& fn);  // relu/gelu/silu/s
 Tensor softmax_last(const Tensor& a);
 Tensor layer_norm_last(const Tensor& a);  // normaliza sobre a ultima dimensao (sem affine)
 
-// Convolucao 2D NCHW, padding valido: [N, C_in, H, W] x [C_out, C_in, KH, KW]
-// -> [N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]. Sem dilation.
-Tensor conv2d(const Tensor& x, const Tensor& nucleo, std::int64_t passo = 1);
+// Convolucao 2D NCHW com padding e dilatacao simetricos.
+// -> [N, C_out, floor((H + 2*padding - KH_eff)/passo)+1, ...],
+// onde KH_eff = (KH - 1)*dilatacao + 1.
+Tensor conv2d(const Tensor& x, const Tensor& nucleo, std::int64_t passo = 1,
+              std::int64_t padding = 0, std::int64_t dilatacao = 1);
 Tensor adicionar_vies_conv(const Tensor& y, const Tensor& vies);
 void conv2d_backward(const Tensor& x, const Tensor& nucleo, const Tensor& grad_saida,
-                     std::int64_t passo, Tensor& grad_x, Tensor& grad_nucleo, Tensor& grad_vies);
+                     std::int64_t passo, std::int64_t padding, std::int64_t dilatacao,
+                     Tensor& grad_x, Tensor& grad_nucleo, Tensor& grad_vies);
 
 // Agrupamento maximo NCHW, padding valido: janela JxJ e passo S (padrao S = J).
 Tensor maxpool2d(const Tensor& x, std::int64_t janela, std::int64_t passo = 0);

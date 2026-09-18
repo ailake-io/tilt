@@ -982,9 +982,16 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::check_conv2d(const 
   const Expr* nucleo = first_positional_arg(call);
   auto k = nucleo ? infer_shape(*nucleo, shapes) : std::nullopt;
   std::int64_t passo = 1;
+  std::int64_t padding = 0;
+  std::int64_t dilatacao = 1;
   for (const auto& a : call.args) {
     if (a.name == "passo" && a.value && a.value->kind == ExprKind::IntLit) {
       passo = std::stoll(a.value->text);
+    } else if (a.name == "padding" && a.value && a.value->kind == ExprKind::IntLit) {
+      padding = std::stoll(a.value->text);
+    } else if ((a.name == "dilatacao" || a.name == "dilation") && a.value &&
+               a.value->kind == ExprKind::IntLit) {
+      dilatacao = std::stoll(a.value->text);
     }
   }
   if (!in) return std::nullopt;
@@ -995,9 +1002,10 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::check_conv2d(const 
            {"use um tensor 4D, ex.: uns [1, 3, 32, 32]"});
     return std::nullopt;
   }
-  if (passo < 1) {
-    report(DiagCode::TensorShapeMismatch, call.span, "conv2d: passo deve ser >= 1",
-           {"ajuste `passo:` para um inteiro >= 1"});
+  if (passo < 1 || padding < 0 || dilatacao < 1) {
+    report(DiagCode::TensorShapeMismatch, call.span,
+           "conv2d: passo >= 1, padding >= 0 e dilatacao >= 1",
+           {"ajuste passo, padding e dilatacao para valores validos"});
     return std::nullopt;
   }
   if (!k) return std::nullopt;
@@ -1015,19 +1023,27 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::check_conv2d(const 
            "conv2d: nucleo tem " + dstr((*k)[1]) + " canais de entrada, mas a entrada tem " +
                dstr(cin),
            {"ajuste o eixo C_in do nucleo para " + dstr(cin) + " (ex.: uns [" + dstr((*k)[0]) +
-                ", " + dstr(cin) + ", " + dstr((*k)[2]) + ", " + dstr((*k)[3]) + "])"});
+            ", " + dstr(cin) + ", " + dstr((*k)[2]) + ", " + dstr((*k)[3]) + "])"});
     return std::nullopt;
   }
   const std::int64_t kh = (*k)[2], kw = (*k)[3];
-  if ((kh >= 0 && h >= 0 && kh > h) || (kw >= 0 && w >= 0 && kw > w)) {
-    report(DiagCode::TensorShapeMismatch, k_span,
-           "conv2d: nucleo " + dstr(kh) + "x" + dstr(kw) + " maior que a entrada " + dstr(h) +
-               "x" + dstr(w),
-           {"reduza o nucleo ou aumente a entrada (padding ainda nao suportado)"});
+  const std::int64_t ekh = kh < 0 ? -1 : (kh - 1) * dilatacao + 1;
+  const std::int64_t ekw = kw < 0 ? -1 : (kw - 1) * dilatacao + 1;
+  const std::int64_t oh = (h < 0 || ekh < 0) ? -1 : (h + 2 * padding - ekh) / passo + 1;
+  const std::int64_t ow = (w < 0 || ekw < 0) ? -1 : (w + 2 * padding - ekw) / passo + 1;
+  if ((oh >= 0 && oh < 1) || (ow >= 0 && ow < 1)) {
+    if (padding == 0 && dilatacao == 1) {
+      report(DiagCode::TensorShapeMismatch, k_span,
+             "conv2d: nucleo " + dstr(kh) + "x" + dstr(kw) + " maior que a entrada " + dstr(h) +
+                 "x" + dstr(w),
+             {"reduza o nucleo ou aumente a entrada (padding ainda nao suportado)"});
+    } else {
+      report(DiagCode::TensorShapeMismatch, k_span,
+             "conv2d: nucleo efetivo nao cabe na entrada com o padding informado",
+             {"aumente padding ou reduza nucleo/dilatacao"});
+    }
     return std::nullopt;
   }
-  const std::int64_t oh = (h < 0 || kh < 0) ? -1 : (h - kh) / passo + 1;
-  const std::int64_t ow = (w < 0 || kw < 0) ? -1 : (w - kw) / passo + 1;
   return TensorShape{(*in)[0], (*k)[0], oh, ow};
 }
 
@@ -2290,21 +2306,30 @@ void SemanticChecker::check_model_shapes() {
           report(DiagCode::TensorShapeMismatch, value->span,
                  "camada 'linear' espera entrada de " + std::to_string(a) +
                      " mas a camada anterior produz " + std::to_string(forma.back()),
-                 {"ajuste para linear: [" + std::to_string(forma.back()) + ", " + std::to_string(b) + "]"});
+                 {"ajuste para linear: [" + std::to_string(forma.back()) + ", " +
+                  std::to_string(b) + "]"});
         }
         if (forma.size() == 1) forma = {b};
       } else if (key == "conv2d" && value && value->kind == ExprKind::ListLit &&
-                 (value->elems.size() == 4 || value->elems.size() == 5)) {
+                 (value->elems.size() >= 4 && value->elems.size() <= 7)) {
         const std::int64_t c_saida = ler(value->elems[0].get());
         const std::int64_t c_entrada = ler(value->elems[1].get());
         const std::int64_t kh = ler(value->elems[2].get());
         const std::int64_t kw = ler(value->elems[3].get());
-        const std::int64_t passo = value->elems.size() == 5 ? ler(value->elems[4].get()) : 1;
-        if (forma.size() != 3 || c_saida <= 0 || c_entrada <= 0 || kh <= 0 || kw <= 0 || passo < 1) {
+        const std::int64_t passo = value->elems.size() >= 5 ? ler(value->elems[4].get()) : 1;
+        const std::int64_t padding = value->elems.size() >= 6 ? ler(value->elems[5].get()) : 0;
+        const std::int64_t dilatacao = value->elems.size() >= 7 ? ler(value->elems[6].get()) : 1;
+        if (forma.size() != 3 || c_saida <= 0 || c_entrada <= 0 || kh <= 0 || kw <= 0 ||
+            passo < 1 || padding < 0 || dilatacao < 1) {
           return;  // runtime detalha; aqui so propaga o conhecido
         }
-        if (c_entrada != forma[0] || kh > forma[1] || kw > forma[2]) return;
-        forma = {c_saida, (forma[1] - kh) / passo + 1, (forma[2] - kw) / passo + 1};
+        const std::int64_t kh_eff = (kh - 1) * dilatacao + 1;
+        const std::int64_t kw_eff = (kw - 1) * dilatacao + 1;
+        if (c_entrada != forma[0] || kh_eff > forma[1] + 2 * padding ||
+            kw_eff > forma[2] + 2 * padding)
+          return;
+        forma = {c_saida, (forma[1] + 2 * padding - kh_eff) / passo + 1,
+                 (forma[2] + 2 * padding - kw_eff) / passo + 1};
       } else if (key == "norma_lote") {
         return;  // preserva canais/forma
       } else if (key == "achatar") {

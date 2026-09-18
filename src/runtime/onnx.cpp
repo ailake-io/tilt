@@ -255,8 +255,10 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
       std::vector<std::string> attrs;
       attrs.push_back(attr_ints("kernel_shape", {kh, kw}));
       attrs.push_back(attr_ints("strides", {l.passo, l.passo}));
-      attrs.push_back(attr_ints("pads", {0, 0, 0, 0}));
-      nodes.push_back(node_proto("Conv", {cur, wn, bn}, {out}, "conv" + std::to_string(seq), attrs));
+      attrs.push_back(attr_ints("pads", {l.padding, l.padding, l.padding, l.padding}));
+      attrs.push_back(attr_ints("dilations", {l.dilatacao, l.dilatacao}));
+      nodes.push_back(
+          node_proto("Conv", {cur, wn, bn}, {out}, "conv" + std::to_string(seq), attrs));
       cur = out;
       dim = cout;
       out_dim = cout;

@@ -2162,41 +2162,55 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
           layers.push_back(std::move(l));
         } else if (key == "conv2d") {
           // Conv2d: entrada [N, C_in, H, W], nucleo [C_out, C_in, KH, KW].
-          // Formas: `conv2d: [C_saida, C_entrada, KH, KW]` ou
-          // `conv2d: [C_saida, C_entrada, KH, KW, passo]`.
+          // Forma: `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`;
+          // os tres ultimos campos sao opcionais.
           if (!value || value->kind != ExprKind::ListLit ||
-              (value->elems.size() != 4 && value->elems.size() != 5)) {
-            fail(decl.span, "modelo '" + name + "': 'conv2d' espera [C_saida, C_entrada, KH, KW]");
+              (value->elems.size() < 4 || value->elems.size() > 7)) {
+            fail(decl.span,
+                 "modelo '" + name +
+                     "': 'conv2d' espera [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]");
           }
           const std::int64_t c_saida = ler_inteiro(value->elems[0].get(), "conv2d");
           const std::int64_t c_entrada = ler_inteiro(value->elems[1].get(), "conv2d");
           const std::int64_t kh = ler_inteiro(value->elems[2].get(), "conv2d");
           const std::int64_t kw = ler_inteiro(value->elems[3].get(), "conv2d");
           const std::int64_t passo =
-              value->elems.size() == 5 ? ler_inteiro(value->elems[4].get(), "conv2d") : 1;
-          if (c_saida <= 0 || c_entrada <= 0 || kh <= 0 || kw <= 0 || passo < 1) {
+              value->elems.size() >= 5 ? ler_inteiro(value->elems[4].get(), "conv2d") : 1;
+          const std::int64_t padding =
+              value->elems.size() >= 6 ? ler_inteiro(value->elems[5].get(), "conv2d") : 0;
+          const std::int64_t dilatacao =
+              value->elems.size() >= 7 ? ler_inteiro(value->elems[6].get(), "conv2d") : 1;
+          if (c_saida <= 0 || c_entrada <= 0 || kh <= 0 || kw <= 0 || passo < 1 || padding < 0 ||
+              dilatacao < 1) {
             fail(decl.span, "modelo '" + name + "': dimensoes de 'conv2d' devem ser >= 1");
           }
           const std::int64_t conhecido = canais();
           if (conhecido > 0 && c_entrada != conhecido) {
             fail(decl.span, "modelo '" + name + "': 'conv2d' espera C_entrada " +
-                               std::to_string(c_entrada) + " mas a camada anterior produz " +
-                               std::to_string(conhecido));
+                                std::to_string(c_entrada) + " mas a camada anterior produz " +
+                                std::to_string(conhecido));
           }
           if (forma.size() != 3) {
             fail(decl.span, "modelo '" + name + "': 'conv2d' precisa de entrada 4D [N, C, H, W]");
           }
-          if (kh > forma[1] || kw > forma[2]) {
-            fail(decl.span, "modelo '" + name + "': nucleo maior que a entrada espacial");
+          const std::int64_t kh_eff = (kh - 1) * dilatacao + 1;
+          const std::int64_t kw_eff = (kw - 1) * dilatacao + 1;
+          if (kh_eff > forma[1] + 2 * padding || kw_eff > forma[2] + 2 * padding) {
+            fail(decl.span, "modelo '" + name + "': nucleo efetivo maior que a entrada com padding");
           }
           Layer l;
           l.kind = Layer::Conv2d;
           l.passo = passo;
+          l.padding = padding;
+          l.dilatacao = dilatacao;
           l.w = rt::Tensor::xavier({c_saida, c_entrada, kh, kw}, c_entrada * kh * kw,
                                    c_saida * kh * kw, seed++);
           l.b = rt::Tensor::zeros({c_saida});
           layers.push_back(std::move(l));
-          forma = {c_saida, (forma[1] - kh) / passo + 1, (forma[2] - kw) / passo + 1};
+          const std::int64_t ekh = (kh - 1) * dilatacao + 1;
+          const std::int64_t ekw = (kw - 1) * dilatacao + 1;
+          forma = {c_saida, (forma[1] + 2 * padding - ekh) / passo + 1,
+                   (forma[2] + 2 * padding - ekw) / passo + 1};
         } else if (key == "norma_lote") {
           const std::int64_t c = canais();
           if (c <= 0) {
@@ -2204,7 +2218,7 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
           }
           Layer l;
           l.kind = Layer::NormaLote;
-          l.w = rt::Tensor::ones({c});  // gama
+          l.w = rt::Tensor::ones({c});   // gama
           l.b = rt::Tensor::zeros({c});  // beta
           l.media_running = rt::Tensor::zeros({c});
           l.var_running = rt::Tensor::ones({c});
@@ -2355,21 +2369,42 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
             const Value* bv = c.kind == ValueKind::Mapa && c.map ? c.map->find("b") : nullptr;
             if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b)) {
               fail(span, "modelo '" + name + "': arquivo de pesos '" + path +
-                             "' invalido (cada camada densa/conv2d precisa de 'w' e 'b' com forma e dados)");
+                             "' invalido (cada camada densa/conv2d precisa de 'w' e 'b' com forma "
+                             "e dados)");
             }
             if (w.shape != l.w.shape || b.shape != l.b.shape) {
-              const std::string rotulo = l.kind == Layer::Dense
-                                             ? "camada densa "
-                                             : (l.kind == Layer::Conv2d ? "camada conv2d "
-                                                                        : "camada norma_lote ");
+              const std::string rotulo =
+                  l.kind == Layer::Dense
+                      ? "camada densa "
+                      : (l.kind == Layer::Conv2d ? "camada conv2d " : "camada norma_lote ");
               fail(span, "modelo '" + name + "': forma de pesos incompativel na " + rotulo +
-                             std::to_string(li) + " (modelo espera w " + l.w.shape_str() +
-                             " b " + l.b.shape_str() + ", arquivo tem w " + w.shape_str() +
-                             " b " + b.shape_str() + ")");
+                             std::to_string(li) + " (modelo espera w " + l.w.shape_str() + " b " +
+                             l.b.shape_str() + ", arquivo tem w " + w.shape_str() + " b " +
+                             b.shape_str() + ")");
             }
             l.w = std::move(w);
             l.b = std::move(b);
             if (t == "conv2d") {
+              const Value* pad =
+                  c.kind == ValueKind::Mapa && c.map ? c.map->find("padding") : nullptr;
+              const Value* dil =
+                  c.kind == ValueKind::Mapa && c.map ? c.map->find("dilatacao") : nullptr;
+              if (pad && pad->is_number()) {
+                const std::int64_t padding = static_cast<std::int64_t>(pad->as_number());
+                if (padding != l.padding) {
+                  fail(span, "modelo '" + name +
+                                 "': 'padding' do arquivo difere da camada conv2d " +
+                                 std::to_string(li));
+                }
+              }
+              if (dil && dil->is_number()) {
+                const std::int64_t dilatacao = static_cast<std::int64_t>(dil->as_number());
+                if (dilatacao != l.dilatacao) {
+                  fail(span, "modelo '" + name +
+                                 "': 'dilatacao' do arquivo difere da camada conv2d " +
+                                 std::to_string(li));
+                }
+              }
               const Value* pv = c.kind == ValueKind::Mapa && c.map ? c.map->find("passo") : nullptr;
               if (pv && pv->is_number()) {
                 const std::int64_t passo = static_cast<std::int64_t>(pv->as_number());
@@ -2383,17 +2418,21 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
             rt::Tensor w, b;
             const Value* wv = c.kind == ValueKind::Mapa && c.map ? c.map->find("w") : nullptr;
             const Value* bv = c.kind == ValueKind::Mapa && c.map ? c.map->find("b") : nullptr;
-            const Value* mv = c.kind == ValueKind::Mapa && c.map ? c.map->find("media_running") : nullptr;
-            const Value* vv = c.kind == ValueKind::Mapa && c.map ? c.map->find("var_running") : nullptr;
+            const Value* mv =
+                c.kind == ValueKind::Mapa && c.map ? c.map->find("media_running") : nullptr;
+            const Value* vv =
+                c.kind == ValueKind::Mapa && c.map ? c.map->find("var_running") : nullptr;
             if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b)) {
-              fail(span, "modelo '" + name + "': arquivo de pesos '" + path +
-                             "' invalido (cada camada norma_lote precisa de 'w' e 'b' com forma e dados)");
+              fail(
+                  span,
+                  "modelo '" + name + "': arquivo de pesos '" + path +
+                      "' invalido (cada camada norma_lote precisa de 'w' e 'b' com forma e dados)");
             }
             if (w.shape != l.w.shape || b.shape != l.b.shape) {
-              const std::string rotulo = l.kind == Layer::Dense
-                                             ? "camada densa "
-                                             : (l.kind == Layer::Conv2d ? "camada conv2d "
-                                                                        : "camada norma_lote ");
+              const std::string rotulo =
+                  l.kind == Layer::Dense
+                      ? "camada densa "
+                      : (l.kind == Layer::Conv2d ? "camada conv2d " : "camada norma_lote ");
               fail(span, "modelo '" + name + "': forma de pesos incompativel na " + rotulo +
                              std::to_string(li) + " (modelo espera w " + l.w.shape_str() +
                              " b " + l.b.shape_str() + ", arquivo tem w " + w.shape_str() +
@@ -2412,7 +2451,8 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
         }
         while (li < layers.size() && !camada_com_pesos(layers[li].kind)) ++li;
         if (li < layers.size()) {
-          fail(span, "modelo '" + name + "': o arquivo '" + path + "' tem menos camadas de pesos do que o modelo");
+          fail(span, "modelo '" + name + "': o arquivo '" + path +
+                         "' tem menos camadas de pesos do que o modelo");
         }
       }
     }
@@ -2439,7 +2479,7 @@ rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Ten
       case Layer::Dropout:
         break;
       case Layer::Conv2d:
-        x = rt::adicionar_vies_conv(rt::conv2d(x, l.w, l.passo), l.b);
+        x = rt::adicionar_vies_conv(rt::conv2d(x, l.w, l.passo, l.padding, l.dilatacao), l.b);
         break;
       case Layer::NormaLote:
         x = rt::norma_lote(x, l.w, l.b, l.media_running, l.var_running, 1e-5f, false);
@@ -2519,6 +2559,8 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
         c.map->set("w", Value::tensor_de(l.w));
         c.map->set("b", Value::tensor_de(l.b));
         c.map->set("passo", Value::inteiro(l.passo));
+        c.map->set("padding", Value::inteiro(l.padding));
+        c.map->set("dilatacao", Value::inteiro(l.dilatacao));
       } else if (l.kind == Layer::NormaLote) {
         c.map->set("tipo", Value::texto("norma_lote"));
         c.map->set("w", Value::tensor_de(l.w));
@@ -2587,26 +2629,27 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
         Layer& l = model_cache_[mname][li];
         const Value* tipo = c.kind == ValueKind::Mapa && c.map ? c.map->find("tipo") : nullptr;
         std::string t = (tipo && tipo->kind == ValueKind::Texto) ? tipo->s : "densa";
-        const std::string esperado = l.kind == Layer::Dense
-                                         ? "densa"
-                                         : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote");
+        const std::string esperado =
+            l.kind == Layer::Dense ? "densa" : (l.kind == Layer::Conv2d ? "conv2d" : "norma_lote");
         if (t != esperado) {
-          fail(inner.span, "modelo '" + mname + "': camada " + std::to_string(li) + " e '" + esperado +
-                               "', mas o arquivo traz '" + t + "'");
+          fail(inner.span, "modelo '" + mname + "': camada " + std::to_string(li) + " e '" +
+                               esperado + "', mas o arquivo traz '" + t + "'");
         }
         if (t == "densa" || t == "conv2d") {
           rt::Tensor w, b;
           const Value* wv = c.kind == ValueKind::Mapa && c.map ? c.map->find("w") : nullptr;
           const Value* bv = c.kind == ValueKind::Mapa && c.map ? c.map->find("b") : nullptr;
           if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b)) {
-            fail(inner.span, "modelo '" + mname + "': arquivo de pesos '" + path +
-                                 "' invalido (cada camada densa/conv2d precisa de 'w' e 'b' com forma e dados)");
+            fail(
+                inner.span,
+                "modelo '" + mname + "': arquivo de pesos '" + path +
+                    "' invalido (cada camada densa/conv2d precisa de 'w' e 'b' com forma e dados)");
           }
           if (w.shape != l.w.shape || b.shape != l.b.shape) {
-            const std::string rotulo = l.kind == Layer::Dense
-                                           ? "camada densa "
-                                           : (l.kind == Layer::Conv2d ? "camada conv2d "
-                                                                      : "camada norma_lote ");
+            const std::string rotulo =
+                l.kind == Layer::Dense
+                    ? "camada densa "
+                    : (l.kind == Layer::Conv2d ? "camada conv2d " : "camada norma_lote ");
             fail(inner.span, "modelo '" + mname + "': forma de pesos incompativel na " + rotulo +
                                  std::to_string(li) + " (modelo espera w " + l.w.shape_str() +
                                  " b " + l.b.shape_str() + ", arquivo tem w " + w.shape_str() +
@@ -2615,6 +2658,26 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
           l.w = std::move(w);
           l.b = std::move(b);
           if (t == "conv2d") {
+            const Value* pad =
+                c.kind == ValueKind::Mapa && c.map ? c.map->find("padding") : nullptr;
+            const Value* dil =
+                c.kind == ValueKind::Mapa && c.map ? c.map->find("dilatacao") : nullptr;
+            if (pad && pad->is_number()) {
+              const std::int64_t padding = static_cast<std::int64_t>(pad->as_number());
+              if (padding != l.padding) {
+                fail(inner.span, "modelo '" + mname +
+                                     "': 'padding' do arquivo difere da camada conv2d " +
+                                     std::to_string(li));
+              }
+            }
+            if (dil && dil->is_number()) {
+              const std::int64_t dilatacao = static_cast<std::int64_t>(dil->as_number());
+              if (dilatacao != l.dilatacao) {
+                fail(inner.span, "modelo '" + mname +
+                                     "': 'dilatacao' do arquivo difere da camada conv2d " +
+                                     std::to_string(li));
+              }
+            }
             const Value* pv = c.kind == ValueKind::Mapa && c.map ? c.map->find("passo") : nullptr;
             if (pv && pv->is_number()) {
               const std::int64_t passo = static_cast<std::int64_t>(pv->as_number());
@@ -2707,6 +2770,8 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
         o.w = l.w;
         o.b = l.b;
         o.passo = l.passo;
+        o.padding = l.padding;
+        o.dilatacao = l.dilatacao;
       } else if (l.kind == Layer::NormaLote) {
         o.kind = rt::OnnxLayer::NormaLote;
         o.w = l.w;
@@ -3229,9 +3294,10 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       }
     }
     if (width != 1) {
-      fail(span, ctx + ": perda 'quadratica' e regressao escalar; a saida do modelo deve ter "
-                      "largura 1 (tem " +
-                          std::to_string(width) + ")");
+      fail(span, ctx +
+                     ": perda 'quadratica' e regressao escalar; a saida do modelo deve ter "
+                     "largura 1 (tem " +
+                     std::to_string(width) + ")");
     }
   }
   for (Layer& l : layers) {
@@ -3257,7 +3323,11 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       c.map->set("v_w", Value::tensor_de(l.v_w));
       c.map->set("m_b", Value::tensor_de(l.m_b));
       c.map->set("v_b", Value::tensor_de(l.v_b));
-      if (l.kind == Layer::Conv2d) c.map->set("passo", Value::inteiro(l.passo));
+      if (l.kind == Layer::Conv2d) {
+        c.map->set("passo", Value::inteiro(l.passo));
+        c.map->set("padding", Value::inteiro(l.padding));
+        c.map->set("dilatacao", Value::inteiro(l.dilatacao));
+      }
       if (l.kind == Layer::NormaLote) {
         c.map->set("media_running", Value::tensor_de(l.media_running));
         c.map->set("var_running", Value::tensor_de(l.var_running));
@@ -3326,6 +3396,20 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       if (w.shape != l.w.shape || b.shape != l.b.shape || m_w.shape != l.w.shape ||
           v_w.shape != l.w.shape || m_b.shape != l.b.shape || v_b.shape != l.b.shape) {
         fail(span, ctx + ": forma do checkpoint incompativel na camada " + std::to_string(li));
+      }
+      if (l.kind == Layer::Conv2d) {
+        const Value* pv = c.kind == ValueKind::Mapa && c.map ? c.map->find("passo") : nullptr;
+        const Value* pad = c.kind == ValueKind::Mapa && c.map ? c.map->find("padding") : nullptr;
+        const Value* dil = c.kind == ValueKind::Mapa && c.map ? c.map->find("dilatacao") : nullptr;
+        if (pv && pv->is_number() && static_cast<std::int64_t>(pv->as_number()) != l.passo) {
+          fail(span, ctx + ": passo do checkpoint difere da camada conv2d " + std::to_string(li));
+        }
+        if (pad && pad->is_number() && static_cast<std::int64_t>(pad->as_number()) != l.padding) {
+          fail(span, ctx + ": padding do checkpoint difere da camada conv2d " + std::to_string(li));
+        }
+        if (dil && dil->is_number() && static_cast<std::int64_t>(dil->as_number()) != l.dilatacao) {
+          fail(span, ctx + ": dilatacao do checkpoint difere da camada conv2d " + std::to_string(li));
+        }
       }
       l.w = std::move(w);
       l.b = std::move(b);
@@ -3500,7 +3584,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           case Layer::LayerNorm: cur = rt::layer_norm_last(cur); break;
           case Layer::Dropout: break;
           case Layer::Conv2d:
-            cur = rt::adicionar_vies_conv(rt::conv2d(cur, l.w, l.passo), l.b);
+            cur = rt::adicionar_vies_conv(rt::conv2d(cur, l.w, l.passo, l.padding, l.dilatacao), l.b);
             break;
           case Layer::NormaLote: {
             rt::norma_lote_estatisticas(cur, l.bn_media, l.bn_var);
@@ -3623,7 +3707,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         }
         if (l.kind == Layer::Conv2d) {
           rt::Tensor grad_x, grad_nucleo, grad_vies;
-          rt::conv2d_backward(in, l.w, grad, l.passo, grad_x, grad_nucleo, grad_vies);
+          rt::conv2d_backward(in, l.w, grad, l.passo, l.padding, l.dilatacao, grad_x, grad_nucleo, grad_vies);
           aplicar_grad(l, grad_nucleo, grad_vies);
           grad = std::move(grad_x);
           continue;
@@ -9661,11 +9745,21 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           fail(call.span, "conv2d espera o nucleo (tensor [C_out, C_in, KH, KW])");
         }
         std::int64_t passo = 1;
+        std::int64_t padding = 0;
+        std::int64_t dilatacao = 1;
         const rt::ValueMap kw = eval_kwargs(call, env);
         if (const Value* pv = kw.find("passo")) {
           passo = static_cast<std::int64_t>(pv->as_number());
         }
-        return Value::tensor_de(rt::conv2d(t, *a[0].tensor, passo));
+        if (const Value* pv = kw.find("padding")) {
+          padding = static_cast<std::int64_t>(pv->as_number());
+        }
+        if (const Value* pv = kw.find("dilatacao")) {
+          dilatacao = static_cast<std::int64_t>(pv->as_number());
+        } else if (const Value* pv = kw.find("dilation")) {
+          dilatacao = static_cast<std::int64_t>(pv->as_number());
+        }
+        return Value::tensor_de(rt::conv2d(t, *a[0].tensor, passo, padding, dilatacao));
       }
       if (method == "norma_lote") {
         auto a = eval_args(call, env);

@@ -11,15 +11,27 @@ namespace tilt::rt {
 // Camada na ordem do `modelo` (densa + ativacoes/softmax/norma/dropout).
 // Espelha Interpreter::Layer sem acoplar o runtime ao interpretador.
 struct OnnxLayer {
-  enum Kind { Dense, Activation, Softmax, Dropout, LayerNorm, Conv2d, NormaLote, Flatten, MaxPool } kind = Dense;
-  Tensor w;  // valido quando kind == Dense ([entrada, saida])
-  Tensor b;  // valido quando kind == Dense ([saida])
-  std::string act;  // valido quando kind == Activation (relu|gelu|silu|sigmoide|tanh)
-  std::int64_t passo = 1;  // valido quando kind == Conv2d/MaxPool
-  std::int64_t janela = 0;  // valido quando kind == MaxPool
-  std::int64_t plano = 0;  // valido quando kind == Flatten (largura apos achatar)
-  Tensor media_running;  // valido quando kind == NormaLote
-  Tensor var_running;    // valido quando kind == NormaLote
+  enum Kind {
+    Dense,
+    Activation,
+    Softmax,
+    Dropout,
+    LayerNorm,
+    Conv2d,
+    NormaLote,
+    Flatten,
+    MaxPool
+  } kind = Dense;
+  Tensor w;                    // valido quando kind == Dense ([entrada, saida])
+  Tensor b;                    // valido quando kind == Dense ([saida])
+  std::string act;             // valido quando kind == Activation (relu|gelu|silu|sigmoide|tanh)
+  std::int64_t passo = 1;      // valido quando kind == Conv2d/MaxPool
+  std::int64_t padding = 0;    // valido quando kind == Conv2d
+  std::int64_t dilatacao = 1;  // valido quando kind == Conv2d
+  std::int64_t janela = 0;     // valido quando kind == MaxPool
+  std::int64_t plano = 0;      // valido quando kind == Flatten (largura apos achatar)
+  Tensor media_running;        // valido quando kind == NormaLote
+  Tensor var_running;          // valido quando kind == NormaLote
 };
 
 // Serializa o modelo como ONNX (protobuf binario, opset 20) e devolve os

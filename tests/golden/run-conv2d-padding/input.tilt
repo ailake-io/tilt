@@ -1,0 +1,6 @@
+funcao principal:
+  x = uns [1, 1, 3, 3]
+  k = uns [1, 1, 3, 3]
+  y = x.conv2d k, padding: 1
+  z = x.conv2d k, padding: 1, dilatacao: 2
+  imprimir y.forma, z.forma

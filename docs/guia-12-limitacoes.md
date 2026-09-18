@@ -334,10 +334,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
   `agrupamento_max` e `achatar` (CNN de brinquedo em CPU, com mini-lotes).
 - `conv2d`/`norma_lote` existem como **operações de tensor** (guia 04) e
-  como camadas de `modelo`/`treino` (`conv2d: [C_saida, C_entrada, KH, KW]`
-  com 5º elemento opcional de passo, `norma_lote`, `agrupamento_max:
+  como camadas de `modelo`/`treino` (`conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`
+  com os três últimos elementos opcionais, `norma_lote`, `agrupamento_max:
   [janela]`/`[janela, passo]`, `achatar`; CNN exige `entrada: tensor[...]`
-  completa): `conv2d` com padding válido e passo 1+ (com viés); `norma_lote`
+  completa): `conv2d` com padding/dilation explícitos e passo 1+ (com viés); `norma_lote`
   com `eps:`/`em_treino:` nas ops e gama/beta +   média/variância correntes nas
   camadas. `treino` roda em lote cheio por default, com `lote:` (mini-lotes
   embaralhados por época), `semente:` (init + embaralhamento reproduzíveis),
@@ -350,7 +350,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
   (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
   ao RAM. `exportar_gguf` grava GGUF v3 (só escrita). Limites: fluxo só modelo 2D;
-  sem dilation nem padding explícito; sem AMP.
+  sem AMP.
 - GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
   `TILT_GPU=fake` para exercitar o caminho de dispatch.
 

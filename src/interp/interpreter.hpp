@@ -241,6 +241,8 @@ class Interpreter {
     rt::Tensor bn_media, bn_var;
     // Conv2d: kernel shape [C_out, C_in, KH, KW]
     std::int64_t passo = 1;
+    std::int64_t padding = 0;    // Conv2d: borda zero simetrica
+    std::int64_t dilatacao = 1;  // Conv2d: espacamento do nucleo
     // MaxPool: janela JxJ (passo uses `passo`, default = janela).
     std::int64_t janela = 0;
     // Flatten: largura apos achatar (para exportacao ONNX).

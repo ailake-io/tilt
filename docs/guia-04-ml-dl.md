@@ -30,7 +30,7 @@ viés `[N]` no último eixo) e entre tensor e escalar.
 | `.reformar([d, d])` | reshape (mesmo número de elementos) |
 | `.relu` `.gelu` `.silu` `.sigmoide` `.tanh` | ativação elementwise |
 | `.softmax` | softmax no último eixo |
-| `.conv2d(nucleo, passo: N)` | convolução 2D NCHW, padding válido (ver abaixo) |
+| `.conv2d(nucleo, passo: N, padding: P, dilatacao: D)` | convolução 2D NCHW com padding e dilatação (ver abaixo) |
 | `.norma_lote(gama, beta, media, variancia, eps: e, em_treino: b)` | batch norm por canal (ver abaixo) |
 | `.norma_camada()` | layer norm no último eixo (sem affine) |
 | `.soma` `.media` | redução total → `decimal` |
@@ -60,7 +60,7 @@ O que é verificado:
 
 | Operação | Verificação em `checar` |
 |---|---|
-| `.conv2d(nucleo, passo: N)` | entrada 4D `[N, C_in, H, W]`, núcleo 4D `[C_out, C_in, KH, KW]`, `C_in` coincidente, núcleo não maior que a entrada, `passo >= 1` — saída `[N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]` |
+| `.conv2d(nucleo, passo: N, padding: P, dilatacao: D)` | entrada 4D, núcleo 4D, canais coincidentes, `passo >= 1`, `padding >= 0`, `dilatacao >= 1`; saída usa o kernel efetivo `(K-1)*D+1` |
 | `.norma_lote(...)` | rank >= 2 (`[N, C, ...]`) — forma preservada |
 | `.softmax`, ativações, `norma_camada` | forma preservada |
 | `.reformar([d, d])` | mesmo número de elementos |
@@ -77,9 +77,9 @@ arquivo.
 
 `conv2d` existe como operação de tensor e como camada de `modelo`:
 entrada `[N, C_in, H, W]` convoluída com núcleo `[C_out, C_in, KH, KW]`,
-padding **válido** (sem borda) — saída
-`[N, C_out, (H-KH)/passo+1, (W-KW)/passo+1]`. Sem dilation nem padding
-explícito por ora.
+com padding e dilatação simétricos — saída
+`[N, C_out, floor((H + 2*P - KH_eff)/passo)+1, floor((W + 2*P - KW_eff)/passo)+1]`,
+onde `KH_eff = (KH-1)*D+1` e `KW_eff = (KW-1)*D+1`.
 
 ```tilt run
 pipeline conv:
@@ -187,7 +187,7 @@ pipeline classifica:
 Camadas: `densa: N`, `linear: [entrada, saida]`, `ativacao: relu|gelu|silu|sigmoide|tanh`,
 `softmax`, `abandono: p` / `dropout: p`, `norma_camada` (normalização sobre a
 última dimensão, sem affine — na inferência e no treino),
-`conv2d: [C_saida, C_entrada, KH, KW]` (quinto elemento opcional = passo),
+`conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]` (os três últimos são opcionais),
 `norma_lote` (affine por canal, com média/variância correntes),
 `agrupamento_max: [janela]` ou `[janela, passo]` e `achatar` (achata o lote
 `[N, ...]` para `[N, C]` antes da `densa`). Modelos convolucionais exigem a

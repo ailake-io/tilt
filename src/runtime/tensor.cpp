@@ -279,27 +279,36 @@ Tensor layer_norm_last(const Tensor& a) {
   return out;
 }
 
-Tensor conv2d(const Tensor& x, const Tensor& k, std::int64_t passo) {
+Tensor conv2d(const Tensor& x, const Tensor& k, std::int64_t passo, std::int64_t padding,
+              std::int64_t dilatacao) {
   if (x.rank() != 4) die("conv2d espera uma entrada [N, C_in, H, W] (" + x.shape_str() + ")");
   if (k.rank() != 4) die("conv2d espera um nucleo [C_out, C_in, KH, KW] (" + k.shape_str() + ")");
   if (passo < 1) die("conv2d: passo deve ser >= 1");
+  if (padding < 0) die("conv2d: padding deve ser >= 0");
+  if (dilatacao < 1) die("conv2d: dilatacao deve ser >= 1");
   const std::int64_t n = x.shape[0];
   const std::int64_t cin = x.shape[1];
   const std::int64_t h = x.shape[2];
   const std::int64_t w = x.shape[3];
   const std::int64_t cout = k.shape[0];
   if (k.shape[1] != cin) {
-    die("conv2d: nucleo tem " + std::to_string(k.shape[1]) + " canais de entrada, mas a entrada tem " +
-        std::to_string(cin));
+    die("conv2d: nucleo tem " + std::to_string(k.shape[1]) +
+        " canais de entrada, mas a entrada tem " + std::to_string(cin));
   }
   const std::int64_t kh = k.shape[2];
   const std::int64_t kw = k.shape[3];
-  if (kh > h || kw > w) {
-    die("conv2d: nucleo " + std::to_string(kh) + "x" + std::to_string(kw) +
-        " maior que a entrada " + std::to_string(h) + "x" + std::to_string(w));
+  const std::int64_t ekh = (kh - 1) * dilatacao + 1;
+  const std::int64_t ekw = (kw - 1) * dilatacao + 1;
+  const std::int64_t oh = (h + 2 * padding - ekh) / passo + 1;
+  const std::int64_t ow = (w + 2 * padding - ekw) / passo + 1;
+  if (oh < 1 || ow < 1) {
+    if (padding == 0 && dilatacao == 1) {
+      die("conv2d: nucleo " + std::to_string(kh) + "x" + std::to_string(kw) +
+          " maior que a entrada " + std::to_string(h) + "x" + std::to_string(w));
+    }
+    die("conv2d: nucleo efetivo " + std::to_string(ekh) + "x" + std::to_string(ekw) +
+        " nao cabe na entrada com padding " + std::to_string(padding));
   }
-  const std::int64_t oh = (h - kh) / passo + 1;
-  const std::int64_t ow = (w - kw) / passo + 1;
 
   Tensor out = Tensor::zeros({n, cout, oh, ow});
 
@@ -320,8 +329,12 @@ Tensor conv2d(const Tensor& x, const Tensor& k, std::int64_t passo) {
             const float* kc = kbase + static_cast<std::size_t>(c * kh * kw);
             for (std::int64_t u = 0; u < kh; ++u) {
               for (std::int64_t v = 0; v < kw; ++v) {
-                acc += xc[static_cast<std::size_t>((i * passo + u) * w + (jj * passo + v))] *
-                       kc[static_cast<std::size_t>(u * kw + v)];
+                const std::int64_t hh = i * passo + u * dilatacao - padding;
+                const std::int64_t ww = jj * passo + v * dilatacao - padding;
+                if (hh >= 0 && hh < h && ww >= 0 && ww < w) {
+                  acc += xc[static_cast<std::size_t>(hh * w + ww)] *
+                         kc[static_cast<std::size_t>(u * kw + v)];
+                }
               }
             }
           }
@@ -373,12 +386,16 @@ Tensor adicionar_vies_conv(const Tensor& y, const Tensor& vies) {
 }
 
 void conv2d_backward(const Tensor& x, const Tensor& nucleo, const Tensor& grad_saida,
-                     std::int64_t passo, Tensor& grad_x, Tensor& grad_nucleo, Tensor& grad_vies) {
-  if (x.rank() != 4) die("conv2d_backward espera uma entrada [N, C_in, H, W] (" + x.shape_str() + ")");
+                     std::int64_t passo, std::int64_t padding, std::int64_t dilatacao,
+                     Tensor& grad_x, Tensor& grad_nucleo, Tensor& grad_vies) {
+  if (x.rank() != 4)
+    die("conv2d_backward espera uma entrada [N, C_in, H, W] (" + x.shape_str() + ")");
   if (nucleo.rank() != 4) {
     die("conv2d_backward espera um nucleo [C_out, C_in, KH, KW] (" + nucleo.shape_str() + ")");
   }
   if (passo < 1) die("conv2d_backward: passo deve ser >= 1");
+  if (padding < 0) die("conv2d_backward: padding deve ser >= 0");
+  if (dilatacao < 1) die("conv2d_backward: dilatacao deve ser >= 1");
   const std::int64_t n = x.shape[0];
   const std::int64_t cin = x.shape[1];
   const std::int64_t h = x.shape[2];
@@ -386,9 +403,11 @@ void conv2d_backward(const Tensor& x, const Tensor& nucleo, const Tensor& grad_s
   const std::int64_t cout = nucleo.shape[0];
   const std::int64_t kh = nucleo.shape[2];
   const std::int64_t kw = nucleo.shape[3];
+  const std::int64_t ekh = (kh - 1) * dilatacao + 1;
+  const std::int64_t ekw = (kw - 1) * dilatacao + 1;
   if (nucleo.shape[1] != cin) die("conv2d_backward: canais do nucleo incompativeis com a entrada");
-  const std::int64_t oh = (h - kh) / passo + 1;
-  const std::int64_t ow = (w - kw) / passo + 1;
+  const std::int64_t oh = (h + 2 * padding - ekh) / passo + 1;
+  const std::int64_t ow = (w + 2 * padding - ekw) / passo + 1;
   if (grad_saida.shape != std::vector<std::int64_t>({n, cout, oh, ow})) {
     die("conv2d_backward: gradiente com forma inesperada (" + grad_saida.shape_str() + ")");
   }
@@ -399,17 +418,22 @@ void conv2d_backward(const Tensor& x, const Tensor& nucleo, const Tensor& grad_s
     for (std::int64_t co = 0; co < cout; ++co) {
       for (std::int64_t i = 0; i < oh; ++i) {
         for (std::int64_t j = 0; j < ow; ++j) {
-          const float gy = grad_saida.data[static_cast<std::size_t>(((nn * cout + co) * oh + i) * ow + j)];
+          const float gy =
+              grad_saida.data[static_cast<std::size_t>(((nn * cout + co) * oh + i) * ow + j)];
           grad_vies.data[static_cast<std::size_t>(co)] += gy;
           for (std::int64_t ci = 0; ci < cin; ++ci) {
             for (std::int64_t u = 0; u < kh; ++u) {
               for (std::int64_t v = 0; v < kw; ++v) {
-                const std::int64_t hh = i * passo + u;
-                const std::int64_t ww = j * passo + v;
-                const std::size_t xi = static_cast<std::size_t>(((nn * cin + ci) * h + hh) * w + ww);
-                const std::size_t ki = static_cast<std::size_t>(((co * cin + ci) * kh + u) * kw + v);
-                grad_nucleo.data[ki] += x.data[xi] * gy;
-                grad_x.data[xi] += nucleo.data[ki] * gy;
+                const std::int64_t hh = i * passo + u * dilatacao - padding;
+                const std::int64_t ww = j * passo + v * dilatacao - padding;
+                const std::size_t ki =
+                    static_cast<std::size_t>(((co * cin + ci) * kh + u) * kw + v);
+                if (hh >= 0 && hh < h && ww >= 0 && ww < w) {
+                  const std::size_t xi =
+                      static_cast<std::size_t>(((nn * cin + ci) * h + hh) * w + ww);
+                  grad_nucleo.data[ki] += x.data[xi] * gy;
+                  grad_x.data[xi] += nucleo.data[ki] * gy;
+                }
               }
             }
           }

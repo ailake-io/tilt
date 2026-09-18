@@ -105,7 +105,7 @@
 - [ ] Implementar AMP (automatic mixed precision) — roteiro
 - [x] Implementar `ao_epoca` (callback por época; bloco com contexto da época)
 - [x] Adicionar dataloader de Parquet para treino (row groups, fluxo 2D)
-- [ ] Implementar dilation e padding explícito em conv2d
+- [x] Implementar dilation e padding explícito em conv2d
 - [x] Implementar dataloader com `shuffle` configurável (`embaralhar: verdadeiro|falso`)
 
 ### 3.3 Modelos (P2)
