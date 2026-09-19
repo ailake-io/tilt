@@ -115,6 +115,17 @@ cd build/release && cpack     # .tar.gz + .deb + .rpm de uma vez
 sha256sum tilt-0.1.0-Linux-x86_64.tar.gz > tilt-0.1.0-Linux-x86_64.tar.gz.sha256
 ```
 
+Para verificar a assinatura Sigstore de um artefato Linux (instale o
+[Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) antes):
+
+```bash
+cosign verify-blob tilt-0.1.0-Linux-x86_64.tar.gz \
+  --bundle tilt-0.1.0-Linux-x86_64.tar.gz.sigstore.json \
+  --certificate-identity-regexp \
+    '^https://github.com/ailake-io/tilt/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ### Release no GitHub (automatizado)
 
 O workflow `.github/workflows/release.yml` faz isso sozinho a cada tag `v*`:
@@ -128,6 +139,8 @@ Ele compila em release, roda a suíte de testes e gera/anexa por
 plataforma (Linux x86_64 e macOS arm64):
 
 - `tilt-*.tar.gz` + `.sha256` (todas as plataformas);
+- `tilt-*.sigstore.json` (Linux, bundles Cosign/Sigstore keyless para os
+  artefatos do CPack; verificáveis sem chave privada do projeto);
 - `tilt-*.deb` e `tilt-*.rpm` + `.sha256` (Linux, do CPack — o job instala
   o `rpm` no runner porque o gerador RPM precisa do `rpmbuild`);
 - `tilt-*.dmg` (macOS, do CPack DragNDrop);

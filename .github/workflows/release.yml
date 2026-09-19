@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -57,6 +58,24 @@ jobs:
               (cd build/release && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256")
           done
 
+      - name: instalar cosign (Linux)
+        if: runner.os == 'Linux'
+        uses: sigstore/cosign-installer@v4.0.0
+        with:
+          cosign-release: v3.0.2
+
+      - name: assinar artefatos Linux com Sigstore
+        if: runner.os == 'Linux'
+        working-directory: build/release
+        run: |
+          set -eu
+          for f in tilt-*; do
+            case "$f" in
+              *.sha256|*.sigstore.json) continue ;;
+            esac
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+
       - uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -66,6 +85,7 @@ jobs:
             build/release/tilt-*.deb.sha256
             build/release/tilt-*.rpm
             build/release/tilt-*.rpm.sha256
+            build/release/tilt-*.sigstore.json
             build/release/tilt-*.dmg
             build/release/tilt-*.dmg.sha256
           generate_release_notes: true
