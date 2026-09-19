@@ -66,6 +66,9 @@ Filtro por prefixo (case-insensitive).
 `tilt lsp` fala Language Server Protocol por stdio. Capabilities atuais:
 
 - diagnósticos push ao abrir/editar (`textDocumentSync` full);
+- **diagnostics on-type**: `didOpen`/`didChange` publicam diagnósticos e
+  `textDocument/diagnostic` oferece o relatório pull; a análise é reutilizada
+  enquanto o conteúdo do documento não muda;
 - autocomplete com gatilhos `.` e `:` (contexto por posição, ver tabela acima);
 - **hover** (`hoverProvider`): documentação em markdown para builtins
   (assinatura + o que faz + exemplo), palavras-chave da linguagem, métodos de

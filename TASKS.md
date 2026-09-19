@@ -239,8 +239,7 @@
   do valor em usos de variável, tipo da expressão sob o cursor com forma de
   tensor; desconhecido cai no texto atual)
 - [x] Implementar `rename symbol` no LSP (same-file, WorkspaceEdit com validação de identificador)
-- [ ] Adicionar diagnostics em tempo real (on-type) no LSP (hoje: full reparse
-  por `didChange`, sem debounce/cache)
+- [x] Adicionar diagnostics em tempo real (on-type) no LSP (push em `didChange`, pull `textDocument/diagnostic` e cache por conteúdo)
 
 ### 10.2 Formatos (P2)
 - [ ] Adicionar suporte a Parquet com ZSTD compression

@@ -109,7 +109,7 @@ Value span_to_range(const Span& s) {
   return range;
 }
 
-void publish_diagnostics(std::ostream& out, const std::string& uri, const std::string& text) {
+Value compute_diagnostics(const std::string& uri, const std::string& text) {
   SourceFile src(uri_to_path(uri), text);
   DiagnosticEngine diag(&src);
   Lexer lexer(src, diag);
@@ -141,9 +141,13 @@ void publish_diagnostics(std::ostream& out, const std::string& uri, const std::s
     arr.list->push_back(std::move(item));
   }
 
+  return arr;
+}
+
+void publish_diagnostics(std::ostream& out, const std::string& uri, const Value& diagnostics) {
   Value params = Value::mapa();
   params.map->set("uri", Value::texto(uri));
-  params.map->set("diagnostics", std::move(arr));
+  params.map->set("diagnostics", diagnostics);
   Value note = Value::mapa();
   note.map->set("jsonrpc", Value::texto("2.0"));
   note.map->set("method", Value::texto("textDocument/publishDiagnostics"));
@@ -155,6 +159,20 @@ void publish_diagnostics(std::ostream& out, const std::string& uri, const std::s
 
 int run_lsp(std::istream& in, std::ostream& out) {
   std::unordered_map<std::string, std::string> docs;
+  struct DiagnosticCache {
+    std::string text;
+    Value diagnostics = Value::lista();
+  };
+  std::unordered_map<std::string, DiagnosticCache> diagnostic_cache;
+  auto diagnostics_for = [&](const std::string& uri) -> const Value& {
+    auto& cached = diagnostic_cache[uri];
+    const std::string& text = docs[uri];
+    if (cached.text != text) {
+      cached.text = text;
+      cached.diagnostics = compute_diagnostics(uri, text);
+    }
+    return cached.diagnostics;
+  };
   std::string body;
 
   while (read_message(in, body)) {
@@ -182,6 +200,10 @@ int run_lsp(std::istream& in, std::ostream& out) {
       caps.map->set("definitionProvider", Value::logico(true));
       caps.map->set("referencesProvider", Value::logico(true));
       caps.map->set("renameProvider", Value::logico(true));
+      Value diagnostic_provider = Value::mapa();
+      diagnostic_provider.map->set("interFileDependencies", Value::logico(false));
+      diagnostic_provider.map->set("workspaceDiagnostics", Value::logico(false));
+      caps.map->set("diagnosticProvider", std::move(diagnostic_provider));
       caps.map->set("documentFormattingProvider", Value::logico(true));
       Value sig = Value::mapa();
       Value sig_triggers = Value::lista();
@@ -201,7 +223,7 @@ int run_lsp(std::istream& in, std::ostream& out) {
       if (td) {
         const std::string uri = member_str(*td, "uri");
         docs[uri] = member_str(*td, "text");
-        publish_diagnostics(out, uri, docs[uri]);
+        publish_diagnostics(out, uri, diagnostics_for(uri));
       }
     } else if (method == "textDocument/didChange" && params) {
       const Value* td = member(*params, "textDocument");
@@ -210,8 +232,15 @@ int run_lsp(std::istream& in, std::ostream& out) {
           !changes->list->empty()) {
         const std::string uri = member_str(*td, "uri");
         docs[uri] = member_str((*changes->list)[0], "text");
-        publish_diagnostics(out, uri, docs[uri]);
+        publish_diagnostics(out, uri, diagnostics_for(uri));
       }
+    } else if (method == "textDocument/diagnostic" && params) {
+      const Value* td = member(*params, "textDocument");
+      const std::string uri = td ? member_str(*td, "uri") : "";
+      Value result = Value::mapa();
+      result.map->set("kind", Value::texto("full"));
+      result.map->set("items", diagnostics_for(uri));
+      write_message(out, make_response(id, std::move(result)));
     } else if (method == "textDocument/completion" && params) {
       const Value* td = member(*params, "textDocument");
       const Value* pos = member(*params, "position");

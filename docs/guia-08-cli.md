@@ -64,6 +64,7 @@ Candidatos de autocomplete para o cursor em `(L, C)` 1-based. Sem `--json`:
 
 Servidor Language Server por stdio (JSON-RPC, framing `Content-Length`):
 `initialize`, `textDocument/didOpen` e `didChange` → `publishDiagnostics`,
+`textDocument/diagnostic` (pull com cache por conteúdo),
 `completion` (gatilhos `.` e `:`), `hover` (docs + tipos do checker),
 `definition`, `references` e `rename` (same-file), `signatureHelp`, `formatting`,
 `shutdown`/`exit`. `references` aceita `context.includeDeclaration` conforme

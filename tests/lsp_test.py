@@ -81,6 +81,14 @@ def main() -> int:
                     },
                 }
             ),
+            frame(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "textDocument/diagnostic",
+                    "params": {"textDocument": {"uri": "file:///t.tilt"}},
+                }
+            ),
             frame({"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}}),
             frame({"jsonrpc": "2.0", "method": "exit"}),
         ]
@@ -101,6 +109,7 @@ def main() -> int:
         "definitionProvider",
         "referencesProvider",
         "renameProvider",
+        "diagnosticProvider",
         "documentFormattingProvider",
         "signatureHelpProvider",
     ):
@@ -113,6 +122,10 @@ def main() -> int:
     codes = [d["code"] for d in diags["params"]["diagnostics"]] if diags else []
     if "T034" not in codes:
         problems.append(f"esperava diagnostico T034, veio {codes}")
+    pull = next((f for f in frames if f.get("id") == 4), None)
+    pull_codes = [d["code"] for d in (pull or {}).get("result", {}).get("items", [])]
+    if "T034" not in pull_codes:
+        problems.append(f"pull diagnostics sem T034: {pull}")
 
     comp = next((f for f in frames if f.get("id") == 2), None)
     labels = [i["label"] for i in comp["result"]["items"]] if comp else []
