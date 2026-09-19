@@ -1,6 +1,6 @@
 # Tarefas do Projeto Tilt
 
-> Gerado em 2026-09-15 com base no estado do repositório.
+> Atualizado em 2026-09-18 com base no estado do repositório.
 
 ## Legenda
 - 🔴 **P0** — Crítico / Bloqueante
@@ -30,9 +30,9 @@
 - [x] 12-6.5 — Callbacks de pipeline, alerta de SLA e jitter no backoff
 - [x] 12-6.6 — Logs JSON opt-in com contexto de execução dos pipelines
 - [x] 12-6.7 — Vacuum conservador de arquivos órfãos Delta/Iceberg
-- [ ] Fase 12-7 — GPU real/CUDA + AMP
-- [x] Fase 12-8 — CI Windows com testes funcionais (build MSVC + `tests/windows_functional.ps1`)
-- [ ] GPU — validação em hardware real (deferida)
+- [ ] Fase 12-7 — GPU real/CUDA + AMP (deferida; não bloqueia as demais fases)
+- [x] Fase 12-8 — CI Windows com testes funcionais (build MSVC + `tests/windows_functional.ps1`); a suíte CTest completa ainda é shell-script e continua em Linux/macOS
+- [ ] GPU — validação em hardware CUDA real (deferida)
 
 
 ---
@@ -84,6 +84,8 @@
 - [x] Implementar `tilt servir-catalogo` (fase 30)
 - [x] Adicionar deletes (position/equality) para Iceberg (fase 12-5a; leitura
   nativa aplica ambos, pyiceberg aplica position e ainda não suporta equality)
+- [x] Implementar compactação `optimize` para Delta/Iceberg (`otimizar_delta`/`otimizar_iceberg`)
+- [ ] Implementar z-order para escrita analítica particionada
 
 ### 2.3 Streaming (P2)
 - [x] Implementar streaming de Parquet no treino (`carregador ..., fluxo: verdadeiro`; CSV e Parquet)
@@ -271,10 +273,9 @@
    inteiro→decimal/`logico`) → 400 ensinável; demais tipos passam sem
    verificação. Teste `servico_entrada_test.sh` + fixture `servico_entrada.tilt`.
 
-Pré-existente (não é da Sprint 1, fica para triagem): 3 blocos `tilt run` em
-`docs/guia-04-ml-dl.md` (checkpoint/retomar, trabalho não-commitado anterior)
-falham com T032 duplo `treino Xor` — o doc escreve dois `treino Xor:` no mesmo
-arquivo e só o par treino+modelo é isento de duplicata.
+Triagem concluída: os blocos de checkpoint/retomar de `docs/guia-04-ml-dl.md`
+foram corrigidos junto com a regra de duplicata de `treino`/`modelo`; a
+documentação fecha sem o antigo T032 duplo (`docs` 102/102).
 
 ## Priorização Sugerida (restante)
 
@@ -297,7 +298,7 @@ arquivo e só o par treino+modelo é isento de duplicata.
   marcador→`nulo` na leitura + poda com `nulo`, validar pyiceberg/Spark.
   Irmão gêmeo (`/` em valores) fica de fora salvo pedido.
 
-### Sprint 3 — em andamento
+### Sprint 3 — entregue
 - [x] S3.4 Hover com tipos (assinatura, campos, valor em uso, expr + forma)
 - [x] Iceberg nulo-partição msg (opção b: sufixo fase-26 restaurado; 158/158)
 - [x] S3.1 Cache `.tiltc` (`src/vm/bytecode_cache.*`, SHA do fonte,
@@ -315,11 +316,8 @@ arquivo e só o par treino+modelo é isento de duplicata.
   `embeddings:` opcional, teto 200 turnos, `T011` em valor inválido; goldens
   `run-agente-memoria-vetorial` + `chk-memoria`)
 
-### Sprint 3 (restante)
-
-### Sprint 3
 1. [x] JIT compiler (1.3) — backend x86-64 direto em memória, fallback para VM
-2. Evolução de schema Iceberg/Delta (2.2)
-3. Agentes com memória vetorial (5.2)
-4. Windows port improvements (7.1)
-5. LSP features (10.1)
+2. [x] Evolução de schema Iceberg/Delta (2.2)
+3. [x] Agentes com memória vetorial (5.2)
+4. [x] Windows port improvements (7.1); permanece apenas a migração da suíte CTest completa
+5. [x] LSP features (10.1) — goto definition, hover, signature help, completion e formatting

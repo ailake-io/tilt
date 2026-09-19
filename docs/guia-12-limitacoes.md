@@ -10,7 +10,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   em posição de operador, nome em posição de nome).
 - Parâmetros compostos em `funcao` (Marco 3 / C3): `nome[]` ou
   `nome[]: <tipo>` (opcional), `mapa` como tipo base; `Arg.optional` é
-  metadado do parser (aridade de `funcao` de usuário segue sem validação).
+  metadado do parser. A aridade de funções de usuário é validada pelo checker:
+  argumentos faltantes são erro; argumentos excedentes são aceitos apenas no
+  formato de chamada entre parênteses, conforme a regra de chamada da Tilt.
 
 ## Semântica
 
@@ -352,8 +354,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
   ao RAM. `exportar_gguf` grava GGUF v3 (só escrita) e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32 e ONNX; ONNX cobre as camadas exportáveis e a camada `incorporacao` continua sem suporte. Limites: fluxo só modelo 2D;
   sem AMP.
-- GPU: o backend CUDA (`TILT_GPU=auto`) só foi validado em hardware; aqui use
-  `TILT_GPU=fake` para exercitar o caminho de dispatch.
+- GPU: o backend CUDA (`TILT_GPU=auto`) ainda não foi validado em hardware
+  CUDA real; aqui use `TILT_GPU=fake` para exercitar o caminho de dispatch.
 
 ## LLM / RAG
 

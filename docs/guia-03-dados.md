@@ -10,8 +10,10 @@ fonte produtos:
 
 Num pipeline, `ler produtos` lê a fonte conforme `tipo:` e devolve uma
 `tabela` (arquivos/SQL) ou `lista` de `texto` (kafka). `file://` é removido
-do caminho. Conectores ainda não cobertos (`s3`, `qdrant`) levantam `T900`
-apontando o marco. `fonte tipo: kafka` exige `topico:` (ver seção Kafka).
+do caminho. S3 é usado pelos builtins `ler_s3`/`escrever_s3` e Qdrant pelo
+bloco `indice`, mas eles não são fontes genéricas neste formato de `fonte`;
+declarar esses valores como `fonte tipo:` continua levantando `T900`.
+`fonte tipo: kafka` exige `topico:` (ver seção Kafka).
 
 ## `pipeline`
 
@@ -378,11 +380,15 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
 
 ### Manutenção de tabelas
 
+`otimizar_delta "diretorio"` e `otimizar_iceberg "diretorio"` regravam os
+arquivos ativos em conjuntos compactos, preservando o particionamento. Os
+arquivos anteriores ficam órfãos até `vacuum_delta`/`vacuum_iceberg` removê-los.
+Os aliases `optimize_delta` e `optimize_iceberg` também são aceitos. A
+compactação é uma reescrita conservadora; no modo local, o metadata antigo é
+substituído e o histórico removido deve ser mantido externamente se necessário.
 `vacuum_delta "diretorio"` e `vacuum_iceberg "diretorio"` removem Parquet
 órfãos que não são referenciados por nenhum log Delta ou metadata/snapshot
-Iceberg. Ambos devolvem a quantidade de arquivos removidos. A operação é
-conservadora: mantém arquivos históricos ainda referenciados, portanto não
-quebra leitores externos nem time travel.
+Iceberg e devolvem a quantidade de arquivos removidos.
 
 ## Iceberg (catálogo Hadoop)
 

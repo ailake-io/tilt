@@ -2,8 +2,8 @@
 
 Levantamento do estado real (parser × checker × interpretador × runtime) e
 dos gaps por domínio para a Tilt ficar excelente em engenharia de dados,
-machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fases 12-5a e
-12-6 concluídas; GPU real/AMP permanecem deferidos para hardware CUDA.
+machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fases 12-5a,
+12-6 e 12-8 concluídas; GPU real/AMP permanecem deferidos para hardware CUDA.
 
 ## Fase 12-5a — formatos e formas de tensor
 
@@ -20,7 +20,7 @@ checker semântico e seus goldens. O estado consolidado é:
 - A .7 foi concluída com golden de regressão, documentação revisada e commit
   isolado das alterações da fase.
 
-## Engenharia de dados — base sólida, faltam operação e escala
+## Engenharia de dados — base sólida, faltam compactação e escala
 
 Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 `verificar`, `janela`, `--agendar` com checkpoint e eleição de líder.
@@ -37,12 +37,12 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   <coluna>` adiciona watermark numérico/textual persistente e
   `backfill: { desde: valor, ate: valor }` permite reprocessar um intervalo
   inclusivo sem avançar o cursor.
-- **Qualidade de dados**: `verificar` valida, mas sem quarentena (desviar
-  linhas ruins), sem perfilagem/estatísticas, sem contrato de schema
-  versionado na entrada.
-- **Escrita analítica**: Delta/Iceberg particionam e já têm `vacuum_*`
-  conservador para Parquet órfão; falta compactação (`optimize`) e
-  `ordenar_por`/z-order.
+- **Qualidade de dados**: `verificar` valida e `quarentena:` já desvia linhas
+  ruins em iterações; ainda faltam perfilagem/estatísticas e contrato de
+  schema versionado na entrada.
+- **Escrita analítica**: Delta/Iceberg particionam, compactam com
+  `otimizar_delta`/`otimizar_iceberg` e já têm `vacuum_*` conservador para
+  Parquet órfão e `ordenar_por` para tabelas em memória; falta z-order.
 
 ## Machine learning clássico — feito (1ª passada)
 
@@ -87,8 +87,6 @@ Funciona: cliente real anthropic/openai via curl, saída estruturada via
 JSON Schema derivado de `tipo`, streaming SSE, embeddings, 6 backends
 vetoriais. Robustez entregue: `tempo_limite`, `tentativas` com backoff (incluindo
 `Retry-After` em 429), `reserva:`, `teto_tokens:` e `tokens:` na resposta.
-
-- **Resta de robustez**: cache de respostas e retry em streaming.
 
 - **Robustez**: timeout configurável, fallback entre modelos e teto de
   custo/tokens por período. `Retry-After` em 429 já é respeitado; ainda faltam
@@ -145,9 +143,8 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 3. ~~Operação de pipelines~~ feito (1ª passada: `ao_falhar` com
    `espera:`/`backoff:`, `tempo_limite:` por passo, `quarentena:` no
    `para cada`, `saude:`/`metricas:` no `servico`, latências por rota no
-   `/metricas`; sem cache de respostas no LLM).
+   `/metricas`, logs estruturados, cursor/backfill e `vacuum_*`).
 4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
-3. Operação de pipelines (timeout por passo, backoff, quarentena,
-   `/saude` + `/metricas`).
-4. ~~`exportar: onnx`~~ feito (ver item 4 acima).
 5. ~~`avaliacao` (evals — fundação de LLMOps)~~ feito em 1ª passada (ver guia 05).
+6. Próximo foco: z-order para escrita analítica; depois cache e retry em
+   streaming no cliente LLM.

@@ -8914,6 +8914,18 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     return Value::nulo();
   }
+  if (name == "otimizar_delta" || name == "optimize_delta") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "otimizar_delta espera (diretorio)");
+    }
+    try {
+      rt::delta_optimize(a[0].s);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
   if (name == "vacuum_delta") {
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) {
@@ -8965,6 +8977,18 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     std::vector<std::string> part_cols = parse_particionar_por(kw, "anexar_iceberg", call.span);
     try {
       rt::iceberg_append(a[1].s, a[0], part_cols);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+    return Value::nulo();
+  }
+  if (name == "otimizar_iceberg" || name == "optimize_iceberg") {
+    auto a = args();
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "otimizar_iceberg espera (diretorio)");
+    }
+    try {
+      rt::iceberg_optimize(a[0].s);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

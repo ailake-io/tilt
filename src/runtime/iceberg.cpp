@@ -3662,6 +3662,32 @@ Value iceberg_read(const std::string& dir, const Value* onde) {
   return read_core(meta, onde);
 }
 
+std::string optimize_partition_column(const PartitionField& pf) {
+  if (pf.source_name.empty()) die("optimize_iceberg: partition spec sem coluna fonte");
+  if (pf.transform == "identity") return pf.source_name;
+  if (pf.transform == "year" || pf.transform == "month" || pf.transform == "day" ||
+      pf.transform == "hour") {
+    return pf.transform + "(" + pf.source_name + ")";
+  }
+  if (pf.transform.rfind("bucket[", 0) == 0 || pf.transform.rfind("truncate[", 0) == 0) {
+    return pf.transform + "(" + pf.source_name + ")";
+  }
+  die("optimize_iceberg: transform de particao nao regravavel '" + pf.transform + "'");
+}
+
+void iceberg_optimize(const std::string& dir) {
+  const std::string location = abs_path(dir);
+  TableMeta meta;
+  latest_metadata_path(location, meta);
+  const Value tabela = iceberg_read(dir, nullptr);
+  std::vector<std::string> part_cols;
+  for (const PartitionField& pf : meta.spec) part_cols.push_back(optimize_partition_column(pf));
+  // Reescrita por particao: iceberg_write gera um data file compacto por grupo.
+  // Os data files anteriores ficam orfaos para vacuum; o metadata corrente
+  // substitui o historico local, como na escrita de sobrescrita existente.
+  iceberg_write(dir, tabela, part_cols);
+}
+
 std::int64_t iceberg_vacuum(const std::string& dir) {
   const std::string location = abs_path(dir);
   const std::vector<std::string> metadata = list_metadata_files(location + "/metadata");

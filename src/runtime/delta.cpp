@@ -1318,6 +1318,17 @@ Value delta_read(const std::string& dir, const Value* onde) {
   return out;
 }
 
+void delta_optimize(const std::string& dir) {
+  const std::string log_dir = dir + "/_delta_log";
+  const std::vector<std::string> versions = list_delta_versions(log_dir);
+  if (versions.empty()) die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
+  const Value tabela = delta_read(dir, nullptr);
+  const std::vector<std::string> part_cols = current_partition_columns(versions);
+  // Reescrita por particao: delta_write agrupa as linhas e cria um parquet
+  // compacto por grupo. Os arquivos anteriores permanecem orfaos ate vacuum.
+  delta_write(dir, tabela, part_cols);
+}
+
 std::int64_t delta_vacuum(const std::string& dir) {
   const std::string log_dir = dir + "/_delta_log";
   const std::vector<std::string> versions = list_delta_versions(log_dir);
