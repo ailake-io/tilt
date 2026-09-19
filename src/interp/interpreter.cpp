@@ -31,6 +31,7 @@
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
 #include "runtime/checkpoint.hpp"
+#include "runtime/cluster.hpp"
 #include "runtime/chroma.hpp"
 #include "runtime/clickhouse.hpp"
 #include "runtime/compat.hpp"
@@ -3418,6 +3419,50 @@ void Interpreter::ler_cfg_treino(const ast::Block& cfg, std::int64_t n, const st
   if (out.shard_id < 0 || out.shard_id >= out.num_shards) {
     fail(span, ctx + ": 'shard_id' deve estar em [0, num_shards)");
   }
+  if (const Item* cf = find_field(cfg, "cluster"); cf && cf->value) {
+    if (cf->value->kind != ExprKind::MapLit) {
+      fail(span, ctx + ": 'cluster' deve ser mapa { dir: \"...\", rank: N, mundo: N }");
+    }
+    for (const auto& e : cf->value->entries) {
+      if (e.key == "dir") {
+        if (!e.value || e.value->kind != ExprKind::TextLit || e.value->text.empty()) {
+          fail(span, ctx + ": 'cluster.dir' deve ser texto nao vazio");
+        }
+        out.cluster_dir = e.value->text;
+      } else if (e.key == "rank") {
+        if (!e.value || e.value->kind != ExprKind::IntLit) {
+          fail(span, ctx + ": 'cluster.rank' deve ser inteiro");
+        }
+        out.cluster_rank = static_cast<int>(std::strtol(e.value->text.c_str(), nullptr, 10));
+      } else if (e.key == "mundo" || e.key == "world") {
+        if (!e.value || e.value->kind != ExprKind::IntLit) {
+          fail(span, ctx + ": 'cluster.mundo' deve ser inteiro");
+        }
+        out.cluster_world = static_cast<int>(std::strtol(e.value->text.c_str(), nullptr, 10));
+      } else if (e.key == "timeout") {
+        if (!e.value || e.value->kind != ExprKind::IntLit) {
+          fail(span, ctx + ": 'cluster.timeout' deve ser inteiro");
+        }
+        out.cluster_timeout = static_cast<int>(std::strtol(e.value->text.c_str(), nullptr, 10));
+      } else {
+        fail(span, ctx + ": chave '" + e.key + "' desconhecida em 'cluster'");
+      }
+    }
+    if (out.cluster_world < 2) {
+      fail(span, ctx + ": 'cluster.mundo' deve ser >= 2");
+    }
+    if (out.cluster_dir.empty()) {
+      fail(span, ctx + ": 'cluster.dir' e obrigatorio");
+    }
+    if (out.cluster_rank < 0 || out.cluster_rank >= out.cluster_world) {
+      fail(span, ctx + ": 'cluster.rank' deve estar em [0, mundo)");
+    }
+    if (out.cluster_timeout < 1) {
+      fail(span, ctx + ": 'cluster.timeout' deve ser >= 1");
+    }
+    out.shard_id = out.cluster_rank;
+    out.num_shards = out.cluster_world;
+  }
   out.seed_init = 0xC1A5;
   out.seed_mistura = 7;
   if (const Item* sf = find_field(cfg, "semente");
@@ -3886,8 +3931,151 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
     out << rt::json_dump(doc) << "\n";
   };
 
-  int epoca_inicial = 1;
   int adam_t = 0;
+  auto cluster_sync = [&](int epoch) {
+    if (cfg.cluster_world <= 1) return;
+    std::string cluster_error;
+    if (!rt::cluster_preparar(cfg.cluster_dir, cluster_error)) {
+      fail(span, ctx + ": cluster: " + cluster_error);
+    }
+    const std::filesystem::path rank_path =
+        std::filesystem::path(cfg.cluster_dir) /
+        ("rank-" + std::to_string(cfg.cluster_rank) + "-epoch-" + std::to_string(epoch) + ".json");
+    salvar_checkpoint(rank_path.string(), epoch, adam_t);
+    if (!rt::cluster_barreira(cfg.cluster_dir, cfg.cluster_rank, cfg.cluster_world, epoch * 2,
+                              cfg.cluster_timeout, cluster_error)) {
+      fail(span, ctx + ": cluster: " + cluster_error);
+    }
+
+    const std::filesystem::path aggregate_path =
+        std::filesystem::path(cfg.cluster_dir) / ("aggregate-epoch-" + std::to_string(epoch) + ".json");
+    std::vector<std::size_t> weight_indices;
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+      if (camada_com_pesos(layers[i].kind)) weight_indices.push_back(i);
+    }
+    if (cfg.cluster_rank == 0) {
+      std::ifstream first_file(std::filesystem::path(cfg.cluster_dir) /
+                               ("rank-0-epoch-" + std::to_string(epoch) + ".json"));
+      std::ostringstream first_text;
+      first_text << first_file.rdbuf();
+      Value aggregate = rt::json_parse(first_text.str());
+      const Value* aggregate_layers = aggregate.kind == ValueKind::Mapa && aggregate.map
+                                          ? aggregate.map->find("camadas")
+                                          : nullptr;
+      if (!aggregate_layers || aggregate_layers->kind != ValueKind::Lista || !aggregate_layers->list ||
+          aggregate_layers->list->size() != weight_indices.size()) {
+        fail(span, ctx + ": cluster: checkpoint agregado invalido");
+      }
+      std::vector<rt::Tensor> sum_w;
+      std::vector<rt::Tensor> sum_b;
+      std::vector<rt::Tensor> sum_u;
+      sum_w.reserve(weight_indices.size());
+      sum_b.reserve(weight_indices.size());
+      sum_u.reserve(weight_indices.size());
+      for (std::size_t i : weight_indices) {
+        const Layer& layer = layers[i];
+        sum_w.push_back(rt::Tensor::zeros(layer.w.shape));
+        sum_b.push_back(rt::Tensor::zeros(layer.b.shape));
+        if (layer.kind == Layer::Recorrente) sum_u.push_back(rt::Tensor::zeros(layer.u.shape));
+        else sum_u.emplace_back();
+      }
+      for (int rank = 0; rank < cfg.cluster_world; ++rank) {
+        const std::filesystem::path path = std::filesystem::path(cfg.cluster_dir) /
+                                           ("rank-" + std::to_string(rank) + "-epoch-" +
+                                            std::to_string(epoch) + ".json");
+        std::ifstream input(path);
+        if (!input) fail(span, ctx + ": cluster: nao foi possivel ler '" + path.string() + "'");
+        std::ostringstream text;
+        text << input.rdbuf();
+        Value checkpoint = rt::json_parse(text.str());
+        const Value* checkpoint_layers = checkpoint.kind == ValueKind::Mapa && checkpoint.map
+                                             ? checkpoint.map->find("camadas")
+                                             : nullptr;
+        if (!checkpoint_layers || checkpoint_layers->kind != ValueKind::Lista ||
+            !checkpoint_layers->list || checkpoint_layers->list->size() != weight_indices.size()) {
+          fail(span, ctx + ": cluster: quantidade de camadas divergente no rank " +
+                       std::to_string(rank));
+        }
+        for (std::size_t j = 0; j < weight_indices.size(); ++j) {
+          const std::size_t i = weight_indices[j];
+          const Value& layer = (*checkpoint_layers->list)[j];
+          const Value* wv = layer.kind == ValueKind::Mapa && layer.map ? layer.map->find("w") : nullptr;
+          const Value* bv = layer.kind == ValueKind::Mapa && layer.map ? layer.map->find("b") : nullptr;
+          rt::Tensor w, b, u;
+          if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b) ||
+              w.shape != sum_w[j].shape || b.shape != sum_b[j].shape) {
+            fail(span, ctx + ": cluster: forma divergente no rank " + std::to_string(rank));
+          }
+          for (std::size_t k = 0; k < w.data.size(); ++k) sum_w[j].data[k] += w.data[k];
+          for (std::size_t k = 0; k < b.data.size(); ++k) sum_b[j].data[k] += b.data[k];
+          if (layers[i].kind == Layer::Recorrente) {
+            const Value* uv = layer.kind == ValueKind::Mapa && layer.map ? layer.map->find("u") : nullptr;
+            if (!uv || !tensor_from_json(*uv, u) || u.shape != sum_u[j].shape) {
+              fail(span, ctx + ": cluster: forma recorrente divergente no rank " +
+                           std::to_string(rank));
+            }
+            for (std::size_t k = 0; k < u.data.size(); ++k) sum_u[j].data[k] += u.data[k];
+          }
+        }
+      }
+      for (std::size_t j = 0; j < weight_indices.size(); ++j) {
+        const std::size_t i = weight_indices[j];
+        const float divisor = static_cast<float>(cfg.cluster_world);
+        layers[i].w = std::move(sum_w[j]);
+        layers[i].b = std::move(sum_b[j]);
+        for (float& value : layers[i].w.data) value /= divisor;
+        for (float& value : layers[i].b.data) value /= divisor;
+        if (layers[i].kind == Layer::Recorrente) {
+          layers[i].u = std::move(sum_u[j]);
+          for (float& value : layers[i].u.data) value /= divisor;
+        }
+      }
+      salvar_checkpoint(aggregate_path.string(), epoch, adam_t);
+    }
+    if (!rt::cluster_aguardar(aggregate_path.string(), cfg.cluster_timeout, cluster_error)) {
+      fail(span, ctx + ": cluster: " + cluster_error);
+    }
+    if (cfg.cluster_rank != 0) {
+      std::ifstream input(aggregate_path);
+      std::ostringstream text;
+      text << input.rdbuf();
+      Value aggregate = rt::json_parse(text.str());
+      const Value* aggregate_layers = aggregate.kind == ValueKind::Mapa && aggregate.map
+                                          ? aggregate.map->find("camadas")
+                                          : nullptr;
+      if (!aggregate_layers || aggregate_layers->kind != ValueKind::Lista || !aggregate_layers->list ||
+          aggregate_layers->list->size() != weight_indices.size()) {
+        fail(span, ctx + ": cluster: checkpoint agregado invalido");
+      }
+      for (std::size_t j = 0; j < weight_indices.size(); ++j) {
+        const std::size_t i = weight_indices[j];
+        const Value& layer = (*aggregate_layers->list)[j];
+        if (!layer.map) continue;
+        rt::Tensor w, b;
+        const Value* wv = layer.map->find("w");
+        const Value* bv = layer.map->find("b");
+        if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b) ||
+            w.shape != layers[i].w.shape || b.shape != layers[i].b.shape) {
+          fail(span, ctx + ": cluster: forma agregada incompativel");
+        }
+        layers[i].w = std::move(w);
+        layers[i].b = std::move(b);
+        if (layers[i].kind == Layer::Recorrente) {
+          rt::Tensor u;
+          const Value* uv = layer.map->find("u");
+          if (!uv || !tensor_from_json(*uv, u) || u.shape != layers[i].u.shape) {
+            fail(span, ctx + ": cluster: forma recorrente agregada incompativel");
+          }
+          layers[i].u = std::move(u);
+        }
+      }
+    }
+    if (!rt::cluster_barreira(cfg.cluster_dir, cfg.cluster_rank, cfg.cluster_world, epoch * 2 + 1,
+                              cfg.cluster_timeout, cluster_error)) {
+      fail(span, ctx + ": cluster: " + cluster_error);
+    }
+  };
+  int epoca_inicial = 1;
   int ultimo_ckpt = 0;
   if (!cfg.retomar.empty()) {
     std::ifstream f(cfg.retomar);
@@ -4444,6 +4632,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           }
         }
       }
+      cluster_sync(epoch);
       perda_epoca /= static_cast<float>(n_tr);
       if (epoch == epoca_inicial) first_loss = perda_epoca;
       last_loss = perda_epoca;

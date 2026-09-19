@@ -63,6 +63,7 @@ add_library(tilt_core STATIC
   src/runtime/redis.cpp
   src/runtime/kafka.cpp
   src/runtime/leader.cpp
+  src/runtime/cluster.cpp
   src/runtime/checkpoint.cpp
   src/runtime/mongo.cpp
   src/runtime/tls.cpp

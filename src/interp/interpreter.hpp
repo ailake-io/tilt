@@ -291,6 +291,10 @@ class Interpreter {
     int lote = -1;  // -1 = lote cheio
     int shard_id = 0;       // indice desta particao de dados
     int num_shards = 1;     // total de particoes
+    std::string cluster_dir;
+    int cluster_rank = 0;
+    int cluster_world = 1;
+    int cluster_timeout = 120;
     bool embaralhar = true;
     std::uint64_t seed_init = 0xC1A5;
     std::uint64_t seed_mistura = 7;

@@ -7,6 +7,13 @@ add_test(
 )
 
 add_test(
+  NAME cluster_train
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cluster_train_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+
+add_test(
   NAME thread_pool
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/thread_pool_test.sh
           ${CMAKE_CURRENT_SOURCE_DIR}/..

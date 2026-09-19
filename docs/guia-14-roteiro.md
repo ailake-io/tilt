@@ -143,8 +143,19 @@ O despacho concorrente reutiliza `tilt::rt::ThreadPool`, com fila protegida, rej
 O bloco treino aceita num_shards: N e shard_id: K para selecionar linhas em
 round-robin (K em 0..N-1). O contrato vale para dados em RAM e para os
 dataloaders CSV/Parquet em fluxo; cada processo pode receber um shard
-deterministico sem materializar o arquivo inteiro. O coordenador de cluster e
-a sincronizacao de gradientes continuam sendo o proximo passo separado.
+deterministico sem materializar o arquivo inteiro.
+
+### Cluster mode de treinamento
+
+Para treinar em processos separados sobre um filesystem compartilhado, use
+`cluster: { dir: "...", rank: K, mundo: N, timeout: S }` dentro de `treino`.
+Cada rank recebe automaticamente o shard correspondente e, ao fim de cada
+época, publica um checkpoint, aguarda os demais e aplica a média dos pesos,
+biases e estados recorrentes. O rank `0` publica o checkpoint agregado. Todos
+os ranks devem usar o mesmo modelo, hiperparâmetros e diretório compartilhado;
+o `timeout` evita espera infinita. Os momentos do Adam e as estatísticas de
+normalização permanecem locais nesta primeira versão, portanto o modo é uma
+sincronização de parâmetros por época (não um all-reduce de gradientes).
 
 ## Priorizacao sugerida
 
