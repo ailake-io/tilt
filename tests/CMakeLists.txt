@@ -1,5 +1,11 @@
 if(NOT WIN32)
 add_test(
+  NAME thread_pool
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/thread_pool_test.sh
+          ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+
+add_test(
   NAME tensor_benchmark
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tensor_benchmark_test.sh
           ${CMAKE_CURRENT_SOURCE_DIR}/..

@@ -1,6 +1,7 @@
 #include "runtime/http_server.hpp"
 
 #include "runtime/compat.hpp"
+#include "runtime/thread_pool.hpp"
 
 #include <cctype>
 #include <cerrno>
@@ -18,11 +19,9 @@
 #include <vector>
 
 #if defined(__linux__)
-#include <condition_variable>
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
-#include <thread>
 #endif
 
 #include "runtime/arena.hpp"
@@ -464,45 +463,9 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
     return -1;
   }
 
-  std::mutex task_m;
-  std::condition_variable task_cv;
-  std::deque<Task> tasks;
-  bool pool_stop = false;
+  ThreadPool pool(static_cast<std::size_t>(threads));
   std::mutex comp_m;
   std::deque<Completion> completions;
-
-  auto worker = [&]() {
-    while (true) {
-      Task t;
-      {
-        std::unique_lock<std::mutex> lk(task_m);
-        task_cv.wait(lk, [&] { return pool_stop || !tasks.empty(); });
-        if (pool_stop) return;
-        t = std::move(tasks.front());
-        tasks.pop_front();
-      }
-      Completion c;
-      c.fd = t.fd;
-      c.seq = t.seq;
-      try {
-        c.resp = handler(t.req);
-      } catch (...) {
-        c.resp.status = 500;
-        c.resp.body = R"({"erro":"falha interna"})";
-      }
-      {
-        std::lock_guard<std::mutex> lk(comp_m);
-        completions.push_back(std::move(c));
-      }
-      const std::uint64_t one = 1;
-      // Acorda o event loop; EAGAIN so significa que ja ha bytes pendentes.
-      if (::write(efd, &one, sizeof(one)) < 0 && errno != EAGAIN) return;
-    }
-  };
-
-  std::vector<std::thread> pool;
-  pool.reserve(static_cast<std::size_t>(threads));
-  for (int i = 0; i < threads; ++i) pool.emplace_back(worker);
 
   std::unordered_map<int, std::unique_ptr<Conn>> conns;
   int served = 0;
@@ -615,11 +578,27 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
         c.close_after = true;
         c.final_seq = seq;
       }
-      {
-        std::lock_guard<std::mutex> lk(task_m);
-        tasks.push_back(Task{c.fd, seq, std::move(req)});
+      Task task{c.fd, seq, std::move(req)};
+      if (!pool.submit([&, task = std::move(task)]() mutable {
+            Completion completion;
+            completion.fd = task.fd;
+            completion.seq = task.seq;
+            try {
+              completion.resp = handler(task.req);
+            } catch (...) {
+              completion.resp.status = 500;
+              completion.resp.body = R"({"erro":"falha interna"})";
+            }
+            {
+              std::lock_guard<std::mutex> lock(comp_m);
+              completions.push_back(std::move(completion));
+            }
+            const std::uint64_t one = 1;
+            if (::write(efd, &one, sizeof(one)) < 0 && errno != EAGAIN) return;
+          })) {
+        fatal = "thread pool rejeitou uma tarefa";
+        break;
       }
-      task_cv.notify_one();
       ++c.inflight;
       ++served;  // contado no despacho: a cota limita o que entra, nao o que sai
       c.arena.resetar();  // liberacao instantanea do scratch da requisicao
@@ -720,12 +699,7 @@ int run_epoll_parallel(int listen_fd, const std::function<HttpResponse(const Htt
     }
   }
 
-  {
-    std::lock_guard<std::mutex> lk(task_m);
-    pool_stop = true;
-  }
-  task_cv.notify_all();
-  for (auto& t : pool) t.join();
+  pool.shutdown();
   for (const auto& [fd, c] : conns) {
     epoll_ctl(ep, EPOLL_CTL_DEL, fd, nullptr);
     ::close(fd);

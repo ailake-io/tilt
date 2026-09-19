@@ -118,6 +118,7 @@ supervisor.
 ## MLOps / servir — deployment frágil
 
 Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
+O despacho concorrente reutiliza `tilt::rt::ThreadPool`, com fila protegida, rejeição opcional por limite e desligamento gracioso; o smoke test `thread_pool` cobre submissão, drenagem e shutdown.
 
 - `/saude`, `/metricas` (com latência por rota) e graceful shutdown existem;
   faltam limite de payload/concorrência por rota e versionamento de modelo
