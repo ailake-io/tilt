@@ -284,9 +284,10 @@ struct Conn {
   Conn(const MysqlApi& d, const std::string& url, const MysqlUrl& parsed, const std::string& sql,
        bool pooled = true)
       : db(d),
-        pool(pooled ? "mysql" : "", url, [&] { return abre_conn(db, parsed); },
-             [&](void* h) { return !db.ping || db.ping(h) == 0; },
-             [&d](void* h) { d.close(h); }, pooled ? sql : "") {
+        pool(
+            pooled ? "mysql" : "", url, [&] { return abre_conn(db, parsed); },
+            [&](void* h) { return !db.ping || db.ping(h) == 0; }, [&d](void* h) { d.close(h); },
+            pooled ? sql : "") {
     conn = pool.get();
   }
   Conn(const Conn&) = delete;

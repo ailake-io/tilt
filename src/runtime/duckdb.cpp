@@ -198,12 +198,13 @@ struct Conn {
 
   Conn(const DuckdbApi& d, const std::string& db_path, const std::string& sql, bool pooled = true)
       : db(d),
-        pool(pooled ? "duckdb" : "", db_path, [&] { return abre_banco(db, db_path); },
-             [](void* h) {
-               auto* p = static_cast<DbConn*>(h);
-               return p && p->connection;
-             },
-             [&d](void* h) { fecha_banco(d, h); }, pooled ? sql : "") {
+        pool(
+            pooled ? "duckdb" : "", db_path, [&] { return abre_banco(db, db_path); },
+            [](void* h) {
+              auto* p = static_cast<DbConn*>(h);
+              return p && p->connection;
+            },
+            [&d](void* h) { fecha_banco(d, h); }, pooled ? sql : "") {
     connection = static_cast<DbConn*>(pool.get())->connection;
   }
   Conn(const Conn&) = delete;

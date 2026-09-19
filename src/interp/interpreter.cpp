@@ -8554,7 +8554,8 @@ void Interpreter::exec_block(const ast::Block& block, Env& env, const PrazoPasso
       throw RuntimeAbort{it.span,
                          "passo " + std::to_string(passo) + " excedeu tempo_limite de " +
                              std::to_string(prazo->segundos) + "s",
-                         DiagCode::RuntimeError, {}};
+                         DiagCode::RuntimeError,
+                         {}};
     }
     // Preso em chamada bloqueante (rede, IO): nao ha como cancelar. O Env passa
     // para a lista de zumbis (vive enquanto a thread destacada precisar) e o
