@@ -127,3 +127,6 @@ carregadas por `LoadLibrary`; os nomes esperados incluem `libpq.dll`,
 Para o LSP, confirme que o editor aponta para o mesmo binário do terminal e que
 `tilt lsp` recebe JSON-RPC por stdin. Reinicie o processo do editor antes de
 investigar cache de realce.
+
+Consulte também o [glossário técnico](glossario.md) para os termos usados nos
+diagnósticos e nos demais guias.

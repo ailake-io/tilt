@@ -200,7 +200,7 @@
 - [x] Adicionar exemplos executáveis para todas as features novas em cada guia (suíte `tests/docs_test.sh`: 103 blocos Tilt validados; exemplos de Delta, RAG, agentes, treino e Kafka incluídos)
 - [x] Criar guia de troubleshooting com erros comuns e soluções (`docs/guia-15-troubleshooting.md`, incluído na suíte documental)
 - [x] Documentar limitações de cada conector em `guia-12-limitacoes.md`
-- [ ] Adicionar glossary de termos técnicos em português
+- [x] Adicionar glossary de termos técnicos em português (`docs/glossario.md`)
 
 ### 8.2 Exemplos (P2)
 - [x] Adicionar exemplo completo de ETL com Delta Lake (Sprint 2:
