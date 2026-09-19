@@ -92,6 +92,18 @@ servico Api:
             versao: prefixo
 ```
 
+### Allowlist de ferramentas
+
+Um serviço pode declarar ferramentas: [nome_a, nome_b]. Quando esse campo
+existe, chamadas de ferramentas dentro de qualquer rota ou middleware ficam
+limitadas à lista; uma ferramenta fora dela responde 500 com erro explícito.
+A lista é validada na subida: cada nome precisa referenciar uma declaração
+ferramenta. Sem ferramentas:, o comportamento continua sem restrição.
+
+Exemplo: servico Seguro com ferramentas: [buscar_documentos] pode chamar
+buscar_documentos(termo: entrada.termo) em suas rotas; outras ferramentas
+recebem erro.
+
 ## Subir o serviço
 
 ```bash

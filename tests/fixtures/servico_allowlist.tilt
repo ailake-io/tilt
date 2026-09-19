@@ -1,0 +1,29 @@
+ferramenta permitida:
+  descricao: "ferramenta liberada pelo servico"
+  entrada:
+    msg: texto
+  executar:
+    retornar "permitido: " + msg
+
+ferramenta negada:
+  descricao: "ferramenta fora da allowlist"
+  entrada:
+    msg: texto
+  executar:
+    retornar "nao deveria executar: " + msg
+
+servico Seguro:
+  porta: 8490
+  ferramentas: [permitida]
+  rota post "/ok":
+    passos:
+      - saida = permitida(msg: entrada.msg)
+      - responder:
+          dados:
+            resultado: saida
+  rota post "/negada":
+    passos:
+      - saida = negada(msg: entrada.msg)
+      - responder:
+          dados:
+            resultado: saida

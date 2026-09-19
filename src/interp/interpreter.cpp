@@ -71,6 +71,7 @@ namespace tilt {
 // rota de ponta a ponta na sua thread, entao a resposta corrente, o flag de
 // 'se' e o dispositivo ativo nunca sao compartilhados entre requisicoes.
 thread_local RouteResponse* route_resp_ = nullptr;  // non-null only while handling a request
+thread_local const std::unordered_set<std::string>* route_tool_allowlist_ = nullptr;
 thread_local bool last_if_taken_ = false;
 thread_local bool use_gpu_ = false;  // active for the current model/treino call
 
@@ -7263,6 +7264,9 @@ rt::Value Interpreter::run_tool(const Item& tool_decl, const rt::ValueMap& args,
   Env env;
   env.parent = &root_;
   const std::string nome = decl_name(tool_decl);
+  if (route_tool_allowlist_ && route_tool_allowlist_->find(nome) == route_tool_allowlist_->end()) {
+    fail(span, "ferramenta '" + nome + "' nao permitida neste servico HTTP");
+  }
   std::vector<const Item*> campos;
   if (tool_decl.block) {
     if (const Item* entrada = find_field(*tool_decl.block, "entrada"); entrada && entrada->block) {
@@ -7809,6 +7813,28 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
 
   int port = port_override > 0 ? port_override : field_int(*svc->block, "porta", 8080);
   const std::vector<Route> routes = collect_routes(*svc->block);
+  std::unordered_set<std::string> ferramentas_http;
+  const Item* fpermitidas = find_field(*svc->block, "ferramentas");
+  const bool allowlist_http = fpermitidas != nullptr;
+  if (fpermitidas) {
+    if (!fpermitidas->value || fpermitidas->value->kind != ExprKind::ListLit) {
+      fail(fpermitidas->span,
+           "servico '" + decl_name(*svc) + "': 'ferramentas' espera uma lista de nomes");
+    }
+    for (const auto& item : fpermitidas->value->elems) {
+      if (!item || (item->kind != ExprKind::Name && item->kind != ExprKind::TextLit)) {
+        fail(item ? item->span : fpermitidas->span,
+             "servico '" + decl_name(*svc) + "': 'ferramentas' espera nomes de ferramentas");
+      }
+      const std::string nome = item->text;
+      auto ferramenta = entities_.find(nome);
+      if (ferramenta == entities_.end() || ferramenta->second->key != "ferramenta") {
+        fail(item->span,
+             "servico '" + decl_name(*svc) + "': ferramenta '" + nome + "' nao declarada");
+      }
+      ferramentas_http.insert(nome);
+    }
+  }
   // Observabilidade opt-in: GET /saude, GET /metricas e a variante Prometheus
   // sao implicitos (rotas do usuario com o mesmo metodo+caminho vencem).
   auto campo_ligado = [&](const char* nome) {
@@ -8012,6 +8038,8 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
           if (!bad) {
             RouteResponse rr;
             route_resp_ = &rr;
+            const auto* allowlist_anterior = route_tool_allowlist_;
+            route_tool_allowlist_ = allowlist_http ? &ferramentas_http : nullptr;
             Env env;
             env.parent = &root_;
             env.vars["entrada"] = parsed;
@@ -8032,7 +8060,12 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
             } catch (const RuntimeAbort& a) {
               resp.status = 500;
               resp.body = R"({"erro":)" + std::string("\"") + a.message + "\"}";
+            } catch (...) {
+              route_tool_allowlist_ = allowlist_anterior;
+              route_resp_ = nullptr;
+              throw;
             }
+            route_tool_allowlist_ = allowlist_anterior;
             route_resp_ = nullptr;
           }
         }

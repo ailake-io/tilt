@@ -403,6 +403,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   uma vez, na ordem declarada).
 - Supervisor delega por rótulo; um rótulo sugerido pelo LLM que não está em
   `agentes:` é erro de execução (`T901`).
+- Serviços HTTP podem restringir chamadas de ferramentas com `ferramentas: [...]`; sem essa lista, rotas mantêm o comportamento aberto.
 - Ferramentas validam campos obrigatórios, campos desconhecidos e tipos escalares/listas/mapas nas chamadas; registros nomeados são tratados como mapas e não têm validação recursiva de esquema.
 
 ## HTTP

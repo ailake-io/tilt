@@ -45,6 +45,12 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico_entrada.tilt)
 
 add_test(
+  NAME servico_allowlist
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/servico_allowlist_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/servico_allowlist.tilt)
+
+add_test(
   NAME servico_shutdown
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/servico_shutdown_test.sh
           $<TARGET_FILE:tilt>

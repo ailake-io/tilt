@@ -147,7 +147,7 @@
 ### 5.1 Ferramentas (P1)
 - [x] `executar:` com corpo direto em `ferramenta` (funciona; documentado no guia-06)
 - [x] Adicionar validação de entrada de ferramentas (campos obrigatórios, desconhecidos e tipagem runtime)
-- [ ] Implementar allowlist de ferramentas em serviços HTTP
+- [x] Implementar allowlist de ferramentas em serviços HTTP (campo ferramentas: no servico, aplicado por request)
 
 ### 5.2 Agentes (P2)
 - [x] `memoria: vetorial` (Sprint 3: índice por agente, top-3, T011 em valor inválido)
