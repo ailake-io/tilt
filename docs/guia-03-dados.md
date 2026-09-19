@@ -742,6 +742,15 @@ pipeline etl:
 | `caminho:` | SQLite/DuckDB: arquivo do banco (deve existir; DuckDB aceita `:memory:`) |
 | `url:` | Postgres: connection string libpq; MySQL/MariaDB: `mysql://usuario:senha@host:porta/banco` (porta default 3306; userinfo opcional); ClickHouse: `clickhouse://[usuario[:senha]@]host[:porta][/banco]` (HTTP; porta default 8123; sem userinfo usa `CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD` do ambiente; usuário default `default`) |
 | `consulta:` | SQL `SELECT` (INSERT/UPDATE/DDL → erro claro; use `executar_sql`) |
+| `pushdown:` | Opcional: `{colunas: ["..."], onde: {coluna: valor, ...}, limite: N}`; empurra projeção, filtros de igualdade e limite ao SQL parametrizado |
+
+`pushdown:` também pode ser escrito como bloco indentado. `colunas` contém
+nomes de coluna em texto; `onde` usa igualdade (`NULL` vira `IS NULL`) e
+`limite` é um inteiro positivo. O Tilt envolve a `consulta:` original numa
+subconsulta, liga os valores com os mesmos prepared statements de
+`consultar_sql` e aplica a seleção no conector (SQLite, Postgres, DuckDB,
+MySQL/MariaDB e ClickHouse). A consulta declarada não deve conter `?` quando
+`onde:` for usado; para SQL já parametrizado, use `consultar_sql` diretamente.
 
 Tipos: inteiro→`inteiro`, real/numeric→`decimal`, bool→`logico` (no DuckDB,
 boolean→`inteiro` 0/1), texto→`texto`, NULL→`nulo`, BLOB SQLite→texto hex

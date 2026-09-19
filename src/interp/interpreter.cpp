@@ -1874,13 +1874,125 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
     if (!c || !c->value || c->value->kind != ExprKind::TextLit) {
       fail(span, "fonte '" + name + "': falta 'consulta: \"select ...\"'");
     }
-    const std::string& sql = c->value->text;
+    std::string sql = c->value->text;
+    std::vector<rt::SqlParam> pushdown_params;
+    auto is_sql_identifier = [](const std::string& value) {
+      if (value.empty() || !(std::isalpha(static_cast<unsigned char>(value[0])) || value[0] == '_')) {
+        return false;
+      }
+      for (std::size_t i = 1; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (!(std::isalnum(c) || value[i] == '_')) return false;
+      }
+      return true;
+    };
+    if (const Item* pf = find_field(*decl->block, "pushdown"); pf) {
+      std::vector<std::pair<std::string, const Expr*>> push_entries;
+      if (pf->value && pf->value->kind == ExprKind::MapLit) {
+        for (const auto& entry : pf->value->entries) {
+          push_entries.emplace_back(entry.key, entry.value.get());
+        }
+      } else if (pf->block) {
+        for (const auto& entry : pf->block->items) {
+          if (!entry || entry->kind != ItemKind::Field || !entry->value) {
+            fail(span, "fonte '" + name + "': 'pushdown' deve conter campos");
+          }
+          push_entries.emplace_back(entry->key, entry->value.get());
+        }
+      } else {
+        fail(span, "fonte '" + name + "': 'pushdown' deve ser um mapa");
+      }
+      std::vector<std::string> columns;
+      std::vector<std::pair<std::string, Value>> predicates;
+      int limit = 0;
+      for (const auto& entry : push_entries) {
+        if (entry.first == "colunas") {
+          Value value = eval(*entry.second, root_);
+          if (value.kind != ValueKind::Lista || !value.list || value.list->empty()) {
+            fail(span, "fonte '" + name + "': 'pushdown.colunas' deve ser uma lista nao vazia");
+          }
+          for (const Value& column : *value.list) {
+            if (column.kind != ValueKind::Texto || !is_sql_identifier(column.s)) {
+              fail(span, "fonte '" + name + "': coluna de pushdown invalida");
+            }
+            columns.push_back(column.s);
+          }
+        } else if (entry.first == "onde") {
+          Value value = eval(*entry.second, root_);
+          if (value.kind != ValueKind::Mapa || !value.map) {
+            fail(span, "fonte '" + name + "': 'pushdown.onde' deve ser um mapa");
+          }
+          for (const auto& predicate : value.map->items) {
+            if (!is_sql_identifier(predicate.first)) {
+              fail(span, "fonte '" + name + "': coluna de filtro invalida");
+            }
+            predicates.emplace_back(predicate.first, predicate.second);
+          }
+        } else if (entry.first == "limite") {
+          Value value = eval(*entry.second, root_);
+          if (value.kind != ValueKind::Inteiro || value.i < 1 ||
+              value.i > std::numeric_limits<int>::max()) {
+            fail(span, "fonte '" + name + "': 'pushdown.limite' deve ser inteiro >= 1");
+          }
+          limit = static_cast<int>(value.i);
+        } else {
+          fail(span, "fonte '" + name + "': chave '" + entry.first + "' desconhecida em 'pushdown'");
+        }
+      }
+      while (!sql.empty() && std::isspace(static_cast<unsigned char>(sql.back()))) sql.pop_back();
+      if (!sql.empty() && sql.back() == ';') {
+        sql.pop_back();
+        while (!sql.empty() && std::isspace(static_cast<unsigned char>(sql.back()))) sql.pop_back();
+      }
+      if (sql.find('?') != std::string::npos && !predicates.empty()) {
+        fail(span, "fonte '" + name + "': consulta com '?' nao pode receber pushdown.onde");
+      }
+      std::string pushed = "SELECT ";
+      if (columns.empty()) {
+        pushed += "*";
+      } else {
+        for (std::size_t i = 0; i < columns.size(); ++i) {
+          if (i) pushed += ", ";
+          pushed += columns[i];
+        }
+      }
+      pushed += " FROM (" + sql + ") AS tilt_pushdown";
+      for (std::size_t i = 0; i < predicates.size(); ++i) {
+        const auto& predicate = predicates[i];
+        const rt::SqlParam param = rt::param_de_valor(predicate.second, "pushdown.onde");
+        pushed += i == 0 ? " WHERE " : " AND ";
+        if (param.tipo == rt::SqlParam::Tipo::Nulo) {
+          pushed += predicate.first + " IS NULL";
+        } else {
+          pushed += predicate.first + " = ?";
+          pushdown_params.push_back(param);
+        }
+      }
+      if (limit > 0) pushed += " LIMIT " + std::to_string(limit);
+      sql = std::move(pushed);
+    }
+    auto run_query = [&](const std::string& query) {
+      if (tipo == "duckdb") {
+        return pushdown_params.empty() ? rt::duckdb_query(path, query)
+                                       : rt::duckdb_query_params(path, query, pushdown_params);
+      }
+      if (tipo == "sqlite") {
+        return pushdown_params.empty() ? rt::sqlite_query(path, query)
+                                       : rt::sqlite_query_params(path, query, pushdown_params);
+      }
+      if (tipo == "mysql") {
+        return pushdown_params.empty() ? rt::mysql_query(path, query)
+                                       : rt::mysql_query_params(path, query, pushdown_params);
+      }
+      if (tipo == "clickhouse") {
+        return pushdown_params.empty() ? rt::clickhouse_query(path, query)
+                                       : rt::clickhouse_query_params(path, query, pushdown_params);
+      }
+      return pushdown_params.empty() ? rt::postgres_query(path, query)
+                                     : rt::postgres_query_params(path, query, pushdown_params);
+    };
     try {
-      Value t = tipo == "duckdb"      ? rt::duckdb_query(path, sql)
-                : tipo == "sqlite"    ? rt::sqlite_query(path, sql)
-                : tipo == "mysql"     ? rt::mysql_query(path, sql)
-                : tipo == "clickhouse" ? rt::clickhouse_query(path, sql)
-                                      : rt::postgres_query(path, sql);
+      Value t = run_query(sql);
       t.kind = ValueKind::Tabela;
       return t;
     } catch (const std::exception& e) {

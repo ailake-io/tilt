@@ -157,6 +157,11 @@ o `timeout` evita espera infinita. Os momentos do Adam e as estatísticas de
 normalização permanecem locais nesta primeira versão, portanto o modo é uma
 sincronização de parâmetros por época (não um all-reduce de gradientes).
 
+Também foi concluído o query pushdown das fontes SQL: `pushdown.colunas`,
+`pushdown.onde` (igualdade parametrizada, inclusive nulo) e `pushdown.limite`
+são aplicados em SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse, com
+teste CTest local e sem interpolar valores no SQL.
+
 ## Priorizacao sugerida
 
 1. ~~`experimento` executável~~ feito (1ª passada; ver acima).

@@ -14,6 +14,12 @@ add_test(
 )
 
 add_test(
+  NAME sql_pushdown
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sql_pushdown_test.sh
+          $<TARGET_FILE:tilt>
+)
+
+add_test(
   NAME thread_pool
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/thread_pool_test.sh
           ${CMAKE_CURRENT_SOURCE_DIR}/..

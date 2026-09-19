@@ -226,7 +226,7 @@
 ### 9.2 Escalabilidade (P3)
 - [x] Implementar sharding de dados para processamento distribuído (num_shards/shard_id round-robin em RAM, CSV e Parquet; validação CTest)
 - [x] Adicionar suporte a cluster mode para treinamento distribuído (filesystem compartilhado, shards automáticos, barreira por época e média de parâmetros; CTest com dois ranks)
-- [ ] Implementar query pushdown para conectores SQL
+- [x] Implementar query pushdown para conectores SQL (`pushdown.colunas`, `onde` parametrizado e `limite` em SQLite/Postgres/DuckDB/MySQL/ClickHouse; CTest SQLite)
 
 ---
 
