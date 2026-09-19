@@ -85,7 +85,7 @@
 - [x] Adicionar deletes (position/equality) para Iceberg (fase 12-5a; leitura
   nativa aplica ambos, pyiceberg aplica position e ainda não suporta equality)
 - [x] Implementar compactação `optimize` para Delta/Iceberg (`otimizar_delta`/`otimizar_iceberg`)
-- [ ] Implementar z-order para escrita analítica particionada
+- [x] Implementar z-order para escrita analítica particionada (`z_order:` nos writers Delta/Iceberg)
 
 ### 2.3 Streaming (P2)
 - [x] Implementar streaming de Parquet no treino (`carregador ..., fluxo: verdadeiro`; CSV e Parquet)

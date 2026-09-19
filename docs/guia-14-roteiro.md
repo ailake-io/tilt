@@ -41,8 +41,9 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   ruins em iterações; ainda faltam perfilagem/estatísticas e contrato de
   schema versionado na entrada.
 - **Escrita analítica**: Delta/Iceberg particionam, compactam com
-  `otimizar_delta`/`otimizar_iceberg` e já têm `vacuum_*` conservador para
-  Parquet órfão e `ordenar_por` para tabelas em memória; falta z-order.
+  `otimizar_delta`/`otimizar_iceberg`, z-order determinístico via `z_order:` e
+  `vacuum_*` conservador para Parquet órfão; `ordenar_por` continua disponível
+  para tabelas em memória.
 
 ## Machine learning clássico — feito (1ª passada)
 
@@ -146,5 +147,5 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
    `/metricas`, logs estruturados, cursor/backfill e `vacuum_*`).
 4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
 5. ~~`avaliacao` (evals — fundação de LLMOps)~~ feito em 1ª passada (ver guia 05).
-6. Próximo foco: z-order para escrita analítica; depois cache e retry em
-   streaming no cliente LLM.
+6. Próximo foco: cache e retry em streaming no cliente LLM; depois as
+   melhorias de conectores e ferramentas.

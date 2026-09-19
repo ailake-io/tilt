@@ -386,6 +386,13 @@ arquivos anteriores ficam órfãos até `vacuum_delta`/`vacuum_iceberg` removê-
 Os aliases `optimize_delta` e `optimize_iceberg` também são aceitos. A
 compactação é uma reescrita conservadora; no modo local, o metadata antigo é
 substituído e o histórico removido deve ser mantido externamente se necessário.
+
+Os writers também aceitam `z_order: ["coluna1", "coluna2"]`. A opção ordena as
+linhas por uma chave Morton determinística antes da escrita, melhorando a
+localidade de dados para leituras analíticas sem alterar o `particionar_por`.
+São aceitas de uma a oito colunas escalares; nomes repetidos, colunas ausentes
+ou linhas que não sejam mapas geram erro.
+
 `vacuum_delta "diretorio"` e `vacuum_iceberg "diretorio"` removem Parquet
 órfãos que não são referenciados por nenhum log Delta ou metadata/snapshot
 Iceberg e devolvem a quantidade de arquivos removidos.

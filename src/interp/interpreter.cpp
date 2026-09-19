@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -20,6 +21,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <unordered_set>
@@ -8393,6 +8395,108 @@ std::vector<std::string> Interpreter::parse_particionar_por(const rt::ValueMap& 
                  "(ex.: particionar_por: [\"estado\", \"mes\"])");
 }
 
+namespace {
+
+std::uint64_t z_order_scalar(const Value& v) {
+  if (v.kind == ValueKind::Inteiro) return static_cast<std::uint64_t>(v.i) ^ (1ULL << 63);
+  if (v.kind == ValueKind::Decimal) {
+    const double clamped =
+        std::isfinite(v.d) ? std::clamp(v.d, -9000000000000.0, 9000000000000.0) : 0.0;
+    const auto scaled = static_cast<std::int64_t>(std::llround(clamped * 1000000.0));
+    return static_cast<std::uint64_t>(scaled) ^ (1ULL << 63);
+  }
+  if (v.kind == ValueKind::Logico) return v.b ? 1ULL : 0ULL;
+  const std::string text = rt::to_display(v);
+  std::uint64_t hash = 1469598103934665603ULL;
+  for (unsigned char c : text) {
+    hash ^= c;
+    hash *= 1099511628211ULL;
+  }
+  return hash;
+}
+
+Value aplicar_z_order(const Value& source, const rt::ValueMap& kw, const char* builtin,
+                      const Span& span) {
+  (void)span;
+  const Value* spec = kw.find("z_order");
+  if (!spec) return source;
+  if (spec->kind != ValueKind::Lista || !spec->list || spec->list->empty() ||
+      spec->list->size() > 8) {
+    throw std::runtime_error(std::string(builtin) +
+                             ": z_order deve ser uma lista de 1 a 8 colunas");
+  }
+  std::vector<std::string> cols;
+  for (const Value& item : *spec->list) {
+    if (item.kind != ValueKind::Texto || item.s.empty() ||
+        std::find(cols.begin(), cols.end(), item.s) != cols.end()) {
+      throw std::runtime_error(std::string(builtin) +
+                               ": z_order deve conter nomes de colunas distintos");
+    }
+    cols.push_back(item.s);
+  }
+  if ((source.kind != ValueKind::Tabela && source.kind != ValueKind::Lista) || !source.list) {
+    throw std::runtime_error(std::string(builtin) + " espera uma tabela para aplicar z_order");
+  }
+  const int bits = 64 / static_cast<int>(cols.size());
+  struct RowKey {
+    std::uint64_t key = 0;
+    std::size_t index = 0;
+  };
+  std::vector<std::vector<std::uint64_t>> coordinates;
+  coordinates.reserve(source.list->size());
+  for (std::size_t row_index = 0; row_index < source.list->size(); ++row_index) {
+    const Value& row = (*source.list)[row_index];
+    if (row.kind != ValueKind::Mapa || !row.map) {
+      throw std::runtime_error(std::string(builtin) + ": z_order exige linhas como mapas");
+    }
+    std::vector<std::uint64_t> values;
+    values.reserve(cols.size());
+    for (const std::string& col : cols) {
+      const Value* field = row.map->find(col);
+      if (!field)
+        throw std::runtime_error(std::string(builtin) + ": coluna de z_order ausente: '" + col +
+                                 "'");
+      values.push_back(z_order_scalar(*field));
+    }
+    coordinates.push_back(std::move(values));
+  }
+  std::vector<std::uint64_t> mins(cols.size(), std::numeric_limits<std::uint64_t>::max());
+  std::vector<std::uint64_t> maxs(cols.size(), 0);
+  for (const auto& values : coordinates) {
+    for (std::size_t column = 0; column < values.size(); ++column) {
+      mins[column] = std::min(mins[column], values[column]);
+      maxs[column] = std::max(maxs[column], values[column]);
+    }
+  }
+  std::vector<RowKey> keys;
+  keys.reserve(coordinates.size());
+  for (std::size_t row_index = 0; row_index < coordinates.size(); ++row_index) {
+    std::uint64_t key = 0;
+    for (int bit = bits - 1; bit >= 0; --bit) {
+      for (std::size_t column = 0; column < cols.size(); ++column) {
+        const std::uint64_t value = coordinates[row_index][column];
+        std::uint64_t normalized = 0;
+        if (maxs[column] != mins[column]) {
+          const long double fraction = static_cast<long double>(value - mins[column]) /
+                                       static_cast<long double>(maxs[column] - mins[column]);
+          normalized = static_cast<std::uint64_t>(
+              fraction * static_cast<long double>(std::numeric_limits<std::uint64_t>::max()));
+        }
+        const int source_bit = 64 - bits + bit;
+        key = (key << 1) | ((normalized >> source_bit) & 1ULL);
+      }
+    }
+    keys.push_back({key, row_index});
+  }
+  std::stable_sort(keys.begin(), keys.end(),
+                   [](const RowKey& a, const RowKey& b) { return a.key < b.key; });
+  Value out = source.kind == ValueKind::Tabela ? Value::tabela() : Value::lista();
+  for (const RowKey& k : keys) out.list->push_back((*source.list)[k.index]);
+  return out;
+}
+
+}  // namespace
+
 Value Interpreter::eval_call(const Expr& expr, Env& env) {
   const Expr& callee = *expr.lhs;
 
@@ -8894,7 +8998,8 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     std::vector<std::string> part_cols = parse_particionar_por(kw, "escrever_delta", call.span);
     try {
-      rt::delta_write(a[1].s, a[0], part_cols);
+      Value ordenada = aplicar_z_order(a[0], kw, "escrever_delta", call.span);
+      rt::delta_write(a[1].s, ordenada, part_cols);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -8908,7 +9013,8 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     std::vector<std::string> part_cols = parse_particionar_por(kw, "anexar_delta", call.span);
     try {
-      rt::delta_append(a[1].s, a[0], part_cols);
+      Value ordenada = aplicar_z_order(a[0], kw, "anexar_delta", call.span);
+      rt::delta_append(a[1].s, ordenada, part_cols);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -8962,7 +9068,8 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     std::vector<std::string> part_cols = parse_particionar_por(kw, "escrever_iceberg", call.span);
     try {
-      rt::iceberg_write(a[1].s, a[0], part_cols);
+      Value ordenada = aplicar_z_order(a[0], kw, "escrever_iceberg", call.span);
+      rt::iceberg_write(a[1].s, ordenada, part_cols);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -8976,7 +9083,8 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     std::vector<std::string> part_cols = parse_particionar_por(kw, "anexar_iceberg", call.span);
     try {
-      rt::iceberg_append(a[1].s, a[0], part_cols);
+      Value ordenada = aplicar_z_order(a[0], kw, "anexar_iceberg", call.span);
+      rt::iceberg_append(a[1].s, ordenada, part_cols);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

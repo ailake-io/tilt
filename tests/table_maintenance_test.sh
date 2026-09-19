@@ -37,6 +37,13 @@ pipeline manutencao:
     - removidos_part_iceberg = vacuum_iceberg "iceberg_part"
     - lido_part_iceberg = ler_iceberg "iceberg_part", onde: { estado: "sp" }
     - imprimir "iceberg-part:", removidos_part_iceberg, tamanho(lido_part_iceberg)
+    - zdados = [{ x: 1, y: 20, bucket: "a" }, { x: 0, y: 30, bucket: "a" }, { x: 1, y: 10, bucket: "a" }]
+    - escrever_delta zdados, "delta_z", particionar_por: "bucket", z_order: ["x", "y"]
+    - lido_z_delta = ler_delta "delta_z", onde: { bucket: "a" }
+    - imprimir "delta-z:", tamanho(lido_z_delta), lido_z_delta[0].x, lido_z_delta[0].y
+    - escrever_iceberg zdados, "iceberg_z", particionar_por: "bucket", z_order: ["x", "y"]
+    - lido_z_iceberg = ler_iceberg "iceberg_z", onde: { bucket: "a" }
+    - imprimir "iceberg-z:", tamanho(lido_z_iceberg), lido_z_iceberg[0].x, lido_z_iceberg[0].y
 EOF
 
 out=$(cd "$tmp" && "$BIN" executar maintenance.tilt 2>&1)
@@ -48,4 +55,6 @@ echo "$out" | grep -q "iceberg: 2 2" || {
 echo "$out" | grep -q "delta-part: 2 2" || { echo "compactacao Delta perdeu particao"; exit 1; }
 echo "$out" | grep -q "iceberg-part: 2 2" || { echo "compactacao Iceberg perdeu particao"; exit 1; }
 
+echo "$out" | grep -q "delta-z: 3 0 30" || { echo "z-order Delta perdeu linhas"; exit 1; }
+echo "$out" | grep -q "iceberg-z: 3 0 30" || { echo "z-order Iceberg perdeu linhas"; exit 1; }
 echo "table_maintenance: ok"
