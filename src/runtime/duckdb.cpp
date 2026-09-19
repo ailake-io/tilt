@@ -1,7 +1,9 @@
 #include "runtime/duckdb.hpp"
 
+#include <cctype>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 
 #include "runtime/compat.hpp"
 #include "runtime/sql_params.hpp"
@@ -211,6 +213,57 @@ std::string result_error(const DuckdbApi& db, void* result) {
   return err ? err : "erro desconhecido";
 }
 
+bool duckdb_termina_palavra(const std::string& sql, const std::string& palavra,
+                            std::size_t* inicio = nullptr) {
+  std::size_t fim = sql.size();
+  while (fim > 0 && std::isspace(static_cast<unsigned char>(sql[fim - 1]))) --fim;
+  if (fim < palavra.size()) return false;
+  const std::size_t inicio_palavra = fim - palavra.size();
+  for (std::size_t k = 0; k < palavra.size(); ++k) {
+    const unsigned char a = static_cast<unsigned char>(sql[inicio_palavra + k]);
+    const unsigned char b = static_cast<unsigned char>(palavra[k]);
+    if (std::toupper(a) != std::toupper(b)) return false;
+  }
+  if (fim > palavra.size() &&
+      (std::isalnum(static_cast<unsigned char>(sql[fim - palavra.size() - 1])) ||
+       sql[fim - palavra.size() - 1] == 95)) {
+    return false;
+  }
+  if (inicio) *inicio = fim - palavra.size();
+  return true;
+}
+
+std::string duckdb_rewrite_sql(const std::string& sql, const std::vector<SqlParam>& params,
+                               std::vector<SqlParam>& bind_params) {
+  std::string out;
+  std::size_t raw = 0;
+  varrer_sql(
+      sql,
+      [&](std::string& emitted) {
+        std::size_t is_start = 0;
+        bool is_context = duckdb_termina_palavra(emitted, "IS", &is_start);
+        bool is_not_context = false;
+        if (!is_context) {
+          std::size_t not_start = 0;
+          if (duckdb_termina_palavra(emitted, "NOT", &not_start)) {
+            const std::string before_not = emitted.substr(0, not_start);
+            is_context = duckdb_termina_palavra(before_not, "IS", &is_start);
+            is_not_context = is_context;
+          }
+        }
+        if (raw < params.size() && params[raw].tipo == SqlParam::Tipo::Nulo && is_context) {
+          emitted.resize(is_start);
+          emitted += is_not_context ? "IS NOT NULL" : "IS NULL";
+        } else {
+          emitted += "?";
+          bind_params.push_back(params[raw]);
+        }
+        ++raw;
+      },
+      out);
+  return out;
+}
+
 }  // namespace
 
 // Materializa as linhas de um resultado ja executado. Exige colunas
@@ -327,22 +380,28 @@ void* prepara_e_liga(const DuckdbApi& db, void* conn, const std::string& sql,
     die(passo +
         "parametros exigem prepared statements (libduckdb sem duckdb_prepare; atualize a lib)");
   }
+  const auto nq = rewrite_qmarks(sql, "nenhum").second;
+  if (nq != params.size()) {
+    die(passo + "esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
+        std::to_string(nq) + " ? ");
+  }
+  std::vector<SqlParam> bind_params;
+  const std::string reescrito = duckdb_rewrite_sql(sql, params, bind_params);
   void* prep = nullptr;
-  if (db.prepare(conn, sql.c_str(), &prep) != kDuckdbSuccess || prep == nullptr) {
+  if (db.prepare(conn, reescrito.c_str(), &prep) != kDuckdbSuccess || prep == nullptr) {
     const char* err = db.prepare_error(prep);
     std::string msg = err ? err : "erro desconhecido";
     if (prep) db.destroy_prepare(&prep);
     die(passo + "falha ao preparar " + acao + ": " + msg);
   }
-  const std::uint64_t nq = db.nparams(prep);
-  if (nq != params.size()) {
+  const std::uint64_t prepared_nq = db.nparams(prep);
+  if (prepared_nq != bind_params.size()) {
     db.destroy_prepare(&prep);
-    die(passo + "esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
-        std::to_string(nq) + " '?'");
+    die(passo + "parametros ligados divergem do SQL preparado");
   }
-  for (std::size_t k = 0; k < params.size(); ++k) {
+  for (std::size_t k = 0; k < bind_params.size(); ++k) {
     const std::uint64_t idx = static_cast<std::uint64_t>(k + 1);
-    const SqlParam& p = params[k];
+    const SqlParam& p = bind_params[k];
     int brc = kDuckdbSuccess;
     switch (p.tipo) {
       case SqlParam::Tipo::Nulo: brc = db.bind_null(prep, idx); break;

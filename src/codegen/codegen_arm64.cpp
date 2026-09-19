@@ -285,18 +285,21 @@ struct Emitter {
           break;  // inalcançavel: chunk_supported rejeita antes de emitir
         case Op::Return:
           copy_slot(os, "x19", 0, "sp", 0);
-          os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp], #16\n  ret\n";
+          os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp, #16]\n  add sp, "
+                "sp, #32\n  ret\n";
           break;
         case Op::ReturnNil:
           for (int f = 0; f < kFields; ++f)
             os << "  mov x9, #0\n  str x9, [x19, #" << (f * 8) << "]\n";
-          os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp], #16\n  ret\n";
+          os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp, #16]\n  add sp, "
+                "sp, #32\n  ret\n";
           break;
       }
     }
     os << ".L" << sym << "_" << c.code.size() << ":\n";
     for (int f = 0; f < kFields; ++f) os << "  mov x9, #0\n  str x9, [x19, #" << (f * 8) << "]\n";
-    os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp], #16\n  ret\n\n";
+    os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp, #16]\n  add sp, sp, "
+          "#32\n  ret\n\n";
   }
 };
 
