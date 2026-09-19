@@ -1,5 +1,6 @@
 #include "lsp/lsp_server.hpp"
 
+#include <cctype>
 #include <cstdlib>
 #include <istream>
 #include <ostream>
@@ -71,6 +72,17 @@ long member_int(const Value& v, const char* key) {
 std::string member_str(const Value& v, const char* key) {
   const Value* m = member(v, key);
   return m && m->kind == rt::ValueKind::Texto ? m->s : std::string();
+}
+
+bool valid_identifier(const std::string& value) {
+  if (value.empty() || !(std::isalpha(static_cast<unsigned char>(value[0])) || value[0] == '_')) {
+    return false;
+  }
+  for (std::size_t i = 1; i < value.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(value[i]);
+    if (!(std::isalnum(c) || value[i] == '_')) return false;
+  }
+  return true;
 }
 
 Value make_response(const Value& id, Value result) {
@@ -169,6 +181,7 @@ int run_lsp(std::istream& in, std::ostream& out) {
       caps.map->set("hoverProvider", Value::logico(true));
       caps.map->set("definitionProvider", Value::logico(true));
       caps.map->set("referencesProvider", Value::logico(true));
+      caps.map->set("renameProvider", Value::logico(true));
       caps.map->set("documentFormattingProvider", Value::logico(true));
       Value sig = Value::mapa();
       Value sig_triggers = Value::lista();
@@ -279,6 +292,34 @@ int run_lsp(std::istream& in, std::ostream& out) {
         result.list->push_back(std::move(location));
       }
       write_message(out, make_response(id, std::move(result)));
+    } else if (method == "textDocument/rename" && params) {
+      const Value* td = member(*params, "textDocument");
+      const Value* pos = member(*params, "position");
+      const std::string uri = td ? member_str(*td, "uri") : "";
+      const std::string new_name = member_str(*params, "newName");
+      const long l = pos ? member_int(*pos, "line") : 0;
+      const long ch = pos ? member_int(*pos, "character") : 0;
+      SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
+      const auto refs = valid_identifier(new_name)
+                            ? references(src, static_cast<std::uint32_t>(l + 1),
+                                         static_cast<std::uint32_t>(ch + 1), true)
+                            : std::vector<Span>();
+      if (refs.empty()) {
+        write_message(out, make_response(id, Value::nulo()));
+      } else {
+        Value edits = Value::lista();
+        for (const Span& ref : refs) {
+          Value edit = Value::mapa();
+          edit.map->set("range", span_to_range(ref));
+          edit.map->set("newText", Value::texto(new_name));
+          edits.list->push_back(std::move(edit));
+        }
+        Value changes = Value::mapa();
+        changes.map->set(uri, std::move(edits));
+        Value result = Value::mapa();
+        result.map->set("changes", std::move(changes));
+        write_message(out, make_response(id, std::move(result)));
+      }
     } else if (method == "textDocument/signatureHelp" && params) {
       const Value* td = member(*params, "textDocument");
       const Value* pos = member(*params, "position");

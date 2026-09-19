@@ -100,6 +100,7 @@ def main() -> int:
         "hoverProvider",
         "definitionProvider",
         "referencesProvider",
+        "renameProvider",
         "documentFormattingProvider",
         "signatureHelpProvider",
     ):
@@ -269,6 +270,18 @@ def main() -> int:
             },
         }
 
+    def rename_req(i, line, ch, new_name):
+        return {
+            "jsonrpc": "2.0",
+            "id": i,
+            "method": "textDocument/rename",
+            "params": {
+                "textDocument": {"uri": "file:///t.tilt"},
+                "position": {"line": line, "character": ch},
+                "newName": new_name,
+            },
+        }
+
     frames = run_lsp(
         binary,
         doc,
@@ -278,6 +291,7 @@ def main() -> int:
             def_req(22, 8, 11),  # x -> parametro de dobro (linha 7, char 13)
             refs_req(23, 8, 11, True),  # x: parametro + uso no retornar
             refs_req(24, 11, 9, False),  # y: somente uso
+            rename_req(25, 11, 9, "resultado"),  # y -> resultado em dois locais
         ],
     )
     if frames is None:
@@ -302,6 +316,10 @@ def main() -> int:
     starts = [ref.get("range", {}).get("start") for ref in refs]
     if starts != [{"line": 11, "character": 9}]:
         problems.append(f"references de y sem declaracao: {refs}")
+    rename = r.get(25, {}).get("result") or {}
+    edits = rename.get("changes", {}).get("file:///t.tilt", [])
+    if len(edits) != 2 or any(edit.get("newText") != "resultado" for edit in edits):
+        problems.append(f"rename de y: {rename}")
 
     # -------------------------------------------------------- signatureHelp
     sig_doc = 'seja t = dividir "a,b,c", ","\n'

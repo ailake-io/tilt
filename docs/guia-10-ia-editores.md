@@ -82,6 +82,9 @@ Filtro por prefixo (case-insensitive).
   same-file do símbolo resolvido no cursor, ignorando acessos de membro
   (`obj.campo`). `context.includeDeclaration` controla se a declaração entra
   no resultado; sem ele, o resultado traz somente os usos;
+- **rename symbol** (`renameProvider`): valida o novo identificador e devolve
+  `WorkspaceEdit.changes` para renomear a declaração e todos os usos same-file;
+  referências cross-file e renomeação de campos de membro ficam para depois;
 - **signatureHelp** (`signatureHelpProvider`, gatilhos `,` e `(`): assinatura
   do builtin mais interno na linha, com o parâmetro ativo destacado (só
   argumentos na mesma linha);

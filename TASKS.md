@@ -238,7 +238,7 @@
 - [x] `hover type` (Sprint 3: assinatura de `funcao`, campos de `tipo`, tipo
   do valor em usos de variável, tipo da expressão sob o cursor com forma de
   tensor; desconhecido cai no texto atual)
-- [ ] Implementar `rename symbol` no LSP
+- [x] Implementar `rename symbol` no LSP (same-file, WorkspaceEdit com validação de identificador)
 - [ ] Adicionar diagnostics em tempo real (on-type) no LSP (hoje: full reparse
   por `didChange`, sem debounce/cache)
 
