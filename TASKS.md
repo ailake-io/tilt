@@ -126,7 +126,7 @@
 - [x] `TILT_LLM=mock` (já existia; verificado na Sprint 2)
 - [x] Adicionar suporte a `Retry-After` header em retry de LLM
 - [x] Implementar cache de respostas LLM (opt-in por `cache: verdadeiro`, em memória)
-- [ ] Implementar streaming com retry (atualmente sem retry em streaming)
+- [x] Implementar streaming com retry (SSE, transporte/429/5xx e fallback)
 - [x] Adicionar `tempo_limite` configurável por tentativa
 
 ### 4.2 RAG / Bancos Vetoriais (P2)

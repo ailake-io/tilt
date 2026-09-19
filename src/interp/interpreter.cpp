@@ -6752,7 +6752,7 @@ std::vector<rt::LlmConfig> Interpreter::cadeia_llm(const std::string& name, Span
   return out;
 }
 
-rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env) {
+rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env, bool fluxo) {
   std::string llm_name;
   if (!call.args.empty() && call.args[0].name.empty()) {
     Value v = eval(*call.args[0].value, env);
@@ -6777,7 +6777,8 @@ rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env) {
   rt::LlmConfig cfg = llm_config(llm_name, call.span);
   rt::RespostaLLM resp;
   try {
-    resp = rt::llm_chat_cadeia(cadeia_llm(llm_name, call.span), system, user);
+    resp = fluxo ? rt::llm_chat_fluxo_cadeia(cadeia_llm(llm_name, call.span), system, user)
+                 : rt::llm_chat_cadeia(cadeia_llm(llm_name, call.span), system, user);
   } catch (const std::exception& e) {
     fail(call.span, std::string("LLM: ") + e.what());
   }
@@ -9152,7 +9153,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
 
   if (name == "perguntar" || name == "perguntar_em_fluxo") {
-    return eval_perguntar(call, env);
+    return eval_perguntar(call, env, name == "perguntar_em_fluxo");
   }
   if (name == "incorporar") {
     auto a = args();

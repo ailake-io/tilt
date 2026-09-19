@@ -52,13 +52,20 @@ class MockLLM(http.server.BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0))
         corpo = self.rfile.read(n).decode("utf-8", "replace")
         try:
-            modelo = json.loads(corpo).get("model", "")
+            pedido = json.loads(corpo)
+            modelo = pedido.get("model", "")
+            stream = pedido.get("stream", False)
         except Exception:
             modelo = ""
+            stream = False
         chamadas[modelo] = chamadas.get(modelo, 0) + 1
         vez = chamadas[modelo]
 
-        if modelo == "lento":
+        if stream and modelo == "stream-instavel" and vez == 1:
+            self._erro(500, {"error": "stream caiu"})
+        elif stream:
+            self._stream_ok("resposta em fluxo", {"prompt_tokens": 4, "completion_tokens": 2})
+        elif modelo == "lento":
             time.sleep(5)
             self._ok("devagar mas cheguei", {"prompt_tokens": 1, "completion_tokens": 1},
                      aberto=True)
@@ -86,6 +93,20 @@ class MockLLM(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
+
+    def _stream_ok(self, texto, uso):
+        eventos = [
+            {"choices": [{"delta": {"content": "resposta "}}]},
+            {"choices": [{"delta": {"content": "em fluxo"}}]},
+            {"usage": uso},
+        ]
+        raw = "".join("data: " + json.dumps(evento) + "\n\n" for evento in eventos).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
 
     def _erro(self, codigo, corpo, retry_after=None):
         raw = json.dumps(corpo).encode("utf-8")
@@ -152,6 +173,7 @@ confere "teto:"
 echo "$out" | grep "teto:" | grep -q "teto_tokens" || {
   echo "teto sem mencionar teto_tokens"; fail=1; }
 # timeout: 2 tentativas de 2s
+confere "stream: resposta em fluxo 4 2"
 confere "cache: 15 15"
 confere "timeout:"
 echo "$out" | grep "timeout:" | grep -q "2 tentativa" || {

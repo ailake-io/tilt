@@ -100,6 +100,9 @@ pipeline resumir:
 Retorna `{ texto, modelo }`. O primeiro argumento posicional é o `llm`
 declarado; `sistema:` e `usuario:` vêm do bloco `:` (ou de `prompt:`).
 `perguntar_em_fluxo` tem a mesma forma (streaming SSE no modo real).
+Em `perguntar_em_fluxo`, a requisição envia `stream: true`, concatena deltas SSE
+de Anthropic/OpenAI e repete a tentativa inteira em falha de transporte, HTTP 429
+ou 5xx, respeitando `Retry-After` e `tentativas:`; `reserva:` também se aplica.
 
 ## Saída estruturada
 

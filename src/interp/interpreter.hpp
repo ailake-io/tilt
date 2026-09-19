@@ -354,7 +354,7 @@ class Interpreter {
   rt::LlmConfig llm_config(const std::string& name, Span span);
   // Primario + reservas (fallback em ordem).
   std::vector<rt::LlmConfig> cadeia_llm(const std::string& name, Span span);
-  rt::Value eval_perguntar(const ast::Expr& call, Env& env);
+  rt::Value eval_perguntar(const ast::Expr& call, Env& env, bool fluxo = false);
   rt::Value structured_from_tipo(const std::string& tipo_name, const std::string& raw, Span span);
   // Valor padrao de campo de `tipo`: avalia `campo: Tipo = padrao` (com o
   // escopo raiz) ou cai para o padrao do tipo declarado quando ausente/falha.

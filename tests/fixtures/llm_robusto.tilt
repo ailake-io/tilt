@@ -30,6 +30,13 @@ llm limitado:
   chave: env "CHAVE"
   teto_tokens: 15
 
+llm fluxo:
+  provedor: "openai"
+  modelo: "stream-instavel"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+  tentativas: 2
+
 llm cacheado:
   provedor: "openai"
   modelo: "ok"
@@ -70,6 +77,11 @@ pipeline teto:
         r2 = perguntar limitado, usuario: "oi de novo"
     capturar erro:
       imprimir "teto:", erro
+
+pipeline fluxo_stream:
+  passos:
+    - r = perguntar_em_fluxo fluxo, usuario: "oi"
+    - imprimir "stream:", r.texto, r.tokens.entrada, r.tokens.saida
 
 pipeline cache:
   passos:

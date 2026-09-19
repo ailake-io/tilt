@@ -41,6 +41,10 @@ std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std:
 RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
                              const std::string& user);
 
+// Streaming SSE: solicita stream=true, materializa os deltas e aplica o mesmo retry/fallback.
+RespostaLLM llm_chat_fluxo_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
+                                  const std::string& user);
+
 // Deterministic in mock mode; real embeddings via `curl` otherwise.
 std::vector<float> llm_embed(const std::string& model, const std::string& text);
 

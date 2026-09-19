@@ -360,11 +360,52 @@ struct PedidoLLM {
   }
 };
 
-PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std::string& user) {
+std::string texto_de_fluxo(const PedidoLLM& ped, const std::string& raw, long long& tok_in,
+                           long long& tok_out) {
+  if (raw.find("data:") == std::string::npos) {
+    const Value response = json_parse(raw);
+    return ped.texto_de(response, tok_in, tok_out);
+  }
+  std::string texto;
+  std::istringstream lines(raw);
+  std::string line;
+  while (std::getline(lines, line)) {
+    if (line.rfind("data:", 0) != 0) continue;
+    const std::string payload = trim_http(line.substr(5));
+    if (payload.empty() || payload == "[DONE]") continue;
+    Value event;
+    try {
+      event = json_parse(payload);
+    } catch (...) {
+      continue;
+    }
+    auto usage = [&](const char* path0, const char* path1, long long& target) {
+      const Value* value = dig(event, {path0, path1});
+      if (value && value->kind == ValueKind::Inteiro) target = value->i;
+    };
+    usage("usage", "input_tokens", tok_in);
+    usage("usage", "prompt_tokens", tok_in);
+    usage("usage", "output_tokens", tok_out);
+    usage("usage", "completion_tokens", tok_out);
+    usage("message_delta", "output_tokens", tok_out);
+    const Value* delta = dig(event, {"delta", "text"});
+    if (delta && delta->kind == ValueKind::Texto) texto += delta->s;
+    delta = dig(event, {"choices", "0", "delta", "content"});
+    if (delta && delta->kind == ValueKind::Texto) texto += delta->s;
+    delta = dig(event, {"choices", "0", "text"});
+    if (delta && delta->kind == ValueKind::Texto) texto += delta->s;
+  }
+  if (texto.empty()) throw std::runtime_error("resposta SSE do LLM sem texto");
+  return texto;
+}
+
+PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std::string& user,
+                     bool fluxo = false) {
   PedidoLLM p;
   Value body = Value::mapa();
   body.map->set("model", Value::texto(cfg.model));
   body.map->set("temperature", Value::decimal(cfg.temperature));
+  if (fluxo) body.map->set("stream", Value::logico(true));
 
   if (cfg.provider == "anthropic") {
     // Sem base_url: API da Anthropic; com base_url: endpoint compativel
@@ -467,8 +508,66 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
   throw std::runtime_error(ultimo_erro);
 }
 
+RespostaLLM chat_fluxo_uma(const LlmConfig& cfg, const std::string& system,
+                           const std::string& user) {
+  const std::string cache_key = cfg.cache ? llm_cache_key(cfg, system, user) : std::string();
+  if (cfg.cache) {
+    RespostaLLM cached;
+    if (cache_read(cache_key, cached)) return cached;
+  }
+  if (llm_is_mock()) {
+    if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+      throw std::runtime_error("teto_tokens excedido no streaming");
+    }
+    const std::string texto = mock_chat(system, user);
+    RespostaLLM response{texto, mock_tokens(system + user), mock_tokens(texto), cfg.model};
+    soma_uso(cfg.nome, response.tok_entrada, response.tok_saida);
+    if (cfg.cache) cache_write(cache_key, response);
+    return response;
+  }
+  if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+    throw std::runtime_error("teto_tokens excedido no streaming");
+  }
+  const PedidoLLM ped = monta_chat(cfg, system, user, true);
+  const int tents = cfg.tentativas < 1 ? 1 : cfg.tentativas;
+  std::string ultimo_erro;
+  for (int t = 1; t <= tents; ++t) {
+    HttpResult r;
+    try {
+      r = http_post_status(ped.url, ped.headers, ped.corpo, cfg.tempo_limite);
+    } catch (const std::exception& e) {
+      ultimo_erro = e.what();
+      if (t < tents) {
+        espera_retry(t, r.retry_after);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
+                               " tentativa(s) no streaming");
+    }
+    if (r.status >= 200 && r.status < 300) {
+      long long tok_in = 0, tok_out = 0;
+      const std::string texto = texto_de_fluxo(ped, r.body, tok_in, tok_out);
+      soma_uso(cfg.nome, tok_in, tok_out);
+      RespostaLLM response{texto, tok_in, tok_out, cfg.model};
+      if (cfg.cache) cache_write(cache_key, response);
+      return response;
+    }
+    if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
+      ultimo_erro = "HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 200);
+      if (t < tents) {
+        espera_retry(t, r.retry_after);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
+                               " tentativa(s) no streaming");
+    }
+    throw std::runtime_error("HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 300));
+  }
+  throw std::runtime_error(ultimo_erro);
+}
+
 RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
-                             const std::string& user) {
+                            const std::string& user) {
   if (cadeia.empty()) throw std::runtime_error("cadeia de LLMs vazia");
   std::string erros;
   for (std::size_t k = 0; k < cadeia.size(); ++k) {
@@ -477,6 +576,21 @@ RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::str
     } catch (const std::exception& e) {
       if (!erros.empty()) erros += "; ";
       erros += "'" + cadeia[k].nome + "': " + e.what();
+    }
+  }
+  throw std::runtime_error(erros);
+}
+
+RespostaLLM llm_chat_fluxo_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
+                                  const std::string& user) {
+  if (cadeia.empty()) throw std::runtime_error("cadeia de LLMs vazia");
+  std::string erros;
+  for (std::size_t k = 0; k < cadeia.size(); ++k) {
+    try {
+      return chat_fluxo_uma(cadeia[k], system, user);
+    } catch (const std::exception& e) {
+      if (!erros.empty()) erros += "; ";
+      erros += "stream " + cadeia[k].nome + ": " + e.what();
     }
   }
   throw std::runtime_error(erros);
