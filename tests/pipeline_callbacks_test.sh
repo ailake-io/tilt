@@ -31,9 +31,9 @@ echo "$out" | grep -q "callback-falha falha falha 2" || {
   echo "callback de falha sem contexto"; exit 1; }
 
 json_out=$(cd "$tmp" && TILT_PIPELINE_LOG_JSON=1 "$BIN" executar callbacks.tilt 2>&1 || true)
-echo "$json_out" | grep -q '\{"evento":"pipeline","nome":"sucesso","status":"sucesso"' || {
+echo "$json_out" | grep -qF '{"evento":"pipeline","nome":"sucesso","status":"sucesso"' || {
   echo "log JSON sem contexto de sucesso"; exit 1; }
-echo "$json_out" | grep -q '\{"evento":"pipeline","nome":"falha","status":"falha"' || {
+echo "$json_out" | grep -qF '{"evento":"pipeline","nome":"falha","status":"falha"' || {
   echo "log JSON sem contexto de falha"; exit 1; }
 
 echo "pipeline_callbacks: ok"

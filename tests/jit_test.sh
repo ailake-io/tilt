@@ -11,7 +11,12 @@ trap 'rm -rf "$tmp"' EXIT
 TILT_JIT_DEBUG=1 "$BIN" executar --jit "$FIXTURES/jit_inteiros.tilt" \
   >"$tmp/jit.out" 2>"$tmp/jit.err"
 diff -u "$tmp/interp.out" "$tmp/jit.out"
-grep -q '^\[jit native\]' "$tmp/jit.err"
+# O JIT nativo so existe em x86_64 (jit.cpp); nas demais arquiteturas o
+# resultado igual ao interpretador vem pelo fallback transparente.
+case "$(uname -m)" in
+  x86_64|amd64) grep -q '^\[jit native\]' "$tmp/jit.err" ;;
+  *) grep -q '^\[jit fallback\]' "$tmp/jit.err" ;;
+esac
 
 "$BIN" executar "$FIXTURES/nativo2.tilt" >"$tmp/fallback-interp.out"
 TILT_JIT_DEBUG=1 "$BIN" executar --jit "$FIXTURES/nativo2.tilt" \
