@@ -7767,9 +7767,24 @@ namespace {
 
 struct Route {
   std::string method;
+  std::string version;
   std::string path;
   const Item* field = nullptr;  // the `rota` Field (has `entrada:` / `passos:`)
 };
+
+bool api_version_valida(const std::string& version) {
+  if (version.size() < 2 || version[0] != 'v') return false;
+  for (std::size_t i = 1; i < version.size(); ++i) {
+    if (!std::isdigit(static_cast<unsigned char>(version[i]))) return false;
+  }
+  return true;
+}
+
+std::string caminho_versionado(const std::string& version, const std::string& path) {
+  std::string suffix = path;
+  if (suffix.empty() || suffix.front() != '/') suffix.insert(suffix.begin(), '/');
+  return "/" + version + suffix;
+}
 
 std::vector<Route> collect_routes(const ast::Block& block) {
   std::vector<Route> routes;
@@ -7781,7 +7796,13 @@ std::vector<Route> collect_routes(const ast::Block& block) {
       r.method = it->header[0]->text;
       for (char& c : r.method) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
-    if (it->header.size() >= 2 && it->header[1] && it->header[1]->kind == ExprKind::TextLit) {
+    if (it->header.size() >= 3 && it->header[1] && it->header[2] &&
+        (it->header[1]->kind == ExprKind::Name || it->header[1]->kind == ExprKind::TextLit) &&
+        it->header[2]->kind == ExprKind::TextLit) {
+      r.version = it->header[1]->text;
+      r.path = caminho_versionado(r.version, it->header[2]->text);
+    } else if (it->header.size() >= 2 && it->header[1] &&
+               it->header[1]->kind == ExprKind::TextLit) {
       r.path = it->header[1]->text;
     }
     routes.push_back(std::move(r));
@@ -7813,6 +7834,12 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
 
   int port = port_override > 0 ? port_override : field_int(*svc->block, "porta", 8080);
   const std::vector<Route> routes = collect_routes(*svc->block);
+  for (const Route& route : routes) {
+    if (!route.version.empty() && !api_version_valida(route.version)) {
+      fail(route.field ? route.field->span : svc->span,
+           "versao de API invalida '" + route.version + "' (use v1, v2 ou vN)");
+    }
+  }
   std::unordered_set<std::string> ferramentas_http;
   const Item* fpermitidas = find_field(*svc->block, "ferramentas");
   const bool allowlist_http = fpermitidas != nullptr;

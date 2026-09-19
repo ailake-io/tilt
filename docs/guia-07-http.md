@@ -59,6 +59,10 @@ servico Ops:
   durante a vida do processo e permite correlacionar a requisição ao log.
 
 - `rota <metodo> "/caminho":` — casa método (`get`/`post`/...) e caminho exatos.
+- `rota <metodo> v1 "/caminho":` (ou `v2`) — acrescenta o prefixo da versão,
+  fazendo a rota casar com `/v1/caminho` (ou `/v2/caminho`). A forma aceita
+  qualquer versão `vN` para permitir evolução futura; rotas sem versão mantêm
+  o caminho original e podem coexistir com rotas versionadas.
 - O corpo JSON da requisição vira a variável `entrada` no escopo dos `passos:`.
 - Se a rota declara `entrada: <Tipo>`, campos ausentes → `400 { "erro": "campo 'x' ausente" }`
   (com valor padrão `campo: <Tipo> = <valor>` o campo é preenchido em vez de rejeitar),

@@ -167,7 +167,7 @@
 ### 6.2 Serviços (P1)
 - [x] `meio:` (middleware) em `servico` (já existe)
 - [x] Validação de `entrada:` (Sprint 1: presença+T011-era 400 + tipos escalares + defaults)
-- [ ] Implementar versionamento de API (prefixo `/v1/`, `/v2/`)
+- [x] Implementar versionamento de API (prefixo `/v1/`, `/v2/`)
 
 ---
 

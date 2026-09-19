@@ -1,0 +1,17 @@
+servico Versoes:
+  porta: 8491
+  rota get v1 "/ping":
+    passos:
+      - responder:
+          dados:
+            versao: "v1"
+  rota get v2 "/ping":
+    passos:
+      - responder:
+          dados:
+            versao: "v2"
+  rota get "/legado":
+    passos:
+      - responder:
+          dados:
+            versao: "legado"
