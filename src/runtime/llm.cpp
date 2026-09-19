@@ -193,6 +193,36 @@ long long uso_total(const std::string& nome) {
   return it == g_uso.end() ? 0 : it->second.first + it->second.second;
 }
 
+std::mutex g_cache_mu;
+std::map<std::string, RespostaLLM> g_chat_cache;
+
+std::string llm_cache_key(const LlmConfig& cfg, const std::string& system,
+                          const std::string& user) {
+  std::ostringstream key;
+  auto add = [&key](const std::string& value) { key << value.size() << ':' << value; };
+  add(cfg.provider);
+  add(cfg.nome);
+  add(cfg.model);
+  add(cfg.base_url);
+  key << std::setprecision(17) << cfg.temperature << ':' << cfg.max_tokens << ':';
+  add(system);
+  add(user);
+  return key.str();
+}
+
+bool cache_read(const std::string& key, RespostaLLM& response) {
+  std::lock_guard<std::mutex> lk(g_cache_mu);
+  const auto it = g_chat_cache.find(key);
+  if (it == g_chat_cache.end()) return false;
+  response = it->second;
+  return true;
+}
+
+void cache_write(const std::string& key, const RespostaLLM& response) {
+  std::lock_guard<std::mutex> lk(g_cache_mu);
+  g_chat_cache[key] = response;
+}
+
 // Heuristica de tokens p/ o mock (chars/4 por lado; deterministica).
 long long mock_tokens(const std::string& s) {
   return static_cast<long long>((s.size() + 3) / 4);
@@ -373,6 +403,11 @@ PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std:
 
 // Uma config, com retry/backoff/timeout/teto. Devolve texto + tokens.
 RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std::string& user) {
+  const std::string cache_key = cfg.cache ? llm_cache_key(cfg, system, user) : std::string();
+  if (cfg.cache) {
+    RespostaLLM cached;
+    if (cache_read(cache_key, cached)) return cached;
+  }
   if (llm_is_mock()) {
     if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
       throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
@@ -382,7 +417,9 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
     const long long tin = mock_tokens(system + user);
     const long long tout = mock_tokens(t);
     soma_uso(cfg.nome, tin, tout);
-    return {t, tin, tout, cfg.model};
+    RespostaLLM response{t, tin, tout, cfg.model};
+    if (cfg.cache) cache_write(cache_key, response);
+    return response;
   }
 
   if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
@@ -411,7 +448,9 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
       long long tin = 0, tout = 0;
       const std::string texto = ped.texto_de(resp, tin, tout);
       soma_uso(cfg.nome, tin, tout);
-      return {texto, tin, tout, cfg.model};
+      RespostaLLM response{texto, tin, tout, cfg.model};
+      if (cfg.cache) cache_write(cache_key, response);
+      return response;
     }
     if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
       ultimo_erro = "HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 200);

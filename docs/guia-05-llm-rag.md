@@ -13,6 +13,7 @@ llm gpt:
   tempo_limite: 60                  # segundos por tentativa (default 60)
   tentativas: 3                     # retry em transporte/429/5xx (default 3)
   teto_tokens: 0                    # 0 = sem teto; >0 barra antes de estourar
+  cache: verdadeiro               # cache de respostas idênticas no processo (opt-in)
   reserva: [gpt_barato]             # fallback: outro 'llm' se este falhar
 
 pipeline declara:
@@ -29,8 +30,11 @@ pipeline declara:
 - `reserva: [b, c]` tenta outro `llm` declarado quando o primeiro esgota
   as tentativas (um nível, sem cadeia; repetido ou inexistente é erro
   claro antes da rede). Vale para `perguntar`, agentes e supervisor.
-- `teto_tokens:` soma entrada+saída acumulados do `llm` no processo e
-  falha **antes** da chamada que estouraria (erro `teto_tokens ...`).
+- `teto_tokens:` soma entrada+saída acumulados do `llm` no processo e falha antes
+  da chamada que estouraria (erro `teto_tokens ...`).
+- `cache: verdadeiro` habilita cache em memória por processo para chamadas idênticas
+  (provedor, modelo, endpoint, parâmetros e prompt); cache hits devolvem também a
+  contabilidade original e não fazem nova chamada nem somam tokens. O padrão é falso.
 - `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` —
   `modelo` é o que respondeu (útil com `reserva:`), tokens vêm do `usage`
   da API (Anthropic `input/output_tokens`, OpenAI `prompt/completion_tokens`;
@@ -55,6 +59,15 @@ pipeline robusto:
 
 Cobertura com HTTP de verdade em `tests/llm_retry_test.sh` (mock local com
 429/500/timeout: retry, fallback, teto e `tempo_limite`).
+
+### Cache de respostas
+
+O cache é opt-in por bloco `llm` com `cache: verdadeiro`. Ele é local ao processo,
+thread-safe e usa a identidade completa da requisição (incluindo `sistema:` e
+`usuario:`); respostas de erro nunca são armazenadas. Para prompts dinâmicos ou
+quando a resposta precisa refletir dados externos recentes, mantenha o padrão
+`cache: falso`.
+
 
 ## Transporte
 

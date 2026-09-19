@@ -6712,6 +6712,12 @@ rt::LlmConfig Interpreter::llm_config(const std::string& name, Span span) {
   cfg.tentativas = field_int(b, "tentativas", 3);
   if (cfg.tentativas < 1) fail(span, "llm '" + name + "': 'tentativas' deve ser >= 1");
   cfg.teto_tokens = field_int(b, "teto_tokens", 0);
+  if (const Item* fc = find_field(b, "cache"); fc && fc->value) {
+    if (fc->value->kind != ExprKind::BoolLit) {
+      fail(fc->value->span, "llm cache deve ser logico");
+    }
+    cfg.cache = fc->value->boolean;
+  }
   if (cfg.teto_tokens < 0) fail(span, "llm '" + name + "': 'teto_tokens' deve ser >= 0");
   if (const Item* fr = find_field(b, "reserva"); fr && fr->value) {
     if (fr->value->kind != ExprKind::ListLit) {

@@ -17,6 +17,7 @@ struct LlmConfig {
   int tempo_limite = 60;            // segundos por tentativa (curl --max-time)
   int tentativas = 3;               // tentativas em erro de transporte/429/5xx
   long long teto_tokens = 0;        // 0 = sem teto; >0 = falha antes de estourar
+  bool cache = false;               // reutiliza respostas idempotentes no processo
   std::vector<std::string> reserva;  // nomes de outros `llm` (fallback em ordem)
 };
 

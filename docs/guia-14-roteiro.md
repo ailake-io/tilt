@@ -90,8 +90,8 @@ vetoriais. Robustez entregue: `tempo_limite`, `tentativas` com backoff (incluind
 `Retry-After` em 429), `reserva:`, `teto_tokens:` e `tokens:` na resposta.
 
 - **Robustez**: timeout configurável, fallback entre modelos e teto de
-  custo/tokens por período. `Retry-After` em 429 já é respeitado; ainda faltam
-  cache de respostas e retry em streaming.
+  custo/tokens por período. `Retry-After` em 429 já é respeitado; ainda falta
+  retry em streaming.
 - **RAG**: sem reranking, chunking só de tamanho fixo (sem respeito a
   sentença/código), sem busca híbrida (vetor + keyword/BM25), sem
   avaliação de recuperação.
@@ -147,5 +147,5 @@ Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
    `/metricas`, logs estruturados, cursor/backfill e `vacuum_*`).
 4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
 5. ~~`avaliacao` (evals — fundação de LLMOps)~~ feito em 1ª passada (ver guia 05).
-6. Próximo foco: cache e retry em streaming no cliente LLM; depois as
+6. Próximo foco: retry em streaming no cliente LLM; depois as
    melhorias de conectores e ferramentas.

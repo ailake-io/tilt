@@ -152,6 +152,7 @@ confere "teto:"
 echo "$out" | grep "teto:" | grep -q "teto_tokens" || {
   echo "teto sem mencionar teto_tokens"; fail=1; }
 # timeout: 2 tentativas de 2s
+confere "cache: 15 15"
 confere "timeout:"
 echo "$out" | grep "timeout:" | grep -q "2 tentativa" || {
   echo "timeout sem mencionar tentativas"; fail=1; }

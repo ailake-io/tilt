@@ -125,7 +125,7 @@
 ### 4.1 LLM (P1)
 - [x] `TILT_LLM=mock` (já existia; verificado na Sprint 2)
 - [x] Adicionar suporte a `Retry-After` header em retry de LLM
-- [ ] Implementar cache de respostas LLM — roteiro
+- [x] Implementar cache de respostas LLM (opt-in por `cache: verdadeiro`, em memória)
 - [ ] Implementar streaming com retry (atualmente sem retry em streaming)
 - [x] Adicionar `tempo_limite` configurável por tentativa
 

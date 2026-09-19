@@ -30,6 +30,14 @@ llm limitado:
   chave: env "CHAVE"
   teto_tokens: 15
 
+llm cacheado:
+  provedor: "openai"
+  modelo: "ok"
+  base_url: "http://127.0.0.1:@PORTA@"
+  chave: env "CHAVE"
+  cache: verdadeiro
+  teto_tokens: 15
+
 llm lento:
   provedor: "openai"
   modelo: "lento"
@@ -62,6 +70,13 @@ pipeline teto:
         r2 = perguntar limitado, usuario: "oi de novo"
     capturar erro:
       imprimir "teto:", erro
+
+pipeline cache:
+  passos:
+    # A segunda chamada idêntica vem do cache e não consome novo teto.
+    - r1 = perguntar cacheado, usuario: "mesmo"
+    - r2 = perguntar cacheado, usuario: "mesmo"
+    - imprimir "cache:", r1.tokens.entrada + r1.tokens.saida, r2.tokens.entrada + r2.tokens.saida
 
 pipeline timeout:
   passos:
