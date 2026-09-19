@@ -194,7 +194,43 @@ bool tilt_enable_vt();
 // tilt_shell_quote escolhe conforme a build; as duas variantes sao
 // chamaveis em qualquer plataforma (para teste unitario).
 std::string tilt_posix_quote(const std::string& s);
+
+#if defined(_WIN32)
+inline std::string tilt_win_quote(const std::string& s) {
+  if (s.empty()) return "\"\"";
+  bool need = false;
+  for (char c : s) {
+    if (c == ' ' || c == '\t' || c == '\n' || c == '"' || c == '&' || c == '|' || c == '<' ||
+        c == '>' || c == '^' || c == '%') {
+      need = true;
+      break;
+    }
+  }
+  if (!need) return s;
+  std::string out = "\"";
+  std::size_t bs = 0;
+  for (char c : s) {
+    if (c == '\\') {
+      ++bs;
+      continue;
+    }
+    if (c == '"') {
+      out.append(bs * 2 + 1, '\\');
+      out += '"';
+      bs = 0;
+      continue;
+    }
+    out.append(bs, '\\');
+    bs = 0;
+    out += c;
+  }
+  out.append(bs * 2, '\\');  // barras finais dobram (senao escapam a aspa final)
+  out += '"';
+  return out;
+}
+#else
 std::string tilt_win_quote(const std::string& s);
+#endif
 inline std::string tilt_shell_quote(const std::string& s) {
 #if defined(_WIN32)
   return tilt_win_quote(s);

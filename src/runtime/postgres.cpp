@@ -235,8 +235,13 @@ bool pg_termina_palavra(const std::string& sql, const std::string& palavra,
                         std::size_t* inicio = nullptr) {
   std::size_t fim = sql.size();
   while (fim > 0 && std::isspace(static_cast<unsigned char>(sql[fim - 1]))) --fim;
-  if (fim < palavra.size() || sql.compare(fim - palavra.size(), palavra.size(), palavra) != 0)
-    return false;
+  if (fim < palavra.size()) return false;
+  const std::size_t inicio_palavra = fim - palavra.size();
+  for (std::size_t k = 0; k < palavra.size(); ++k) {
+    const unsigned char a = static_cast<unsigned char>(sql[inicio_palavra + k]);
+    const unsigned char b = static_cast<unsigned char>(palavra[k]);
+    if (std::toupper(a) != std::toupper(b)) return false;
+  }
   if (fim > palavra.size() &&
       (std::isalnum(static_cast<unsigned char>(sql[fim - palavra.size() - 1])) ||
        sql[fim - palavra.size() - 1] == '_')) {

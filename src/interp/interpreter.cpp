@@ -1695,7 +1695,8 @@ std::string Interpreter::janela_offset_file(const std::string& fonte) {
   if (path.empty()) path = fonte_field_text(*decl->block, "arquivo");
   if (path.empty()) path = fonte_field_text(*decl->block, "url");
   if (path.rfind("file://", 0) == 0) path = path.substr(7);
-  if (path.empty()) return "";
+  if (tipo == "duckdb" && path.rfind("duckdb://", 0) == 0) path = path.substr(9);
+  if (tipo == "sqlite" && path.rfind("sqlite://", 0) == 0) path = path.substr(9);
   const std::string local = path + ".tilt-offset";
   try {
     return rt::checkpoint_resolve(local);
@@ -1829,7 +1830,8 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
   if (path.empty()) path = field_text("arquivo");
   if (path.empty()) path = field_text("url");
   if (path.rfind("file://", 0) == 0) path = path.substr(7);
-
+  if (tipo == "duckdb" && path.rfind("duckdb://", 0) == 0) path = path.substr(9);
+  if (tipo == "sqlite" && path.rfind("sqlite://", 0) == 0) path = path.substr(9);
   if (tipo == "csv") {
     if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
     return read_csv_file(path, span);

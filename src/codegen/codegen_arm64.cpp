@@ -156,6 +156,7 @@ struct Emitter {
     os << "  .globl " << sym << "\n" << sym << ":\n";
     os << "  stp x29, x30, [sp, #-16]!\n  mov x29, sp\n";
     os << "  stp x19, x20, [sp, #-16]!\n";  // out, args (registradores)
+    os << "  mov x19, x0\n  mov x20, x1\n";
     if (locals_frame) os << "  sub sp, sp, #" << locals_frame << "\n";
     if (nparams > 0) {
       // args = &arg0 (slot mais alto); arg_p fica em x20 - p*kSlot.
