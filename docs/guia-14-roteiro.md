@@ -138,7 +138,15 @@ O despacho concorrente reutiliza `tilt::rt::ThreadPool`, com fila protegida, rej
   espelhado; layout comum a libmysqlclient e libmariadb validado contra as
   duas com servidor MariaDB 11; interpolação com escape removida).
 
-## Priorização sugerida
+## Sharding e escalabilidade
+
+O bloco treino aceita num_shards: N e shard_id: K para selecionar linhas em
+round-robin (K em 0..N-1). O contrato vale para dados em RAM e para os
+dataloaders CSV/Parquet em fluxo; cada processo pode receber um shard
+deterministico sem materializar o arquivo inteiro. O coordenador de cluster e
+a sincronizacao de gradientes continuam sendo o proximo passo separado.
+
+## Priorizacao sugerida
 
 1. ~~`experimento` executável~~ feito (1ª passada; ver acima).
 2. ~~Robustez LLM~~ feito (1ª passada; ver acima).

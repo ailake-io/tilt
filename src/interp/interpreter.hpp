@@ -289,6 +289,8 @@ class Interpreter {
     double lr = 0.1;
     int epocas = 50;
     int lote = -1;  // -1 = lote cheio
+    int shard_id = 0;       // indice desta particao de dados
+    int num_shards = 1;     // total de particoes
     bool embaralhar = true;
     std::uint64_t seed_init = 0xC1A5;
     std::uint64_t seed_mistura = 7;

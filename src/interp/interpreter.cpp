@@ -3412,6 +3412,12 @@ void Interpreter::ler_cfg_treino(const ast::Block& cfg, std::int64_t n, const st
     out.embaralhar = ef->value->boolean;
   }
   if (out.lote < 1) fail(span, ctx + ": 'lote' deve ser >= 1");
+  out.num_shards = field_int(cfg, "num_shards", 1);
+  out.shard_id = field_int(cfg, "shard_id", 0);
+  if (out.num_shards < 1) fail(span, ctx + ": 'num_shards' deve ser >= 1");
+  if (out.shard_id < 0 || out.shard_id >= out.num_shards) {
+    fail(span, ctx + ": 'shard_id' deve estar em [0, num_shards)");
+  }
   out.seed_init = 0xC1A5;
   out.seed_mistura = 7;
   if (const Item* sf = find_field(cfg, "semente");
@@ -3689,17 +3695,54 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
                                                         Span span) {
   const std::string name = decl_name(modelo_decl);
   const bool fluxo = !cfg.fluxo_csv.empty();
-  const std::int64_t n = fluxo ? cfg.fluxo_n : x.shape[0];
+  int classes = 1;
+  for (double v : yf) classes = std::max(classes, static_cast<int>(v) + 1);
+  const std::int64_t n_total = fluxo ? cfg.fluxo_n : x.shape[0];
+  if (n_total < 1) fail(span, ctx + ": dados sem linhas");
+  std::vector<std::int64_t> fluxo_rows;
+  if (fluxo) {
+    fluxo_rows.reserve(static_cast<std::size_t>(n_total / cfg.num_shards + 1));
+    for (std::int64_t i = 0; i < n_total; ++i) {
+      if (i % cfg.num_shards == cfg.shard_id) fluxo_rows.push_back(i);
+    }
+    if (fluxo_rows.empty()) {
+      fail(span, ctx + ": shard_id nao recebeu nenhuma linha");
+    }
+    std::vector<double> shard_y;
+    shard_y.reserve(fluxo_rows.size());
+    for (std::int64_t i : fluxo_rows) shard_y.push_back(yf[static_cast<std::size_t>(i)]);
+    yf = std::move(shard_y);
+  } else if (cfg.num_shards > 1) {
+    std::vector<std::int64_t> shard_rows;
+    shard_rows.reserve(static_cast<std::size_t>(n_total / cfg.num_shards + 1));
+    for (std::int64_t i = 0; i < n_total; ++i) {
+      if (i % cfg.num_shards == cfg.shard_id) shard_rows.push_back(i);
+    }
+    if (shard_rows.empty()) {
+      fail(span, ctx + ": shard_id nao recebeu nenhuma linha");
+    }
+    x = rt::fatiar_lote(x, shard_rows);
+    std::vector<double> shard_y;
+    shard_y.reserve(shard_rows.size());
+    for (std::int64_t i : shard_rows) shard_y.push_back(yf[static_cast<std::size_t>(i)]);
+    yf = std::move(shard_y);
+  }
+  const std::int64_t n = fluxo ? static_cast<std::int64_t>(fluxo_rows.size()) : x.shape[0];
   const std::int64_t f = fluxo ? cfg.fluxo_f : x.shape[1];
   const bool ce = cfg.perda == "entropia_cruzada";
   const bool mse = cfg.perda == "quadratica";
+  // For Parquet, map global row numbers from the file to this shard's local labels.
+  std::vector<std::int64_t> local_row_for_global;
+  if (fluxo && cfg.fluxo_parquet) {
+    local_row_for_global.assign(static_cast<std::size_t>(n_total), -1);
+    for (std::size_t i = 0; i < fluxo_rows.size(); ++i) {
+      local_row_for_global[static_cast<std::size_t>(fluxo_rows[i])] =
+          static_cast<std::int64_t>(i);
+    }
+  }
 
   std::vector<int> y;
-  int classes = 1;
-  for (double v : yf) {
-    y.push_back(static_cast<int>(v));
-    classes = std::max(classes, static_cast<int>(v) + 1);
-  }
+  for (double v : yf) y.push_back(static_cast<int>(v));
   // Divisao treino/validacao (deterministica pela semente).
   rt::Tensor x_tr = x;
   std::vector<int> y_tr = y;
@@ -4004,7 +4047,13 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       } else {
         fx.caminho = cfg.fluxo_csv;
         fx.alvo = cfg.fluxo_alvo;
-        fx.desloc = cfg.fluxo_desloc;
+        fx.desloc.clear();
+        for (std::int64_t global : fluxo_rows) {
+          if (global < 0 || global >= static_cast<std::int64_t>(cfg.fluxo_desloc.size())) {
+            fail(span, ctx + ": indice de shard fora dos offsets CSV");
+          }
+          fx.desloc.push_back(cfg.fluxo_desloc[static_cast<std::size_t>(global)]);
+        }
         try {
           abrir_fluxo_csv(fx);
         } catch (const std::exception& e) {
@@ -4371,13 +4420,19 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
               const std::int64_t base = base_grupo[static_cast<std::size_t>(g)];
               std::int64_t local = 0;
               for (const Value& row : *tab.list) {
+                const std::int64_t global = base + local;
+                const std::int64_t local_row =
+                    global >= 0 && global < static_cast<std::int64_t>(local_row_for_global.size())
+                        ? local_row_for_global[static_cast<std::size_t>(global)]
+                        : -1;
+                ++local;
+                if (local_row < 0) continue;
                 for (const std::string& c : cfg.fluxo_atributos) {
                   const Value* cell =
                       row.kind == ValueKind::Mapa && row.map ? row.map->find(c) : nullptr;
                   xb_span.data.push_back(cell ? static_cast<float>(cell->as_number()) : 0.0F);
                 }
-                linhas_span.push_back(base + local);
-                ++local;
+                linhas_span.push_back(local_row);
               }
             }
             xb_span.shape[0] = static_cast<std::int64_t>(linhas_span.size());

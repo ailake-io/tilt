@@ -224,7 +224,7 @@
 - [x] Implementar thread pool para operações de IO paralelas (ThreadPool reutilizável com fila protegida, limite opcional e shutdown gracioso; usado pelo servidor HTTP)
 
 ### 9.2 Escalabilidade (P3)
-- [ ] Implementar sharding de dados para processamento distribuído
+- [x] Implementar sharding de dados para processamento distribuído (num_shards/shard_id round-robin em RAM, CSV e Parquet; validação CTest)
 - [ ] Adicionar suporte a cluster mode para treinamento distribuído
 - [ ] Implementar query pushdown para conectores SQL
 

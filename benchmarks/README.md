@@ -18,3 +18,11 @@ The default all mode skips missing NumPy/PyTorch and reports that on stderr.
 The --json option emits records for automation. Timings include the result
 reduction used to keep the operation observable; compare runs on the same
 machine and with the same backend thread settings.
+
+### Sharding de treino
+
+Um bloco treino pode selecionar uma particao deterministica das linhas com
+num_shards: N e shard_id: K, usando o mesmo esquema round-robin nos dados em
+RAM, no fluxo CSV e no fluxo Parquet. Cada processo/worker recebe K em
+0..N-1; com num_shards: 1 o comportamento permanece o mesmo. A divisao de
+validacao e feita dentro das linhas do shard.
