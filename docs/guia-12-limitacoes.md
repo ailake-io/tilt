@@ -492,9 +492,11 @@ A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
     `%NN` podem corromper; só trocando o spawn por `CreateProcess`).
   - TLS carrega OpenSSL via DLL (`libssl-3-x64.dll`/`libcrypto-3-x64.dll`)
     no `PATH`; sem elas, `rediss://`/`mongodb+srv://`/kafka TLS erros claros.
-  - A suíte `ctest` continua em shell script e roda em Linux/macOS; o job
-    Windows também executa `tests/windows_functional.ps1` nativamente em
-    PowerShell, comparando interpretador, VM, JIT/fallback e exemplos ETL.
+  - O CTest no Windows registra `windows_functional`, executando
+    `tests/windows_functional.ps1` nativamente em PowerShell e cobrindo
+    interpretador, VM, JIT/fallback, exemplos ETL e rotas HTTP versionadas.
+    Testes de conectores que dependem de shell, Python ou servidores locais
+    continuam condicionados a Linux/macOS.
   - O job `connectors` do CI instala PostgreSQL, MariaDB e libmariadb, baixa
     uma libduckdb oficial fixada e roda os testes reais de PostgreSQL, MySQL,
     DuckDB e ClickHouse; o ambiente local pode continuar pulando esses testes

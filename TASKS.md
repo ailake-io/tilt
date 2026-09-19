@@ -31,7 +31,7 @@
 - [x] 12-6.6 — Logs JSON opt-in com contexto de execução dos pipelines
 - [x] 12-6.7 — Vacuum conservador de arquivos órfãos Delta/Iceberg
 - [ ] Fase 12-7 — GPU real/CUDA + AMP (deferida; não bloqueia as demais fases)
-- [x] Fase 12-8 — CI Windows com testes funcionais (build MSVC + `tests/windows_functional.ps1`); a suíte CTest completa ainda é shell-script e continua em Linux/macOS
+- [x] Fase 12-8 — CI Windows com testes funcionais (build MSVC + CTest nativo via `tests/windows_functional.ps1`; conectores shell permanecem em Linux/macOS)
 - [ ] GPU — validação em hardware CUDA real (deferida)
 
 
@@ -177,7 +177,7 @@
 - [x] Quoting `cmd.exe` (Sprint 3: `tilt_shell_quote`, `quote_test.sh`; residual % documentado)
 - [x] Implementar TLS via DLL no Windows (`libssl-3-x64.dll`)
 - [x] Adicionar suporte a SQLite/Postgres/MySQL no Windows via dlopen/LoadLibrary
-- [ ] Migrar `tests/ctest` para Windows (atualmente shell-script only)
+- [x] Migrar `tests/ctest` para Windows (CTest nativo via PowerShell; suíte shell de conectores permanece em Linux/macOS)
 
 ### 7.2 Packaging (P2)
 - [x] Implementar installer Windows com WIX (`.msi`) com upgrade path

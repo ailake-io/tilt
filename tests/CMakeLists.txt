@@ -1,3 +1,4 @@
+if(NOT WIN32)
 add_test(
   NAME golden
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_golden.sh
@@ -304,4 +305,19 @@ set_tests_properties(vector_real PROPERTIES TIMEOUT 180)
 find_program(PYTHON3 python3)
 if(PYTHON3)
   add_test(NAME lsp COMMAND ${PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/lsp_test.py $<TARGET_FILE:tilt>)
+endif()
+else()
+  find_program(POWERSHELL_EXECUTABLE NAMES pwsh powershell)
+  if(NOT POWERSHELL_EXECUTABLE)
+    message(FATAL_ERROR "PowerShell e necessario para a suite CTest do Windows")
+  endif()
+  add_test(
+    NAME windows_functional
+    COMMAND ${POWERSHELL_EXECUTABLE} -NoProfile -NonInteractive
+            -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/windows_functional.ps1
+            -Bin $<TARGET_FILE:tilt>)
+  set_tests_properties(windows_functional PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+    TIMEOUT 180)
 endif()

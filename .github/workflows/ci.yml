@@ -56,10 +56,8 @@ jobs:
           ./build/release/bin/tilt executar exemplos/etl_delta.tilt
           TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente.tilt
 
-  # Port Windows (MSVC, windows-latest): a suíte de testes é em shell script
-  # (bash/sh), então aqui o job garante que o projeto compila com o MSVC
-  # (-Werror) e o binário responde no smoke estendido (paridade com o linux).
-  # Cobertura funcional completa (ctest) segue em Linux/macOS.
+  # Port Windows (MSVC, windows-latest): o CTest registra uma suíte funcional
+  # nativa em PowerShell; os testes shell de conectores ficam em Linux/macOS.
   windows:
     runs-on: windows-latest
     steps:
@@ -84,12 +82,9 @@ jobs:
           $env:TILT_LLM = "mock"
           & $exe executar exemplos/agente.tilt
 
-      - name: functional tests (PowerShell)
+      - name: functional tests (CTest + PowerShell)
         shell: pwsh
-        run: |
-          $exe = (Get-ChildItem -Recurse -Filter tilt.exe build/release | Select-Object -First 1).FullName
-          if (-not $exe) { throw "tilt.exe nao encontrado em build/release" }
-          ./tests/windows_functional.ps1 -Bin $exe
+        run: ctest --test-dir build/release --output-on-failure
 
   connectors:
     runs-on: ubuntu-latest
