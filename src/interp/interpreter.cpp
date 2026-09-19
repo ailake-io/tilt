@@ -32,6 +32,7 @@
 #include "parser/parser.hpp"
 #include "runtime/checkpoint.hpp"
 #include "runtime/cluster.hpp"
+#include "runtime/avro.hpp"
 #include "runtime/chroma.hpp"
 #include "runtime/clickhouse.hpp"
 #include "runtime/compat.hpp"
@@ -10227,7 +10228,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     bool do_fim = false;
     std::int64_t max = 100;
-    std::string grupo, broker;
+    std::string grupo, broker, formato, schema_avro;
     bool tls = false;
     if (a.size() >= 2) {
       if (a[1].kind != ValueKind::Mapa || !a[1].map) {
@@ -10261,7 +10262,30 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         if (tv->kind != ValueKind::Logico) fail(call.span, "ler_kafka: 'tls' deve ser logico");
         tls = tv->b;
       }
+      if (const Value* fv = a[1].map->find("formato")) {
+        if (fv->kind != ValueKind::Texto || (fv->s != "texto" && fv->s != "avro")) {
+          fail(call.span, "ler_kafka: 'formato' deve ser \"texto\" ou \"avro\"");
+        }
+        formato = fv->s;
+      }
+      if (const Value* sv = a[1].map->find("schema")) {
+        if (sv->kind != ValueKind::Texto) fail(call.span, "ler_kafka: 'schema' deve ser texto");
+        schema_avro = sv->s;
+      }
     }
+    auto decodificar_avro = [&](Value raw) {
+      if (formato != "avro") return raw;
+      if (schema_avro.empty()) fail(call.span, "ler_kafka: formato avro requer 'schema'");
+      Value out = Value::lista();
+      for (const Value& payload : *raw.list) {
+        try {
+          out.list->push_back(rt::avro_confluent_decode(schema_avro, payload.s).value);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
+      return out;
+    };
     try {
       if (!grupo.empty()) {
         // Consumer group: coordenacao + checkpoint por commit de offset.
@@ -10271,9 +10295,9 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
           (void)part;
           out.list->push_back(Value::texto(valor));
         }
-        return out;
+        return decodificar_avro(std::move(out));
       }
-      return rt::kafka_ler(a[0].s, do_fim, max, broker, tls);
+      return decodificar_avro(rt::kafka_ler(a[0].s, do_fim, max, broker, tls));
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
@@ -10330,12 +10354,78 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       }
     }
     try {
-      const std::string body = a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
+      std::string body;
+      if (a.size() >= 3 && a[2].kind == ValueKind::Mapa && a[2].map) {
+        const Value* formato = a[2].map->find("formato");
+        if (formato && formato->kind != ValueKind::Texto) {
+          fail(call.span, "escrever_kafka: 'formato' deve ser texto");
+        }
+        if (formato && formato->s == "avro") {
+          const Value* schema = a[2].map->find("schema");
+          const Value* id = a[2].map->find("id_esquema");
+          if (!schema || schema->kind != ValueKind::Texto || !id || id->kind != ValueKind::Inteiro) {
+            fail(call.span, "escrever_kafka: Avro requer schema e id_esquema");
+          }
+          body = rt::avro_confluent_encode(schema->s, static_cast<std::int32_t>(id->i), a[1]);
+        }
+      }
+      if (body.empty()) body = a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
       rt::kafka_produzir(a[0].s, body, static_cast<std::int32_t>(particao), opt, tls);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }
     return Value::nulo();
+  }
+  if (name == "avro_codificar") {
+    auto a = args();
+    if (a.size() != 3 || a[1].kind != ValueKind::Texto || a[2].kind != ValueKind::Inteiro) {
+      fail(call.span, "avro_codificar espera (valor, schema_json, id_esquema)");
+    }
+    try {
+      return Value::texto(rt::avro_confluent_encode(
+          a[1].s, static_cast<std::int32_t>(a[2].i), a[0]));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "avro_decodificar") {
+    auto a = args();
+    if (a.size() != 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span, "avro_decodificar espera (payload, schema_json)");
+    }
+    try {
+      const rt::AvroConfluentValue decoded = rt::avro_confluent_decode(a[1].s, a[0].s);
+      Value out = Value::mapa();
+      out.map->set("id_esquema", Value::inteiro(decoded.schema_id));
+      out.map->set("valor", decoded.value);
+      return out;
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "avro_schema") {
+    auto a = args();
+    if (a.size() != 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Inteiro) {
+      fail(call.span, "avro_schema espera (url_registry, id_esquema)");
+    }
+    try {
+      return Value::texto(rt::avro_schema_registry_get(
+          a[0].s, static_cast<std::int32_t>(a[1].i)));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "avro_registrar") {
+    auto a = args();
+    if (a.size() != 3 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto ||
+        a[2].kind != ValueKind::Texto) {
+      fail(call.span, "avro_registrar espera (url_registry, subject, schema_json)");
+    }
+    try {
+      return Value::inteiro(rt::avro_schema_registry_register(a[0].s, a[1].s, a[2].s));
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
   }
   if (name == "transacao_kafka") {
     auto a = args();

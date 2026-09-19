@@ -1,5 +1,6 @@
 #include "runtime/iceberg.hpp"
 
+#include "runtime/avro.hpp"
 #include "runtime/compat.hpp"
 
 #include <algorithm>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include "runtime/json.hpp"
+#include "runtime/http_client.hpp"
 #include "runtime/parquet.hpp"
 #include "runtime/snappy_codec.hpp"
 
@@ -3377,6 +3379,88 @@ void list_iceberg_parquets(const std::string& current, std::vector<std::string>&
 }
 
 }  // namespace
+
+std::string avro_confluent_encode(const std::string& schema_json, std::int32_t schema_id,
+                                  const Value& value) {
+  if (schema_id < 0) die("avro: schema id deve ser >= 0");
+  Value schema;
+  try {
+    schema = json_parse(schema_json);
+  } catch (const std::exception& e) {
+    die("avro: schema JSON invalido: " + std::string(e.what()));
+  }
+  std::string out;
+  out.reserve(5);
+  out.push_back('\0');
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    out.push_back(static_cast<char>((static_cast<std::uint32_t>(schema_id) >> shift) & 0xFFu));
+  }
+  try {
+    avro_encode(out, schema, value);
+  } catch (const std::exception& e) {
+    die(e.what());
+  }
+  return out;
+}
+
+AvroConfluentValue avro_confluent_decode(const std::string& schema_json,
+                                         const std::string& payload) {
+  if (payload.size() < 5 || static_cast<unsigned char>(payload[0]) != 0) {
+    die("avro: envelope Confluent invalido (magic byte 0 ausente)");
+  }
+  const auto u8 = [&payload](std::size_t i) {
+    return static_cast<std::uint32_t>(static_cast<unsigned char>(payload[i]));
+  };
+  const std::int32_t schema_id = static_cast<std::int32_t>((u8(1) << 24) | (u8(2) << 16) |
+                                                            (u8(3) << 8) | u8(4));
+  Value schema;
+  try {
+    schema = json_parse(schema_json);
+  } catch (const std::exception& e) {
+    die("avro: schema JSON invalido: " + std::string(e.what()));
+  }
+  const std::string body = payload.substr(5);
+  AvroDecoder dec(body, "envelope Confluent");
+  Value value;
+  try {
+    value = avro_decode(dec, schema);
+  } catch (const std::exception& e) {
+    die(e.what());
+  }
+  if (!dec.done()) die("avro: payload possui bytes depois do valor principal");
+  return {schema_id, std::move(value)};
+}
+
+std::string avro_schema_registry_get(const std::string& base_url, std::int32_t schema_id) {
+  if (schema_id < 0) die("avro: schema id deve ser >= 0");
+  std::string url = base_url;
+  while (!url.empty() && url.back() == '/') url.pop_back();
+  const Value body = http_get_json(url + "/schemas/ids/" + std::to_string(schema_id));
+  if (body.kind != ValueKind::Mapa || !body.map) die("avro: resposta do registry nao e um objeto");
+  const Value* schema = body.map->find("schema");
+  if (!schema || schema->kind != ValueKind::Texto) {
+    die("avro: resposta do registry nao contem 'schema'");
+  }
+  return schema->s;
+}
+
+std::int32_t avro_schema_registry_register(const std::string& base_url,
+                                           const std::string& subject,
+                                           const std::string& schema_json) {
+  if (subject.empty()) die("avro: subject do registry nao pode ser vazio");
+  std::string url = base_url;
+  while (!url.empty() && url.back() == '/') url.pop_back();
+  Value request = Value::mapa();
+  request.map->set("schema", Value::texto(schema_json));
+  const Value body = http_post_json(url + "/subjects/" + subject + "/versions", request,
+                                    {{"Content-Type", "application/vnd.schemaregistry.v1+json"}});
+  if (body.kind != ValueKind::Mapa || !body.map) die("avro: resposta do registry nao e um objeto");
+  const Value* id = body.map->find("id");
+  if (!id || id->kind != ValueKind::Inteiro || id->i < 0 || id->i > 2147483647) {
+    die("avro: resposta do registry nao contem id valido");
+  }
+  return static_cast<std::int32_t>(id->i);
+}
 
 void iceberg_write(const std::string& dir, const Value& tabela,
                    const std::vector<std::string>& part_cols) {

@@ -964,6 +964,16 @@ pipeline eventos:
   resolve o líder da partição via metadata e conecta nele. `{tls: verdadeiro}`
   liga TLS (todas as conexões da chamada: metadata, produce/fetch e coordenação
   de grupo; ver nota de TLS na seção Redis).
+- Avro/Schema Registry (envelope Confluent): `avro_codificar valor, schema_json,
+  id_esquema` devolve `magic-byte 0 + schema-id big-endian + payload Avro`; o
+  inverso é `avro_decodificar payload, schema_json`, que devolve
+  `{ id_esquema:, valor: }`. Para buscar ou registrar schemas no registry use
+  `avro_schema url, id_esquema` e `avro_registrar url, subject, schema_json`.
+  `escrever_kafka` aceita `{ formato: "avro", schema:, id_esquema: }` e
+  `ler_kafka` aceita `{ formato: "avro", schema: }`, devolvendo os valores
+  decodificados. O codec suporta os tipos Avro usados pelo runtime (primitivos,
+  records, arrays, maps e uniões anuláveis); compatibilidade/evolução de schema
+  continua sendo responsabilidade do Schema Registry.
 - `transacao_kafka id, registros, {broker:, acks:, tentativas:, tls:}`: inicia uma
   transação Kafka real com `FindCoordinator`, `InitProducerId`,
   `AddPartitionsToTxn`, Produce v3 com o bit transacional e `EndTxn`. Cada item

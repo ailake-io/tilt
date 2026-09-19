@@ -244,7 +244,9 @@
 ### 10.2 Formatos (P2)
 - [x] Adicionar suporte a Parquet com ZSTD compression (codec 6, dlopen de libzstd, leitura/escrita e teste pyarrow nos dois sentidos)
 - [ ] Implementar Parquet com encryption (AWS KMS / local key)
-- [ ] Adicionar suporte a Avro (para Kafka schema registry)
+- [x] Adicionar suporte a Avro para Kafka Schema Registry (envelope Confluent,
+  records/arrays/maps/uniões, `avro_codificar`/`avro_decodificar`, lookup e
+  registro REST e integração `escrever_kafka`/`ler_kafka`)
 - [ ] Implementar Delta Lake transaction log parsing completo
 
 ---

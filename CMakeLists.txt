@@ -56,6 +56,8 @@ add_library(tilt_core STATIC
   src/runtime/http_client.cpp
   src/runtime/gpu_runtime.cpp
   src/runtime/parquet.cpp
+  # Avro OCF/Confluent vive no mesmo TU do Iceberg para reutilizar o codec
+  # binario e os codecs de bloco sem duplicar a implementacao.
   src/runtime/delta.cpp
   src/runtime/iceberg.cpp
   src/runtime/iceberg_catalog_server.cpp
