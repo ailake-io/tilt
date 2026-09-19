@@ -271,8 +271,12 @@ fallback (`reserva:`); em modo multi-juiz o prompt pede JSON com `veredito` e
 `juiz indeciso`).
 
 `amostra: N` + `semente:` (default 7) rodam no máximo N casos, embaralhados
-de forma determinística (xorshift64*, o mesmo do init Xavier) — o resumo
-mostra `(amostra N/total, semente S)`. `registrar_em: "run.json"` grava o run local (média, limiar, métricas, amostra/semente e por caso `{indice, passou, motivo, saida}`). Para enviar ao MLflow Tracking REST, use `registrar_em: "mlflow://host/experimento"`.
+de forma determinística (xorshift64*, o mesmo do init Xavier). Para manter a proporção entre grupos,
+combine com `estratificar_por: grupo` (nome ou texto): o campo deve existir em todos os casos e as cotas
+são distribuídas pelo maior resto, com desempate determinístico. O resumo identifica a seleção, por exemplo
+`(amostra N/total, semente S, estratificada por grupo)`. `registrar_em: "run.json"` grava o run local
+(média, limiar, métricas, amostra/semente, campo de estratificação e por caso `{indice, passou, motivo, saida}`).
+Para enviar ao MLflow Tracking REST, use `registrar_em: "mlflow://host/experimento"`.
 
 ```tilt run
 llm gpt:

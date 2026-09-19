@@ -16,6 +16,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <ostream>
 #include <random>
@@ -6337,23 +6338,88 @@ void Interpreter::run_avaliacao(const Item& decl) {
       if (sev.kind != ValueKind::Inteiro) throw std::runtime_error("'semente' deve ser inteiro");
       semente = sev.i;
     }
+    std::string estratificar_por;
+    if (const Item* fe = find_field(cfg, "estratificar_por"); fe && fe->value) {
+      if (fe->value->kind != ExprKind::Name && fe->value->kind != ExprKind::TextLit) {
+        throw std::runtime_error("'estratificar_por' deve ser o nome/texto de um campo dos casos");
+      }
+      estratificar_por = fe->value->text;
+      if (amostra < 0) {
+        throw std::runtime_error(
+            "'estratificar_por' exige 'amostra:' para ativar a amostragem estratificada");
+      }
+      for (std::size_t k = 0; k < casos.size(); ++k) {
+        if (!casos[k].map->find(estratificar_por)) {
+          throw std::runtime_error("caso " + std::to_string(k) +
+                                   " sem o campo de estratificacao '" + estratificar_por + "'");
+        }
+      }
+    }
     std::vector<std::size_t> ordem;
     for (std::size_t k = 0; k < casos.size(); ++k) ordem.push_back(k);
     std::size_t n_rodar = casos.size();
     const bool amostrada = amostra >= 0 && amostra < static_cast<std::int64_t>(casos.size());
+    const bool estratificada = amostrada && !estratificar_por.empty();
     if (amostrada) {
       // xorshift64* — mesmo gerador do init Xavier: deterministico na semente.
-      std::uint64_t st =
-          semente ? static_cast<std::uint64_t>(semente) : 0x9E3779B97F4A7C15ULL;
+      std::uint64_t st = semente ? static_cast<std::uint64_t>(semente) : 0x9E3779B97F4A7C15ULL;
       auto prox = [&]() {
         st ^= st >> 12;
         st ^= st << 25;
         st ^= st >> 27;
         return st * 0x2545F4914F6CDD1DULL;
       };
-      for (std::size_t k = ordem.size() - 1; k > 0; --k) {
-        const std::size_t j = static_cast<std::size_t>(prox() % (k + 1));
-        std::swap(ordem[k], ordem[j]);
+      auto embaralhar = [&](std::vector<std::size_t>& indices) {
+        for (std::size_t k = indices.size(); k > 1; --k) {
+          const std::size_t j = static_cast<std::size_t>(prox() % k);
+          std::swap(indices[k - 1], indices[j]);
+        }
+      };
+      if (!estratificada) {
+        embaralhar(ordem);
+      } else {
+        struct GrupoAmostra {
+          std::string chave;
+          std::vector<std::size_t> indices;
+          std::size_t alvo = 0;
+          std::uint64_t resto = 0;
+        };
+        std::map<std::string, std::vector<std::size_t>> por_valor;
+        for (std::size_t k = 0; k < casos.size(); ++k) {
+          por_valor[rt::json_dump(*casos[k].map->find(estratificar_por))].push_back(k);
+        }
+        std::vector<GrupoAmostra> grupos;
+        grupos.reserve(por_valor.size());
+        std::size_t alocados = 0;
+        const std::uint64_t total = static_cast<std::uint64_t>(casos.size());
+        const std::uint64_t desejados = static_cast<std::uint64_t>(amostra);
+        for (auto& [chave, indices] : por_valor) {
+          const std::uint64_t produto = desejados * static_cast<std::uint64_t>(indices.size());
+          GrupoAmostra grupo{chave, std::move(indices), static_cast<std::size_t>(produto / total),
+                             produto % total};
+          grupo.alvo = std::min(grupo.alvo, grupo.indices.size());
+          alocados += grupo.alvo;
+          embaralhar(grupo.indices);
+          grupos.push_back(std::move(grupo));
+        }
+        std::size_t restantes = static_cast<std::size_t>(amostra) - alocados;
+        while (restantes > 0) {
+          auto candidato = grupos.end();
+          for (auto it = grupos.begin(); it != grupos.end(); ++it) {
+            if (it->alvo >= it->indices.size()) continue;
+            if (candidato == grupos.end() || it->resto > candidato->resto) candidato = it;
+          }
+          if (candidato == grupos.end()) break;
+          ++candidato->alvo;
+          candidato->resto = 0;
+          --restantes;
+        }
+        ordem.clear();
+        ordem.reserve(static_cast<std::size_t>(amostra));
+        for (const GrupoAmostra& grupo : grupos) {
+          ordem.insert(ordem.end(), grupo.indices.begin(), grupo.indices.begin() + grupo.alvo);
+        }
+        embaralhar(ordem);
       }
       n_rodar = static_cast<std::size_t>(amostra);
     }
@@ -6547,7 +6613,9 @@ void Interpreter::run_avaliacao(const Item& decl) {
     out_ << "avaliacao " << name << ": " << passou << "/" << n_rodar << " passou | media "
          << media_s << " (limiar " << limiar_s << ")";
     if (amostrada) {
-      out_ << " (amostra " << n_rodar << "/" << casos.size() << ", semente " << semente << ")";
+      out_ << " (amostra " << n_rodar << "/" << casos.size() << ", semente " << semente;
+      if (estratificada) out_ << ", estratificada por " << estratificar_por;
+      out_ << ")";
     }
     out_ << "\n";
 
@@ -6582,6 +6650,7 @@ void Interpreter::run_avaliacao(const Item& decl) {
         if (amostrada) {
           doc.map->set("amostra", Value::inteiro(static_cast<std::int64_t>(n_rodar)));
           doc.map->set("semente", Value::inteiro(semente));
+          if (estratificada) doc.map->set("estratificar_por", Value::texto(estratificar_por));
         }
         Value rcs = Value::lista();
         for (const Registro& r : registros) {

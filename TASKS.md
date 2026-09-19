@@ -137,7 +137,7 @@
 
 ### 4.3 Avaliação (P2)
 - [x] Implementar juiz multi-cadeia estruturada (`cadeia: [...]`, voto maioria/unanimidade e veredito JSON)
-- [ ] Implementar amostragem estratificada (atualmente só por contagem)
+- [x] Implementar amostragem estratificada (estratificar_por: com cotas proporcionais e desempate por maior resto)
 - [x] Adicionar `registrar_em` com POST REST para experimento e avaliação
 
 ---
