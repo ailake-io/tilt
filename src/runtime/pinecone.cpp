@@ -107,6 +107,21 @@ std::string vec_json(const std::vector<float>& vec) {
 
 }  // namespace
 
+void pinecone_ensure_namespace(const std::string& base, const std::string& ns) {
+  Value parsed;
+  try {
+    parsed = json_parse(http_json("POST", base + "/describe_index_stats", "{}"));
+  } catch (const std::exception& e) {
+    die(std::string("nao foi possivel verificar namespace ") + ns + ": " + e.what());
+  }
+  const Value* namespaces =
+      parsed.kind == ValueKind::Mapa && parsed.map ? parsed.map->find("namespaces") : nullptr;
+  if (!namespaces || namespaces->kind != ValueKind::Mapa || !namespaces->map ||
+      !namespaces->map->find(ns)) {
+    die("namespace nao encontrado: " + ns);
+  }
+}
+
 void pinecone_upsert(const std::string& base, const std::string& ns,
                      const std::string& id, const std::string& text,
                      const std::vector<float>& vec) {

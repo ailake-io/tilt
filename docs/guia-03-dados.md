@@ -1207,9 +1207,10 @@ mesmo padrão do Qdrant/Weaviate). Os embeddings continuam vindo de
 é obrigatória (header `Api-Key`); ausente, o erro é claro antes da rede.
 `inserir` faz upsert (`POST /vectors/upsert`,
 `{namespace, vectors: [{id, values, metadata: {texto}}]}`); `buscar` usa
-`POST /query` (`{namespace, vector, topK}`) e devolve `{ id, score }` — o
-score do Pinecone já é similaridade de cosseno. O índice deve **já existir**
-na conta: criar índice é control plane e fica fora de escopo. Coberto por
+`POST /query` (`{namespace, vector, topK}`) e devolve `{ id, score }`; o score
+do Pinecone já é similaridade de cosseno. Depois do upsert, `inserir` valida o
+namespace com `describe_index_stats`, e `buscar` faz essa validação antes da query.
+O índice deve **já existir** na conta: criar índice é control plane e fica fora de escopo.
 `tests/pinecone_test.sh` (mock REST sobre TLS com cert auto-assinado +
 embeddings em modo `mock`).
 

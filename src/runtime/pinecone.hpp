@@ -14,6 +14,8 @@ namespace tilt::rt {
 // {namespace, vectors: [{id, values, metadata: {texto}}]}; busca:
 // POST /query {namespace, vector, topK} -> matches[] com id/score (o score do
 // Pinecone ja e similaridade de cosseno: quanto maior, melhor).
+// Verifica que o namespace existe no data plane (upsert ja o cria implicitamente).
+void pinecone_ensure_namespace(const std::string& base, const std::string& ns);
 void pinecone_upsert(const std::string& base, const std::string& ns,
                      const std::string& id, const std::string& text,
                      const std::vector<float>& vec);

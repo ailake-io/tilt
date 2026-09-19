@@ -98,6 +98,8 @@ class MockPinecone(http.server.BaseHTTPRequestHandler):
         try:
             if not partes and metodo == "GET":  # readiness
                 return self._enviar({"status": "ok"})
+            if partes == ["describe_index_stats"] and metodo == "POST":
+                return self._enviar({"namespaces": {name: {"vectorCount": len(items)} for name, items in namespaces.items()}})
             if partes == ["vectors", "upsert"] and metodo == "POST":
                 corpo = self._corpo()
                 ns = corpo.get("namespace", "")
@@ -214,7 +216,7 @@ check_output() {
     echo "saida sem 'top1: b1': $out"; fail=1;
   }
   # 404 de namespace desconhecido com a mensagem do servidor
-  echo "$out" | grep -q "erro-404: pinecone: namespace desconhecido: fantasma" || {
+  echo "$out" | grep -q "erro-404: pinecone: namespace nao encontrado: fantasma" || {
     echo "saida sem o 404 capturado: $out"; fail=1;
   }
   return "$fail"
@@ -251,6 +253,10 @@ depois=$(grep -c . "$tmp/log" 2>/dev/null || echo 0)
 [ "$depois" = "$antes" ] || {
   echo "rodada sem chave tocou na rede (log $antes -> $depois linhas)"
   exit 1
+}
+
+grep -q "POST /describe_index_stats" "$tmp/log" || {
+  echo "ensure de namespace nao foi chamado"; exit 1;
 }
 
 # conferencia independente via HTTP: os 3 vetores restam no namespace ns1

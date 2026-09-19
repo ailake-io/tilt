@@ -6979,6 +6979,13 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     } else {
       add_one(v);
     }
+    if (pinecone) {
+      try {
+        rt::pinecone_ensure_namespace(pinecone_base, pinecone_ns);
+      } catch (const std::exception& e) {
+        fail(call.span, std::string(e.what()));
+      }
+    }
     return Value::inteiro(added);
   }
 
@@ -6994,6 +7001,13 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
     Value out = Value::lista();
     if (qdrant || pgvector || weaviate || pinecone || chroma) {
+      if (pinecone) {
+        try {
+          rt::pinecone_ensure_namespace(pinecone_base, pinecone_ns);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
       std::vector<std::pair<std::string, double>> hits;
       try {
         if (qdrant) {

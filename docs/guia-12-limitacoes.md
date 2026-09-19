@@ -285,7 +285,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   índice é control plane, fora de escopo); sempre HTTPS; `PINECONE_API_KEY`
   é obrigatória (header `Api-Key`), com erro claro antes da rede quando
   ausente; o score já é similaridade de cosseno (maior = melhor, sem conversão
-  como no Weaviate); sem `ensure` de namespace (o upsert cria implicitamente);
+  como no Weaviate); `ensure` consulta `describe_index_stats` e valida o namespace antes de buscar; o upsert continua criando-o implicitamente;
   `buscar` devolve `id` e `score`, sem o `texto` (que vai no `metadata.texto`).
 - Chroma: HTTP puro, sem auth (Chroma open-source padrão; Chroma Cloud com
   auth/tls fica fora de escopo); a coleção é get-or-create (`POST
