@@ -128,6 +128,22 @@ cosign verify-blob tilt-0.1.0-Linux-x86_64.tar.gz \
 
 ### Release no GitHub (automatizado)
 
+### Atualização automática
+
+Em instalações POSIX, o pacote instala o auxiliar `tilt-atualizar`. Ele consulta a
+Release mais recente, baixa o tarball da plataforma, confere o `.sha256` e troca
+binário e stdlib somente depois da validação:
+
+```bash
+tilt-atualizar --check       # apenas verifica se há versão nova
+tilt-atualizar               # atualiza ~/.local (prefixo padrão)
+tilt-atualizar --prefix=/usr/local  # pode exigir sudo
+```
+
+A atualização aceita `--version=vX.Y.Z` para fixar uma release e `--force` para
+reinstalar a versão atual. O updater é POSIX (Linux/macOS); no Windows, use o
+MSI/winget publicado na Release.
+
 O workflow `.github/workflows/release.yml` faz isso sozinho a cada tag `v*`:
 
 ```bash

@@ -182,7 +182,7 @@
 ### 7.2 Packaging (P2)
 - [x] Implementar installer Windows com WIX (`.msi`) com upgrade path
 - [x] Adicionar assinatura de binário para releases Linux (Sigstore/Cosign keyless; bundles `.sigstore.json` anexados)
-- [ ] Implementar auto-updater para o tilt CLI
+- [x] Implementar auto-updater para o tilt CLI (`tilt-atualizar`, checksum SHA-256 e troca segura de binário/stdlib)
 - [ ] Criar snap extension points para integrações (banco de dados, GPU)
 
 ### 7.3 CI/CD (P2)

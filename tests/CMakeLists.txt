@@ -155,6 +155,12 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/quote_test.sh)
 
 add_test(
+  NAME update_script
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/update_script_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+add_test(
   NAME parquet
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/parquet_test.sh
           $<TARGET_FILE:tilt>
