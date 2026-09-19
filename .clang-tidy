@@ -1,0 +1,3 @@
+Checks: '-*,bugprone-use-after-move,bugprone-suspicious-memset-usage,bugprone-infinite-loop,bugprone-macro-parentheses,performance-move-const-arg,performance-for-range-copy'
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*/src/.*'

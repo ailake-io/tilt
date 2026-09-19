@@ -22,6 +22,29 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
         run: tests/lint_test.sh "$BASE_SHA" "$HEAD_SHA"
 
+  lint_cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: install clang-tidy and cpplint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+          python3 -m pip install --user --disable-pip-version-check cpplint==2.0.0
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: configure compile database
+        run: cmake -S . -B build/lint -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: lint changed C/C++ files
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: tests/lint_cpp_test.sh "$BASE_SHA" "$HEAD_SHA" build/lint
+
   build:
     strategy:
       fail-fast: false

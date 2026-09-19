@@ -189,7 +189,7 @@
 - [x] Adicionar testes de interoperabilidade Spark real no CI (CTest roda `spark_test` e `spark_catalog`)
 - [x] Adicionar testes de regression para conectores TLS (`tests/tls_test.sh`)
 - [x] Implementar testes cross-compilation ARM64 no CI (`arm64_codegen`)
-- [ ] Adicionar linting de código C++ (clang-tidy, cpplint) no CI
+- [x] Adicionar linting de código C++ (clang-tidy, cpplint) no CI (job incremental com compile database)
 
 ---
 

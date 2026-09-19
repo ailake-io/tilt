@@ -2298,8 +2298,9 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
           l.kind = Layer::Flatten;
           l.plano = 1;
           for (std::int64_t d : forma) l.plano *= d;
+          const std::int64_t plano = l.plano;
           layers.push_back(std::move(l));
-          forma = {l.plano};
+          forma = {plano};
         } else if (key == "agrupamento_max") {
           if (!value ||
               (value->kind != ExprKind::IntLit &&
