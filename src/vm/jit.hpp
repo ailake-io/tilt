@@ -22,7 +22,7 @@ class Jit {
   rt::Value run(const Chunk& chunk, std::vector<rt::Value> args) const;
 
  private:
-  std::ostream& out_;
+  [[maybe_unused]] std::ostream& out_;
 };
 
 }  // namespace tilt::vm
