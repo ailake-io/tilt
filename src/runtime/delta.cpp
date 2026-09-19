@@ -1440,7 +1440,9 @@ Value delta_read_changes(const std::string& dir, long long de, long long ate) {
             }
           }
         }
-        row.map->set("_change_type", Value::texto(change));
+        if (std::string(change) != "cdc" || !row.map->find("_change_type")) {
+          row.map->set("_change_type", Value::texto(change));
+        }
         row.map->set("_commit_version", Value::inteiro(versao));
         row.map->set("_commit_timestamp", Value::inteiro(timestamp));
         out.list->push_back(std::move(row));
@@ -1449,8 +1451,16 @@ Value delta_read_changes(const std::string& dir, long long de, long long ate) {
     if (!cdc.empty()) {
       for (const Value& a : cdc) append_file(a, "cdc");
     } else {
-      for (const Value& a : adds) append_file(a, "insert");
-      for (const Value& a : removes) append_file(a, "delete");
+      auto data_change = [](const Value& action) {
+        const Value* v = action.map ? action.map->find("dataChange") : nullptr;
+        return !v || v->kind != ValueKind::Logico || v->b;
+      };
+      for (const Value& a : adds) {
+        if (data_change(a)) append_file(a, "insert");
+      }
+      for (const Value& a : removes) {
+        if (data_change(a)) append_file(a, "delete");
+      }
     }
   }
   return out;
