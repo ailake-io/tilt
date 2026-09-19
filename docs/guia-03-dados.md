@@ -985,6 +985,10 @@ pipeline eventos:
   com `janela:` e `agenda:`, a fonte **com** `grupo:` faz a janela acumular
   só mensagens novas a cada tick, porque o offset fica commitado no broker:
 
+O exemplo completo [`exemplos/kafka_streaming.tilt`](../exemplos/kafka_streaming.tilt)
+processa um lote de eventos com `janela:` e imprime cada evento recebido. Ele é
+exercitado pelo teste de integração `tests/kafka_test.sh` usando o broker mock.
+
 ```tilt check
 # Janela sobre Kafka com grupo (checkpoint no broker); roda com --agendar.
 fonte pedidos_kafka:

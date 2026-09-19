@@ -668,6 +668,12 @@ out=$(
     "$BIN" executar "${2:-${0%/*}/fixtures/kafka_roundtrip.tilt}"
 )
 
+# --- exemplo de streaming com janela + checkpoint por consumer group ------------
+out_stream=$(
+  env KAFKA_BOOTSTRAP="127.0.0.1:$PORTA" \
+    "$BIN" executar "${0%/*}/../exemplos/kafka_streaming.tilt"
+)
+
 # --- consumer group + fonte kafka (fixture kafka_grupo.tilt) ---------------------
 out2=$(
   env KAFKA_BOOTSTRAP="127.0.0.1:$PORTA" \
@@ -740,6 +746,17 @@ depois=$(echo "$out" | grep -n "msg-2" | head -1 | cut -d: -f1)
 }
 echo "$out" | grep -q "^2$" || { echo "saida sem tamanho 2: $out"; fail=1; }
 
+# O exemplo consome as duas mensagens produzidas no roundtrip e processa um lote.
+echo "$out_stream" | grep -q "^lote recebido: 2$" || {
+  echo "streaming: lote esperado de 2 eventos: $out_stream"; fail=1;
+}
+echo "$out_stream" | grep -q "msg-1" || {
+  echo "streaming: saida sem 'msg-1': $out_stream"; fail=1;
+}
+echo "$out_stream" | grep -q "msg-2" || {
+  echo "streaming: saida sem 'msg-2': $out_stream"; fail=1;
+}
+
 # (b) 1a leitura do grupo devolve as 3 mensagens, em ordem (1 linha: lista)
 echo "$out2" | grep -q "^\[c-1, c-2, c-3\]$" || {
   echo "grupo: esperado '[c-1, c-2, c-3]': $out2"; fail=1;
@@ -771,9 +788,10 @@ echo "$out_idem" | grep -q "^\[r-1\]$" || { echo "reintento errado: $out_idem"; 
 echo "$out_idem" | grep -q "^\[i-1, i-2\]$" || { echo "idem errado: $out_idem"; fail=1; }
 echo "$out_idem" | grep -q "^\[d-1\]$" || { echo "idem2 duplicado?: $out_idem"; fail=1; }
 echo "$out_idem" | grep -q "^\[l-1\]$" || { echo "legado errado: $out_idem"; fail=1; }
-# 4 fetches dos fixtures originais + 1 por consumidor (cada um so busca a sua
-# particao) no cenario de rebalanceamento + 4 do cenario idempotente
-[ "$fetches" = "10" ] || { echo "esperado 10 FETCH, obtido $fetches"; cat "$tmp/log"; fail=1; }
+# 1 fetch extra do exemplo de streaming, 4 fetches dos fixtures originais +
+# 1 por consumidor (cada um so busca a sua particao) no cenario de
+# rebalanceamento + 4 do cenario idempotente
+[ "$fetches" = "11" ] || { echo "esperado 11 FETCH, obtido $fetches"; cat "$tmp/log"; fail=1; }
 
 # coordenacao do consumer group g1: 2 chamadas no fixture kafka_grupo
 for ev in JOINGROUP SYNCGROUP OFFSETFETCH OFFSETCOMMIT LEAVEGROUP; do

@@ -1,0 +1,17 @@
+# Streaming de eventos Kafka com janela e checkpoint por consumer group.
+# Execute com KAFKA_BOOTSTRAP apontando para um broker Kafka compatível.
+
+fonte pedidos:
+  tipo: kafka
+  topico: "pedidos"
+  grupo: "exemplo-streaming"
+  desde: "inicio"
+  max: 10
+
+pipeline processar_pedidos:
+  entrada: pedidos
+  janela: 2
+  passos:
+    - imprimir "lote recebido:", tamanho(linhas)
+    - para cada evento em linhas:
+        imprimir "evento:", evento

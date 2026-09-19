@@ -210,7 +210,7 @@
   validado com mock e incluído no smoke do CI)
 - [x] Adicionar exemplo de agente multi-étapas com ferramentas reais (`exemplos/agente_multi_etapas.tilt`, validado no smoke CI)
 - [x] Adicionar exemplo de treino de modelo com dados reais (`exemplos/treino.tilt`)
-- [ ] Adicionar exemplo de streaming com Kafka (tema de eventos)
+- [x] Adicionar exemplo de streaming com Kafka (tema de eventos) (`exemplos/kafka_streaming.tilt`, validado em `tests/kafka_test.sh`)
 
 ---
 
