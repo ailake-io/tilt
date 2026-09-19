@@ -60,6 +60,12 @@ void delta_append(const std::string& dir, const Value& tabela,
 Value delta_read(const std::string& dir, const Value* onde = nullptr,
                  long long versao = -1);
 
+// Lê Change Data Feed entre versões inclusivas. Quando o commit possui
+// ações `cdc`, elas têm precedência; caso contrário, `add`/`remove` viram
+// `insert`/`delete`. Cada linha recebe `_change_type`, `_commit_version` e
+// `_commit_timestamp`.
+Value delta_read_changes(const std::string& dir, long long de, long long ate = -1);
+
 // Compacta os arquivos ativos preservando as colunas de partição; arquivos
 // antigos ficam órfãos para delta_vacuum remover.
 void delta_optimize(const std::string& dir);

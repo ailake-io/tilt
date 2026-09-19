@@ -372,6 +372,40 @@ std::string partition_value_string(const Value& v, const std::string& col) {
   }
 }
 
+// O protocolo Delta armazena `path` como URI relativa. Spark/delta-rs podem
+// percent-encode espacos e caracteres reservados; `file://` absoluto tambem
+// aparece em alguns writers. Normaliza os dois casos antes do acesso local.
+std::string decode_delta_path(std::string path) {
+  if (path.rfind("file://", 0) == 0) path.erase(0, 7);
+  std::string out;
+  out.reserve(path.size());
+  auto hex = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  };
+  for (std::size_t i = 0; i < path.size(); ++i) {
+    if (path[i] == '%' && i + 2 < path.size()) {
+      const int hi = hex(path[i + 1]);
+      const int lo = hex(path[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        out.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(path[i]);
+  }
+  return out;
+}
+
+std::string delta_data_path(const std::string& dir, const std::string& path) {
+  const std::string decoded = decode_delta_path(path);
+  if (!decoded.empty() && decoded.front() == '/') return decoded;
+  return dir + "/" + decoded;
+}
+
 // partitionValues do log sao strings; converte para o tipo declarado no
 // schema (inteiro/decimal/logico). Conversao impossivel mantem texto.
 Value partition_rehydrate(const std::string& s, const std::string& delta_type) {
@@ -611,7 +645,7 @@ std::vector<CpAdd> coletar_ativos(const std::vector<std::string>& versions) {
         const Value* p = add->map->find("path");
         if (!p || p->kind != ValueKind::Texto) continue;
         CpAdd a;
-        a.path = p->s;
+        a.path = decode_delta_path(p->s);
         if (const Value* pv = add->map->find("partitionValues");
             pv && pv->kind == ValueKind::Mapa && pv->map) {
           Value cpi = Value::mapa();
@@ -759,7 +793,7 @@ std::optional<StdCheckpoint> load_standard_checkpoint(const std::string& log_dir
           const Value* p = add->map->find("path");
           if (!p || p->kind != ValueKind::Texto) continue;
           CpAdd a;
-          a.path = p->s;
+          a.path = decode_delta_path(p->s);
           if (const Value* pv = add->map->find("partitionValues");
               pv && pv->kind == ValueKind::Mapa && pv->map) {
             Value cpi = Value::mapa();
@@ -1222,7 +1256,7 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
         const Value* p = add->map->find("path");
         if (p && p->kind == ValueKind::Texto) {
           ActiveFile f;
-          f.path = p->s;
+          f.path = decode_delta_path(p->s);
           if (const Value* pv = add->map->find("partitionValues");
               pv && pv->kind == ValueKind::Mapa && pv->map) {
             for (const auto& kv : pv->map->items) {
@@ -1278,7 +1312,7 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
   Value out = Value::tabela();
   std::vector<std::string> schema_cols;
   for (const ActiveFile& f : active) {
-    Value chunk = parquet_read(dir + "/" + f.path);
+    Value chunk = parquet_read(delta_data_path(dir, f.path));
     if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
       die("arquivo '" + f.path + "' nao e uma tabela parquet");
     }
@@ -1325,6 +1359,98 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
         }
         if (passa_residual(row)) out.list->push_back(std::move(row));
       }
+    }
+  }
+  return out;
+}
+
+Value delta_read_changes(const std::string& dir, long long de, long long ate) {
+  if (de < 0) die("ler_delta_mudancas: versao inicial deve ser >= 0");
+  const std::vector<std::string> all = list_delta_versions(dir + "/_delta_log");
+  if (all.empty()) die("tabela em '" + dir + "' nao possui transaction log");
+  const long long ultimo = versao_de_json(all.back());
+  if (ate < 0) ate = ultimo;
+  if (ate < de) die("ler_delta_mudancas: 'ate' deve ser >= 'de'");
+
+  Value out = Value::tabela();
+  for (const std::string& path : all) {
+    const long long versao = versao_de_json(path);
+    if (versao < de || versao > ate) continue;
+    std::ifstream in(path);
+    if (!in) die("nao foi possivel abrir '" + path + "'");
+    std::vector<Value> cdc, adds, removes;
+    std::int64_t timestamp = 0;
+    std::string line_text;
+    while (std::getline(in, line_text)) {
+      if (line_text.empty()) continue;
+      Value row;
+      try {
+        row = json_parse(line_text);
+      } catch (const std::exception& e) {
+        die("linha invalida no log '" + path + "': " + e.what());
+      }
+      if (row.kind != ValueKind::Mapa || !row.map) continue;
+      if (const Value* ci = row.map->find("commitInfo");
+          ci && ci->kind == ValueKind::Mapa && ci->map) {
+        if (const Value* ts = ci->map->find("timestamp"); ts && ts->is_number()) {
+          timestamp = static_cast<std::int64_t>(ts->as_number());
+        }
+      }
+      if (const Value* a = row.map->find("cdc"); a && a->kind == ValueKind::Mapa && a->map) {
+        cdc.push_back(*a);
+      } else if (const Value* a = row.map->find("add");
+                 a && a->kind == ValueKind::Mapa && a->map) {
+        adds.push_back(*a);
+      } else if (const Value* r = row.map->find("remove");
+                 r && r->kind == ValueKind::Mapa && r->map) {
+        removes.push_back(*r);
+      }
+    }
+
+    std::vector<std::string> prefix;
+    for (const std::string& candidate : all) {
+      if (versao_de_json(candidate) <= versao) prefix.push_back(candidate);
+    }
+    const auto fields = schema_string_fields(current_schema_string(prefix));
+    const auto part_cols = current_partition_columns(prefix);
+    auto append_file = [&](const Value& action, const char* change) {
+      const Value* p = action.map ? action.map->find("path") : nullptr;
+      if (!p || p->kind != ValueKind::Texto) die("acao Delta sem path em '" + path + "'");
+      if (action.map && action.map->find("deletionVector")) {
+        die("ler_delta_mudancas: deletion vectors ainda nao suportados (arquivo '" +
+            p->s + "')");
+      }
+      Value chunk = parquet_read(delta_data_path(dir, p->s));
+      if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
+        die("arquivo CDC '" + p->s + "' nao e uma tabela parquet");
+      }
+      for (Value& row : *chunk.list) {
+        if (row.kind != ValueKind::Mapa || !row.map) continue;
+        if (!fields.empty()) {
+          for (const auto& fld : fields) {
+            if (row.map->find(fld.first)) continue;
+            const Value* pv = action.map ? action.map->find("partitionValues") : nullptr;
+            const Value* cell = nullptr;
+            if (pv && pv->kind == ValueKind::Mapa && pv->map) cell = pv->map->find(fld.first);
+            if (cell && cell->kind == ValueKind::Texto &&
+                std::find(part_cols.begin(), part_cols.end(), fld.first) != part_cols.end()) {
+              row.map->set(fld.first, partition_rehydrate(cell->s, fld.second));
+            } else {
+              row.map->set(fld.first, Value::nulo());
+            }
+          }
+        }
+        row.map->set("_change_type", Value::texto(change));
+        row.map->set("_commit_version", Value::inteiro(versao));
+        row.map->set("_commit_timestamp", Value::inteiro(timestamp));
+        out.list->push_back(std::move(row));
+      }
+    };
+    if (!cdc.empty()) {
+      for (const Value& a : cdc) append_file(a, "cdc");
+    } else {
+      for (const Value& a : adds) append_file(a, "insert");
+      for (const Value& a : removes) append_file(a, "delete");
     }
   }
   return out;

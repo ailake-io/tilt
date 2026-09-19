@@ -9482,6 +9482,30 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
   }
+  if (name == "ler_delta_mudancas") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span, "ler_delta_mudancas espera (diretorio, {de:, ate:})");
+    }
+    long long de = 0;
+    long long ate = -1;
+    if (const Value* v = kw.find("de")) {
+      if (v->kind != ValueKind::Inteiro || v->i < 0) fail(call.span, "'de' deve ser inteiro >= 0");
+      de = static_cast<long long>(v->i);
+    }
+    if (const Value* v = kw.find("ate")) {
+      if (v->kind != ValueKind::Inteiro || v->i < 0) fail(call.span, "'ate' deve ser inteiro >= 0");
+      ate = static_cast<long long>(v->i);
+    }
+    try {
+      Value t = rt::delta_read_changes(a[0].s, de, ate);
+      t.kind = ValueKind::Tabela;
+      return t;
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "carregador") {
     auto a = args();
     rt::ValueMap kw = eval_kwargs(call, env);

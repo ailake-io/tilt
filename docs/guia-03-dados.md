@@ -345,6 +345,10 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
 - **time travel**: `ler_delta "dir", versao: N` reconstrói exatamente o
   snapshot do commit `N`; checkpoints só são usados quando sua versão é menor
   ou igual ao snapshot solicitado;
+- **Change Data Feed**: `ler_delta_mudancas "dir", de: N, ate: M` lê as ações
+  `cdc` do intervalo quando presentes; sem `cdc`, deriva `insert`/`delete` de
+  `add`/`remove`. Cada linha recebe `_change_type`, `_commit_version` e
+  `_commit_timestamp`;
 - **partições hive-style**: `escrever_delta tabela, "dir", particionar_por: "col"`
   (ou **partição composta** `particionar_por: ["estado", "ano"]`) grava os
   parquet em `<dir>/<c1>=<v1>/<c2>=<v2>/part-NNNNN.parquet`, **sem** as colunas
