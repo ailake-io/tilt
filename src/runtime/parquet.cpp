@@ -1,5 +1,6 @@
 #include "runtime/parquet.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "runtime/compat.hpp"
@@ -1207,70 +1209,6 @@ void flatten_list(const Column& c, std::vector<std::string> path, int def_base,
       ++fl.lv.num_values;
     }
   }
-  out.push_back(std::move(fl));
-}
-
-// Cria folhas vazias para uma coluna, sem emitir entradas. Usado para
-// inicializar as folhas de cada campo de um struct elemento de lista.
-void flatten_skeleton(const Column& c, std::vector<std::string> path, int def_base,
-                      std::deque<Column>& owned, std::vector<FlatLeaf>& out) {
-  if (c.is_struct) {
-    const int child_base = def_base + (c.optional ? 1 : 0);
-    for (const Column& ch : c.children) {
-      auto cp = path;
-      cp.push_back(ch.name);
-      flatten_skeleton(ch, std::move(cp), child_base, owned, out);
-    }
-    return;
-  }
-  if (c.struct_list) {
-    const int outer = c.nullable_per_level.empty() ? 0 : (c.nullable_per_level[0] ? 1 : 0);
-    const int o2 = c.elem_struct_nullable ? 1 : 0;
-    const int child_base = def_base + outer + 1 + o2;
-    for (const Column& ch : c.children) {
-      auto cp = path;
-      cp.push_back(ch.name);
-      flatten_skeleton(ch, std::move(cp), child_base, owned, out);
-    }
-    return;
-  }
-  if (c.nesting_depth == 0) {
-    FlatLeaf fl;
-    fl.path = std::move(path);
-    fl.leaf = const_cast<Column*>(&c);
-    fl.lv.max_def = def_base + (c.optional ? 1 : 0);
-    fl.lv.max_rep = 0;
-    out.push_back(std::move(fl));
-    return;
-  }
-  if (c.nesting_depth == 1) {
-    FlatLeaf fl;
-    fl.path = std::move(path);
-    fl.leaf = const_cast<Column*>(&c);
-    const int outer = c.nullable_per_level.empty() ? 0 : (c.nullable_per_level[0] ? 1 : 0);
-    fl.lv.max_def = def_base + outer + 1 + (c.elem_nullable ? 1 : 0);
-    fl.lv.max_rep = 1;
-    out.push_back(std::move(fl));
-    return;
-  }
-  // lista aninhada: folha sintetica
-  owned.emplace_back();
-  Column& leaf = owned.back();
-  leaf.name = c.name;
-  leaf.type = c.type;
-  leaf.has_type = true;
-  leaf.repeated = true;
-  FlatLeaf fl;
-  fl.path = std::move(path);
-  fl.leaf = &leaf;
-  int max_def = def_base;
-  for (bool b : c.nullable_per_level) {
-    max_def += 1;
-    if (b) max_def += 1;
-  }
-  if (c.elem_nullable) max_def += 1;
-  fl.lv.max_def = max_def;
-  fl.lv.max_rep = static_cast<int>(c.nullable_per_level.size());
   out.push_back(std::move(fl));
 }
 

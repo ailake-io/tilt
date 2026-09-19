@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <utility>
 
 #include "runtime/compat.hpp"
 #include "runtime/sql_params.hpp"
