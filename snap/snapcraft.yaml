@@ -12,6 +12,29 @@ confinement: classic
 apps:
   tilt:
     command: usr/bin/tilt
+    environment:
+      # Drivers opcionais podem ser fornecidos por um content snap sem
+      # alterar o binario. O runtime tambem aceita esse caminho fora do Snap.
+      TILT_DRIVER_PATH: $SNAP_COMMON/tilt/drivers
+    plugs:
+      - network
+      - network-bind
+      - home
+      - database-drivers
+      - gpu
+      - hardware-observe
+
+plugs:
+  # Slot de um snap fornecedor com libpq, SQLite, DuckDB, MariaDB/MySQL ou
+  # outros componentes nativos. O provider publica o mesmo content id.
+  database-drivers:
+    interface: content
+    content: tilt-database-drivers-v1
+    target: $SNAP_COMMON/tilt/drivers
+  # O plug opengl fornece o ponto de extensao grafico; CUDA continua sendo
+  # carregado sob demanda do driver do host quando houver hardware.
+  gpu:
+    interface: opengl
 
 parts:
   tilt:

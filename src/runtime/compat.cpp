@@ -1,8 +1,12 @@
 #include "runtime/compat.hpp"
 
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <random>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #if defined(_WIN32)
   #include <cerrno>
@@ -23,6 +27,38 @@
 #endif
 
 namespace tilt::rt {
+
+namespace {
+
+// Content snaps e instalacoes portaveis podem expor drivers nativos fora do
+// caminho padrao do loader. Mantemos o nome curto usado pelos conectores e
+// tentamos cada diretorio de TILT_DRIVER_PATH como fallback.
+std::vector<std::string> driver_candidates(const char* path) {
+  std::vector<std::string> out;
+  if (!path || !*path || std::strchr(path, '/') || std::strchr(path, '\\')) return out;
+  const char* raw = std::getenv("TILT_DRIVER_PATH");
+  if (!raw || !*raw) return out;
+#if defined(_WIN32)
+  constexpr char separator = ';';
+  constexpr char slash = '\\';
+#else
+  constexpr char separator = ':';
+  constexpr char slash = '/';
+#endif
+  std::string dir;
+  for (const char* p = raw;; ++p) {
+    if (*p == separator || *p == '\0') {
+      if (!dir.empty()) out.push_back(dir + slash + path);
+      dir.clear();
+      if (*p == '\0') break;
+    } else {
+      dir.push_back(*p);
+    }
+  }
+  return out;
+}
+
+}  // namespace
 
 #if defined(_WIN32)
 
@@ -55,6 +91,12 @@ void set_dl_error() {
 
 void* tilt_dlopen(const char* path, bool /*global*/) {
   HMODULE mod = LoadLibraryA(path);
+  if (!mod) {
+    for (const std::string& candidate : driver_candidates(path)) {
+      mod = LoadLibraryA(candidate.c_str());
+      if (mod) break;
+    }
+  }
   if (!mod) set_dl_error();
   return static_cast<void*>(mod);
 }
@@ -204,7 +246,14 @@ std::string tilt_exe_path(const char* argv0) {
 #else  // POSIX
 
 void* tilt_dlopen(const char* path, bool global) {
-  return ::dlopen(path, RTLD_NOW | (global ? RTLD_GLOBAL : RTLD_LOCAL));
+  const int flags = RTLD_NOW | (global ? RTLD_GLOBAL : RTLD_LOCAL);
+  void* lib = ::dlopen(path, flags);
+  if (lib) return lib;
+  for (const std::string& candidate : driver_candidates(path)) {
+    lib = ::dlopen(candidate.c_str(), flags);
+    if (lib) return lib;
+  }
+  return nullptr;
 }
 
 void* tilt_dlsym(void* lib, const char* name) { return ::dlsym(lib, name); }

@@ -212,8 +212,11 @@ std::string tilt_exe_path(const char* argv0 = nullptr);
 
 // --------------------------------------------------------------------------
 // Carregamento dinamico de bibliotecas (dlopen vs LoadLibrary).
-// tilt_dlopen tenta `path`; `global` corresponde a RTLD_GLOBAL (POSIX-only,
-// ignorado no Windows). tilt_dlerror devolve nullptr quando nao ha erro;
+// tilt_dlopen tenta `path` e, se o nome for curto, os diretorios de
+// `TILT_DRIVER_PATH` (':' POSIX, ';' Windows); isso permite content snaps e
+// instalacoes portaveis fornecerem conectores sem alterar o binario.
+// `global` corresponde a RTLD_GLOBAL (POSIX-only, ignorado no Windows).
+// tilt_dlerror devolve nullptr quando nao ha erro;
 // caso contrario aponta para um buffer thread-local valido ate a proxima
 // chamada tilt_dl* na mesma thread.
 // --------------------------------------------------------------------------

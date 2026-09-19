@@ -18,6 +18,30 @@ O `tilt` não tem dependências de link: SQLite, zlib (gzip no Parquet),
 OpenSSL (TLS) e libpq (Postgres) são carregadas em runtime via `dlopen`
 quando o recurso é usado.
 
+### Pontos de extensão no Snap
+
+O manifesto Snap declara dois pontos opcionais para integrações nativas:
+
+- `database-drivers`: plug de conteúdo `tilt-database-drivers-v1`, montado em
+  `$SNAP_COMMON/tilt/drivers`; um snap fornecedor pode publicar ali as
+  bibliotecas SQLite, DuckDB, PostgreSQL ou MariaDB/MySQL.
+- `gpu`: plug `opengl` e `hardware-observe`, reservado para o acesso a
+  dispositivos gráficos/compute. A validação CUDA em hardware real continua
+  separada e deferida.
+
+O carregador tenta primeiro os nomes normais do sistema e depois os diretórios
+listados em `TILT_DRIVER_PATH` (`:` no Linux/macOS, `;` no Windows). No Snap,
+esse caminho já aponta para o diretório do content plug. A conexão é opcional;
+por exemplo, após instalar um provider compatível:
+
+```bash
+sudo snap connect tilt:database-drivers provider:tilt-database-drivers
+sudo snap connect tilt:gpu
+```
+
+Sem os plugs, os conectores continuam emitindo o diagnóstico normal de
+biblioteca ausente, sem falha no início do processo.
+
 **Em runtime:**
 
 - `libc6` — única dependência obrigatória;

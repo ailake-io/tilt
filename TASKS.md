@@ -183,7 +183,7 @@
 - [x] Implementar installer Windows com WIX (`.msi`) com upgrade path
 - [x] Adicionar assinatura de binário para releases Linux (Sigstore/Cosign keyless; bundles `.sigstore.json` anexados)
 - [x] Implementar auto-updater para o tilt CLI (`tilt-atualizar`, checksum SHA-256 e troca segura de binário/stdlib)
-- [ ] Criar snap extension points para integrações (banco de dados, GPU)
+- [x] Criar snap extension points para integrações (banco de dados, GPU) (`database-drivers` content plug, `gpu`/hardware plugs e `TILT_DRIVER_PATH`)
 
 ### 7.3 CI/CD (P2)
 - [x] Adicionar testes de interoperabilidade Spark real no CI (CTest roda `spark_test` e `spark_catalog`)

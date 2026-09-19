@@ -155,6 +155,10 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/quote_test.sh)
 
 add_test(
+  NAME dlopen_path
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/dlopen_path_test.sh)
+
+add_test(
   NAME update_script
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/update_script_test.sh
           $<TARGET_FILE:tilt>
