@@ -297,6 +297,11 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
   strings); nome de coleção restrito a `[a-z0-9_]`.
+- CI real dos conectores vetoriais: o job vector_connectors provisiona
+  Qdrant, Weaviate, Chroma e pgvector em containers pinados e executa
+  tests/vector_connectors_real_test.sh; fora desse job, o teste vector_real
+  pula quando os serviços não estão disponíveis.
+
 - Streaming com `janela:`: buffer fica em memoria; o offset persiste em
   `<fonte>.tilt-offset` para fonte de arquivo (csv/json) — com
   `TILT_CHECKPOINT_DIR` o arquivo mora no diretorio compartilhado, num objeto

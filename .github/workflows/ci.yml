@@ -115,6 +115,48 @@ jobs:
       - name: connector integration tests
         run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse)$" --output-on-failure
 
+
+  vector_connectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install pgvector client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: configure (Release, -Werror)
+        run: cmake --preset release -DTILT_WERROR=ON
+
+      - name: build
+        run: cmake --build --preset release
+
+      - name: start real vector services
+        run: |
+          docker run -d --name tilt-qdrant-ci -p 6333:6333 qdrant/qdrant:v1.13.6
+          docker run -d --name tilt-weaviate-ci -p 8080:8080 \
+            -e AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED=true \
+            -e PERSISTENCE_DATA_PATH=/var/lib/weaviate \
+            -e DEFAULT_VECTORIZER_MODULE=none \
+            -e ENABLE_MODULES= \
+            -e CLUSTER_HOSTNAME=node1 \
+            semitechnologies/weaviate:1.28.4
+          docker run -d --name tilt-chroma-ci -p 8000:8000 \
+            -e IS_PERSISTENT=FALSE \
+            chromadb/chroma:0.5.23
+          docker run -d --name tilt-pgvector-ci -p 5433:5432 \
+            -e POSTGRES_PASSWORD=tilt \
+            -e POSTGRES_DB=vdb \
+            pgvector/pgvector:pg16
+
+      - name: real vector connector tests
+        env:
+          TILT_VECTOR_WAIT_ATTEMPTS: 90
+        run: ctest --test-dir build/release -R '^vector_real$' --output-on-failure
+
+      - name: cleanup vector services
+        if: always()
+        run: docker rm -f tilt-qdrant-ci tilt-weaviate-ci tilt-chroma-ci tilt-pgvector-ci || true
+
   sanitizers:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,25 @@
+indice kb:
+  embeddings: "m"
+  armazenamento: "weaviate://127.0.0.1:8080/Documentos"
+
+indice espectro:
+  embeddings: "m"
+  armazenamento: "weaviate://127.0.0.1:8080/Espectro"
+
+pipeline rag:
+  passos:
+    - n = kb.inserir([
+        { id: "00000000-0000-4000-8000-000000000001", texto: "gato domestico" },
+        { id: "00000000-0000-4000-8000-000000000002", texto: "gato e cachorro" },
+        { id: "00000000-0000-4000-8000-000000000003", texto: "engenharia de dados" },
+      ])
+    - imprimir "inseridos:", n
+    - achados = kb.buscar("gato", top_k: 2)
+    - para cada h em achados:
+        imprimir "achado:", h.id, h.score
+    - unico = kb.buscar("gato", top_k: 1)
+    - imprimir "top1:", unico[0].id
+    - tentar:
+        espectro.buscar("gato", top_k: 1)
+    capturar e:
+      imprimir "erro-weaviate:", e
