@@ -165,11 +165,17 @@ pipeline principal:
     - imprimir "std_total: ", tamanho tudo
     - so3 = ler_delta "std", onde: { id: 3 }
     - imprimir "std_id3: ", tamanho so3
+    - v0 = ler_delta "std", versao: 0
+    - imprimir "std_v0: ", tamanho v0
+    - v1 = ler_delta "std", versao: 1
+    - imprimir "std_v1: ", tamanho v1
 TILTEOF
 out_std=$(cd "$tmp" && "$BIN" executar cp_std_ler.tilt)
 printf '%s\n' "$out_std"
 echo "$out_std" | grep -qE "std_total: +4" || { echo "checkpoint padrao: total errado"; fail=1; }
 echo "$out_std" | grep -qE "std_id3: +1" || { echo "checkpoint padrao: filtro errado"; fail=1; }
+echo "$out_std" | grep -qE "std_v0: +2" || { echo "time travel v0: total errado"; fail=1; }
+echo "$out_std" | grep -qE "std_v1: +3" || { echo "time travel v1: total errado"; fail=1; }
 
 [ "$fail" = 0 ] && echo "delta_test ok"
 exit "$fail"

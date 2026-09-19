@@ -9467,8 +9467,15 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, "ler_delta: 'onde' deve ser um mapa de colunas e valores "
                       "(ex.: onde: { estado: \"SP\" })");
     }
+    long long versao = -1;
+    if (const Value* v = kw.find("versao")) {
+      if (v->kind != ValueKind::Inteiro || v->i < 0) {
+        fail(call.span, "ler_delta: 'versao' deve ser inteiro >= 0");
+      }
+      versao = static_cast<long long>(v->i);
+    }
     try {
-      Value t = rt::delta_read(a[0].s, onde);
+      Value t = rt::delta_read(a[0].s, onde, versao);
       t.kind = ValueKind::Tabela;
       return t;
     } catch (const std::exception& e) {

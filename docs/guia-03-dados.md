@@ -342,6 +342,9 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
 - a leitura aplica o log em ordem de versão (`add`/`remove`) e concatena os
   arquivos ativos, projetando cada arquivo no schema corrente por nome
   (coluna ausente no arquivo → nulo);
+- **time travel**: `ler_delta "dir", versao: N` reconstrói exatamente o
+  snapshot do commit `N`; checkpoints só são usados quando sua versão é menor
+  ou igual ao snapshot solicitado;
 - **partições hive-style**: `escrever_delta tabela, "dir", particionar_por: "col"`
   (ou **partição composta** `particionar_por: ["estado", "ano"]`) grava os
   parquet em `<dir>/<c1>=<v1>/<c2>=<v2>/part-NNNNN.parquet`, **sem** as colunas

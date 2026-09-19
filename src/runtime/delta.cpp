@@ -558,7 +558,7 @@ long long versao_de_json(const std::string& path) {
   }
 }
 
-long long checkpoint_versao(const std::string& log_dir) {
+long long checkpoint_versao(const std::string& log_dir, long long limite = -1) {
   std::vector<std::string> entries;
   if (!tilt_listdir(log_dir, entries)) return -1;
   long long melhor = -1;
@@ -568,7 +568,8 @@ long long checkpoint_versao(const std::string& log_dir) {
       continue;
     }
     try {
-      melhor = std::max(melhor, std::stoll(name.substr(0, 20)));
+      const long long v = std::stoll(name.substr(0, 20));
+      if (limite < 0 || v <= limite) melhor = std::max(melhor, v);
     } catch (const std::exception&) {
     }
   }
@@ -689,7 +690,7 @@ void delta_maybe_checkpoint(const std::string& dir, const std::string& log_dir, 
 // replay apenas dos JSONs maiores que N — tabelas escritas por Spark/
 // delta-rs com checkpoint passam a ler rapido. Coexiste com o sidecar
 // tilt-native (usa-se o de maior versao; empate: o padrao).
-long long last_checkpoint_version(const std::string& log_dir) {
+long long last_checkpoint_version(const std::string& log_dir, long long limite = -1) {
   std::ifstream in(log_dir + "/_last_checkpoint");
   if (!in) return -1;
   std::ostringstream ss;
@@ -698,7 +699,8 @@ long long last_checkpoint_version(const std::string& log_dir) {
     Value v = json_parse(ss.str());
     if (v.kind == ValueKind::Mapa && v.map) {
       if (const Value* n = v.map->find("version"); n && n->is_number()) {
-        return static_cast<long long>(n->as_number());
+        const long long v = static_cast<long long>(n->as_number());
+        return limite < 0 || v <= limite ? v : -1;
       }
     }
   } catch (const std::exception&) {
@@ -1102,9 +1104,19 @@ bool pred_eq(const Value& cell, const Value& pred) {
   }
 }
 
-Value delta_read(const std::string& dir, const Value* onde) {
+Value delta_read(const std::string& dir, const Value* onde, long long versao) {
   const std::string log_dir = dir + "/_delta_log";
-  const std::vector<std::string> versions = list_delta_versions(log_dir);
+  std::vector<std::string> versions = list_delta_versions(log_dir);
+  if (versao >= 0) {
+    std::vector<std::string> ate;
+    for (const std::string& path : versions) {
+      if (versao_de_json(path) <= versao) ate.push_back(path);
+    }
+    versions = std::move(ate);
+    if (versions.empty() || versao_de_json(versions.back()) != versao) {
+      die("snapshot Delta versao " + std::to_string(versao) + " nao encontrado");
+    }
+  }
 
   // Predicados de `onde` separados em: (a) pruning — coluna de particao da
   // tabela, compara contra partitionValues do log e pula arquivo inteiro;
@@ -1134,8 +1146,8 @@ Value delta_read(const std::string& dir, const Value* onde) {
   std::vector<ActiveFile> active;  // em ordem de add
   // Base de checkpoint (evita repassar JSONs antigos; a cauda e replayada
   // abaixo): padrao (`_last_checkpoint`) ou tilt-native, o de maior versao.
-  const long long cp_ver = checkpoint_versao(log_dir);
-  const long long std_ver = last_checkpoint_version(log_dir);
+  const long long cp_ver = checkpoint_versao(log_dir, versao);
+  const long long std_ver = last_checkpoint_version(log_dir, versao);
   auto passa_prune = [&](const std::vector<std::pair<std::string, Value>>& partvals) {
     for (const auto& [col, val] : prune_preds) {
       auto pv = std::find_if(partvals.begin(), partvals.end(),

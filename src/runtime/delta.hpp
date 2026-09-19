@@ -55,7 +55,10 @@ void delta_append(const std::string& dir, const Value& tabela,
                   const std::vector<std::string>& part_cols_req = {});
 // `onde` (opcional): mapa coluna -> valor. Igualdade; colunas de particao
 // podam arquivos, o resto filtra linhas. Resultado pode ser tabela vazia.
-Value delta_read(const std::string& dir, const Value* onde = nullptr);
+// `versao` >= 0 faz time travel para o snapshot dessa versão. A leitura usa
+// apenas commits/checkpoints <= versão, nunca um checkpoint posterior.
+Value delta_read(const std::string& dir, const Value* onde = nullptr,
+                 long long versao = -1);
 
 // Compacta os arquivos ativos preservando as colunas de partição; arquivos
 // antigos ficam órfãos para delta_vacuum remover.
