@@ -218,7 +218,7 @@
 
 ### 9.1 Performance (P2)
 - [x] Otimizar hot path do interpretador (já usa `ValueKind` + `switch` direto; não há `std::variant`/`std::visit` no caminho de execução)
-- [ ] Implementar cache de tipos em `semantic/checker.cpp` para projetos grandes
+- [x] Implementar cache de tipos em `semantic/checker.cpp` para projetos grandes (memoiza expressões independentes do escopo e preserva diagnósticos)
 - [ ] Otimizar alocação de tensores em `Tensor` (pool/reuse)
 - [ ] Benchmark de operações de tensor (matmul, conv2d) vs NumPy/Torch
 - [ ] Implementar thread pool para operações de IO paralelas

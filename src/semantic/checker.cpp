@@ -57,12 +57,53 @@ void collect_union_literals(const Expr& e, std::vector<std::string>& out) {
   }
 }
 
+// Retorna true apenas quando o resultado de infer_type nao pode depender do
+// TypeEnv nem dos mapas de fluxo (formas_mapa_/elem_lista_). Isso permite
+// memoizar sem carregar uma chave de ambiente cara nem misturar tipos de
+// variaveis com o mesmo no AST em escopos diferentes.
+bool type_cache_safe(const Expr& e) {
+  switch (e.kind) {
+    case ExprKind::IntLit:
+    case ExprKind::DecimalLit:
+    case ExprKind::TextLit:
+    case ExprKind::BoolLit:
+    case ExprKind::NullLit:
+    case ExprKind::ListLit:
+    case ExprKind::MapLit:
+      return true;
+    case ExprKind::Device:
+    case ExprKind::Unary:
+      return e.lhs ? type_cache_safe(*e.lhs) : (e.rhs ? type_cache_safe(*e.rhs) : false);
+    case ExprKind::Binary:
+      return e.lhs && e.rhs && type_cache_safe(*e.lhs) && type_cache_safe(*e.rhs);
+    case ExprKind::Index: {
+      const std::string base = (e.lhs && e.lhs->kind == ExprKind::Name) ? e.lhs->text : "";
+      if (word_in(base, {"tensor", "zeros", "uns", "aleatorio"})) return true;
+      return e.lhs && e.lhs->kind != ExprKind::Name && type_cache_safe(*e.lhs);
+    }
+    case ExprKind::Slice:
+      return e.lhs && type_cache_safe(*e.lhs);
+    case ExprKind::Member:
+      if (!e.lhs) return false;
+      if (e.lhs->kind == ExprKind::MapLit) {
+        for (const auto& entry : e.lhs->entries) {
+          if (entry.key == e.text) return entry.value && type_cache_safe(*entry.value);
+        }
+        return true;  // campo ausente: erro estavel, cacheia Unknown.
+      }
+      return e.lhs->kind != ExprKind::Name && type_cache_safe(*e.lhs);
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
 SemanticChecker::SemanticChecker(const ast::Program& program, DiagnosticEngine& diag)
     : program_(program), diag_(diag) {}
 
 void SemanticChecker::run() {
+  type_cache_.clear();
   collect();
   resolve_types();
   audit_blocks();
@@ -1324,7 +1365,16 @@ std::optional<SemanticChecker::TensorShape> SemanticChecker::infer_shape_impl(
 }
 
 sema::TypeKind SemanticChecker::infer_type(const Expr& e, const TypeEnv& types) {
+  const bool cacheable = type_cache_safe(e);
+  if (cacheable) {
+    auto it = type_cache_.find(&e);
+    if (it != type_cache_.end()) {
+      if (it->second != sema::TypeKind::Unknown) hover_types_[&e] = it->second;
+      return it->second;
+    }
+  }
   sema::TypeKind t = infer_type_impl(e, types);
+  if (cacheable) type_cache_.emplace(&e, t);
   if (t != sema::TypeKind::Unknown) hover_types_[&e] = t;
   return t;
 }

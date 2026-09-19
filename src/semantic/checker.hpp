@@ -152,6 +152,11 @@ class SemanticChecker {
   // Tipos/formas por expressao para o hover do LSP (so conhecidos).
   std::unordered_map<const ast::Expr*, sema::TypeKind> hover_types_;
   std::unordered_map<const ast::Expr*, std::vector<std::int64_t>> hover_shapes_;
+  // Memoizacao de inferencias independentes do TypeEnv. Nomes, chamadas e
+  // acessos a variaveis ficam fora: o mesmo no da AST pode ser analisado em
+  // escopos diferentes. O cache inclui Unknown para nao repetir diagnosticos
+  // de expressoes estaveis.
+  std::unordered_map<const ast::Expr*, sema::TypeKind> type_cache_;
 };
 
 // Convenience wrapper used by the CLI.
