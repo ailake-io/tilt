@@ -274,7 +274,8 @@ void* abre_conn(const MysqlApi& db, const MysqlUrl& url) {
 }
 
 // Conexao via pool (statements avulsos) ou dedicada (transacao, pooled=false).
-// O handle continua em `conn`; o pool valida com mysql_ping no checkout.
+// O callback de fechar fica no pool depois do Conn morrer: capture a API (singleton),
+// nunca `this`. O handle continua em `conn`; o pool valida com mysql_ping no checkout.
 struct Conn {
   const MysqlApi& db;
   PooledConn pool;
@@ -285,7 +286,7 @@ struct Conn {
       : db(d),
         pool(pooled ? "mysql" : "", url, [&] { return abre_conn(db, parsed); },
              [&](void* h) { return !db.ping || db.ping(h) == 0; },
-             [&](void* h) { db.close(h); }, pooled ? sql : "") {
+             [&d](void* h) { d.close(h); }, pooled ? sql : "") {
     conn = pool.get();
   }
   Conn(const Conn&) = delete;

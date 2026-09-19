@@ -203,7 +203,7 @@ struct Conn {
                auto* p = static_cast<DbConn*>(h);
                return p && p->connection;
              },
-             [&](void* h) { fecha_banco(db, h); }, pooled ? sql : "") {
+             [&d](void* h) { fecha_banco(d, h); }, pooled ? sql : "") {
     connection = static_cast<DbConn*>(pool.get())->connection;
   }
   Conn(const Conn&) = delete;

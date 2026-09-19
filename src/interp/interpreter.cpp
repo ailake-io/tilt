@@ -1,6 +1,7 @@
 #include "interp/interpreter.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -8511,6 +8512,15 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
 
 // ------------------------------------------------------------------ statements
 
+namespace {
+// Cancelamento cooperativo do passo com `tempo_limite`: a thread-worker do passo
+// aponta para a flag do prazo; exec_stmt a consulta e aborta o passo quando o
+// prazo estoura, para a thread terminar sozinha em vez de seguir rodando
+// (destacada) sobre a AST e o Env que o processo libera ao sair.
+thread_local const std::atomic<bool>* g_passo_cancelado = nullptr;
+constexpr auto kGracaCancelamento = std::chrono::seconds(2);
+}  // namespace
+
 void Interpreter::exec_block(const ast::Block& block, Env& env, const PrazoPasso* prazo) {
   // Roda um item de topo com deadline (timeout por passo): worker thread +
   // espera limitada; ao estourar, a thread é destacada (segue sozinha) e o
@@ -8520,7 +8530,11 @@ void Interpreter::exec_block(const ast::Block& block, Env& env, const PrazoPasso
       exec_item(it, env);
       return;
     }
-    std::packaged_task<void()> tarefa([&] { exec_item(it, env); });
+    auto cancelado = std::make_shared<std::atomic<bool>>(false);
+    std::packaged_task<void()> tarefa([&, cancelado] {
+      g_passo_cancelado = cancelado.get();
+      exec_item(it, env);
+    });
     std::future<void> fut = tarefa.get_future();
     std::thread th(std::move(tarefa));
     if (fut.wait_for(std::chrono::seconds(prazo->segundos)) == std::future_status::ready) {
@@ -8528,8 +8542,23 @@ void Interpreter::exec_block(const ast::Block& block, Env& env, const PrazoPasso
       fut.get();  // relança RuntimeAbort do passo
       return;
     }
-    // Estourou: o Env passa para a lista de zumbis (vive enquanto a thread
-    // destacada precisar) e o passo falha para o retry la de cima.
+    // Estourou: pede o cancelamento e espera a thread sair por conta propria
+    // (exec_stmt consulta a flag a cada statement).
+    cancelado->store(true);
+    if (fut.wait_for(kGracaCancelamento) == std::future_status::ready) {
+      th.join();
+      try {
+        fut.get();
+      } catch (...) {  // o abort de cancelamento; o erro reportado e o de prazo
+      }
+      throw RuntimeAbort{it.span,
+                         "passo " + std::to_string(passo) + " excedeu tempo_limite de " +
+                             std::to_string(prazo->segundos) + "s",
+                         DiagCode::RuntimeError, {}};
+    }
+    // Preso em chamada bloqueante (rede, IO): nao ha como cancelar. O Env passa
+    // para a lista de zumbis (vive enquanto a thread destacada precisar) e o
+    // passo falha para o retry la de cima.
     if (prazo->dono) {
       std::lock_guard<std::mutex> lk(zumbis_mu_);
       zumbis_.push_back(prazo->dono);
@@ -8632,6 +8661,9 @@ void Interpreter::exec_item(const Item& item, Env& env) {
 }
 
 void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
+  if (g_passo_cancelado && g_passo_cancelado->load(std::memory_order_relaxed)) {
+    throw RuntimeAbort{stmt.span, "passo cancelado por tempo_limite", DiagCode::RuntimeError, {}};
+  }
   switch (stmt.kind) {
     case StmtKind::Expr:
       if (stmt.a) eval(*stmt.a, env);
