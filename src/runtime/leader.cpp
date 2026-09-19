@@ -3,18 +3,45 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
 #include <fstream>
 #include <sstream>
 #include <string>
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <fcntl.h>
 #include <unistd.h>
+#endif
+
+#include "runtime/compat.hpp"
 
 namespace tilt::rt {
+
+namespace {
+
+int leader_open_exclusive(const std::string& path) {
+#if defined(_WIN32)
+  return ::_open(path.c_str(), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, 0600);
+#else
+  return ::open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+#endif
+}
+
+std::int64_t leader_write(int fd, const std::string& payload) {
+#if defined(_WIN32)
+  return ::_write(fd, payload.data(), static_cast<unsigned>(payload.size()));
+#else
+  return ::write(fd, payload.data(), payload.size());
+#endif
+}
+
+}  // namespace
 
 std::string leader_dono() {
   char host[256] = {};
   ::gethostname(host, sizeof(host) - 1);
-  return std::string(host) + ":" + std::to_string(::getpid());
+  return std::string(host) + ":" + std::to_string(tilt_getpid());
 }
 
 static long agora_epoch() {
@@ -31,7 +58,7 @@ static bool ler_lease(const std::string& path, std::string& dono, long& expira) 
 }
 
 static void gravar_lease(const std::string& path, const std::string& dono, long expira) {
-  const std::string tmp = path + ".tmp." + std::to_string(::getpid());
+  const std::string tmp = path + ".tmp." + std::to_string(tilt_getpid());
   {
     std::ofstream out(tmp, std::ios::trunc);
     out << dono << " " << expira << "\n";
@@ -48,12 +75,12 @@ bool leader_tentar(const std::string& lease_path, int ttl_seg, std::string& moti
   const std::string eu = leader_dono();
   const long agora = agora_epoch();
 
-  const int fd = ::open(lease_path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
+  const int fd = leader_open_exclusive(lease_path);
   if (fd >= 0) {
     const std::string payload = eu + " " + std::to_string(agora + ttl_seg) + "\n";
-    const ssize_t nw = ::write(fd, payload.c_str(), payload.size());
-    ::close(fd);
-    if (nw != static_cast<ssize_t>(payload.size())) {
+    const ssize_t nw = leader_write(fd, payload);
+    tilt_close_file(fd);
+    if (nw != static_cast<std::int64_t>(payload.size())) {
       motivo = "falha ao gravar lease";
       return false;
     }

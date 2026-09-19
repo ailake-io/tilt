@@ -1,11 +1,11 @@
 #include "runtime/duckdb.hpp"
 
+#include <cstdint>
+#include <stdexcept>
+
 #include "runtime/compat.hpp"
 #include "runtime/sql_params.hpp"
 #include "runtime/sql_pool.hpp"
-
-#include <cstdint>
-#include <stdexcept>
 
 namespace tilt::rt {
 
@@ -58,7 +58,7 @@ struct DuckdbApi {
   int (*prepare)(void*, const char*, void**) = nullptr;
   void (*destroy_prepare)(void**) = nullptr;
   const char* (*prepare_error)(void*) = nullptr;
-  int (*nparams)(void*, std::uint64_t*) = nullptr;
+  std::uint64_t (*nparams)(void*) = nullptr;
   int (*bind_boolean)(void*, std::uint64_t, bool) = nullptr;
   int (*bind_int8)(void*, std::uint64_t, std::int8_t) = nullptr;
   int (*bind_int64)(void*, std::uint64_t, std::int64_t) = nullptr;
@@ -334,11 +334,7 @@ void* prepara_e_liga(const DuckdbApi& db, void* conn, const std::string& sql,
     if (prep) db.destroy_prepare(&prep);
     die(passo + "falha ao preparar " + acao + ": " + msg);
   }
-  std::uint64_t nq = 0;
-  if (db.nparams(prep, &nq) != kDuckdbSuccess) {
-    db.destroy_prepare(&prep);
-    die(passo + "falha ao inspecionar parametros");
-  }
+  const std::uint64_t nq = db.nparams(prep);
   if (nq != params.size()) {
     db.destroy_prepare(&prep);
     die(passo + "esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +

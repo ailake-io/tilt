@@ -1,9 +1,5 @@
 #include "runtime/parquet.hpp"
 
-#include "runtime/compat.hpp"
-#include "runtime/sha256.hpp"
-#include "runtime/snappy_codec.hpp"
-
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -14,6 +10,10 @@
 #include <optional>
 #include <stdexcept>
 #include <vector>
+
+#include "runtime/compat.hpp"
+#include "runtime/sha256.hpp"
+#include "runtime/snappy_codec.hpp"
 
 namespace tilt::rt {
 
@@ -969,7 +969,13 @@ std::string uuid_bytes(const std::string& s) {
 // Codifica um double como decimal big-endian signed com escala e tamanho fixo.
 std::string decimal_bytes_from_double(double v, int scale, int fixed_len) {
   const double p = std::pow(10.0, scale);
+#if defined(_MSC_VER)
+  // MSVC nao oferece __int128_t; os valores vindos de double cabem no
+  // intervalo inteiro de 64 bits com a precisao representavel pela entrada.
+  std::int64_t unscaled = static_cast<std::int64_t>(std::llround(v * p));
+#else
   __int128_t unscaled = static_cast<__int128_t>(std::llround(v * p));
+#endif
   std::string out(fixed_len, '\0');
   for (int i = fixed_len - 1; i >= 0; --i) {
     out[i] = static_cast<char>(static_cast<unsigned char>(unscaled & 0xFF));
@@ -3487,18 +3493,18 @@ struct RField {
 
 // Arquivo parquet aberto: bytes + schema + metadados dos row groups.
 // Permite decodificar grupo a grupo sem materializar o arquivo todo.
- struct LeitorParquet {
-   std::string path;
-   std::string file;
-   std::vector<RField> top;
-   std::vector<ColDesc> cols_desc;
-   std::vector<std::vector<ColMeta>> row_groups;
- std::vector<std::int64_t> rg_num_rows;
+struct LeitorParquet {
+  std::string path;
+  std::string file;
+  std::vector<RField> top;
+  std::vector<ColDesc> cols_desc;
+  std::vector<std::vector<ColMeta>> row_groups;
+  std::vector<std::int64_t> rg_num_rows;
   std::int64_t num_rows = 0;
   ParsedParquetCrypto crypto;
- };
+};
 
- LeitorParquet abrir_parquet(const std::string& path);
+LeitorParquet abrir_parquet(const std::string& path);
 
 // Remonta um valor (folha/struct/lista/mapa) da linha `r` sobre colunas ja
 // decodificadas. Era lambda local de parquet_read; virou funcao para reuso

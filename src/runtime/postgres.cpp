@@ -1,12 +1,13 @@
 #include "runtime/postgres.hpp"
 
-#include "runtime/compat.hpp"
-#include "runtime/sql_params.hpp"
-#include "runtime/sql_pool.hpp"
-
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+
+#include "runtime/compat.hpp"
+#include "runtime/sql_params.hpp"
+#include "runtime/sql_pool.hpp"
 
 namespace tilt::rt {
 
@@ -229,19 +230,70 @@ std::string pg_param_texto(const SqlParam& p) {
   return "";
 }
 
+bool pg_termina_palavra(const std::string& sql, const std::string& palavra,
+                        std::size_t* inicio = nullptr) {
+  std::size_t fim = sql.size();
+  while (fim > 0 && std::isspace(static_cast<unsigned char>(sql[fim - 1]))) --fim;
+  if (fim < palavra.size() || sql.compare(fim - palavra.size(), palavra.size(), palavra) != 0)
+    return false;
+  if (fim > palavra.size() &&
+      (std::isalnum(static_cast<unsigned char>(sql[fim - palavra.size() - 1])) ||
+       sql[fim - palavra.size() - 1] == '_')) {
+    return false;
+  }
+  if (inicio) *inicio = fim - palavra.size();
+  return true;
+}
+
+// PostgreSQL nao aceita `IS $1`; quando o parametro e nulo, a forma SQL
+// equivalente e `IS NULL` (ou `IS NOT NULL`) sem bind para esse placeholder.
+std::string pg_rewrite_sql(const std::string& sql, const std::vector<SqlParam>& params,
+                           std::vector<std::size_t>& bind_indices) {
+  std::string out;
+  std::size_t raw = 0;
+  varrer_sql(
+      sql,
+      [&](std::string& emitted) {
+        bool is_context = false;
+        std::size_t is_start = 0;
+        if (pg_termina_palavra(emitted, "IS", &is_start)) {
+          is_context = true;
+        } else {
+          std::size_t not_start = 0;
+          if (pg_termina_palavra(emitted, "NOT", &not_start)) {
+            const std::string before_not = emitted.substr(0, not_start);
+            is_context = pg_termina_palavra(before_not, "IS", &is_start);
+          }
+        }
+        if (raw < params.size() && params[raw].tipo == SqlParam::Tipo::Nulo && is_context) {
+          emitted.resize(is_start);
+          emitted += "IS NULL";
+        } else {
+          bind_indices.push_back(raw);
+          emitted += "$" + std::to_string(bind_indices.size());
+        }
+        ++raw;
+      },
+      out);
+  return out;
+}
+
 // Executa numa conexao aberta, com `?` reescritos para $N e ligados em texto.
 void exec_um(const PqApi& pq, void* conn, const std::string& sql,
              const std::vector<SqlParam>& params, const std::string& passo) {
-  const auto [reescrito, nq] = rewrite_qmarks(sql, "dolar");
+  const auto nq = rewrite_qmarks(sql, "nenhum").second;
   if (nq != params.size()) {
     die(passo + "esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
         std::to_string(nq) + " '?'");
   }
+  std::vector<std::size_t> bind_indices;
+  const std::string reescrito = pg_rewrite_sql(sql, params, bind_indices);
   std::vector<std::string> textos;
   std::vector<const char*> valores;
-  textos.reserve(params.size());
-  valores.reserve(params.size());
-  for (const SqlParam& p : params) {
+  textos.reserve(bind_indices.size());
+  valores.reserve(bind_indices.size());
+  for (std::size_t bind_index : bind_indices) {
+    const SqlParam& p = params[bind_index];
     if (p.tipo == SqlParam::Tipo::Nulo) {
       valores.push_back(nullptr);  // NULL de verdade
     } else {
@@ -249,7 +301,7 @@ void exec_um(const PqApi& pq, void* conn, const std::string& sql,
       valores.push_back(textos.back().c_str());
     }
   }
-  void* res = pq.exec_params(conn, reescrito.c_str(), static_cast<int>(params.size()), nullptr,
+  void* res = pq.exec_params(conn, reescrito.c_str(), static_cast<int>(valores.size()), nullptr,
                              valores.data(), nullptr, nullptr, 0);
   if (!res) {
     const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";
@@ -290,16 +342,19 @@ Value postgres_query_params(const std::string& url, const std::string& sql,
     die("libpq.so.5 nao encontrada; instale o pacote libpq5");
 #endif
   }
-  const auto [reescrito, nq] = rewrite_qmarks(sql, "dolar");
+  const auto nq = rewrite_qmarks(sql, "nenhum").second;
   if (nq != params.size()) {
     die("esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
         std::to_string(nq) + " '?'");
   }
+  std::vector<std::size_t> bind_indices;
+  const std::string reescrito = pg_rewrite_sql(sql, params, bind_indices);
   std::vector<std::string> textos;
   std::vector<const char*> valores;
-  textos.reserve(params.size());
-  valores.reserve(params.size());
-  for (const SqlParam& p : params) {
+  textos.reserve(bind_indices.size());
+  valores.reserve(bind_indices.size());
+  for (std::size_t bind_index : bind_indices) {
+    const SqlParam& p = params[bind_index];
     if (p.tipo == SqlParam::Tipo::Nulo) {
       valores.push_back(nullptr);
     } else {
@@ -307,11 +362,11 @@ Value postgres_query_params(const std::string& url, const std::string& sql,
       valores.push_back(textos.back().c_str());
     }
   }
-  PooledConn pool("postgres", url, [&] { return connect_or_die(pq, url); },
-                  [&](void* h) { return pq.status(h) == kConnectionOk; },
-                  [&](void* h) { pq.finish(h); }, sql);
+  PooledConn pool(
+      "postgres", url, [&] { return connect_or_die(pq, url); },
+      [&](void* h) { return pq.status(h) == kConnectionOk; }, [&](void* h) { pq.finish(h); }, sql);
   void* conn = pool.get();
-  void* res = pq.exec_params(conn, reescrito.c_str(), static_cast<int>(params.size()), nullptr,
+  void* res = pq.exec_params(conn, reescrito.c_str(), static_cast<int>(valores.size()), nullptr,
                              valores.data(), nullptr, nullptr, 0);
   if (!res) {
     const std::string msg = pq.error_message(conn) ? pq.error_message(conn) : "erro desconhecido";

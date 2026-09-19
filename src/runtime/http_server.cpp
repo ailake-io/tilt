@@ -1,8 +1,5 @@
 #include "runtime/http_server.hpp"
 
-#include "runtime/compat.hpp"
-#include "runtime/thread_pool.hpp"
-
 #include <cctype>
 #include <cerrno>
 #include <csignal>
@@ -25,6 +22,8 @@
 #endif
 
 #include "runtime/arena.hpp"
+#include "runtime/compat.hpp"
+#include "runtime/thread_pool.hpp"
 
 namespace tilt::rt {
 
@@ -914,7 +913,7 @@ int run_blocking(int listen_fd, const std::function<HttpResponse(const HttpReque
                  int max_requests, std::string& fatal) {
   (void)fatal;
   int served = 0;
-  while (max_requests <= 0 || served < max_requests) {
+  while ((max_requests <= 0 || served < max_requests) && !shutdown_requested()) {
     const int client = ::accept(listen_fd, nullptr, nullptr);
     if (client < 0) {
       if (errno == EINTR) continue;

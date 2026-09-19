@@ -1,12 +1,10 @@
 #include "runtime/delta.hpp"
 
-#include "runtime/compat.hpp"
-
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <optional>
 #include <random>
@@ -16,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "runtime/compat.hpp"
 #include "runtime/json.hpp"
 #include "runtime/parquet.hpp"
 
@@ -805,8 +804,7 @@ std::set<std::uint64_t> read_deletion_vector(const Value& action, const std::str
                     static_cast<unsigned char>(uuid[12]), static_cast<unsigned char>(uuid[13]),
                     static_cast<unsigned char>(uuid[14]), static_cast<unsigned char>(uuid[15]));
       const std::string prefix = pi->s.substr(0, pi->s.size() - 20);
-      path = dir + (prefix.empty() ? "/" : "/" + prefix + "/") +
-             "deletion_vector_" + us + ".bin";
+      path = dir + (prefix.empty() ? "/" : "/" + prefix + "/") + "deletion_vector_" + us + ".bin";
     } else {
       die("Deletion Vector storageType '" + st->s + "' nao suportado");
     }
@@ -836,8 +834,8 @@ std::set<std::uint64_t> read_deletion_vector(const Value& action, const std::str
   if (magic == DV_NATIVE_MAGIC) die("Deletion Vector native serialization nao suportada");
   if (magic != DV_MAGIC) die("magic de Deletion Vector invalido");
   std::set<std::uint64_t> rows = decode_roaring64(payload.substr(mp));
-  if (const Value* card = dv->map->find("cardinality"); card && card->is_number() &&
-      static_cast<std::size_t>(card->as_number()) != rows.size()) {
+  if (const Value* card = dv->map->find("cardinality");
+      card && card->is_number() && static_cast<std::size_t>(card->as_number()) != rows.size()) {
     die("cardinality do Deletion Vector nao confere");
   }
   return rows;

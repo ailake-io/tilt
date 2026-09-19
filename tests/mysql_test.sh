@@ -88,7 +88,7 @@ if [ -n "$MYSQLD" ] || [ -n "$MARIADB" ]; then
   data="$tmp/data"
   sock="$tmp/mysql.sock"
   mkdir -p "$data"
-  if [ -n "$MYSQLD" ]; then
+  if [ -n "$MYSQLD" ] && [ -z "$MARIADB" ]; then
     SERVER="$MYSQLD"
     MYSQL_BIN="$MYSQL"
     IS_MARIADB=0

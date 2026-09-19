@@ -34,8 +34,8 @@ std::string sanitize(const std::string& name) {
 
 // ids dos operadores binarios conhecidos pelo runtime C (tv_binop)
 int binop_id(const std::string& op) {
-  static const char* const kOps[] = {"+", "-", "*", "/", "%", "==", "!=",
-                                     "<", "<=", ">",  ">=", "contem"};
+  static const char* const kOps[] = {
+      "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "contem"};
   for (int i = 0; i < 12; ++i) {
     if (op == kOps[i]) return i;
   }
@@ -58,7 +58,8 @@ struct Emitter {
         case rt::ValueKind::Texto:
           break;
         default:
-          *err = "constante do tipo '" + std::string(v.type_name()) + "' fora do subconjunto nativo";
+          *err =
+              "constante do tipo '" + std::string(v.type_name()) + "' fora do subconjunto nativo";
           return false;
       }
     }
@@ -148,8 +149,9 @@ struct Emitter {
   void emit_chunk(const std::string& sym, int nparams, const Chunk& c,
                   const std::unordered_map<int, std::string>& labels) {
     // Locais ocupam um bloco logo abaixo de x19/x20 salvos; a pilha de
-    // avaliacao cresce a partir dai. local s fica em [sp, #(s*kSlot)].
+    // avaliacao cresce a partir dai. local s fica em [x29, local_offset(s)].
     const int locals_frame = ((c.num_locals * kSlot) + 15) & ~15;
+    const auto local_offset = [&](int slot) { return -16 - locals_frame + slot * kSlot; };
 
     os << "  .globl " << sym << "\n" << sym << ":\n";
     os << "  stp x29, x30, [sp, #-16]!\n  mov x29, sp\n";
@@ -206,10 +208,10 @@ struct Emitter {
         }
         case Op::LoadLocal:
           os << "  sub sp, sp, #" << kSlot << "\n";
-          copy_slot(os, "sp", 0, "sp", kSlot + in.a * kSlot);
+          copy_slot(os, "sp", 0, "x29", local_offset(in.a));
           break;
         case Op::StoreLocal:
-          copy_slot(os, "sp", kSlot + in.a * kSlot, "sp", 0);
+          copy_slot(os, "x29", local_offset(in.a), "sp", 0);
           os << "  add sp, sp, #" << kSlot << "\n";
           break;
         case Op::Pop:
@@ -235,15 +237,14 @@ struct Emitter {
           os << "  b .L" << sym << "_" << in.a << "\n";
           break;
         case Op::JumpIfFalse:
-          os << "  mov x0, sp\n  bl tv_truthy\n  add sp, sp, #" << kSlot
-             << "\n  cbz x0, .L" << sym << "_" << in.a << "\n";
+          os << "  mov x0, sp\n  bl tv_truthy\n  add sp, sp, #" << kSlot << "\n  cbz x0, .L" << sym
+             << "_" << in.a << "\n";
           break;
         case Op::CallFunc: {
           const int argc = in.b;
           // args na pilha: arg0 no endereco mais alto. out vai abaixo deles.
           os << "  sub sp, sp, #" << kSlot << "\n  mov x0, sp\n  add x1, sp, #" << (argc * kSlot)
-             << "\n  bl tilt_fn_"
-             << sanitize(c.names[static_cast<std::size_t>(in.a)]) << "\n";
+             << "\n  bl tilt_fn_" << sanitize(c.names[static_cast<std::size_t>(in.a)]) << "\n";
           if (argc > 0) {
             // copia out para o slot de arg0 e desempilha os demais
             copy_slot(os, "sp", argc * kSlot, "sp", 0);
@@ -274,7 +275,8 @@ struct Emitter {
           break;
         }
         case Op::Index:
-          os << "  add x0, sp, #" << kSlot << "\n  add x1, sp, #" << kSlot << "\n"
+          os << "  add x0, sp, #" << kSlot << "\n  add x1, sp, #" << kSlot
+             << "\n"
                 "  mov x2, sp\n  bl tv_index\n  add sp, sp, #"
              << kSlot << "\n";
           break;
@@ -285,7 +287,8 @@ struct Emitter {
           os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp], #16\n  ret\n";
           break;
         case Op::ReturnNil:
-          for (int f = 0; f < kFields; ++f) os << "  mov x9, #0\n  str x9, [x19, #" << (f * 8) << "]\n";
+          for (int f = 0; f < kFields; ++f)
+            os << "  mov x9, #0\n  str x9, [x19, #" << (f * 8) << "]\n";
           os << "  mov sp, x29\n  ldp x19, x20, [sp, #-16]!\n  ldp x29, x30, [sp], #16\n  ret\n";
           break;
       }
@@ -322,8 +325,8 @@ Result emit_program(const ast::Program& program) {
     }
   }
 
-  std::vector<Unit> units;       // tudo que vira simbolo (funcoes + pipelines)
-  std::vector<int> entry;        // indices em `units` que main chama, em ordem
+  std::vector<Unit> units;  // tudo que vira simbolo (funcoes + pipelines)
+  std::vector<int> entry;   // indices em `units` que main chama, em ordem
   auto add_unit = [&](const std::string& sym, const std::string& header, int nparams,
                       const Item& decl, bool is_pipeline) -> std::string {
     Unit u;
@@ -408,7 +411,8 @@ Result emit_program(const ast::Program& program) {
   for (const int u : entry) {
     if (!units[static_cast<std::size_t>(u)].header.empty()) {
       const std::string& h = units[static_cast<std::size_t>(u)].header;
-      em.os << "  adrp x0, " << h << "\n  add x0, x0, #:lo12:" << h << "\n"
+      em.os << "  adrp x0, " << h << "\n  add x0, x0, #:lo12:" << h
+            << "\n"
                "  bl tv_pipeline_header\n";
     }
     em.os << "  mov x0, sp\n  add x1, sp, #48\n  bl " << units[static_cast<std::size_t>(u)].sym
