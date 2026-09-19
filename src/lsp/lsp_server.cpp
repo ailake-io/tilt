@@ -168,6 +168,7 @@ int run_lsp(std::istream& in, std::ostream& out) {
       caps.map->set("completionProvider", std::move(comp));
       caps.map->set("hoverProvider", Value::logico(true));
       caps.map->set("definitionProvider", Value::logico(true));
+      caps.map->set("referencesProvider", Value::logico(true));
       caps.map->set("documentFormattingProvider", Value::logico(true));
       Value sig = Value::mapa();
       Value sig_triggers = Value::lista();
@@ -255,6 +256,29 @@ int run_lsp(std::istream& in, std::ostream& out) {
         result.map->set("range", span_to_range(def));
         write_message(out, make_response(id, std::move(result)));
       }
+    } else if (method == "textDocument/references" && params) {
+      const Value* td = member(*params, "textDocument");
+      const Value* pos = member(*params, "position");
+      const Value* context = member(*params, "context");
+      const std::string uri = td ? member_str(*td, "uri") : "";
+      const long l = pos ? member_int(*pos, "line") : 0;
+      const long ch = pos ? member_int(*pos, "character") : 0;
+      bool include_declaration = false;
+      if (context) {
+        const Value* include = member(*context, "includeDeclaration");
+        include_declaration = include && include->kind == rt::ValueKind::Logico && include->b;
+      }
+      SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
+      const auto refs = references(src, static_cast<std::uint32_t>(l + 1),
+                                   static_cast<std::uint32_t>(ch + 1), include_declaration);
+      Value result = Value::lista();
+      for (const Span& ref : refs) {
+        Value location = Value::mapa();
+        location.map->set("uri", Value::texto(uri));
+        location.map->set("range", span_to_range(ref));
+        result.list->push_back(std::move(location));
+      }
+      write_message(out, make_response(id, std::move(result)));
     } else if (method == "textDocument/signatureHelp" && params) {
       const Value* td = member(*params, "textDocument");
       const Value* pos = member(*params, "position");

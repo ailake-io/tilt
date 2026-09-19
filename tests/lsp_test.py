@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Drives `tilt lsp` over stdio and checks initialize / diagnostics / completion
-/ hover / definition / signatureHelp / formatting."""
+/ hover / definition / references / signatureHelp / formatting."""
 import json
 import subprocess
 import sys
@@ -99,6 +99,7 @@ def main() -> int:
         "completionProvider",
         "hoverProvider",
         "definitionProvider",
+        "referencesProvider",
         "documentFormattingProvider",
         "signatureHelpProvider",
     ):
@@ -256,6 +257,18 @@ def main() -> int:
             },
         }
 
+    def refs_req(i, line, ch, include_declaration):
+        return {
+            "jsonrpc": "2.0",
+            "id": i,
+            "method": "textDocument/references",
+            "params": {
+                "textDocument": {"uri": "file:///t.tilt"},
+                "position": {"line": line, "character": ch},
+                "context": {"includeDeclaration": include_declaration},
+            },
+        }
+
     frames = run_lsp(
         binary,
         doc,
@@ -263,6 +276,8 @@ def main() -> int:
             def_req(20, 11, 9),  # y -> `seja y` (linha 10, char 5)
             def_req(21, 2, 12),  # etl -> `pipeline etl:` (linha 2, char 9)
             def_req(22, 8, 11),  # x -> parametro de dobro (linha 7, char 13)
+            refs_req(23, 8, 11, True),  # x: parametro + uso no retornar
+            refs_req(24, 11, 9, False),  # y: somente uso
         ],
     )
     if frames is None:
@@ -278,6 +293,15 @@ def main() -> int:
     d = r.get(22, {}).get("result") or {}
     if d.get("range", {}).get("start") != {"line": 7, "character": 13}:
         problems.append(f"definition de parametro x: {d}")
+
+    refs = r.get(23, {}).get("result") or []
+    starts = [ref.get("range", {}).get("start") for ref in refs]
+    if starts != [{"line": 7, "character": 13}, {"line": 8, "character": 11}]:
+        problems.append(f"references de x: {refs}")
+    refs = r.get(24, {}).get("result") or []
+    starts = [ref.get("range", {}).get("start") for ref in refs]
+    if starts != [{"line": 11, "character": 9}]:
+        problems.append(f"references de y sem declaracao: {refs}")
 
     # -------------------------------------------------------- signatureHelp
     sig_doc = 'seja t = dividir "a,b,c", ","\n'

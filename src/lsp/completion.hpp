@@ -26,6 +26,11 @@ std::string hover(const SourceFile& src, std::uint32_t line, std::uint32_t colum
 // Returns a zero-length span when there is no known declaration.
 Span definition(const SourceFile& src, std::uint32_t line, std::uint32_t column);
 
+// All same-file references to the symbol under the cursor. Declaration is
+// included only when requested by the LSP references context.
+std::vector<Span> references(const SourceFile& src, std::uint32_t line, std::uint32_t column,
+                             bool include_declaration);
+
 // Signature help when the cursor is inside a call to a known builtin.
 struct SigHelp {
   bool found = false;

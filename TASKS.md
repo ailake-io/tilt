@@ -234,7 +234,7 @@
 
 ### 10.1 IDE/LSP (P2)
 - [x] `goto definition` no LSP (same-file; cross-file futuro)
-- [ ] Implementar `find references` no LSP
+- [x] Implementar `find references` no LSP (same-file, com `includeDeclaration` e ranges LSP)
 - [x] `hover type` (Sprint 3: assinatura de `funcao`, campos de `tipo`, tipo
   do valor em usos de variável, tipo da expressão sob o cursor com forma de
   tensor; desconhecido cai no texto atual)

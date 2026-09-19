@@ -78,6 +78,10 @@ Filtro por prefixo (case-insensitive).
   `seja`/`constante`, atribuições, parâmetros de `funcao`, variáveis de
   `para cada`/`capturar` e nomes de declarações (`pipeline x:`, `funcao y`,
   `agente z`, ...). Sem resolução cross-file;
+- **find references** (`referencesProvider`): localiza todas as ocorrências
+  same-file do símbolo resolvido no cursor, ignorando acessos de membro
+  (`obj.campo`). `context.includeDeclaration` controla se a declaração entra
+  no resultado; sem ele, o resultado traz somente os usos;
 - **signatureHelp** (`signatureHelpProvider`, gatilhos `,` e `(`): assinatura
   do builtin mais interno na linha, com o parâmetro ativo destacado (só
   argumentos na mesma linha);

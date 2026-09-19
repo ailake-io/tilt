@@ -972,6 +972,35 @@ Span definition(const SourceFile& src, std::uint32_t line, std::uint32_t column)
   return Span{0, 0, 0, 0};
 }
 
+std::vector<Span> references(const SourceFile& src, std::uint32_t line, std::uint32_t column,
+                             bool include_declaration) {
+  std::vector<Span> out;
+  const std::string word = word_at(src, line, column, nullptr);
+  if (word.empty()) return out;
+
+  DiagnosticEngine diag(&src);
+  Lexer lexer(src, diag);
+  const std::vector<Token> toks = lexer.tokenize();
+  Parser parser(toks, diag);
+  const ast::Program prog = parser.parse_program();
+  const auto decls = collect_decls(prog, toks);
+  const NameDecl* target = resolve_decl(decls, word, line, column);
+  if (!target) return out;
+
+  const std::string_view text = src.text();
+  for (const Token& tok : toks) {
+    if (tok.kind != TokenKind::Identifier || tok.lexeme != word) continue;
+    if (tok.span.offset > 0 && tok.span.offset <= text.size() &&
+        text[tok.span.offset - 1] == '.') {
+      continue;  // membro de mapa/tensor, nao uma referencia ao nome declarado.
+    }
+    const bool is_target_declaration = tok.span.offset == target->span.offset;
+    if (is_target_declaration && !include_declaration) continue;
+    out.push_back(tok.span);
+  }
+  return out;
+}
+
 SigHelp signature_help(const SourceFile& src, std::uint32_t line, std::uint32_t column) {
   SigHelp out;
   const std::string_view text = src.line_text(line);
