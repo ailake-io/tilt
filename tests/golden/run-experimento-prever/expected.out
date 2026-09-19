@@ -1,6 +1,6 @@
 == experimento prever ==
 modelo: regressao_linear | linhas: 3 (treino 2, teste 1) | atributos: 2
-teste rmse: 10.1746
+teste rmse: 38.8119
 teste r2: 0.0000
 == pipeline usa ==
-preco: 254.913
+preco: 279.406

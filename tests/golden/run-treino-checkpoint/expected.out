@@ -2,6 +2,6 @@ treino M: checkpoint salvo em ckpt.json (epoca 2)
 treino M: checkpoint salvo em ckpt.json (epoca 4)
 treino M: perda caiu sim | acuracia 6/8
 treino M: retomado de ckpt.json (epoca 4)
-treino M: perda caiu sim | acuracia 8/8
+treino M: perda caiu sim | acuracia 6/8
 == pipeline p ==
 a: 0 b: 1

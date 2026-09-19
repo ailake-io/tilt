@@ -2,4 +2,4 @@
 modelo: svm | linhas: 4 (treino 3, teste 1) | atributos: 1
 teste acuracia: 1.0000
 == pipeline p ==
-1 0.268897
+1 0.731015

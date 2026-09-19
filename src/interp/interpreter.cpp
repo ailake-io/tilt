@@ -58,6 +58,7 @@
 #include "runtime/postgres.hpp"
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
+#include "runtime/sorteio.hpp"
 #include "runtime/s3.hpp"
 #include "runtime/safetensors.hpp"
 #include "runtime/sqlite.hpp"
@@ -3917,7 +3918,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
     std::vector<std::int64_t> corte(static_cast<std::size_t>(n));
     for (std::int64_t i = 0; i < n; ++i) corte[static_cast<std::size_t>(i)] = i;
     std::mt19937_64 rng_div(cfg.seed_mistura + 0x9E3779B9ULL);
-    std::shuffle(corte.begin(), corte.end(), rng_div);
+    embaralhar_portavel(corte.begin(), corte.end(), rng_div);
     std::int64_t n_val = static_cast<std::int64_t>(cfg.f_val * static_cast<double>(n));
     if (cfg.f_val > 0.0) n_val = std::max<std::int64_t>(1, std::min<std::int64_t>(n_val, n - 1));
     std::vector<std::int64_t> idx_tr(corte.begin(), corte.begin() + (n - n_val));
@@ -4413,7 +4414,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       // Embaralhamento deterministico pela semente (so quando ha >1 lote).
       if (cfg.embaralhar && tamanho_lote < n_full) {
         std::mt19937_64 rng(cfg.seed_mistura + seed_sufixo);
-        std::shuffle(ordem.begin(), ordem.end(), rng);
+        embaralhar_portavel(ordem.begin(), ordem.end(), rng);
       }
       for (std::int64_t b0 = 0; b0 < n_full; b0 += tamanho_lote) {
         const std::int64_t nb = std::min(tamanho_lote, n_full - b0);
@@ -4685,7 +4686,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           if (cfg.embaralhar) {
             std::mt19937_64 rngb(cfg.seed_mistura + static_cast<std::uint64_t>(epoch) +
                                  0xBF58476D1CE4E5B9ULL);
-            std::shuffle(ob.begin(), ob.end(), rngb);
+            embaralhar_portavel(ob.begin(), ob.end(), rngb);
           }
           for (std::int64_t bpos : ob) {
             rt::Tensor xb_file;
@@ -4705,7 +4706,7 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           if (cfg.embaralhar) {
             std::mt19937_64 rngv(cfg.seed_mistura + static_cast<std::uint64_t>(epoch) +
                                  0x94D049BB133111EBULL);
-            std::shuffle(ov.begin(), ov.end(), rngv);
+            embaralhar_portavel(ov.begin(), ov.end(), rngv);
           }
           for (std::int64_t vpos : ov) {
             const VaoParquet& vao = vaos[static_cast<std::size_t>(vpos)];
@@ -5463,7 +5464,7 @@ static ArvoreA arv_treinar(const std::vector<std::vector<double>>& x, const std:
     std::vector<std::size_t> atts(f);
     for (std::size_t j = 0; j < f; ++j) atts[j] = j;
     if (nteste > 0 && static_cast<std::size_t>(nteste) < f) {
-      std::shuffle(atts.begin(), atts.end(), rng);
+      embaralhar_portavel(atts.begin(), atts.end(), rng);
       atts.resize(static_cast<std::size_t>(nteste));
     }
     const double base = arv_impureza(idx, y, classificacao, nclasses);
@@ -5629,14 +5630,13 @@ static void exp_treinar_modelo(Interpreter::ExpModel& m, const std::vector<std::
       yd = ytr;
     }
     m.arvores.clear();
-    std::uniform_int_distribution<std::size_t> bolsa(0, xt.size() - 1);
     for (int t = 0; t < hp.arvores; ++t) {
       std::vector<std::vector<double>> xb;
       std::vector<double> yb;
       xb.reserve(xt.size());
       yb.reserve(xt.size());
       for (std::size_t i = 0; i < xt.size(); ++i) {
-        const std::size_t k = bolsa(rng);
+        const std::size_t k = static_cast<std::size_t>(sortear_indice(rng, xt.size()));
         xb.push_back(xt[k]);
         yb.push_back(yd[k]);
       }
@@ -5700,7 +5700,7 @@ static void exp_treinar_modelo(Interpreter::ExpModel& m, const std::vector<std::
     for (std::size_t i = 0; i < ordem.size(); ++i) ordem[i] = i;
     long t = 0;
     for (int e = 0; e < hp.epocas; ++e) {
-      std::shuffle(ordem.begin(), ordem.end(), rng);
+      embaralhar_portavel(ordem.begin(), ordem.end(), rng);
       for (std::size_t k = 0; k < ordem.size(); ++k) {
         ++t;
         const std::size_t i = ordem[k];
@@ -5725,7 +5725,7 @@ static void exp_treinar_modelo(Interpreter::ExpModel& m, const std::vector<std::
     }
     std::vector<std::size_t> ordem(xt.size());
     for (std::size_t i = 0; i < ordem.size(); ++i) ordem[i] = i;
-    std::shuffle(ordem.begin(), ordem.end(), rng);
+    embaralhar_portavel(ordem.begin(), ordem.end(), rng);
     m.centroides.clear();
     for (int c = 0; c < k; ++c) m.centroides.push_back(xt[ordem[static_cast<std::size_t>(c)]]);
     std::vector<int> atrib(xt.size(), -1);
@@ -6109,7 +6109,7 @@ void Interpreter::run_experimento(const Item& decl) {
     std::vector<std::size_t> idx(total);
     for (std::size_t i = 0; i < total; ++i) idx[i] = i;
     std::mt19937 rng(static_cast<std::uint32_t>(semente));
-    std::shuffle(idx.begin(), idx.end(), rng);
+    embaralhar_portavel(idx.begin(), idx.end(), rng);
     n_tr = std::max<std::size_t>(1, static_cast<std::size_t>(f_tr * total));
     n_va = static_cast<std::size_t>(f_va * total);
     if (n_tr + n_va >= total) n_tr = total - n_va - 1;
@@ -6399,7 +6399,7 @@ void Interpreter::run_experimento(const Item& decl) {
       std::vector<std::size_t> idc(total);
       for (std::size_t i = 0; i < total; ++i) idc[i] = i;
       std::mt19937 rng_cv(static_cast<std::uint32_t>(semente));
-      std::shuffle(idc.begin(), idc.end(), rng_cv);
+      embaralhar_portavel(idc.begin(), idc.end(), rng_cv);
       std::vector<double> notas;
       for (int f = 0; f < K; ++f) {
         std::vector<Value> tr, te;
