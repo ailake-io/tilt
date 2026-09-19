@@ -187,7 +187,9 @@ void fecha_banco(const DuckdbApi& db, void* h) {
   delete p;
 }
 
-// Conexao via pool (statements avulsos) ou dedicada (transacao, pooled=false).
+// DuckDB usa conexoes dedicadas em todos os caminhos: manter uma conexao ociosa
+// do pool aberta enquanto outra transaciona o mesmo arquivo causa conflitos
+// de catalogo no DuckDB.
 // DuckDB e em-processo: a conexao nao "cai" sozinha, validacao e trivial.
 struct Conn {
   const DuckdbApi& db;
@@ -327,7 +329,7 @@ Value duckdb_query(const std::string& db_path, const std::string& sql) {
     die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
   }
 
-  Conn conn(db, db_path, sql);
+  Conn conn(db, db_path, sql, false);
   DuckdbResult result;
   if (db.query(conn.connection, sql.c_str(), &result) != kDuckdbSuccess) {
     const std::string msg = result_error(db, &result);
@@ -360,7 +362,7 @@ void duckdb_exec(const std::string& db_path, const std::string& sql) {
   // A C API nao expoe duckdb_execute_statements nesta versao; DDL/DML roda via
   // duckdb_query (sucesso = DuckDBSuccess, sem linhas) e o erro vem de
   // duckdb_result_error.
-  Conn conn(db, db_path, sql);
+  Conn conn(db, db_path, sql, false);
   DuckdbResult result;
   if (db.query(conn.connection, sql.c_str(), &result) != kDuckdbSuccess) {
     const std::string msg = result_error(db, &result);
@@ -445,7 +447,7 @@ void duckdb_exec_params(const std::string& db_path, const std::string& sql,
     die("libduckdb nao encontrada: instale o pacote duckdb");
 #endif
   }
-  Conn conn(db, db_path, sql);
+  Conn conn(db, db_path, sql, false);
   exec_um(db, conn.connection, sql, params, "");
 }
 
@@ -465,7 +467,7 @@ Value duckdb_query_params(const std::string& db_path, const std::string& sql,
   if (!returns_rows(sql)) {
     die("apenas consultas SELECT sao suportadas nesta versao; para INSERT/UPDATE/DDL use executar_sql");
   }
-  Conn conn(db, db_path, sql);
+  Conn conn(db, db_path, sql, false);
   void* prep = prepara_e_liga(db, conn.connection, sql, params, "", "consulta");
   DuckdbResult result;
   const int rc = db.execute_prepared(prep, &result);
