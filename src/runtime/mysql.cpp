@@ -1,15 +1,15 @@
 #include "runtime/mysql.hpp"
 
-#include "runtime/compat.hpp"
-#include "runtime/sql_params.hpp"
-#include "runtime/sql_pool.hpp"
-
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
+
+#include "runtime/compat.hpp"
+#include "runtime/sql_params.hpp"
+#include "runtime/sql_pool.hpp"
 
 namespace tilt::rt {
 
