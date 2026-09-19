@@ -30,11 +30,11 @@
 
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
-#include "runtime/checkpoint.hpp"
-#include "runtime/cluster.hpp"
 #include "runtime/avro.hpp"
+#include "runtime/checkpoint.hpp"
 #include "runtime/chroma.hpp"
 #include "runtime/clickhouse.hpp"
+#include "runtime/cluster.hpp"
 #include "runtime/compat.hpp"
 #include "runtime/delta.hpp"
 #include "runtime/duckdb.hpp"
