@@ -381,8 +381,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `"chroma://host[:porta]/colecao"` (REST via `curl`, HTTP puro, sem auth;
   coleção get-or-create; `buscar` devolve `{ id, score }`, sem o texto; o
   score é `1 - distance` da query do Chroma).
-- Os embeddings do modo `mock` são um bag-of-tokens hasheado (16 dimensões) —
-  bons para testes determinísticos, não para relevância real.
+- Os embeddings do modo `mock` mantêm 16 dimensões e combinam tokens hasheados com trigrams
+  com padding de borda e normalização L2; continuam sendo apenas um mock determinístico, não relevância real.
 - `avaliacao` é de 1ª passada (guia 05): `dados:` inline/bloco/caminho,
   `executar:` por caso com `caso` + `retornar`, métricas `exata`/`contem`/
   `regex`/`tolerancia`/`juiz` (todas precisam passar por caso), gate no

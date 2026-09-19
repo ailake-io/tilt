@@ -131,7 +131,7 @@
 
 ### 4.2 RAG / Bancos Vetoriais (P2)
 - [x] Implementar pruning de partições no Delta Lake (Fase 6: igualdade em partições compostas + filtro residual)
-- [ ] Melhorar embeddings mock (atualmente bag-of-tokens hasheado — 16 dims)
+- [x] Melhorar embeddings mock (tokens + trigrams hasheados, 16 dims, normalização L2)
 - [ ] Adicionar suporte a Pinecone com `ensure` de namespace
 - [ ] Validar integração com Qdrant, Weaviate, Chroma, pgvector em CI real
 

@@ -162,7 +162,7 @@ indice base:
 
 pipeline indexar:
   passos:
-    # Com TILT_LLM=mock, embeddings determinísticos de 16 dimensões.
+    # Com TILT_LLM=mock, embeddings determinísticos de 16 dimensões (tokens + trigrams).
     - total = base.inserir([{ id: "a1", texto: "a fatura sai no primeiro dia util do mes" }])
     - imprimir total   # 1
     - base.inserir "o boleto vence dia dez"

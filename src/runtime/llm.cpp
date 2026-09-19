@@ -602,29 +602,39 @@ std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std:
 
 std::vector<float> llm_embed(const std::string& model, const std::string& text) {
   if (llm_is_mock()) {
-    // Deterministic hashed bag-of-tokens, L2-normalized. Same words -> same
-    // vector; shared vocabulary -> higher cosine similarity.
+    // Deterministic hashed token + subword trigram embedding, L2-normalized.
+    // Tokens keep exact-word precision; boundary-padded trigrams reduce the
+    // brittleness of the old bag-of-tokens mock for related spellings.
     constexpr std::size_t kDim = 16;
+    constexpr float kTrigramWeight = 0.25F;
     std::vector<float> v(kDim, 0.0F);
-    std::string tok;
-    auto flush = [&] {
-      if (tok.empty()) return;
+    auto hash_text = [](const std::string& value) {
       std::uint64_t h = 1469598103934665603ULL;
-      for (char c : tok) {
-        h ^= static_cast<unsigned char>(c);
+      for (unsigned char c : value) {
+        h ^= c;
         h *= 1099511628211ULL;
       }
-      v[h % kDim] += 1.0F;
-      tok.clear();
+      return h;
     };
+    auto add_token = [&](const std::string& token) {
+      if (token.empty()) return;
+      v[hash_text(token) % kDim] += 1.0F;
+      const std::string padded = "^" + token + "$";
+      if (padded.size() < 3) return;
+      for (std::size_t i = 0; i + 3 <= padded.size(); ++i) {
+        v[hash_text(padded.substr(i, 3)) % kDim] += kTrigramWeight;
+      }
+    };
+    std::string token;
     for (char c : text) {
       if (std::isalnum(static_cast<unsigned char>(c))) {
-        tok += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        token += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
       } else {
-        flush();
+        add_token(token);
+        token.clear();
       }
     }
-    flush();
+    add_token(token);
     float norm = 0.0F;
     for (float x : v) norm += x * x;
     norm = norm > 0.0F ? std::sqrt(norm) : 1.0F;

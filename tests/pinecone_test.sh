@@ -11,7 +11,7 @@
 # desconhecido da 404 {"message": ...}. Rodadas: (1) PINECONE_API_KEY correta
 # — insercao de 3 docs e busca top_k conferindo ids/ordem/scores (colisao do
 # hash mock: "gato e cachorro" pontua 2/sqrt(5) = 0.894427 > "gato domestico"
-# 1/sqrt(2) = 0.707107 > "engenharia de dados", fora do top 2) e o 404 de
+# "engenharia de dados" fica fora do top 2) e o 404 de
 # namespace desconhecido capturado pelo tilt; (2) chave errada — 401 com a
 # mensagem do servidor; (3) PINECONE_API_KEY ausente — erro claro antes de
 # tocar a rede (o log do mock nao ganha linhas).
@@ -196,16 +196,16 @@ check_output() {
   echo "$out" | grep -q "inseridos: 3" || {
     echo "saida sem 'inseridos: 3': $out"; fail=1;
   }
-  # top_k: b1 (colisao no mock -> 2/sqrt(5)) antes de a1 (1/sqrt(2)); c1 fora
+  # top_k: b1 segue antes de a1 com tokens e trigrams; c1 fica fora
   linhas=$(echo "$out" | grep "^achado:" || true)
   [ "$(printf '%s\n' "$linhas" | grep -c .)" = "2" ] || {
     echo "esperados 2 achados: $out"; fail=1;
   }
-  printf '%s\n' "$linhas" | sed -n 1p | grep -q "achado: b1 0.894" || {
-    echo "primeiro achado nao e 'b1 0.894': $out"; fail=1;
+  printf '%s\n' "$linhas" | sed -n 1p | grep -q "achado: b1 0.856706" || {
+    echo "primeiro achado nao e 'b1 0.856706': $out"; fail=1;
   }
-  printf '%s\n' "$linhas" | sed -n 2p | grep -q "achado: a1 0.707" || {
-    echo "segundo achado nao e 'a1 0.707': $out"; fail=1;
+  printf '%s\n' "$linhas" | sed -n 2p | grep -q "achado: a1 0.699896" || {
+    echo "segundo achado nao e 'a1 0.699896': $out"; fail=1;
   }
   echo "$linhas" | grep -q "c1" && {
     echo "c1 nao deveria estar no top 2: $out"; fail=1;
