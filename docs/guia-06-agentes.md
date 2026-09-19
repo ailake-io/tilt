@@ -147,6 +147,8 @@ Retorna `{ texto, rastro: [ { agente, texto } ] }`.
 ## Exemplo
 
 [`../exemplos/agente.tilt`](../exemplos/agente.tilt) — ferramenta + RAG + agente.
+[`../exemplos/agente_multi_etapas.tilt`](../exemplos/agente_multi_etapas.tilt) —
+equipe supervisor com busca vetorial e validação real via `checar_tilt`.
 [`../exemplos/copiloto.tilt`](../exemplos/copiloto.tilt) — agente que revisa
 código Tilt com o builtin `checar_tilt` (ver [guia 10](guia-10-ia-editores.md)).
 

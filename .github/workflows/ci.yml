@@ -78,6 +78,7 @@ jobs:
           ./build/release/bin/tilt executar exemplos/resumo_vendas.tilt
           ./build/release/bin/tilt executar exemplos/etl_delta.tilt
           TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente.tilt
+          TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente_multi_etapas.tilt
 
   # Port Windows (MSVC, windows-latest): o CTest registra uma suíte funcional
   # nativa em PowerShell; os testes shell de conectores ficam em Linux/macOS.

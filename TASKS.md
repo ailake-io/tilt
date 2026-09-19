@@ -208,7 +208,7 @@
   anexar→ler com pruning; hermético e idempotente; no smoke do CI)
 - [x] Adicionar exemplo de RAG completo (existia `exemplos/agente.tilt` —
   validado com mock e incluído no smoke do CI)
-- [ ] Adicionar exemplo de agente multi-étapas com ferramentas reais
+- [x] Adicionar exemplo de agente multi-étapas com ferramentas reais (`exemplos/agente_multi_etapas.tilt`, validado no smoke CI)
 - [x] Adicionar exemplo de treino de modelo com dados reais (`exemplos/treino.tilt`)
 - [ ] Adicionar exemplo de streaming com Kafka (tema de eventos)
 

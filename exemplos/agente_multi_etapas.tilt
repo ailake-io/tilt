@@ -1,0 +1,58 @@
+# Equipe multi-etapas com ferramentas reais. Rode com TILT_LLM=mock.
+# O Pesquisador consulta um indice vetorial e o Revisor valida um arquivo Tilt.
+
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+  dimensao: 16
+  metrica: cosseno
+
+ferramenta pesquisar_politica:
+  descricao: "Busca a politica de suporte mais relevante."
+  executar:
+    vetor = incorporar "text-embedding-3-small", "horario de suporte"
+    retornar base.buscar vetor, top_k: 1
+
+ferramenta validar_exemplo:
+  descricao: "Valida um exemplo Tilt e devolve seus diagnosticos."
+  executar:
+    retornar checar_tilt "exemplos/soma.tilt"
+
+agente Pesquisador:
+  llm: gpt
+  papel: "Pesquisador: encontre a politica que responde a pergunta."
+  ferramentas:
+    - pesquisar_politica
+  memoria: nenhuma
+  max_passos: 2
+
+agente Revisor:
+  llm: gpt
+  papel: "Revisor: confirme que o exemplo Tilt continua valido."
+  ferramentas:
+    - validar_exemplo
+  memoria: nenhuma
+  max_passos: 2
+
+equipe SuporteEQualidade:
+  agentes:
+    - pesquisador: Pesquisador
+    - revisor: Revisor
+  estrategia: supervisor
+  supervisor: gpt
+  objetivo: "Responder com a politica encontrada e confirmar a qualidade do exemplo."
+  max_passos: 4
+
+pipeline atendimento:
+  passos:
+    - base.inserir "o suporte funciona de segunda a sexta, das 9h as 18h"
+    - relatorio = SuporteEQualidade.responder "qual o horario de suporte e o exemplo esta valido?"
+    - imprimir "relatorio:", relatorio.texto
+    - imprimir "etapas:", relatorio.rastro.tamanho
+    - para cada etapa em relatorio.rastro:
+        imprimir etapa.agente, etapa.texto

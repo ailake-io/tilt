@@ -44,6 +44,8 @@ if ($fallbackInterp -cne $fallbackJit) {
 [void](Invoke-Tilt @("checar", "exemplos/soma.tilt"))
 [void](Invoke-Tilt @("executar", "exemplos/resumo_vendas.tilt"))
 [void](Invoke-Tilt @("executar", "exemplos/etl_delta.tilt"))
+$env:TILT_LLM = "mock"
+[void](Invoke-Tilt @("executar", "exemplos/agente_multi_etapas.tilt"))
 
 $port = 8492
 $temp = Join-Path $env:TEMP ("tilt-windows-" + [guid]::NewGuid().ToString())
