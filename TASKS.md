@@ -198,7 +198,7 @@
 ### 8.1 Documentação (P2)
 - [x] Completar `guia-14-roteiro.md` com roadmap detalhado de fases restantes
 - [x] Adicionar exemplos executáveis para todas as features novas em cada guia (suíte `tests/docs_test.sh`: 103 blocos Tilt validados; exemplos de Delta, RAG, agentes, treino e Kafka incluídos)
-- [ ] Criar guia de troubleshooting com erros comuns e soluções
+- [x] Criar guia de troubleshooting com erros comuns e soluções (`docs/guia-15-troubleshooting.md`, incluído na suíte documental)
 - [x] Documentar limitações de cada conector em `guia-12-limitacoes.md`
 - [ ] Adicionar glossary de termos técnicos em português
 
