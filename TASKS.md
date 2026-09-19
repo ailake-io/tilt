@@ -220,7 +220,7 @@
 - [x] Otimizar hot path do interpretador (já usa `ValueKind` + `switch` direto; não há `std::variant`/`std::visit` no caminho de execução)
 - [x] Implementar cache de tipos em `semantic/checker.cpp` para projetos grandes (memoiza expressões independentes do escopo e preserva diagnósticos)
 - [x] Otimizar alocação de tensores em `Tensor` (pool/reuse) (allocator pooled thread-safe, limite de 64 MiB e teste de reuso)
-- [ ] Benchmark de operações de tensor (matmul, conv2d) vs NumPy/Torch
+- [x] Benchmark de operações de tensor (matmul, conv2d) vs NumPy/Torch (runner reproduzível com C++/NumPy/PyTorch opcional em `scripts/benchmark_tensor_ops.py`)
 - [ ] Implementar thread pool para operações de IO paralelas
 
 ### 9.2 Escalabilidade (P3)
