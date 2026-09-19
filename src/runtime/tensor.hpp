@@ -1,17 +1,64 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <new>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace tilt::rt {
+
+namespace detail {
+
+// Allocator de capacidade reutilizavel para buffers f32 de Tensor. A
+// implementacao mantem ownership exclusivo: o bloco volta ao pool somente
+// quando o vector que o possui e destruido ou realocado.
+float* tensor_buffer_allocate(std::size_t n);
+void tensor_buffer_deallocate(float* p, std::size_t n) noexcept;
+
+}  // namespace detail
+
+template <typename T>
+struct TensorBufferAllocator {
+  using value_type = T;
+
+  TensorBufferAllocator() noexcept = default;
+  template <typename U>
+  TensorBufferAllocator(const TensorBufferAllocator<U>&) noexcept {}
+
+  T* allocate(std::size_t n) {
+    if (n > std::numeric_limits<std::size_t>::max() / sizeof(T)) throw std::bad_alloc();
+    if constexpr (std::is_same_v<T, float>) {
+      return detail::tensor_buffer_allocate(n);
+    } else {
+      return static_cast<T*>(::operator new(n * sizeof(T)));
+    }
+  }
+
+  void deallocate(T* p, std::size_t n) noexcept {
+    if constexpr (std::is_same_v<T, float>) {
+      detail::tensor_buffer_deallocate(p, n);
+    } else {
+      ::operator delete(p);
+    }
+  }
+
+  template <typename U>
+  bool operator==(const TensorBufferAllocator<U>&) const noexcept { return true; }
+  template <typename U>
+  bool operator!=(const TensorBufferAllocator<U>&) const noexcept { return false; }
+};
+
+using TensorData = std::vector<float, TensorBufferAllocator<float>>;
 
 // Dense row-major f32 tensor. matmul 2D x 2D divide linhas entre threads
 // acima de um limiar; demais kernels sao escalares (SIMD: futuro).
 // Shape-mismatched operations throw std::runtime_error.
 struct Tensor {
   std::vector<std::int64_t> shape;
-  std::vector<float> data;
+  TensorData data;
 
   std::int64_t size() const;
   std::int64_t rank() const { return static_cast<std::int64_t>(shape.size()); }

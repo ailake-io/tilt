@@ -2085,7 +2085,7 @@ rt::Tensor Interpreter::value_to_tensor(const Value& v, Span span) {
     flatten_nested(v, shape, data, 0);
     rt::Tensor t;
     t.shape = shape;
-    t.data = std::move(data);
+    t.data.assign(data.begin(), data.end());
     if (t.size() != static_cast<std::int64_t>(t.data.size())) {
       fail(span, "lista aninhada irregular; nao forma um tensor");
     }
@@ -2892,7 +2892,7 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
           fail(inner.span, "peso ONNX ausente ou com forma incompativel: " + name);
         rt::Tensor result;
         result.shape = found->second->shape;
-        result.data = found->second->data;
+        result.data.assign(found->second->data.begin(), found->second->data.end());
         return result;
       };
       auto suffix = [](const std::string& name, const std::string& prefix) {
@@ -3288,7 +3288,7 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
       rt::GgufTensor w, b;
       w.nome = base + ".peso";
       w.forma = l.w.shape;
-      w.dados = l.w.data;
+      w.dados.assign(l.w.data.begin(), l.w.data.end());
       if (l.kind == Layer::Embedding) {
         tensores.push_back(std::move(w));
         ++estadual;
@@ -3296,7 +3296,7 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
       }
       b.nome = base + ".vies";
       b.forma = l.b.shape;
-      b.dados = l.b.data;
+      b.dados.assign(l.b.data.begin(), l.b.data.end());
       tensores.push_back(std::move(w));
       tensores.push_back(std::move(b));
       ++estadual;
@@ -9479,7 +9479,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       std::vector<float> v = rt::llm_embed(model, text);
       rt::Tensor t;
       t.shape = {static_cast<std::int64_t>(v.size())};
-      t.data = std::move(v);
+      t.data.assign(v.begin(), v.end());
       return Value::tensor_de(std::move(t));
     } catch (const std::exception& e) {
       fail(call.span, std::string("incorporar: ") + e.what());

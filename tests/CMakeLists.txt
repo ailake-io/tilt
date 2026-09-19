@@ -1,5 +1,11 @@
 if(NOT WIN32)
 add_test(
+  NAME tensor_pool
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/tensor_pool_test.sh
+          ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+
+add_test(
   NAME golden
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/run_golden.sh
           $<TARGET_FILE:tilt>

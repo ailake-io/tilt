@@ -2,12 +2,77 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 namespace tilt::rt {
+
+namespace detail {
+
+namespace {
+
+struct TensorBufferPool {
+  std::mutex mu;
+  std::unordered_map<std::size_t, std::vector<float*>> free;
+  std::size_t cached_bytes = 0;
+  static constexpr std::size_t kMaxBytes = 64U * 1024U * 1024U;
+  static constexpr std::size_t kMaxPerSize = 8;
+};
+
+TensorBufferPool& tensor_buffer_pool() {
+  // Leaked intentionally: Tensor destructors from other static objects cannot
+  // race the pool's teardown at process exit. The cap bounds retained memory.
+  static TensorBufferPool* pool = new TensorBufferPool();
+  return *pool;
+}
+
+}  // namespace
+
+float* tensor_buffer_allocate(std::size_t n) {
+  if (n == 0) return static_cast<float*>(::operator new(0));
+  TensorBufferPool& pool = tensor_buffer_pool();
+  {
+    std::lock_guard<std::mutex> lock(pool.mu);
+    auto it = pool.free.find(n);
+    if (it != pool.free.end() && !it->second.empty()) {
+      float* p = it->second.back();
+      it->second.pop_back();
+      pool.cached_bytes -= n * sizeof(float);
+      if (it->second.empty()) pool.free.erase(it);
+      return p;
+    }
+  }
+  return static_cast<float*>(::operator new(n * sizeof(float)));
+}
+
+void tensor_buffer_deallocate(float* p, std::size_t n) noexcept {
+  if (!p) return;
+  if (n == 0) {
+    ::operator delete(p);
+    return;
+  }
+  TensorBufferPool& pool = tensor_buffer_pool();
+  const std::size_t bytes = n * sizeof(float);
+  {
+    std::lock_guard<std::mutex> lock(pool.mu);
+    auto& bucket = pool.free[n];
+    if (bytes <= TensorBufferPool::kMaxBytes &&
+        bucket.size() < TensorBufferPool::kMaxPerSize &&
+        pool.cached_bytes <= TensorBufferPool::kMaxBytes - bytes) {
+      bucket.push_back(p);
+      pool.cached_bytes += bytes;
+      return;
+    }
+    if (bucket.empty()) pool.free.erase(n);
+  }
+  ::operator delete(p);
+}
+
+}  // namespace detail
 
 namespace {
 

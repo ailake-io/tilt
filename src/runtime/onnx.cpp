@@ -3,6 +3,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <utility>
 
@@ -49,7 +50,7 @@ std::string encode_packed_int64(const std::vector<std::int64_t>& v) {
   return w.out;
 }
 
-std::string encode_raw_floats(const std::vector<float>& v) {
+std::string encode_raw_floats(std::span<const float> v) {
   std::string s;
   s.resize(v.size() * 4);
   if (!v.empty()) std::memcpy(s.data(), v.data(), s.size());
@@ -146,7 +147,7 @@ std::string value_info_forma(const std::string& name,
 
 // TensorProto (initializer): dims (1, packed) + data_type (2) + name (8) + raw_data (9)
 std::string tensor_proto(const std::string& name, const std::vector<std::int64_t>& dims,
-                         const std::vector<float>& data) {
+                         std::span<const float> data) {
   Writer w;
   w.bytes_field(1, encode_packed_int64(dims));
   w.varint_field(2, 1);  // FLOAT
