@@ -1,8 +1,10 @@
 #include "runtime/parquet.hpp"
 
 #include "runtime/compat.hpp"
+#include "runtime/sha256.hpp"
 #include "runtime/snappy_codec.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -183,6 +185,239 @@ struct Tr {  // reader
     if (pos > n) die("fim inesperado ao pular campo");
   }
 };
+
+// ---------------------------------------------------------------- criptografia modular Parquet
+// AES-GCM e carregado dinamicamente para manter o runtime sem dependencia de
+// link com OpenSSL (inclusive no build Windows). O formato segue o
+// AES_GCM_V1 do parquet-format: nonce de 12 bytes, ciphertext e tag de 16
+// bytes; paginas levam um prefixo little-endian com o tamanho do modulo.
+struct AesGcmApi {
+  using CtxNew = void* (*)();
+  using CtxFree = void (*)(void*);
+  using Cipher = const void* (*)();
+  using Init = int (*)(void*, const void*, void*, const unsigned char*, const unsigned char*);
+  using Update = int (*)(void*, unsigned char*, int*, const unsigned char*, int);
+  using Final = int (*)(void*, unsigned char*, int*);
+  using Ctrl = int (*)(void*, int, int, void*);
+  using Rand = int (*)(unsigned char*, int);
+
+  void* lib = nullptr;
+  CtxNew ctx_new = nullptr;
+  CtxFree ctx_free = nullptr;
+  Cipher cipher = nullptr;
+  Init enc_init = nullptr;
+  Init dec_init = nullptr;
+  Update enc_update = nullptr;
+  Update dec_update = nullptr;
+  Final enc_final = nullptr;
+  Final dec_final = nullptr;
+  Ctrl ctrl = nullptr;
+  Rand rand_bytes = nullptr;
+
+  void load() {
+    if (lib) return;
+#if defined(_WIN32)
+    const char* names[] = {"libcrypto-3-x64.dll", "libcrypto-1_1-x64.dll", "libcrypto.dll"};
+#else
+    const char* names[] = {"libcrypto.so.3", "libcrypto.so"};
+#endif
+    for (const char* name : names) {
+      lib = tilt_dlopen(name);
+      if (lib) break;
+    }
+    if (!lib) die("criptografia Parquet exige OpenSSL libcrypto no ambiente");
+#define TILT_CRYPTO_SYM(name, member) \
+    member = reinterpret_cast<decltype(member)>(tilt_dlsym(lib, name));
+    TILT_CRYPTO_SYM("EVP_CIPHER_CTX_new", ctx_new);
+    TILT_CRYPTO_SYM("EVP_CIPHER_CTX_free", ctx_free);
+    TILT_CRYPTO_SYM("EVP_aes_256_gcm", cipher);
+    TILT_CRYPTO_SYM("EVP_EncryptInit_ex", enc_init);
+    TILT_CRYPTO_SYM("EVP_DecryptInit_ex", dec_init);
+    TILT_CRYPTO_SYM("EVP_EncryptUpdate", enc_update);
+    TILT_CRYPTO_SYM("EVP_DecryptUpdate", dec_update);
+    TILT_CRYPTO_SYM("EVP_EncryptFinal_ex", enc_final);
+    TILT_CRYPTO_SYM("EVP_DecryptFinal_ex", dec_final);
+    TILT_CRYPTO_SYM("EVP_CIPHER_CTX_ctrl", ctrl);
+    TILT_CRYPTO_SYM("RAND_bytes", rand_bytes);
+#undef TILT_CRYPTO_SYM
+    if (!ctx_new || !ctx_free || !cipher || !enc_init || !dec_init || !enc_update ||
+        !dec_update || !enc_final || !dec_final || !ctrl || !rand_bytes) {
+      die("libcrypto sem a API AES-GCM necessaria");
+    }
+  }
+};
+
+constexpr int CRYPTO_CTRL_GCM_SET_IVLEN = 0x9;
+constexpr int CRYPTO_CTRL_GCM_GET_TAG = 0x10;
+constexpr int CRYPTO_CTRL_GCM_SET_TAG = 0x11;
+
+struct ParquetCrypto {
+  std::array<std::uint8_t, 32> key{};
+  std::string file_unique;
+};
+
+AesGcmApi& aes_gcm() {
+  static AesGcmApi api;
+  api.load();
+  return api;
+}
+
+std::string random_bytes(std::size_t n) {
+  AesGcmApi& api = aes_gcm();
+  std::string out(n, '\0');
+  if (n > 0 && api.rand_bytes(reinterpret_cast<unsigned char*>(out.data()), static_cast<int>(n)) != 1) {
+    die("RAND_bytes falhou ao criar nonce/identificador do arquivo Parquet");
+  }
+  return out;
+}
+
+std::array<std::uint8_t, 32> parquet_key(const std::string& secret) {
+  if (secret.empty()) die("chave Parquet vazia");
+  return sha256_raw(secret);
+}
+
+std::string gcm_crypt(const std::string& input, const std::string& aad,
+                      const std::array<std::uint8_t, 32>& key,
+                      const std::string& nonce, bool decrypt,
+                      const std::string& tag = {}) {
+  AesGcmApi& api = aes_gcm();
+  void* ctx = api.ctx_new();
+  if (!ctx) die("EVP_CIPHER_CTX_new falhou");
+  auto cleanup = [&]() { api.ctx_free(ctx); };
+  const auto* k = reinterpret_cast<const unsigned char*>(key.data());
+  const auto* iv = reinterpret_cast<const unsigned char*>(nonce.data());
+  const bool ok_init = decrypt
+      ? api.dec_init(ctx, api.cipher(), nullptr, nullptr, nullptr) == 1
+      : api.enc_init(ctx, api.cipher(), nullptr, nullptr, nullptr) == 1;
+  if (!ok_init || api.ctrl(ctx, CRYPTO_CTRL_GCM_SET_IVLEN, static_cast<int>(nonce.size()), nullptr) != 1) {
+    cleanup();
+    die("inicializacao AES-GCM falhou");
+  }
+  const bool ok_key = decrypt
+      ? api.dec_init(ctx, nullptr, nullptr, k, iv) == 1
+      : api.enc_init(ctx, nullptr, nullptr, k, iv) == 1;
+  if (!ok_key) {
+    cleanup();
+    die("chave AES-GCM invalida");
+  }
+  int ignored = 0;
+  if (!aad.empty() && (decrypt ? api.dec_update(ctx, nullptr, &ignored,
+                                                reinterpret_cast<const unsigned char*>(aad.data()),
+                                                static_cast<int>(aad.size()))
+                               : api.enc_update(ctx, nullptr, &ignored,
+                                                reinterpret_cast<const unsigned char*>(aad.data()),
+                                                static_cast<int>(aad.size()))) != 1) {
+    cleanup();
+    die("AAD AES-GCM invalida");
+  }
+  std::string out(input.size() + 16, '\0');
+  int written = 0;
+  const bool ok_update = decrypt
+      ? api.dec_update(ctx, reinterpret_cast<unsigned char*>(out.data()), &written,
+                       reinterpret_cast<const unsigned char*>(input.data()), static_cast<int>(input.size())) == 1
+      : api.enc_update(ctx, reinterpret_cast<unsigned char*>(out.data()), &written,
+                       reinterpret_cast<const unsigned char*>(input.data()), static_cast<int>(input.size())) == 1;
+  if (!ok_update) {
+    cleanup();
+    die("AES-GCM nao conseguiu processar o modulo");
+  }
+  if (decrypt) {
+    if (tag.size() != 16 || api.ctrl(ctx, CRYPTO_CTRL_GCM_SET_TAG, 16,
+                                     const_cast<char*>(tag.data())) != 1) {
+      cleanup();
+      die("tag AES-GCM ausente ou invalida");
+    }
+  }
+  int tail = 0;
+  const bool ok_final = decrypt
+      ? api.dec_final(ctx, reinterpret_cast<unsigned char*>(out.data()) + written, &tail) == 1
+      : api.enc_final(ctx, reinterpret_cast<unsigned char*>(out.data()) + written, &tail) == 1;
+  if (!ok_final) {
+    cleanup();
+    die(decrypt ? "tag AES-GCM nao confere (chave errada ou arquivo adulterado)"
+                : "finalizacao AES-GCM falhou");
+  }
+  written += tail;
+  if (!decrypt) {
+    std::string gcm_tag(16, '\0');
+    if (api.ctrl(ctx, CRYPTO_CTRL_GCM_GET_TAG, 16, gcm_tag.data()) != 1) {
+      cleanup();
+      die("tag AES-GCM nao pode ser obtida");
+    }
+    out.resize(static_cast<std::size_t>(written));
+    out += gcm_tag;
+  } else {
+    out.resize(static_cast<std::size_t>(written));
+  }
+  cleanup();
+  return out;
+}
+
+std::string parquet_aad(const std::string& file_unique, unsigned char module,
+                        std::uint32_t row_group = 0, std::uint32_t column = 0,
+                        std::uint32_t page = 0, bool page_module = true) {
+  std::string aad = file_unique;
+  aad.push_back(static_cast<char>(module));
+  if (page_module) {
+    for (std::uint32_t n : {row_group, column, page}) {
+      aad.push_back(static_cast<char>(n & 0xFF));
+      aad.push_back(static_cast<char>((n >> 8) & 0xFF));
+      aad.push_back(static_cast<char>((n >> 16) & 0xFF));
+      aad.push_back(static_cast<char>((n >> 24) & 0xFF));
+    }
+  }
+  return aad;
+}
+
+std::string encrypt_page(const std::string& plain, unsigned char module,
+                         const ParquetCrypto& crypto, std::uint32_t column,
+                         std::uint32_t page = 0) {
+  const std::string nonce = random_bytes(12);
+  const std::string cipher = gcm_crypt(plain, parquet_aad(crypto.file_unique, module, 0, column, page),
+                                       crypto.key, nonce, false);
+  std::string out;
+  const std::uint32_t len = static_cast<std::uint32_t>(nonce.size() + cipher.size());
+  out.append(reinterpret_cast<const char*>(&len), 4);
+  out += nonce;
+  out += cipher;
+  return out;
+}
+
+std::size_t decrypt_page(const std::string& file, std::size_t at, unsigned char module,
+                         const ParquetCrypto& crypto, std::uint32_t column,
+                         std::uint32_t page, std::string& plain) {
+  if (at > file.size() || file.size() - at < 4) die("modulo Parquet criptografado truncado");
+  std::uint32_t len = 0;
+  std::memcpy(&len, file.data() + at, 4);
+  if (len < 12 + 16 || len > file.size() - at - 4) die("tamanho de modulo Parquet criptografado invalido");
+  const std::size_t p = at + 4;
+  const std::string nonce(file.data() + p, 12);
+  const std::string body(file.data() + p + 12, len - 12);
+  const std::string cipher = body.substr(0, body.size() - 16);
+  const std::string tag = body.substr(body.size() - 16);
+  plain = gcm_crypt(cipher, parquet_aad(crypto.file_unique, module, 0, column, page),
+                    crypto.key, nonce, true, tag);
+  return 4 + len;
+}
+
+std::string encrypt_footer(const std::string& plain, const ParquetCrypto& crypto) {
+  const std::string nonce = random_bytes(12);
+  const std::string cipher = gcm_crypt(plain, parquet_aad(crypto.file_unique, 0, 0, 0, 0, false),
+                                       crypto.key, nonce, false);
+  return nonce + cipher;
+}
+
+std::string decrypt_footer(const std::string& block, std::size_t at, std::uint32_t len,
+                           const ParquetCrypto& crypto) {
+  if (len < 12 + 16 || at > block.size() || len > block.size() - at) {
+    die("footer Parquet criptografado truncado");
+  }
+  const std::string nonce(block.data() + at, 12);
+  const std::string body(block.data() + at + 12, len - 12);
+  return gcm_crypt(body.substr(0, body.size() - 16),
+                   parquet_aad(crypto.file_unique, 0, 0, 0, 0, false),
+                   crypto.key, nonce, true, body.substr(body.size() - 16));
+}
 
 // ---------------------------------------------------------------- dados
 
@@ -1829,6 +2064,11 @@ struct ColMeta {
   std::int64_t dictionary_page_offset = -1;
 };
 
+struct ParsedParquetCrypto {
+  bool encrypted = false;
+  ParquetCrypto material;
+};
+
 // Descritor de coluna extraido da arvore de schema: nome exposto (grupo
 // externo no caso de lista), tipo da folha e niveis maximos de
 // definicao/repeticao (0/0 = REQUIRED flat, 1/0 = OPTIONAL flat, 1/1 ou 2/1 =
@@ -1874,7 +2114,9 @@ struct ColDesc {
 // gzip/deflate (zlib dlopen) e snappy (codec proprio).
 void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
                   std::int64_t expected_rows, std::vector<Value>& out,
-                  std::vector<int>* row_def = nullptr) {
+                  std::vector<int>* row_def = nullptr,
+                  const ParsedParquetCrypto* crypto_info = nullptr,
+                  std::uint32_t column_index = 0) {
   const std::string ctx = "coluna '" + cd.name + "'";
   if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY && cm.codec != C_ZSTD) {
     die(ctx + ": codec " + std::to_string(cm.codec) +
@@ -1895,8 +2137,20 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
   std::vector<Value> dict;
   bool has_dict = false;
   const std::size_t start = out.size();
+  std::uint32_t page_ordinal = 0;
   while (static_cast<std::int64_t>(out.size() - start) < expected_rows) {
-    Tr pr{reinterpret_cast<const std::uint8_t*>(file.data()), file.size(), pos};
+    std::string encrypted_header;
+    const bool is_encrypted = crypto_info && crypto_info->encrypted;
+    if (is_encrypted) {
+      const bool dictionary = cm.dictionary_page_offset >= 0 &&
+                              static_cast<std::int64_t>(pos) == cm.dictionary_page_offset;
+      const std::size_t consumed = decrypt_page(
+          file, pos, static_cast<unsigned char>(dictionary ? 5 : 4),
+          crypto_info->material, column_index, page_ordinal, encrypted_header);
+      pos += consumed;
+    }
+    Tr pr{reinterpret_cast<const std::uint8_t*>(is_encrypted ? encrypted_header.data() : file.data()),
+          is_encrypted ? encrypted_header.size() : file.size(), is_encrypted ? 0 : pos};
     int page_type = -1;
     std::int64_t uncompressed = -1;
     std::int64_t compressed = -1;
@@ -1968,11 +2222,20 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       }
     }
     (void)uncompressed;
-    if (compressed < 0 || pr.pos + static_cast<std::size_t>(compressed) > file.size()) {
-      die(ctx + ": pagina truncada ou tamanho comprimido ausente");
+    std::string payload;
+    if (is_encrypted) {
+      const unsigned char module = page_type == PG_DICTIONARY ? 3 : 2;
+      const std::size_t consumed = decrypt_page(file, pos, module, crypto_info->material,
+                                                column_index, page_ordinal, payload);
+      pos += consumed;
+    } else {
+      if (compressed < 0 || pr.pos + static_cast<std::size_t>(compressed) > file.size()) {
+        die(ctx + ": pagina truncada ou tamanho comprimido ausente");
+      }
+      payload.assign(file.data() + pr.pos, static_cast<std::size_t>(compressed));
+      pos = pr.pos + static_cast<std::size_t>(compressed);
     }
-    std::string payload(file.data() + pr.pos, static_cast<std::size_t>(compressed));
-    pos = pr.pos + static_cast<std::size_t>(compressed);
+    ++page_ordinal;
     const bool v2 = page_type == PG_DATA_V2;
     // nas v1 o payload inteiro (levels + valores) e comprimido; dictionary
     // pages tambem seguem o codec da coluna. Em v2 so a secao de valores pode
@@ -2890,7 +3153,13 @@ void parquet_write(const std::string& path, const Value& tabela,
         " invalido (use 0=sem compressao, 1=snappy, 2=gzip, 6=zstd)");
   }
 
-  std::string body = "PAR1";
+  ParquetCrypto crypto;
+  const bool encrypted = !opts.chave.empty();
+  if (encrypted) {
+    crypto.key = parquet_key(opts.chave);
+    crypto.file_unique = random_bytes(16);
+  }
+  std::string body = encrypted ? "PARE" : "PAR1";
   struct ChunkInfo {
     PType type;
     bool repeated;
@@ -2914,7 +3183,8 @@ void parquet_write(const std::string& path, const Value& tabela,
   std::deque<Column> owned;  // folhas sinteticas (refs estaveis)
   const std::vector<FlatLeaf> leaves = flatten_columns(cols, owned);
 
-  for (const FlatLeaf& fl : leaves) {
+  for (std::size_t leaf_index = 0; leaf_index < leaves.size(); ++leaf_index) {
+    const FlatLeaf& fl = leaves[leaf_index];
     const Column& c = *fl.leaf;
     const ColumnLevels& lv = fl.lv;
     // Niveis e valores da pagina. Em v1 as secoes levam prefixo de 4 bytes e
@@ -2982,7 +3252,8 @@ void parquet_write(const std::string& path, const Value& tabela,
     if (dict) {
       ci.dict_page_offset = static_cast<std::int64_t>(body.size());
       const std::string dict_comp = compress_payload(values_plain, codec, c.name);
-      Tw dw{body};
+      std::string dict_header;
+      Tw dw{dict_header};
       dw.struct_begin();  // PageHeader
       dw.field_i32(1, PG_DICTIONARY);
       dw.field_i32(2, static_cast<std::int32_t>(values_plain.size()));
@@ -2993,15 +3264,26 @@ void parquet_write(const std::string& path, const Value& tabela,
       dw.field_i32(2, E_PLAIN);
       dw.struct_end();
       dw.struct_end();  // STOP do PageHeader
-      ci.dict_uncompressed = static_cast<std::int64_t>(body.size()) - ci.dict_page_offset +
-                             static_cast<std::int64_t>(values_plain.size());
-      ci.dict_compressed = static_cast<std::int64_t>(body.size()) - ci.dict_page_offset +
-                           static_cast<std::int64_t>(dict_comp.size());
-      body += dict_comp;
+      if (encrypted) {
+        const std::string eh = encrypt_page(dict_header, 5, crypto,
+                                            static_cast<std::uint32_t>(leaf_index));
+        const std::string ep = encrypt_page(dict_comp, 3, crypto,
+                                            static_cast<std::uint32_t>(leaf_index));
+        body += eh;
+        body += ep;
+        ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
+        ci.dict_compressed = static_cast<std::int64_t>(eh.size() + ep.size());
+      } else {
+        body += dict_header;
+        body += dict_comp;
+        ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
+        ci.dict_compressed = static_cast<std::int64_t>(dict_header.size() + dict_comp.size());
+      }
     }
     ci.data_page_offset = static_cast<std::int64_t>(body.size());
 
-    Tw hw{body};
+    std::string data_header;
+    Tw hw{data_header};
     hw.struct_begin();  // PageHeader
     if (!opts.paginas_v2) {
       hw.field_i32(1, PG_DATA);
@@ -3034,17 +3316,29 @@ void parquet_write(const std::string& path, const Value& tabela,
     }
     hw.struct_end();  // STOP do PageHeader
 
-    ci.uncompressed_size = static_cast<std::int64_t>(body.size()) - ci.data_page_offset +
-                           payload_uncompressed;
-    ci.compressed_size = static_cast<std::int64_t>(body.size()) - ci.data_page_offset +
-                         static_cast<std::int64_t>(payload.size());
+    if (encrypted) {
+      const std::string eh = encrypt_page(data_header, 4, crypto,
+                                          static_cast<std::uint32_t>(leaf_index));
+      const std::string ep = encrypt_page(payload, 2, crypto,
+                                          static_cast<std::uint32_t>(leaf_index),
+                                          dict ? 1u : 0u);
+      ci.uncompressed_size = static_cast<std::int64_t>(data_header.size() + payload_uncompressed);
+      ci.compressed_size = static_cast<std::int64_t>(eh.size() + ep.size());
+      body += eh;
+      body += ep;
+    } else {
+      ci.uncompressed_size = static_cast<std::int64_t>(data_header.size()) + payload_uncompressed;
+      ci.compressed_size = static_cast<std::int64_t>(data_header.size()) +
+                           static_cast<std::int64_t>(payload.size());
+      body += data_header;
+      body += payload;
+    }
     if (ci.dict) {
       // Tamanhos cobrem dictionary + data page (mesmo ColumnChunk).
       ci.uncompressed_size += ci.dict_uncompressed;
       ci.compressed_size += ci.dict_compressed;
     }
     infos.push_back(ci);
-    body += payload;
   }
 
   const std::int64_t total_bytes = static_cast<std::int64_t>(body.size()) - 4;
@@ -3068,6 +3362,7 @@ void parquet_write(const std::string& path, const Value& tabela,
   fw.list_begin(4, T_STRUCT, 1);
   {
     fw.struct_begin();
+    fw.field_i32(7, 0);  // RowGroup.ordinal
     fw.list_begin(1, T_STRUCT, leaves.size());
     for (std::size_t k = 0; k < leaves.size(); ++k) {
       fw.struct_begin();
@@ -3098,6 +3393,15 @@ void parquet_write(const std::string& path, const Value& tabela,
       if (infos[k].dict) {
         fw.field_i64(11, infos[k].dict_page_offset);  // dictionary_page_offset
       }
+      if (encrypted) {
+        // ColumnCryptoMetaData: EncryptionWithFooterKey (struct vazio).
+        fw.field(8, T_STRUCT);
+        fw.struct_begin();
+        fw.field(1, T_STRUCT);
+        fw.struct_begin();
+        fw.struct_end();
+        fw.struct_end();
+      }
       fw.struct_end();
       fw.struct_end();
     }
@@ -3109,16 +3413,40 @@ void parquet_write(const std::string& path, const Value& tabela,
                            codec == C_ZSTD ? "zstd" : "sem compressao";
   fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain/dictionary, paginas ") +
                        (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
-                       ", opcionais com nulos, listas)");
+                       ", opcionais com nulos, listas" +
+                       (encrypted ? ", AES_GCM_V1 local)" : ")"));
   fw.struct_end();
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) die("nao foi possivel gravar '" + path + "'");
   out.write(body.data(), static_cast<std::streamsize>(body.size()));
-  out.write(footer.data(), static_cast<std::streamsize>(footer.size()));
-  const std::uint32_t flen = static_cast<std::uint32_t>(footer.size());
+  if (!encrypted) {
+    out.write(footer.data(), static_cast<std::streamsize>(footer.size()));
+    const std::uint32_t flen = static_cast<std::uint32_t>(footer.size());
+    out.write(reinterpret_cast<const char*>(&flen), 4);
+    out.write("PAR1", 4);
+    return;
+  }
+  // FileCryptoMetaData: AES_GCM_V1 { aad_file_unique } + key metadata.
+  std::string crypto_meta;
+  Tw cmw{crypto_meta};
+  cmw.field(1, T_STRUCT);
+  cmw.struct_begin();
+  cmw.field(1, T_STRUCT);
+  cmw.struct_begin();
+  cmw.field_str(2, crypto.file_unique);
+  cmw.struct_end();
+  cmw.struct_end();
+  cmw.field_str(2, "tilt-local-key-v1");
+  cmw.struct_end();
+  const std::string encrypted_footer = encrypt_footer(footer, crypto);
+  out.write(crypto_meta.data(), static_cast<std::streamsize>(crypto_meta.size()));
+  const std::uint32_t encrypted_len = static_cast<std::uint32_t>(encrypted_footer.size());
+  out.write(reinterpret_cast<const char*>(&encrypted_len), 4);
+  out.write(encrypted_footer.data(), static_cast<std::streamsize>(encrypted_footer.size()));
+  const std::uint32_t flen = static_cast<std::uint32_t>(crypto_meta.size() + 4 + encrypted_footer.size());
   out.write(reinterpret_cast<const char*>(&flen), 4);
-  out.write("PAR1", 4);
+  out.write("PARE", 4);
 }
 
 // No de schema achatado (usa ColDesc para as folhas). Era local de
@@ -3165,8 +3493,9 @@ struct RField {
    std::vector<RField> top;
    std::vector<ColDesc> cols_desc;
    std::vector<std::vector<ColMeta>> row_groups;
-   std::vector<std::int64_t> rg_num_rows;
-   std::int64_t num_rows = 0;
+ std::vector<std::int64_t> rg_num_rows;
+  std::int64_t num_rows = 0;
+  ParsedParquetCrypto crypto;
  };
 
  LeitorParquet abrir_parquet(const std::string& path);
@@ -3262,19 +3591,104 @@ Value montar_no(const RField& f, std::size_t r,
   return m;
 }
 
+ParsedParquetCrypto parse_crypto_metadata(const std::string& file, std::size_t start,
+                                          std::size_t size) {
+  ParsedParquetCrypto out;
+  out.encrypted = true;
+  Tr tr{reinterpret_cast<const std::uint8_t*>(file.data() + start), size, 0};
+  auto binary = [&](Tr& x) {
+    const std::uint64_t n = x.varint();
+    if (n > x.n - x.pos) die("metadado de chave Parquet truncado");
+    std::string s(reinterpret_cast<const char*>(x.p + x.pos), static_cast<std::size_t>(n));
+    x.pos += static_cast<std::size_t>(n);
+    return s;
+  };
+  short last = 0;
+  while (true) {
+    const std::uint8_t h = tr.byte();
+    const auto tt = static_cast<TType>(h & 0xF);
+    if (tt == T_STOP) break;
+    const short id = (h >> 4) ? static_cast<short>(last + (h >> 4)) : static_cast<short>(tr.zz());
+    last = id;
+    if (id == 1 && tt == T_STRUCT) {
+      short alast = 0;
+      while (true) {
+        const std::uint8_t ah = tr.byte();
+        const auto at = static_cast<TType>(ah & 0xF);
+        if (at == T_STOP) break;
+        const short aid = (ah >> 4) ? static_cast<short>(alast + (ah >> 4))
+                                    : static_cast<short>(tr.zz());
+        alast = aid;
+        if (aid == 1 && at == T_STRUCT) {
+          short glast = 0;
+          while (true) {
+            const std::uint8_t gh = tr.byte();
+            const auto gt = static_cast<TType>(gh & 0xF);
+            if (gt == T_STOP) break;
+            const short gid = (gh >> 4) ? static_cast<short>(glast + (gh >> 4))
+                                        : static_cast<short>(tr.zz());
+            glast = gid;
+            if (gid == 2 && gt == T_BINARY) out.material.file_unique = binary(tr);
+            else tr.skip(gt);
+          }
+        } else {
+          tr.skip(at);
+        }
+      }
+    } else {
+      tr.skip(tt);
+    }
+  }
+  if (out.material.file_unique.empty()) die("FileCryptoMetaData sem aad_file_unique");
+  const char* secret = std::getenv("TILT_PARQUET_KEY");
+  if (!secret || !*secret) {
+    die("arquivo Parquet criptografado; defina TILT_PARQUET_KEY para ler a chave local");
+  }
+  out.material.key = parquet_key(secret);
+  return out;
+}
+
 LeitorParquet abrir_parquet(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
   if (!in) die("nao foi possivel abrir '" + path + "'");
   std::string file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  if (file.size() < 12 || file.compare(0, 4, "PAR1") != 0 ||
-      file.compare(file.size() - 4, 4, "PAR1") != 0) {
-    die("'" + path + "' nao e um arquivo parquet (magic PAR1 ausente)");
+  const bool encrypted = file.size() >= 12 && file.compare(0, 4, "PARE") == 0 &&
+                         file.compare(file.size() - 4, 4, "PARE") == 0;
+  if (file.size() < 12 || (!encrypted && (file.compare(0, 4, "PAR1") != 0 ||
+                                         file.compare(file.size() - 4, 4, "PAR1") != 0))) {
+    die("'" + path + "' nao e um arquivo parquet (magic PAR1/PARE ausente)");
   }
   std::uint32_t flen;
   std::memcpy(&flen, file.data() + file.size() - 8, 4);
   if (static_cast<std::size_t>(flen) > file.size() - 8) die("footer maior que o arquivo");
 
-  Tr tr{reinterpret_cast<const std::uint8_t*>(file.data() + file.size() - 8 - flen), flen, 0};
+  const std::size_t footer_start = file.size() - 8 - flen;
+  ParsedParquetCrypto crypto_info;
+  std::string decrypted_footer;
+  Tr tr{};
+  if (encrypted) {
+    crypto_info = parse_crypto_metadata(file, footer_start, flen);
+    // parse_crypto_metadata reparseia abaixo para obter o fim exato do struct.
+    Tr meta{reinterpret_cast<const std::uint8_t*>(file.data() + footer_start), flen, 0};
+    short mlast = 0;
+    while (true) {
+      const std::uint8_t h = meta.byte();
+      const auto tt = static_cast<TType>(h & 0xF);
+      if (tt == T_STOP) break;
+      const short id = (h >> 4) ? static_cast<short>(mlast + (h >> 4)) : static_cast<short>(meta.zz());
+      mlast = id;
+      meta.skip(tt);
+    }
+    if (meta.pos + 4 > flen) die("FileCryptoMetaData sem comprimento do footer");
+    std::uint32_t encrypted_len = 0;
+    std::memcpy(&encrypted_len, meta.p + meta.pos, 4);
+    meta.pos += 4;
+    if (encrypted_len != flen - meta.pos) die("comprimento do footer Parquet criptografado inconsistente");
+    decrypted_footer = decrypt_footer(file, footer_start + meta.pos, encrypted_len, crypto_info.material);
+    tr = {reinterpret_cast<const std::uint8_t*>(decrypted_footer.data()), decrypted_footer.size(), 0};
+  } else {
+    tr = {reinterpret_cast<const std::uint8_t*>(file.data() + footer_start), flen, 0};
+  }
 
   std::vector<std::vector<ColMeta>> row_groups;  // [row group][coluna]
   std::vector<std::int64_t> rg_num_rows;
@@ -3978,6 +4392,7 @@ LeitorParquet abrir_parquet(const std::string& path) {
   lp.row_groups = std::move(row_groups);
   lp.rg_num_rows = std::move(rg_num_rows);
   lp.num_rows = num_rows;
+  lp.crypto = std::move(crypto_info);
   return lp;
 }
 
@@ -3998,7 +4413,8 @@ Value parquet_read(const std::string& path) {
     auto& col = columns[ci];
     auto& defs = coldefs[ci];
     for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
-      decode_chunk(file, row_groups[rg][ci], cols_desc[ci], rg_num_rows[rg], col, &defs);
+      decode_chunk(file, row_groups[rg][ci], cols_desc[ci], rg_num_rows[rg], col, &defs,
+                   &lp.crypto, static_cast<std::uint32_t>(ci));
     }
   }
 
@@ -4053,7 +4469,7 @@ Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo) {
   std::vector<std::vector<int>> coldefs(ncols);
   for (std::size_t ci = 0; ci < ncols; ++ci) {
     decode_chunk(lp.file, lp.row_groups[g][ci], lp.cols_desc[ci], lp.rg_num_rows[g], columns[ci],
-                 &coldefs[ci]);
+                 &coldefs[ci], &lp.crypto, static_cast<std::uint32_t>(ci));
   }
   Value tabela = Value::tabela();
   for (std::int64_t r = 0; r < lp.rg_num_rows[g]; ++r) {

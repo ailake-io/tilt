@@ -293,6 +293,13 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
 - **páginas**: DATA_PAGE v1 por padrão; `paginas: "v2"` grava DATA_PAGE_V2
   (definition/repetition levels fora da seção comprimida). A leitura aceita
   v1 e v2 de qualquer escritor;
+- **Modular Encryption**: `escrever_parquet tabela, "seguro.parquet",
+  chave: "segredo"` grava `PARE` com AES-GCM-256 (`AES_GCM_V1`), cifrando
+  headers/payloads de páginas e o footer. A leitura exige a mesma chave em
+  `TILT_PARQUET_KEY`; a chave não é persistida no arquivo e a autenticação
+  rejeita arquivo adulterado ou segredo incorreto. O resolvedor AWS KMS ainda
+  é uma etapa separada (o formato já preserva `FileCryptoMetaData` e
+  `ColumnCryptoMetaData` padrão);
 - escrita: encoding **PLAIN** ou **DICTIONARY** (acima), um row group por arquivo;
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;
@@ -349,6 +356,12 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   `cdc` do intervalo quando presentes; sem `cdc`, deriva `insert`/`delete` de
   `add`/`remove`. Cada linha recebe `_change_type`, `_commit_version` e
   `_commit_timestamp`;
+- **Deletion Vectors**: a leitura aplica `deletionVector` dos `add`/`remove`
+  inline (`storageType: "i"`) e em arquivo (`"u"` relativo ou `"p"` absoluto),
+  decodificando o RoaringBitmapArray portable de 64 bits (array, bitmap e run
+  containers) e validando `sizeInBytes`, `cardinality` e CRC. A chave lógica
+  do snapshot é `(path, deletionVector.uniqueId)`; checkpoints que não carregam
+  o descriptor são ignorados para não reintroduzir linhas excluídas;
 - **partições hive-style**: `escrever_delta tabela, "dir", particionar_por: "col"`
   (ou **partição composta** `particionar_por: ["estado", "ano"]`) grava os
   parquet em `<dir>/<c1>=<v1>/<c2>=<v2>/part-NNNNN.parquet`, **sem** as colunas

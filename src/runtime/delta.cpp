@@ -622,11 +622,245 @@ std::string checkpoint_meta_nome(long long v) {
   return buf;
 }
 
+// ---------------------------------------------------------------- Deletion Vectors
+// Delta envolve um RoaringBitmap portable de 64 bits com magic little-endian
+// 0x6439d3d1. O decoder abaixo cobre array, bitmap e run containers do
+// formato portable, sem depender de libroaring no sistema.
+constexpr std::uint32_t DV_MAGIC = 1681511377u;
+constexpr std::uint32_t DV_NATIVE_MAGIC = 1681511376u;
+
+std::uint16_t dv_u16(const std::string& b, std::size_t& p) {
+  if (p + 2 > b.size()) die("Deletion Vector truncado (u16)");
+  std::uint16_t v = static_cast<std::uint16_t>(static_cast<unsigned char>(b[p])) |
+                    static_cast<std::uint16_t>(static_cast<unsigned char>(b[p + 1]) << 8);
+  p += 2;
+  return v;
+}
+std::uint32_t dv_u32(const std::string& b, std::size_t& p) {
+  if (p + 4 > b.size()) die("Deletion Vector truncado (u32)");
+  std::uint32_t v = static_cast<std::uint32_t>(static_cast<unsigned char>(b[p])) |
+                    (static_cast<std::uint32_t>(static_cast<unsigned char>(b[p + 1])) << 8) |
+                    (static_cast<std::uint32_t>(static_cast<unsigned char>(b[p + 2])) << 16) |
+                    (static_cast<std::uint32_t>(static_cast<unsigned char>(b[p + 3])) << 24);
+  p += 4;
+  return v;
+}
+std::uint64_t dv_u64(const std::string& b, std::size_t& p) {
+  std::uint64_t lo = dv_u32(b, p);
+  std::uint64_t hi = dv_u32(b, p);
+  return lo | (hi << 32);
+}
+std::uint32_t dv_be32(const std::string& b, std::size_t p) {
+  if (p + 4 > b.size()) die("Deletion Vector truncado (be32)");
+  return (static_cast<std::uint32_t>(static_cast<unsigned char>(b[p])) << 24) |
+         (static_cast<std::uint32_t>(static_cast<unsigned char>(b[p + 1])) << 16) |
+         (static_cast<std::uint32_t>(static_cast<unsigned char>(b[p + 2])) << 8) |
+         static_cast<std::uint32_t>(static_cast<unsigned char>(b[p + 3]));
+}
+
+std::uint32_t dv_crc32(const std::string& b, std::size_t begin, std::size_t end) {
+  std::uint32_t crc = 0xFFFFFFFFu;
+  for (std::size_t i = begin; i < end; ++i) {
+    crc ^= static_cast<std::uint8_t>(b[i]);
+    for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ (0xEDB88320u & -(crc & 1));
+  }
+  return ~crc;
+}
+
+std::size_t decode_roaring32(const std::string& b, std::size_t start,
+                             std::vector<std::uint32_t>& out) {
+  std::size_t p = start;
+  if (p + 4 > b.size()) die("Deletion Vector sem cookie Roaring");
+  const std::uint32_t cookie = dv_u32(b, p);
+  const bool no_run = cookie == 12346u;
+  const bool has_run = (cookie & 0xFFFFu) == 12347u;
+  if (!no_run && !has_run) die("Deletion Vector com cookie Roaring desconhecido");
+  std::uint32_t n = no_run ? dv_u32(b, p) : ((cookie >> 16) + 1u);
+  if (n > 65536u) die("Deletion Vector com numero de containers invalido");
+  std::string run_flags;
+  if (has_run) {
+    const std::size_t bytes = (n + 7u) / 8u;
+    if (p + bytes > b.size()) die("Deletion Vector sem run bitmap");
+    run_flags.assign(b.data() + p, bytes);
+    p += bytes;
+  }
+  std::vector<std::uint16_t> keys(n), cards(n);
+  for (std::uint32_t i = 0; i < n; ++i) {
+    keys[i] = dv_u16(b, p);
+    cards[i] = dv_u16(b, p);
+  }
+  const bool offsets = no_run || n >= 4;
+  if (offsets) {
+    for (std::uint32_t i = 0; i < n; ++i) (void)dv_u32(b, p);
+  }
+  for (std::uint32_t i = 0; i < n; ++i) {
+    const bool is_run = has_run && ((static_cast<unsigned char>(run_flags[i / 8]) >> (i % 8)) & 1u);
+    const std::uint32_t card = static_cast<std::uint32_t>(cards[i]) + 1u;
+    const std::uint32_t base = static_cast<std::uint32_t>(keys[i]) << 16;
+    if (is_run) {
+      const std::uint16_t runs = dv_u16(b, p);
+      for (std::uint16_t r = 0; r < runs; ++r) {
+        const std::uint16_t first = dv_u16(b, p);
+        const std::uint16_t len = dv_u16(b, p);
+        for (std::uint32_t v = 0; v <= len; ++v) out.push_back(base + first + v);
+      }
+    } else if (card <= 4096u) {
+      for (std::uint32_t v = 0; v < card; ++v) out.push_back(base + dv_u16(b, p));
+    } else {
+      if (p + 8192 > b.size()) die("Deletion Vector bitset truncado");
+      for (std::uint32_t word = 0; word < 1024; ++word) {
+        std::uint64_t bits = dv_u64(b, p);
+        while (bits) {
+          unsigned bit = 0;
+          while ((bits & 1u) == 0) {
+            bits >>= 1;
+            ++bit;
+          }
+          out.push_back(base + word * 64u + bit);
+          bits &= bits - 1;
+        }
+      }
+    }
+  }
+  return p;
+}
+
+std::set<std::uint64_t> decode_roaring64(const std::string& payload) {
+  std::size_t p = 0;
+  const std::uint64_t buckets = dv_u64(payload, p);
+  if (buckets > 1000000) die("Deletion Vector com numero de buckets invalido");
+  std::set<std::uint64_t> rows;
+  for (std::uint64_t b = 0; b < buckets; ++b) {
+    const std::uint32_t high = dv_u32(payload, p);
+    std::vector<std::uint32_t> lows;
+    const std::size_t end = decode_roaring32(payload, p, lows);
+    p = end;
+    for (std::uint32_t low : lows) rows.insert((static_cast<std::uint64_t>(high) << 32) | low);
+  }
+  return rows;
+}
+
+std::string dv_z85_decode(const std::string& encoded) {
+  static const std::string alphabet =
+      "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#";
+  if (encoded.size() % 5 != 0) die("Deletion Vector base85 com tamanho invalido");
+  std::string out;
+  out.reserve(encoded.size() / 5 * 4);
+  for (std::size_t i = 0; i < encoded.size(); i += 5) {
+    std::uint64_t value = 0;
+    for (std::size_t k = 0; k < 5; ++k) {
+      const std::size_t digit = alphabet.find(encoded[i + k]);
+      if (digit == std::string::npos) die("Deletion Vector com caractere base85 invalido");
+      value = value * 85 + digit;
+    }
+    if (value > 0xFFFFFFFFull) die("Deletion Vector base85 fora do intervalo");
+    for (int k = 3; k >= 0; --k) out.push_back(static_cast<char>((value >> (k * 8)) & 0xFF));
+  }
+  return out;
+}
+
+std::string dv_unique_id(const Value& action) {
+  const Value* dv = action.map ? action.map->find("deletionVector") : nullptr;
+  if (!dv || dv->kind != ValueKind::Mapa || !dv->map) return {};
+  const Value* st = dv->map->find("storageType");
+  const Value* pi = dv->map->find("pathOrInlineDv");
+  if (!st || st->kind != ValueKind::Texto || !pi || pi->kind != ValueKind::Texto) {
+    die("Deletion Vector sem storageType/pathOrInlineDv");
+  }
+  std::string id = st->s + pi->s;
+  if (const Value* off = dv->map->find("offset"); off && off->is_number()) {
+    id += "@" + std::to_string(static_cast<long long>(off->as_number()));
+  }
+  return id;
+}
+
+std::set<std::uint64_t> read_deletion_vector(const Value& action, const std::string& dir) {
+  const Value* dv = action.map ? action.map->find("deletionVector") : nullptr;
+  if (!dv || dv->kind != ValueKind::Mapa || !dv->map) return {};
+  const Value* st = dv->map->find("storageType");
+  const Value* pi = dv->map->find("pathOrInlineDv");
+  if (!st || st->kind != ValueKind::Texto || !pi || pi->kind != ValueKind::Texto) {
+    die("Deletion Vector sem storageType/pathOrInlineDv");
+  }
+  std::string payload;
+  if (st->s == "i") {
+    payload = dv_z85_decode(pi->s);
+  } else {
+    std::string path;
+    if (st->s == "p") {
+      path = decode_delta_path(pi->s);
+    } else if (st->s == "u") {
+      if (pi->s.size() < 20) die("Deletion Vector relativo sem UUID base85");
+      const std::string uuid = dv_z85_decode(pi->s.substr(pi->s.size() - 20));
+      if (uuid.size() != 16) die("UUID de Deletion Vector invalido");
+      char us[37];
+      std::snprintf(us, sizeof us,
+                    "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                    static_cast<unsigned char>(uuid[0]), static_cast<unsigned char>(uuid[1]),
+                    static_cast<unsigned char>(uuid[2]), static_cast<unsigned char>(uuid[3]),
+                    static_cast<unsigned char>(uuid[4]), static_cast<unsigned char>(uuid[5]),
+                    static_cast<unsigned char>(uuid[6]), static_cast<unsigned char>(uuid[7]),
+                    static_cast<unsigned char>(uuid[8]), static_cast<unsigned char>(uuid[9]),
+                    static_cast<unsigned char>(uuid[10]), static_cast<unsigned char>(uuid[11]),
+                    static_cast<unsigned char>(uuid[12]), static_cast<unsigned char>(uuid[13]),
+                    static_cast<unsigned char>(uuid[14]), static_cast<unsigned char>(uuid[15]));
+      const std::string prefix = pi->s.substr(0, pi->s.size() - 20);
+      path = dir + (prefix.empty() ? "/" : "/" + prefix + "/") +
+             "deletion_vector_" + us + ".bin";
+    } else {
+      die("Deletion Vector storageType '" + st->s + "' nao suportado");
+    }
+    std::ifstream in(path, std::ios::binary);
+    if (!in) die("nao foi possivel abrir Deletion Vector '" + path + "'");
+    payload.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    std::size_t offset = 1;
+    if (const Value* off = dv->map->find("offset"); off && off->is_number()) {
+      offset = static_cast<std::size_t>(off->as_number());
+    }
+    const Value* sz = dv->map->find("sizeInBytes");
+    if (!sz || !sz->is_number()) die("Deletion Vector sem sizeInBytes");
+    const std::size_t size = static_cast<std::size_t>(sz->as_number());
+    if (offset + 4 + size + 4 > payload.size()) die("arquivo Deletion Vector truncado");
+    const std::uint32_t stored = dv_be32(payload, offset);
+    if (stored != size) die("sizeInBytes do Deletion Vector nao confere com o arquivo");
+    const std::size_t magic_at = offset + 4;
+    const std::size_t crc_at = magic_at + size;
+    const std::uint32_t expected = dv_crc32(payload, magic_at, crc_at);
+    const std::uint32_t got = dv_be32(payload, crc_at);
+    if (expected != got) die("CRC32 do Deletion Vector nao confere");
+    payload = payload.substr(magic_at, size);
+  }
+  if (payload.size() < 4) die("Deletion Vector sem magic");
+  std::size_t mp = 0;
+  const std::uint32_t magic = dv_u32(payload, mp);
+  if (magic == DV_NATIVE_MAGIC) die("Deletion Vector native serialization nao suportada");
+  if (magic != DV_MAGIC) die("magic de Deletion Vector invalido");
+  std::set<std::uint64_t> rows = decode_roaring64(payload.substr(mp));
+  if (const Value* card = dv->map->find("cardinality"); card && card->is_number() &&
+      static_cast<std::size_t>(card->as_number()) != rows.size()) {
+    die("cardinality do Deletion Vector nao confere");
+  }
+  return rows;
+}
+
+bool logs_have_deletion_vectors(const std::vector<std::string>& versions) {
+  for (const std::string& path : versions) {
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.find("\"deletionVector\"") != std::string::npos) return true;
+    }
+  }
+  return false;
+}
+
 // Reconstroi a lista de adds ativos repassando os JSONs (sem pruning) —
 // usado para materializar o checkpoint apos o commit.
 struct CpAdd {
   std::string path;
   std::string part_json;
+  std::string dv_id;
+  std::set<std::uint64_t> deleted_rows;
   std::int64_t size = 0;
   std::int64_t mtime = 0;
 };
@@ -646,6 +880,7 @@ std::vector<CpAdd> coletar_ativos(const std::vector<std::string>& versions) {
         if (!p || p->kind != ValueKind::Texto) continue;
         CpAdd a;
         a.path = decode_delta_path(p->s);
+        a.dv_id = dv_unique_id(*add);
         if (const Value* pv = add->map->find("partitionValues");
             pv && pv->kind == ValueKind::Mapa && pv->map) {
           Value cpi = Value::mapa();
@@ -669,7 +904,11 @@ std::vector<CpAdd> coletar_ativos(const std::vector<std::string>& versions) {
         const Value* p = rem->map->find("path");
         if (p && p->kind == ValueKind::Texto) {
           ativos.erase(std::remove_if(ativos.begin(), ativos.end(),
-                                      [&](const CpAdd& a) { return a.path == p->s; }),
+                                      [&](const CpAdd& a) {
+                                        return a.path == decode_delta_path(p->s) &&
+                                               (dv_unique_id(*rem).empty() ||
+                                                a.dv_id == dv_unique_id(*rem));
+                                      }),
                        ativos.end());
         }
       }
@@ -794,6 +1033,8 @@ std::optional<StdCheckpoint> load_standard_checkpoint(const std::string& log_dir
           if (!p || p->kind != ValueKind::Texto) continue;
           CpAdd a;
           a.path = decode_delta_path(p->s);
+          a.dv_id = dv_unique_id(*add);
+          a.deleted_rows = read_deletion_vector(*add, log_dir.substr(0, log_dir.size() - 10));
           if (const Value* pv = add->map->find("partitionValues");
               pv && pv->kind == ValueKind::Mapa && pv->map) {
             Value cpi = Value::mapa();
@@ -1175,6 +1416,8 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
   // de tabelas externas, reidratada como nulo).
   struct ActiveFile {
     std::string path;
+    std::string dv_id;
+    std::set<std::uint64_t> deleted_rows;
     std::vector<std::pair<std::string, Value>> partvals;
   };
   std::vector<ActiveFile> active;  // em ordem de add
@@ -1196,6 +1439,8 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
     for (const CpAdd& a : adds) {
       ActiveFile f;
       f.path = a.path;
+      f.dv_id = a.dv_id;
+      f.deleted_rows = a.deleted_rows;
       try {
         Value pv = json_parse(a.part_json);
         if (pv.kind == ValueKind::Mapa && pv.map) {
@@ -1208,14 +1453,18 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
       if (passa_prune(f.partvals)) active.push_back(std::move(f));
     }
   };
+  const bool has_dvs = logs_have_deletion_vectors(versions);
   long long base_ver = -1;
-  if (std_ver >= 0 && std_ver >= cp_ver) {
+  // O checkpoint tilt-native antigo não carrega o descriptor DV. Em uma
+  // tabela com DVs o replay JSON é a fonte segura; checkpoint padrão segue
+  // disponível somente quando não há DVs.
+  if (!has_dvs && std_ver >= 0 && std_ver >= cp_ver) {
     if (const auto scp = load_standard_checkpoint(log_dir, std_ver)) {
       semeia(scp->adds);
       base_ver = std_ver;
     }
   }
-  if (base_ver < 0 && cp_ver >= 0) {
+  if (!has_dvs && base_ver < 0 && cp_ver >= 0) {
     try {
       Value base = parquet_read(log_dir + "/" + checkpoint_nome(cp_ver));
       if (base.kind == ValueKind::Tabela || base.kind == ValueKind::Lista) {
@@ -1257,6 +1506,8 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
         if (p && p->kind == ValueKind::Texto) {
           ActiveFile f;
           f.path = decode_delta_path(p->s);
+          f.dv_id = dv_unique_id(*add);
+          f.deleted_rows = read_deletion_vector(*add, dir);
           if (const Value* pv = add->map->find("partitionValues");
               pv && pv->kind == ValueKind::Mapa && pv->map) {
             for (const auto& kv : pv->map->items) {
@@ -1277,7 +1528,14 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
               break;
             }
           }
-          if (passa) active.push_back(std::move(f));
+          if (passa) {
+            active.erase(std::remove_if(active.begin(), active.end(),
+                                        [&](const ActiveFile& old) {
+                                          return old.path == f.path && old.dv_id == f.dv_id;
+                                        }),
+                         active.end());
+            active.push_back(std::move(f));
+          }
         }
       }
       if (const Value* rem = row.map->find("remove");
@@ -1285,7 +1543,11 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
         const Value* p = rem->map->find("path");
         if (p && p->kind == ValueKind::Texto) {
           active.erase(std::remove_if(active.begin(), active.end(),
-                                      [&](const ActiveFile& f) { return f.path == p->s; }),
+                                      [&](const ActiveFile& f) {
+                                        return f.path == decode_delta_path(p->s) &&
+                                               (dv_unique_id(*rem).empty() ||
+                                                f.dv_id == dv_unique_id(*rem));
+                                      }),
                        active.end());
         }
       }
@@ -1316,7 +1578,9 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
     if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
       die("arquivo '" + f.path + "' nao e uma tabela parquet");
     }
+    std::uint64_t row_index = 0;
     for (Value& row : *chunk.list) {
+      if (f.deleted_rows.find(row_index++) != f.deleted_rows.end()) continue;
       if (row.kind != ValueKind::Mapa || !row.map) die("linha de '" + f.path + "' nao e um mapa");
       if (!fields.empty()) {
         // Reidrata na ordem declarada: valor do parquet, senao partitionValues
@@ -1416,15 +1680,15 @@ Value delta_read_changes(const std::string& dir, long long de, long long ate) {
     auto append_file = [&](const Value& action, const char* change) {
       const Value* p = action.map ? action.map->find("path") : nullptr;
       if (!p || p->kind != ValueKind::Texto) die("acao Delta sem path em '" + path + "'");
-      if (action.map && action.map->find("deletionVector")) {
-        die("ler_delta_mudancas: deletion vectors ainda nao suportados (arquivo '" +
-            p->s + "')");
-      }
       Value chunk = parquet_read(delta_data_path(dir, p->s));
       if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) {
         die("arquivo CDC '" + p->s + "' nao e uma tabela parquet");
       }
+      const std::set<std::uint64_t> dv_rows = read_deletion_vector(action, dir);
+      std::uint64_t row_index = 0;
       for (Value& row : *chunk.list) {
+        const bool marked = dv_rows.find(row_index++) != dv_rows.end();
+        if ((std::string(change) == "delete") ? !marked : marked) continue;
         if (row.kind != ValueKind::Mapa || !row.map) continue;
         if (!fields.empty()) {
           for (const auto& fld : fields) {

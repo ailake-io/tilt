@@ -180,5 +180,60 @@ echo "$out_std" | grep -qE "std_v0: +2" || { echo "time travel v0: total errado"
 echo "$out_std" | grep -qE "std_v1: +3" || { echo "time travel v1: total errado"; fail=1; }
 echo "$out_std" | grep -qE "std_cdf: +2" || { echo "CDF: total errado"; fail=1; }
 
+# --- 6. Deletion Vector inline: RoaringBitmapArray portable --------------------
+cat > "$tmp/dv.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - base = [{ id: 0, nome: "zero" }, { id: 1, nome: "um" },
+              { id: 2, nome: "dois" }, { id: 3, nome: "tres" },
+              { id: 4, nome: "quatro" }]
+    - escrever_delta base, "dv"
+TILTEOF
+(cd "$tmp" && "$BIN" executar dv.tilt) > /dev/null
+python3 - "$tmp/dv" <<'PYEOF'
+import json, struct, sys
+
+alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-:+=^!/*?&<>()[]{}@%$#"
+def z85(data):
+    out = []
+    for i in range(0, len(data), 4):
+        n = int.from_bytes(data[i:i+4], "big")
+        chars = []
+        for _ in range(5):
+            chars.append(alphabet[n % 85])
+            n //= 85
+        out.append("".join(reversed(chars)))
+    return "".join(out)
+
+# 64-bit bitmap: bucket 0 -> 32-bit Roaring array {1, 3}.
+roaring32 = struct.pack("<IIHHIHH", 12346, 1, 0, 1, 16, 1, 3)
+payload = struct.pack("<I", 1681511377) + struct.pack("<QI", 1, 0) + roaring32
+assert len(payload) == 36
+inline = z85(payload)
+log = sys.argv[1] + "/_delta_log/00000000000000000000.json"
+rows = []
+for line in open(log):
+    action = json.loads(line)
+    if "add" in action:
+        action["add"]["deletionVector"] = {
+            "storageType": "i", "pathOrInlineDv": inline,
+            "sizeInBytes": len(payload), "cardinality": 2
+        }
+    rows.append(json.dumps(action, separators=(",", ":")))
+open(log, "w").write("\n".join(rows) + "\n")
+PYEOF
+cat > "$tmp/dv_ler.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - t = ler_delta "dv"
+    - imprimir "dv_total: ", tamanho t
+    - c = ler_delta_mudancas "dv", de: 0, ate: 0
+    - imprimir "dv_cdf: ", tamanho c
+TILTEOF
+out_dv=$(cd "$tmp" && "$BIN" executar dv_ler.tilt)
+printf '%s\n' "$out_dv"
+echo "$out_dv" | grep -qE "dv_total: +3" || { echo "DV: snapshot errado"; fail=1; }
+echo "$out_dv" | grep -qE "dv_cdf: +3" || { echo "DV: CDF errado"; fail=1; }
+
 [ "$fail" = 0 ] && echo "delta_test ok"
 exit "$fail"

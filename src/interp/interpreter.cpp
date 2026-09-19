@@ -9695,6 +9695,12 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       }
       opts.dicionario = dic->b;
     }
+    if (const Value* chave = kw.find("chave")) {
+      if (chave->kind != ValueKind::Texto || chave->s.empty()) {
+        fail(call.span, "escrever_parquet: 'chave' deve ser texto nao vazio");
+      }
+      opts.chave = chave->s;
+    }
     try {
       rt::parquet_write(a[1].s, a[0], nullptr, opts);
     } catch (const std::exception& e) {

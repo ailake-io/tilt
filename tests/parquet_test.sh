@@ -693,5 +693,37 @@ printf '%s\n' "$out"
 confere "3 carla"
 confere "4 davi"
 
+# --- 17. Modular Encryption AES_GCM_V1 local (PARE) ----------------------------
+cat > "$tmp/escrita_criptografada.tilt" <<'TILTEOF'
+pipeline escrita_criptografada:
+  passos:
+    - t = [{ id: 1, nome: "ana", tags: ["ml", "dados"] },
+           { id: 2, nome: "bruno", tags: [] },
+           { id: 3, nome: nulo, tags: nulo }]
+    - escrever_parquet t, "saida_criptografada.parquet", chave: "segredo-parquet", codec: "snappy"
+    - v = ler_parquet "saida_criptografada.parquet"
+    - imprimir tamanho v
+    - imprimir v[0].id, v[0].nome
+TILTEOF
+out=$(cd "$tmp" && TILT_PARQUET_KEY=segredo-parquet "$BIN" executar escrita_criptografada.tilt)
+printf '%s\n' "$out"
+confere "3"
+confere "1 ana"
+python3 - "$tmp/saida_criptografada.parquet" <<'PYEOF'
+import sys
+from pathlib import Path
+import pyarrow.parquet as pq
+
+b = Path(sys.argv[1]).read_bytes()
+assert b[:4] == b"PARE" and b[-4:] == b"PARE", b[:4] + b[-4:]
+try:
+    pq.ParquetFile(sys.argv[1])
+except OSError as e:
+    assert "encrypted metadata" in str(e).lower(), str(e)
+else:
+    raise AssertionError("pyarrow deveria exigir propriedades de decriptacao")
+print("pyarrow: arquivo PARE reconhecido como Parquet criptografado")
+PYEOF
+
 [ "$fail" = 0 ] && echo "parquet_test ok"
 exit "$fail"
