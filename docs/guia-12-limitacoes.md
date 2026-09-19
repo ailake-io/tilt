@@ -61,7 +61,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## Dados
 
 - Parquet é nativo (reader/writer próprio, zero dependências de link): a
-  escrita é PLAIN com compressão **gzip** (padrão) ou **snappy** (`codec:
+  escrita é PLAIN com compressão **gzip** (padrão), **snappy** (`codec:
   "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
   por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
@@ -83,9 +83,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   timestamp viram texto ISO, decimal vira decimal) e dictionary pages com
   encoding PLAIN ou PLAIN_DICTIONARY, páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
-  gzip/deflate (zlib via `dlopen`) e **snappy** (codec próprio, sem dlopen).
-  Ainda fora do subconjunto: 4+ níveis de lista e criptografia Parquet;
-  compressão ZSTD ainda não está disponível.
+  gzip/deflate (zlib via `dlopen`), **snappy** (codec próprio) e **ZSTD**
+  (libzstd via `dlopen`). Ainda fora do subconjunto: 4+ níveis de lista e
+  criptografia Parquet.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,

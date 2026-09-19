@@ -653,5 +653,45 @@ assert os.path.getsize(sys.argv[1]) > 0
 print("pyarrow: arquivo UUID gerado (leitura nativa depende do suporte a LogicalType.UUID)")
 PYEOF
 
+# --- 16. ZSTD nos dois sentidos -----------------------------------------------
+cat > "$tmp/escrita_zstd.tilt" <<'TILTEOF'
+pipeline escrita_zstd:
+  passos:
+    - t = [{ id: 1, nome: "ana" }, { id: 2, nome: "bruno" }]
+    - escrever_parquet t, "saida_zstd.parquet", codec: "zstd"
+    - v = ler_parquet "saida_zstd.parquet"
+    - para cada l em v:
+        imprimir l.id, l.nome
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_zstd.tilt)
+printf '%s\n' "$out"
+confere "1 ana"
+confere "2 bruno"
+python3 - "$tmp/saida_zstd.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+f = pq.ParquetFile(sys.argv[1])
+assert f.metadata.row_group(0).column(0).compression == "ZSTD"
+print("pyarrow: ZSTD escrito pelo tilt validado")
+PYEOF
+
+python3 - "$tmp/entrada_zstd.parquet" <<'PYEOF'
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+pq.write_table(pa.table({"id": [3, 4], "nome": ["carla", "davi"]}), sys.argv[1], compression="zstd")
+PYEOF
+cat > "$tmp/leitura_zstd.tilt" <<'TILTEOF'
+pipeline leitura_zstd:
+  passos:
+    - v = ler_parquet "entrada_zstd.parquet"
+    - para cada l em v:
+        imprimir l.id, l.nome
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_zstd.tilt)
+printf '%s\n' "$out"
+confere "3 carla"
+confere "4 davi"
+
 [ "$fail" = 0 ] && echo "parquet_test ok"
 exit "$fail"

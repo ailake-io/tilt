@@ -202,7 +202,7 @@ enum PEncoding : int {
   E_RLE = 3,
   E_RLE_DICTIONARY = 8,
 };
-enum PCodec : int { C_NONE = 0, C_SNAPPY = 1, C_GZIP = 2 };
+enum PCodec : int { C_NONE = 0, C_SNAPPY = 1, C_GZIP = 2, C_ZSTD = 6 };
 enum PPageType : int { PG_DATA = 0, PG_DICTIONARY = 2, PG_DATA_V2 = 3 };
 
 struct Column {
@@ -1483,7 +1483,91 @@ std::string gzip_payload(const std::string& in, const std::string& col) {
   return out;
 }
 
-std::string decompress_payload(std::string payload, int codec, const std::string& col) {
+struct ZstdApi {
+  void* lib = nullptr;
+  std::size_t (*compress_bound)(std::size_t) = nullptr;
+  std::size_t (*compress)(void*, std::size_t, const void*, std::size_t, int) = nullptr;
+  std::size_t (*decompress)(void*, std::size_t, const void*, std::size_t) = nullptr;
+  unsigned long long (*frame_size)(const void*, std::size_t) = nullptr;
+  unsigned (*is_error)(std::size_t) = nullptr;
+  const char* (*error_name)(std::size_t) = nullptr;
+};
+
+template <typename F>
+bool bind_zstdsym(void* lib, F& fn, const char* name) {
+  fn = reinterpret_cast<F>(tilt_dlsym(lib, name));
+  return fn != nullptr;
+}
+
+const ZstdApi& zstd() {
+  static const ZstdApi instance = [] {
+    ZstdApi a;
+#if defined(_WIN32)
+    a.lib = tilt_dlopen("libzstd.dll");
+    if (!a.lib) a.lib = tilt_dlopen("zstd.dll");
+#else
+    a.lib = tilt_dlopen("libzstd.so.1");
+    if (!a.lib) a.lib = tilt_dlopen("libzstd.so");
+    if (!a.lib) a.lib = tilt_dlopen("libzstd.1.dylib");
+    if (!a.lib) a.lib = tilt_dlopen("libzstd.dylib");
+#endif
+    if (!a.lib) return a;
+    const bool ok = bind_zstdsym(a.lib, a.compress_bound, "ZSTD_compressBound") &&
+                    bind_zstdsym(a.lib, a.compress, "ZSTD_compress") &&
+                    bind_zstdsym(a.lib, a.decompress, "ZSTD_decompress") &&
+                    bind_zstdsym(a.lib, a.frame_size, "ZSTD_getFrameContentSize") &&
+                    bind_zstdsym(a.lib, a.is_error, "ZSTD_isError") &&
+                    bind_zstdsym(a.lib, a.error_name, "ZSTD_getErrorName");
+    if (!ok) {
+      tilt_dlclose(a.lib);
+      a = ZstdApi{};
+    }
+    return a;
+  }();
+  return instance;
+}
+
+std::string zstd_ausente(const std::string& col) {
+  return "coluna '" + col +
+         "': zstd requer libzstd (libzstd.so.1, libzstd.dylib ou zstd.dll), "
+         "que nao foi encontrada; instale o pacote zstd";
+}
+
+std::string zstd_payload(const std::string& in, const std::string& col) {
+  const ZstdApi& z = zstd();
+  if (!z.lib) die(zstd_ausente(col));
+  std::string out(z.compress_bound(in.size()), '\0');
+  const std::size_t n = z.compress(out.data(), out.size(), in.data(), in.size(), 3);
+  if (z.is_error(n)) {
+    die("coluna '" + col + "': falha ao comprimir pagina zstd (" + z.error_name(n) + ")");
+  }
+  out.resize(n);
+  return out;
+}
+
+std::string unzstd_payload(const std::string& in, const std::string& col, std::size_t expected) {
+  const ZstdApi& z = zstd();
+  if (!z.lib) die(zstd_ausente(col));
+  constexpr unsigned long long kUnknown = 0xFFFFFFFFFFFFFFFEULL;
+  constexpr unsigned long long kError = 0xFFFFFFFFFFFFFFFFULL;
+  const unsigned long long frame = z.frame_size(in.data(), in.size());
+  std::size_t capacity = expected > 0 ? expected :
+      (frame != kUnknown && frame != kError ? static_cast<std::size_t>(frame) :
+                                               std::max<std::size_t>(65536, in.size() * 4));
+  for (int attempt = 0; attempt < 24; ++attempt) {
+    std::string out(capacity, '\0');
+    const std::size_t n = z.decompress(out.data(), out.size(), in.data(), in.size());
+    if (!z.is_error(n)) {
+      out.resize(n);
+      return out;
+    }
+    capacity *= 2;
+  }
+  die("coluna '" + col + "': falha ao descomprimir pagina zstd");
+}
+
+std::string decompress_payload(std::string payload, int codec, const std::string& col,
+                               std::size_t expected = 0) {
   if (codec == C_GZIP) return gunzip_payload(payload, col);
   if (codec == C_SNAPPY) {
     try {
@@ -1492,12 +1576,14 @@ std::string decompress_payload(std::string payload, int codec, const std::string
       die("coluna '" + col + "': stream snappy invalido (" + e.what() + ")");
     }
   }
+  if (codec == C_ZSTD) return unzstd_payload(payload, col, expected);
   return payload;
 }
 
 std::string compress_payload(const std::string& payload, int codec, const std::string& col) {
   if (codec == C_GZIP) return gzip_payload(payload, col);
   if (codec == C_SNAPPY) return snappy_compress_literals(payload);
+  if (codec == C_ZSTD) return zstd_payload(payload, col);
   return payload;
 }
 
@@ -1790,9 +1876,9 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
                   std::int64_t expected_rows, std::vector<Value>& out,
                   std::vector<int>* row_def = nullptr) {
   const std::string ctx = "coluna '" + cd.name + "'";
-  if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY) {
+  if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY && cm.codec != C_ZSTD) {
     die(ctx + ": codec " + std::to_string(cm.codec) +
-        " nao suportado (suportados: sem compressao, gzip/deflate, snappy)");
+        " nao suportado (suportados: sem compressao, gzip/deflate, snappy, zstd)");
   }
   const int max_def = cd.max_def;
   const int max_rep = cd.max_rep;
@@ -1891,7 +1977,10 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
     // nas v1 o payload inteiro (levels + valores) e comprimido; dictionary
     // pages tambem seguem o codec da coluna. Em v2 so a secao de valores pode
     // estar comprimida — os levels sao tratados adiante.
-    if (!v2) payload = decompress_payload(payload, cm.codec, cd.name);
+    if (!v2) {
+      payload = decompress_payload(payload, cm.codec, cd.name,
+                                   uncompressed > 0 ? static_cast<std::size_t>(uncompressed) : 0);
+    }
 
     if (page_type == PG_DICTIONARY) {
       if (dict_enc != E_PLAIN && dict_enc != E_PLAIN_DICTIONARY) {
@@ -2796,8 +2885,9 @@ void parquet_write(const std::string& path, const Value& tabela,
   aplicar_tipos(cols, opts.tipos);
   const std::size_t nrows = cols[0].rows;
   const int codec = opts.codec;
-  if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY) {
-    die("codec " + std::to_string(codec) + " invalido (use 0=sem compressao, 1=snappy, 2=gzip)");
+  if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY && codec != C_ZSTD) {
+    die("codec " + std::to_string(codec) +
+        " invalido (use 0=sem compressao, 1=snappy, 2=gzip, 6=zstd)");
   }
 
   std::string body = "PAR1";
@@ -3015,7 +3105,8 @@ void parquet_write(const std::string& path, const Value& tabela,
     fw.field_i64(3, static_cast<std::int64_t>(nrows));
     fw.struct_end();
   }
-  const char* codec_nome = codec == C_GZIP ? "gzip" : codec == C_SNAPPY ? "snappy" : "sem compressao";
+  const char* codec_nome = codec == C_GZIP ? "gzip" : codec == C_SNAPPY ? "snappy" :
+                           codec == C_ZSTD ? "zstd" : "sem compressao";
   fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain/dictionary, paginas ") +
                        (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
                        ", opcionais com nulos, listas)");

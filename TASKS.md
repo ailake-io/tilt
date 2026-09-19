@@ -242,7 +242,7 @@
 - [x] Adicionar diagnostics em tempo real (on-type) no LSP (push em `didChange`, pull `textDocument/diagnostic` e cache por conteúdo)
 
 ### 10.2 Formatos (P2)
-- [ ] Adicionar suporte a Parquet com ZSTD compression
+- [x] Adicionar suporte a Parquet com ZSTD compression (codec 6, dlopen de libzstd, leitura/escrita e teste pyarrow nos dois sentidos)
 - [ ] Implementar Parquet com encryption (AWS KMS / local key)
 - [ ] Adicionar suporte a Avro (para Kafka schema registry)
 - [ ] Implementar Delta Lake transaction log parsing completo

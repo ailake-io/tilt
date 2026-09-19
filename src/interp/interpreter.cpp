@@ -9617,15 +9617,17 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     const Value* codec = kw.find("codec");
     if (codec) {
       if (codec->kind != ValueKind::Texto) {
-        fail(call.span, "escrever_parquet: 'codec' deve ser \"gzip\" ou \"snappy\"");
+        fail(call.span, "escrever_parquet: 'codec' deve ser \"gzip\", \"snappy\" ou \"zstd\"");
       }
       if (codec->s == "gzip") {
         opts.codec = 2;
       } else if (codec->s == "snappy") {
         opts.codec = 1;
+      } else if (codec->s == "zstd") {
+        opts.codec = 6;
       } else {
         fail(call.span, "escrever_parquet: codec '" + codec->s +
-                            "' invalido (use \"gzip\" ou \"snappy\")");
+                            "' invalido (use \"gzip\", \"snappy\" ou \"zstd\")");
       }
     }
     const Value* paginas = kw.find("paginas");

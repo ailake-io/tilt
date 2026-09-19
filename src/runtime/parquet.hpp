@@ -39,12 +39,13 @@ namespace tilt::rt {
 //   INTEGER/DATE/TIME/TIMESTAMP/DECIMAL (data/hora/timestamp -> texto ISO,
 //   decimal -> decimal), paginas v1 e v2, PLAIN e
 //   DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e codecs gzip/deflate
-//   (zlib via dlopen("libz.so.1")) e snappy (codec proprio, sem dlopen).
+//   (zlib via dlopen("libz.so.1")), snappy (codec proprio) e zstd via dlopen
+//   (libzstd, sem dependencia de link).
 //
 // Lanca std::runtime_error com mensagem acionavel em qualquer limite.
 
 // Codecs (mesmos valores do enum parquet): 0 = sem compressao,
-// 1 = snappy, 2 = gzip.
+// 1 = snappy, 2 = gzip, 6 = zstd.
 struct ParquetWriteOpts {
   int codec = 2;          // gzip por padrao
   bool paginas_v2 = false;  // DATA_PAGE v1 por padrao

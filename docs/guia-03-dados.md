@@ -282,10 +282,11 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   grupos OPTIONAL. Uma coluna só de nulos (ou só de listas vazias) gera
   erro — o tipo não pode ser inferido;
 - **compressão**: `escrever_parquet tabela, "saida.parquet", codec: "gzip"`
-  (padrão) ou `codec: "snappy"` — o compressor snappy próprio é
+  (padrão), `codec: "snappy"` ou `codec: "zstd"` — o compressor snappy próprio é
   "literal-only" (emite um bloco snappy válido sem matching, sem redução de
   espaço), então qualquer leitor descomprime; a leitura descomprime snappy
-  genérico (com matching) e gzip/deflate (zlib via `dlopen("libz.so.1")`);
+  genérico (com matching), gzip/deflate (zlib via `dlopen("libz.so.1")`) e
+  zstd (libzstd via `dlopen`, codec Parquet 6);
 - **dictionary**: encoding DICTIONARY automático por coluna quando há
   repetição (dicionário em PLAIN + índices RLE; `dicionario: falso` volta ao
   PLAIN puro);
@@ -301,7 +302,8 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   TIMESTAMP/DECIMAL** (data/hora/timestamp viram texto ISO, decimal vira
   decimal, dictionary pages PLAIN ou PLAIN_DICTIONARY), páginas **PLAIN** e
   **DICTIONARY** (`PLAIN_DICTIONARY`/`RLE_DICTIONARY`) e compressão
-  **gzip/deflate** e **snappy**. Listas com 3+ níveis seguem com erro claro.
+  **gzip/deflate**, **snappy** e **zstd**. Listas com 3+ níveis seguem com
+  erro claro.
 
 Exemplo de interoperabilidade com Python (arquivos de outras ferramentas —
 dictionary, gzip/snappy, v2 e listas — são lidos diretamente):
