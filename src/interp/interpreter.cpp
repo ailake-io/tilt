@@ -6230,21 +6230,48 @@ void Interpreter::run_avaliacao(const Item& decl) {
     const bool usa_juiz =
         std::find(metricas.begin(), metricas.end(), "juiz") != metricas.end();
     const Item* fjuiz = find_field(cfg, "juiz");
-    std::string juiz_llm;
+    std::vector<std::string> juiz_llms;
+    std::string juiz_consenso = "maioria";
     const Expr* juiz_sistema = nullptr;
     const Expr* juiz_usuario = nullptr;
     if (usa_juiz) {
       if (!fjuiz || !fjuiz->block) {
-        throw std::runtime_error("'metricas:' com 'juiz' precisa do bloco 'juiz:' (com 'llm: <nome>')");
+        throw std::runtime_error("metricas com juiz precisa do bloco juiz");
       }
       const Item* fjl = find_field(*fjuiz->block, "llm");
-      if (!fjl || !fjl->value || fjl->value->kind != ExprKind::Name) {
-        throw std::runtime_error("bloco 'juiz:' precisa de 'llm: <nome de llm declarado>'");
+      const Item* fjc = find_field(*fjuiz->block, "cadeia");
+      if (fjl && fjc) {
+        throw std::runtime_error("bloco juiz deve usar llm ou cadeia, nao ambos");
       }
-      juiz_llm = fjl->value->text;
-      auto jit = entities_.find(juiz_llm);
-      if (jit == entities_.end() || jit->second->key != "llm") {
-        throw std::runtime_error("bloco 'juiz:': '" + juiz_llm + "' nao e um 'llm' declarado");
+      if (fjc) {
+        if (!fjc->value || fjc->value->kind != ExprKind::ListLit || fjc->value->elems.empty()) {
+          throw std::runtime_error("bloco juiz: cadeia deve ser uma lista nao vazia de LLMs");
+        }
+        for (const auto& el : fjc->value->elems) {
+          if (!el || (el->kind != ExprKind::Name && el->kind != ExprKind::TextLit)) {
+            throw std::runtime_error("bloco juiz: cadeia espera nomes de LLM");
+          }
+          juiz_llms.push_back(el->text);
+        }
+      } else if (fjl && fjl->value && fjl->value->kind == ExprKind::Name) {
+        juiz_llms.push_back(fjl->value->text);
+      } else {
+        throw std::runtime_error("bloco juiz precisa de llm ou cadeia");
+      }
+      for (const std::string& juiz : juiz_llms) {
+        auto jit = entities_.find(juiz);
+        if (jit == entities_.end() || jit->second->key != "llm") {
+          throw std::runtime_error("juiz: LLM nao declarado: " + juiz);
+        }
+      }
+      if (const Item* fco = find_field(*fjuiz->block, "consenso"); fco && fco->value) {
+        if (fco->value->kind != ExprKind::Name && fco->value->kind != ExprKind::TextLit) {
+          throw std::runtime_error("juiz: consenso deve ser maioria ou unanimidade");
+        }
+        juiz_consenso = fco->value->text;
+      }
+      if (juiz_consenso != "maioria" && juiz_consenso != "unanimidade") {
+        throw std::runtime_error("juiz: consenso deve ser maioria ou unanimidade");
       }
       if (const Item* fjs = find_field(*fjuiz->block, "sistema"); fjs && fjs->value) {
         juiz_sistema = fjs->value.get();
@@ -6253,9 +6280,8 @@ void Interpreter::run_avaliacao(const Item& decl) {
         juiz_usuario = fju->value.get();
       }
     } else if (fjuiz) {
-      throw std::runtime_error("bloco 'juiz:' sem 'juiz' em 'metricas:' (adicione a metrica ou remova o bloco)");
+      throw std::runtime_error("bloco juiz sem metrica juiz");
     }
-
     // ---- tolerancia / limiar / ao_reprovar / verboso
     double tolerancia = 1e-6;
     if (const Item* ft = find_field(cfg, "tolerancia"); ft && ft->value) {
@@ -6341,6 +6367,31 @@ void Interpreter::run_avaliacao(const Item& decl) {
       return rt::json_dump(v);
     };
 
+    auto classificar_juiz = [](const std::string& bruto) {
+      std::string veredito = bruto;
+      try {
+        const Value estruturado = rt::json_parse(bruto);
+        if (estruturado.kind == ValueKind::Mapa && estruturado.map) {
+          for (const char* campo : {"veredito", "resultado", "verdict"}) {
+            if (const Value* v = estruturado.map->find(campo); v && v->kind == ValueKind::Texto) {
+              veredito = v->s;
+              break;
+            }
+          }
+        }
+      } catch (...) {
+      }
+      for (char& c : veredito) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+      }
+      const std::size_t passa_pos = veredito.find("PASSA");
+      const std::size_t falha_pos = veredito.find("FALHA");
+      if (passa_pos == std::string::npos && falha_pos == std::string::npos) return -1;
+      if (falha_pos == std::string::npos) return 1;
+      if (passa_pos == std::string::npos) return 0;
+      return passa_pos < falha_pos ? 1 : 0;
+    };
+
     // ---- loop dos casos
     out_ << "== avaliacao " << name << " ==\n";
     struct Registro {
@@ -6406,42 +6457,66 @@ void Interpreter::run_avaliacao(const Item& decl) {
             break;
           }
         } else if (mt == "juiz") {
-          // Juiz-LLM: {{saida}} / {{esperado}} interpolam no prompt (eval de
-          // texto). Veredito: PASSA passa; FALHA ou indeciso reprova o caso.
+          // Um juiz simples usa `llm:`; uma cadeia usa varios LLMs independentes
+          // e combina os vereditos por maioria ou unanimidade.
           env.vars["saida"] = Value::texto(como_texto(saida));
           env.vars["esperado"] = Value::texto(como_texto(*esperado));
           std::string sistema = "Voce e um avaliador. Responda PASSA ou FALHA.";
           std::string usuario =
               "Esperado: {{esperado}}\nSaida: {{saida}}\nA saida atende ao esperado? Responda PASSA ou FALHA.";
+          if (juiz_llms.size() > 1) {
+            sistema +=
+                " Responda em JSON: {\"veredito\": \"PASSA\" ou \"FALHA\", \"justificativa\": "
+                "\"...\"}.";
+          }
           if (juiz_sistema) {
             Value jsv = eval(*juiz_sistema, env);
             if (jsv.kind != ValueKind::Texto) {
-              throw std::runtime_error("bloco 'juiz:': 'sistema:' deve ser texto");
+              throw std::runtime_error("bloco juiz: sistema deve ser texto");
             }
             sistema = jsv.s;
           }
           if (juiz_usuario) {
             Value juv = eval(*juiz_usuario, env);
             if (juv.kind != ValueKind::Texto) {
-              throw std::runtime_error("bloco 'juiz:': 'usuario:' deve ser texto");
+              throw std::runtime_error("bloco juiz: usuario deve ser texto");
             }
             usuario = juv.s;
           }
-          rt::RespostaLLM rj;
-          try {
-            rj = rt::llm_chat_cadeia(cadeia_llm(juiz_llm, fjuiz->span), sistema, usuario);
-          } catch (const std::exception& e) {
-            throw std::runtime_error("juiz (llm '" + juiz_llm + "'): " + e.what());
+          int votos_passou = 0;
+          int votos_falhou = 0;
+          int votos_indecisos = 0;
+          for (const std::string& juiz : juiz_llms) {
+            rt::RespostaLLM rj;
+            try {
+              rj = rt::llm_chat_cadeia(cadeia_llm(juiz, fjuiz->span), sistema, usuario);
+            } catch (const std::exception& e) {
+              throw std::runtime_error("juiz (llm " + juiz + "): " + e.what());
+            }
+            const int voto = classificar_juiz(rj.texto);
+            if (voto > 0) {
+              ++votos_passou;
+            } else if (voto == 0) {
+              ++votos_falhou;
+            } else {
+              ++votos_indecisos;
+            }
           }
-          std::string veredito = rj.texto;
-          for (char& c : veredito) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-          if (veredito.find("PASSA") != std::string::npos) {
-            continue;  // passa nesta metrica; segue para a proxima
-          }
+          const bool consenso_ok =
+              juiz_consenso == "unanimidade"
+                  ? votos_passou == static_cast<int>(juiz_llms.size())
+                  : votos_passou > votos_falhou && votos_passou > votos_indecisos;
+          if (consenso_ok) continue;
           ok = false;
-          motivo = veredito.find("FALHA") != std::string::npos
-                       ? "juiz: FALHA"
-                       : "juiz indeciso (resposta sem PASSA/FALHA)";
+          if (juiz_llms.size() == 1 && votos_falhou == 1) {
+            motivo = "juiz: FALHA";
+          } else if (votos_indecisos > 0 && votos_passou == 0 && votos_falhou == 0) {
+            motivo = "juiz indeciso (sem PASSA/FALHA)";
+          } else {
+            motivo = "juiz: consenso " + juiz_consenso + " (passa " + std::to_string(votos_passou) +
+                     ", falha " + std::to_string(votos_falhou) + ", indeciso " +
+                     std::to_string(votos_indecisos) + ")";
+          }
           break;
         } else {  // tolerancia
           if ((saida.kind != ValueKind::Inteiro && saida.kind != ValueKind::Decimal) ||

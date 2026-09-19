@@ -260,8 +260,12 @@ avaliacao resumo: 2/2 passou | media 1.00 (limiar 0.50)
 
 ### Juiz-LLM, amostragem e run em arquivo
 
-A métrica `juiz` delega o veredito a um `llm`: exige o bloco `juiz:` com
+A métrica `juiz` delega o veredito a um `llm` ou a uma cadeia de juízes: exige o bloco `juiz:` com
 `llm:` (mais `sistema:`/`usuario:` opcionais, com `{{saida}}` e
+Para vários juízes, use `cadeia: [juiz_a, juiz_b, ...]` e `consenso: maioria`
+(default) ou `consenso: unanimidade`. Cada LLM executa sua própria cadeia de
+fallback (`reserva:`); em modo multi-juiz o prompt pede JSON com `veredito` e
+`justificativa`, mas respostas textuais PASSA/FALHA também são aceitas.
 `{{esperado}}` interpolados). O caso passa se a resposta contiver `PASSA`;
 `FALHA` ou resposta sem veredito reprovam o caso (motivo `juiz: FALHA` ou
 `juiz indeciso`).
@@ -291,6 +295,6 @@ avaliacao com_juiz:
   ao_reprovar: avisar
 ```
 
-Limites: juiz sem cadeia de pensamento estruturada nem multi-juiz com voto;
+Limites: o juiz não expõe cadeia de pensamento; o multi-juiz usa voto de maioria ou unanimidade, sem pesos por juiz;
 amostra só por contagem (sem fração); o registro MLflow envia métricas e
 parâmetros, mas ainda não publica artefatos ou detalhes de cada caso.

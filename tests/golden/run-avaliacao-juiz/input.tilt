@@ -3,6 +3,10 @@ llm gpt:
   modelo: "claude-sonnet-5"
   chave: env "ANTHROPIC_API_KEY"
 
+llm gpt2:
+  provedor: "openai"
+  modelo: "mock-juiz-2"
+
 avaliacao juiz:
   dados:
     - { v: "PASSA", esperado: "x" }
@@ -10,6 +14,7 @@ avaliacao juiz:
     - retornar caso.v
   metricas: [juiz]
   juiz:
-    llm: gpt
+    cadeia: [gpt, gpt2]
+    consenso: maioria
     usuario: "Repita: {{saida}}"
   verboso: verdadeiro

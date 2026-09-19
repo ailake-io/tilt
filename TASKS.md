@@ -136,7 +136,7 @@
 - [ ] Validar integração com Qdrant, Weaviate, Chroma, pgvector em CI real
 
 ### 4.3 Avaliação (P2)
-- [ ] Implementar juiz multi-cadeia estruturada (atualmente sem cadeia)
+- [x] Implementar juiz multi-cadeia estruturada (`cadeia: [...]`, voto maioria/unanimidade e veredito JSON)
 - [ ] Implementar amostragem estratificada (atualmente só por contagem)
 - [x] Adicionar `registrar_em` com POST REST para experimento e avaliação
 

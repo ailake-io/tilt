@@ -386,7 +386,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - `avaliacao` é de 1ª passada (guia 05): `dados:` inline/bloco/caminho,
   `executar:` por caso com `caso` + `retornar`, métricas `exata`/`contem`/
   `regex`/`tolerancia`/`juiz` (todas precisam passar por caso), gate no
-  `limiar:`, `amostra:` + `semente:` determinísticos e `registrar_em:` local ou via MLflow REST. Limites: juiz sem cadeia estruturada nem voto multi-juiz,
+  `limiar:`, `amostra:` + `semente:` determinísticos e `registrar_em:` local ou via MLflow REST. Limites: juiz sem cadeia de pensamento; voto multi-juiz usa maioria ou unanimidade,
   amostra só por contagem; o MLflow ainda não publica artefatos ou detalhes de cada caso.
 
 ## Agentes
