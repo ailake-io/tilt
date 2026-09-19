@@ -146,7 +146,7 @@
 
 ### 5.1 Ferramentas (P1)
 - [x] `executar:` com corpo direto em `ferramenta` (funciona; documentado no guia-06)
-- [ ] Adicionar validação de entrada de ferramentas (tipagem de campos)
+- [x] Adicionar validação de entrada de ferramentas (campos obrigatórios, desconhecidos e tipagem runtime)
 - [ ] Implementar allowlist de ferramentas em serviços HTTP
 
 ### 5.2 Agentes (P2)

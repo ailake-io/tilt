@@ -9,3 +9,15 @@ pipeline p:
   passos:
     - msg = saudacao nome: "mundo"
     - imprimir msg
+    - tentar:
+        saudacao(nome: 7)
+    capturar e:
+      imprimir "erro-tipo:", e
+    - tentar:
+        saudacao(nome: "mundo", extra: 1)
+    capturar e:
+      imprimir "erro-extra:", e
+    - tentar:
+        saudacao()
+    capturar e:
+      imprimir "erro-faltante:", e

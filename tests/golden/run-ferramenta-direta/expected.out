@@ -1,2 +1,5 @@
 == pipeline p ==
 ola mundo
+erro-tipo: ferramenta 'saudacao': campo 'nome' espera texto, recebeu 'inteiro'
+erro-extra: ferramenta 'saudacao': campo de entrada 'extra' nao declarado
+erro-faltante: ferramenta 'saudacao': campo de entrada 'nome' obrigatorio

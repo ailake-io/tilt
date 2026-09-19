@@ -22,6 +22,8 @@ ferramenta busca_documentos:
 
 - `entrada:` define os parâmetros da ferramenta.
 - `executar:` é um bloco de instruções; o `retornar` produz o resultado.
+- Os campos declarados são obrigatórios nas chamadas diretas; cada valor é validado contra texto, inteiro, decimal, logico, lista[...], mapa, tabela, tensor e uniões literais. Campo desconhecido ou tipo incompatível gera erro capturável por tentar.
+- No planner, os campos ausentes continuam sendo preenchidos best-effort antes da validação; isso preserva o fallback documentado para agentes.
 - Chamada direta: `busca_documentos(termo: "x")` ou `busca_documentos.executar { termo: "x" }`.
 
 ## `agente`

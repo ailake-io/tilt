@@ -6822,6 +6822,71 @@ Value default_for_type(const Expr* type_expr) {
   return Value::nulo();
 }
 
+std::string ferramenta_tipo_texto(const Expr* type_expr) {
+  if (!type_expr) return "qualquer";
+  if (type_expr->kind == ExprKind::Name) return type_expr->text;
+  if (type_expr->kind == ExprKind::TextLit) {
+    return std::string(1, '"') + type_expr->text + std::string(1, '"');
+  }
+  if (type_expr->kind == ExprKind::Binary && type_expr->text == "|") {
+    return ferramenta_tipo_texto(type_expr->lhs.get()) + " | " +
+           ferramenta_tipo_texto(type_expr->rhs.get());
+  }
+  if (type_expr->kind == ExprKind::Index && type_expr->lhs) {
+    std::string out = ferramenta_tipo_texto(type_expr->lhs.get()) + "[";
+    for (std::size_t i = 0; i < type_expr->elems.size(); ++i) {
+      if (i) out += ", ";
+      out += ferramenta_tipo_texto(type_expr->elems[i].get());
+    }
+    return out + "]";
+  }
+  return "tipo";
+}
+
+bool ferramenta_valor_compativel(const Expr* type_expr, const Value& value) {
+  if (!type_expr) return true;
+  if (type_expr->kind == ExprKind::Binary && type_expr->text == "|") {
+    return ferramenta_valor_compativel(type_expr->lhs.get(), value) ||
+           ferramenta_valor_compativel(type_expr->rhs.get(), value);
+  }
+  if (type_expr->kind == ExprKind::TextLit) {
+    return value.kind == ValueKind::Texto && value.s == type_expr->text;
+  }
+  if (type_expr->kind == ExprKind::Index && type_expr->lhs &&
+      type_expr->lhs->kind == ExprKind::Name) {
+    const std::string& base = type_expr->lhs->text;
+    if (base == "opcional") {
+      return value.kind == ValueKind::Nulo ||
+             (type_expr->elems.size() == 1 &&
+              ferramenta_valor_compativel(type_expr->elems[0].get(), value));
+    }
+    if (base == "lista") {
+      if (value.kind != ValueKind::Lista || !value.list) return false;
+      if (type_expr->elems.empty()) return true;
+      for (const Value& item : *value.list) {
+        if (!ferramenta_valor_compativel(type_expr->elems[0].get(), item)) return false;
+      }
+      return true;
+    }
+    if (base == "tensor") return value.kind == ValueKind::Tensor;
+  }
+  if (type_expr->kind != ExprKind::Name) return true;
+  const std::string& type = type_expr->text;
+  if (type == "texto") return value.kind == ValueKind::Texto;
+  if (type == "inteiro") return value.kind == ValueKind::Inteiro;
+  if (type == "decimal")
+    return value.kind == ValueKind::Inteiro || value.kind == ValueKind::Decimal;
+  if (type == "logico") return value.kind == ValueKind::Logico;
+  if (type == "nulo") return value.kind == ValueKind::Nulo;
+  if (type == "lista") return value.kind == ValueKind::Lista;
+  if (type == "tabela") return value.kind == ValueKind::Tabela;
+  if (type == "mapa") return value.kind == ValueKind::Mapa;
+  if (type == "tensor") return value.kind == ValueKind::Tensor;
+  if (type == "opcional") return true;
+  // Tipos declarados pelo usuario sao registros em runtime.
+  return value.kind == ValueKind::Mapa;
+}
+
 }  // namespace
 
 rt::LlmConfig Interpreter::llm_config(const std::string& name, Span span) {
@@ -7197,15 +7262,47 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
 rt::Value Interpreter::run_tool(const Item& tool_decl, const rt::ValueMap& args, Span span) {
   Env env;
   env.parent = &root_;
+  const std::string nome = decl_name(tool_decl);
+  std::vector<const Item*> campos;
   if (tool_decl.block) {
     if (const Item* entrada = find_field(*tool_decl.block, "entrada"); entrada && entrada->block) {
       for (const auto& f : entrada->block->items) {
-        if (f && f->kind == ItemKind::Field) {
-          const Value* a = args.find(f->key);
-          env.vars[f->key] = a ? *a : Value::nulo();
-        }
+        if (f && f->kind == ItemKind::Field) campos.push_back(f.get());
       }
     }
+  }
+  for (const auto& [key, value] : args.items) {
+    const Item* campo = nullptr;
+    for (const Item* f : campos) {
+      if (f->key == key) {
+        campo = f;
+        break;
+      }
+    }
+    if (!campo) {
+      fail(span, "ferramenta '" + nome + "': campo de entrada '" + key + "' nao declarado");
+    }
+    if (campo->value && !ferramenta_valor_compativel(campo->value.get(), value)) {
+      fail(span, "ferramenta '" + nome + "': campo '" + key + "' espera " +
+                     ferramenta_tipo_texto(campo->value.get()) + ", recebeu '" + value.type_name() +
+                     "'");
+    }
+  }
+  for (const Item* campo : campos) {
+    const Value* value = args.find(campo->key);
+    if (!value) {
+      const bool opcional = campo->value && campo->value->kind == ExprKind::Index &&
+                            campo->value->lhs && campo->value->lhs->kind == ExprKind::Name &&
+                            campo->value->lhs->text == "opcional";
+      if (!opcional) {
+        fail(span, "ferramenta '" + nome + "': campo de entrada '" + campo->key + "' obrigatorio");
+      }
+      env.vars[campo->key] = Value::nulo();
+      continue;
+    }
+    env.vars[campo->key] = *value;
+  }
+  if (tool_decl.block) {
     if (const Item* exec = find_field(*tool_decl.block, "executar"); exec && exec->block) {
       try {
         exec_block(*exec->block, env);
@@ -7214,7 +7311,6 @@ rt::Value Interpreter::run_tool(const Item& tool_decl, const rt::ValueMap& args,
       }
     }
   }
-  (void)span;
   return Value::nulo();
 }
 
