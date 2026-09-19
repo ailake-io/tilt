@@ -17,8 +17,8 @@ namespace tilt {
 // e n - 1 <= Rng::max() - Rng::min().
 template <class Rng>
 std::uint64_t sortear_indice(Rng& rng, std::uint64_t n) {
-  const std::uint64_t faixa = static_cast<std::uint64_t>(Rng::max()) -
-                              static_cast<std::uint64_t>(Rng::min());
+  const std::uint64_t faixa =
+      static_cast<std::uint64_t>(Rng::max()) - static_cast<std::uint64_t>(Rng::min());
   // (faixa + 1) % n valores no topo da faixa seriam desiguais: rejeita-os.
   const std::uint64_t excesso = (faixa % n + 1) % n;
   const std::uint64_t limite = faixa - excesso;
