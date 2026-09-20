@@ -186,9 +186,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   Qualquer outro endpoint (indexação, `_delete_by_query`, `_cat`, settings)
   é via `es_executar`, que devolve o JSON parseado ou `texto` cru quando a
   resposta não é JSON. Auth só Basic (userinfo da URL ou env
-  `ELASTIC_USER`/`ELASTIC_PASSWORD`), sem API keys/SASL/SSO, e HTTP apenas —
-  esquema `https://` ainda não é configurável na URL (use o `es_executar`
-  com reverse proxy local ou a rede interna).
+  `ELASTIC_USER`/`ELASTIC_PASSWORD`), sem API keys/SASL/SSO. HTTPS com os
+  esquemas `elasticsearch+https://` e `opensearch+https://` (o `curl` valida o
+  certificado; para uma CA própria ou autoassinada use `CURL_CA_BUNDLE`; certificado
+  não confiável é recusado — coberto por `tests/es_https_test.sh`).
 - MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
   `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
   básico completo, validado contra um `mongod` 7 real (`tests/mongo_real_test.sh`):

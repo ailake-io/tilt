@@ -56,6 +56,11 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME es_https
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/es_https_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME redis_real
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/redis_real_test.sh
           $<TARGET_FILE:tilt>)
