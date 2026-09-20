@@ -19,6 +19,8 @@
 #include <fcntl.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#elif !defined(_WIN32)
+#include <poll.h>
 #endif
 
 #include "runtime/arena.hpp"
@@ -909,11 +911,27 @@ int run_event_loop(int listen_fd, const std::function<HttpResponse(const HttpReq
 
 #else  // !__linux__ && !_WIN32 : fallback bloqueante, uma conexao por vez
 
+// Espera o fd ficar legivel por ate 1 s (o mesmo tick do epoll_wait). Sem isso,
+// accept()/recv() bloqueantes reiniciam apos o handler de SIGTERM (std::signal
+// no macOS/BSD instala com SA_RESTART) e o servidor nunca le a flag de
+// desligamento. >0 legivel, 0 timeout/interrompido, <0 erro.
+int esperar_leitura(int fd) {
+  pollfd pfd{};
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  const int rc = ::poll(&pfd, 1, 1000);
+  if (rc < 0 && errno == EINTR) return 0;
+  return rc;
+}
+
 int run_blocking(int listen_fd, const std::function<HttpResponse(const HttpRequest&)>& handler,
                  int max_requests, std::string& fatal) {
   (void)fatal;
   int served = 0;
   while ((max_requests <= 0 || served < max_requests) && !shutdown_requested()) {
+    const int pronto = esperar_leitura(listen_fd);
+    if (pronto < 0) break;
+    if (pronto == 0) continue;  // timeout: reavalia a flag de desligamento
     const int client = ::accept(listen_fd, nullptr, nullptr);
     if (client < 0) {
       if (errno == EINTR) continue;
@@ -929,6 +947,20 @@ int run_blocking(int listen_fd, const std::function<HttpResponse(const HttpReque
       arena.resetar();
       ParseResult r;
       while ((r = parse_request(in, arena, req)) == ParseResult::NeedMore) {
+        const int pronto_cli = esperar_leitura(client);
+        if (pronto_cli < 0) {
+          alive = false;
+          break;
+        }
+        if (pronto_cli == 0) {
+          // Conexao keep-alive ociosa nao pode segurar o desligamento; um
+          // request parcial (in nao vazio) continua sendo aguardado.
+          if (in.empty() && shutdown_requested()) {
+            alive = false;
+            break;
+          }
+          continue;
+        }
         char chunk[4096];
         const ssize_t n = ::recv(client, chunk, sizeof(chunk), 0);
         if (n <= 0) {

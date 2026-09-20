@@ -49,4 +49,11 @@ class PooledConn {
   bool pool_back_ = true;
 };
 
+// Fecha todas as conexoes ociosas do pool. Chame no fim do main, com as
+// bibliotecas de cliente (libpq, libmysqlclient) ainda carregadas: o destrutor
+// estatico do registro nao pode fazer isso com seguranca (ordem de teardown
+// indefinida), e sem esta chamada as ociosas aparecem como vazamento no
+// LeakSanitizer.
+void sql_pool_fechar_ociosas();
+
 }  // namespace tilt::rt

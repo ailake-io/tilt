@@ -15,7 +15,15 @@ trap 'kill "$server" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/release/bin" "$TMP/release/share/tilt/stdlib" "$TMP/web"
 cp "$BIN" "$TMP/release/bin/tilt"
 cp -R "$ROOT/stdlib/." "$TMP/release/share/tilt/stdlib/"
-ASSET="tilt-0.1.0-Linux-x86_64.tar.gz"
+case "$(uname -s)" in
+  Darwin) OS=macos ;;
+  *) OS=Linux ;;
+esac
+case "$(uname -m)" in
+  aarch64|arm64) ARCH=arm64 ;;
+  *) ARCH=x86_64 ;;
+esac
+ASSET="tilt-0.1.0-${OS}-${ARCH}.tar.gz"
 tar -czf "$TMP/web/$ASSET" -C "$TMP/release" bin share
 ( cd "$TMP/web" && sha256sum "$ASSET" > "$ASSET.sha256" )
 python3 - "$TMP/web" "$PORTA" <<'PY' &

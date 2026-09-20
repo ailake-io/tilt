@@ -86,6 +86,23 @@ bool abre_estado(const std::string& sql) {
 
 }  // namespace
 
+void sql_pool_fechar_ociosas() {
+  std::unordered_map<std::string, std::vector<IdleEntry>> ociosas;
+  {
+    std::lock_guard<std::mutex> lk(registry().mu);
+    ociosas.swap(registry().idle);
+  }
+  // Fecha fora do mutex (close pode fazer IO).
+  for (auto& [chave, entradas] : ociosas) {
+    for (auto& e : entradas) {
+      try {
+        e.close(e.handle);
+      } catch (...) {
+      }
+    }
+  }
+}
+
 PooledConn::PooledConn(std::string backend, std::string dsn, OpenFn open, AliveFn alive,
                        CloseFn close, const std::string& sql_hint)
     : backend_(std::move(backend)), close_(std::move(close)) {

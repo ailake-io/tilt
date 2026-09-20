@@ -2,8 +2,9 @@
 set -eu
 
 BIN="$1"
-tmp=$(mktemp --suffix=.tilt)
-trap 'rm -f "$tmp"' EXIT
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+tmp="$tmpdir/avro.tilt"
 cat > "$tmp" <<'EOF'
 pipeline principal:
   passos:
