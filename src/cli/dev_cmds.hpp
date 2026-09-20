@@ -14,6 +14,9 @@ int cmd_testar(const std::vector<std::string_view>& args);
 // `tilt formatar <arquivo|diretorio>... [--verificar] [--stdout]`
 int cmd_formatar(const std::vector<std::string_view>& args);
 
+// `tilt repl`: laco interativo (stdin -> stdout) com estado entre linhas.
+int cmd_repl(const std::vector<std::string_view>& args);
+
 // `tilt novo <nome>`: cria um projeto com programa, testes e README.
 int cmd_novo(const std::vector<std::string_view>& args);
 

@@ -10,6 +10,7 @@ comandos:
   testar [caminho...] [--filtro X]   roda os blocos `teste` (afirmar, afirmar_igual)
   formatar <caminho...> [--verificar]  normaliza espacos dos .tilt
   novo <nome>                        cria um projeto (programa, testes, README)
+  repl                               laco interativo com estado entre linhas
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
                                      [--requisicoes N] [--threads N]
   servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via

@@ -70,5 +70,23 @@ grep -q '^  b   $' sujo.tilt || { echo "FALHA: conteudo do texto triplo nao foi 
 [ "$(head -c1 sujo.tilt)" = "f" ] || { echo "FALHA: linhas em branco no inicio"; fail=1; }
 ck "formatado ainda executa" "$BIN" executar sujo.tilt
 
+# --- repl: estado entre linhas, expressao solta imprime, funcao/bloco/lambda, erro
+# nao encerra a sessao, :carregar registra as declaracoes de um arquivo
+printf 'funcao triplo n:\n  retornar n * 3\n' > util_repl.tilt
+out=$(printf '%s\n' 'x = 3' 'x * 2' 'funcao dobro n:' '  retornar n * 2' 'dobro(x + 1)' \
+  'se x > 1:' '  imprimir "maior"' 'senao:' '  imprimir "menor"' \
+  'f = funcao a: a + x' 'f(10)' 'y_indefinido' 'x + 100' \
+  ':carregar util_repl.tilt' 'triplo(4)' ':sair' 'imprimir "depois do sair"' | "$BIN" repl 2>&1) || {
+  echo "FALHA: repl saiu com erro: $out"; fail=1; }
+printf '%s\n' "$out" > repl.out
+[ "$(sed -n 1p repl.out)" = "6" ] || { echo "FALHA: repl x * 2: $out"; fail=1; }
+grep -qx '8' repl.out || { echo "FALHA: repl funcao dobro(x + 1): $out"; fail=1; }
+grep -qx 'maior' repl.out || { echo "FALHA: repl bloco se/senao: $out"; fail=1; }
+grep -qx '13' repl.out || { echo "FALHA: repl lambda capturando x: $out"; fail=1; }
+grep -q "nome 'y_indefinido' nao definido" repl.out || { echo "FALHA: repl erro de execucao: $out"; fail=1; }
+grep -qx '103' repl.out || { echo "FALHA: repl nao seguiu apos o erro: $out"; fail=1; }
+grep -qx '12' repl.out || { echo "FALHA: repl :carregar + triplo(4): $out"; fail=1; }
+grep -q 'depois do sair' repl.out && { echo "FALHA: repl executou apos :sair"; fail=1; }
+
 [ "$fail" = 0 ] && echo "dev_cmds_test ok"
 exit "$fail"

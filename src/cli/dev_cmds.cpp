@@ -1,10 +1,17 @@
 #include "cli/dev_cmds.hpp"
 
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <sstream>
 
@@ -14,6 +21,7 @@
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
 #include "semantic/checker.hpp"
+#include "tilt/version.hpp"
 
 namespace tilt {
 
@@ -259,6 +267,189 @@ int cmd_formatar(const std::vector<std::string_view>& args) {
   if (verificar && mudariam > 0) {
     std::cout << mudariam << " arquivo(s) precisam de formatacao\n";
     return kFalhas;
+  }
+  return kOk;
+}
+
+// -------------------------------------------------------------------- repl
+
+namespace {
+
+std::string aparar_repl(const std::string& s) {
+  std::size_t a = 0;
+  std::size_t b = s.size();
+  while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+  while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+  return s.substr(a, b - a);
+}
+
+// Declaracoes de topo aceitas direto no REPL (o resto vira passo de um pipeline).
+bool eh_declaracao(const std::string& linha) {
+  static const char* const kDecl[] = {"funcao",    "tipo",   "importar", "de",         "seja",
+                                      "constante", "llm",    "indice",   "ferramenta", "agente",
+                                      "equipe",    "modelo", "fonte"};
+  std::size_t fim = 0;
+  while (fim < linha.size() &&
+         (std::isalnum(static_cast<unsigned char>(linha[fim])) != 0 || linha[fim] == '_')) {
+    ++fim;
+  }
+  const std::string primeira = linha.substr(0, fim);
+  for (const char* d : kDecl) {
+    if (primeira == d) return true;
+  }
+  return false;
+}
+
+const ast::Block* bloco_passos(const ast::Program& programa) {
+  for (const auto& item : programa.items) {
+    if (!item || item->kind != ast::ItemKind::Decl || item->key != "pipeline" || !item->block) {
+      continue;
+    }
+    for (const auto& f : item->block->items) {
+      if (f && f->kind == ast::ItemKind::Field && f->key == "passos" && f->block) {
+        return f->block.get();
+      }
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+int cmd_repl(const std::vector<std::string_view>& args) {
+  if (args.size() > 1) {
+    std::cerr << "tilt: uso: tilt repl\n";
+    return kUso;
+  }
+#if defined(_WIN32)
+  const bool interativo = _isatty(_fileno(stdin)) != 0;
+#else
+  const bool interativo = isatty(STDIN_FILENO) != 0;
+#endif
+  // Mantem vivos os fontes e programas da sessao: funcoes, lambdas e entidades
+  // apontam para nos da AST.
+  std::vector<std::unique_ptr<SourceFile>> fontes;
+  std::vector<std::unique_ptr<ast::Program>> programas;
+  SourceFile base("repl", "");
+  DiagnosticEngine diag_base(&base);
+  ast::Program vazio;
+  Interpreter interp(vazio, diag_base, std::cout);
+  interp.set_entry_dir(".");
+
+  // Faz o parse de um texto e devolve o Program (nullptr + diagnosticos em stderr se falhar).
+  auto analisar = [&](const std::string& texto) -> const ast::Program* {
+    fontes.push_back(std::make_unique<SourceFile>("repl", texto));
+    DiagnosticEngine diag(fontes.back().get());
+    Lexer lexer(*fontes.back(), diag);
+    const std::vector<Token> tokens = lexer.tokenize();
+    Parser parser(tokens, diag);
+    auto programa = std::make_unique<ast::Program>(parser.parse_program());
+    if (diag.has_errors()) {
+      diag.render(std::cerr, false);
+      return nullptr;
+    }
+    programas.push_back(std::move(programa));
+    return programas.back().get();
+  };
+
+  auto avaliar = [&](const std::string& entrada) {
+    if (eh_declaracao(entrada)) {
+      const ast::Program* p = analisar(entrada + "\n");
+      if (!p) return;
+      try {
+        interp.repl_registrar(*p);
+      } catch (const std::exception& e) {
+        std::cerr << "erro[T901]: " << e.what() << "\n";
+      }
+      return;
+    }
+    std::string fonte = "pipeline __repl:\n  passos:\n";
+    std::istringstream linhas(entrada);
+    std::string linha;
+    bool primeira = true;
+    while (std::getline(linhas, linha)) {
+      // `senao`/`capturar` alinham com o `- se`/`- tentar` (4 espacos); o resto do
+      // bloco fica 6 espacos a direita (2 alem do texto depois de `- `).
+      const bool alinha_com_traco = linha.rfind("senao", 0) == 0 || linha.rfind("capturar", 0) == 0;
+      fonte += primeira ? "    - " : (alinha_com_traco ? "    " : "      ");
+      fonte += linha + "\n";
+      primeira = false;
+    }
+    const ast::Program* p = analisar(fonte);
+    if (!p) return;
+    const ast::Block* passos = bloco_passos(*p);
+    if (!passos) return;
+    std::string erro;
+    if (!interp.repl_executar(*passos, true, erro)) {
+      std::cout.flush();
+      std::cerr << "erro[T901]: " << erro << "\n";
+    }
+  };
+
+  if (interativo) {
+    std::cout << "tilt " << kVersion << " — REPL. `:ajuda` lista os comandos, `:sair` encerra.\n";
+  }
+  std::string linha;
+  std::optional<std::string> pendente;  // linha lida a mais ao fechar um bloco
+  while (true) {
+    if (pendente) {
+      linha = *pendente;
+      pendente.reset();
+    } else {
+      if (interativo) std::cout << "tilt> " << std::flush;
+      if (!std::getline(std::cin, linha)) break;
+    }
+    std::string entrada = aparar_repl(linha);
+    if (entrada.empty()) continue;
+    if (entrada == ":sair" || entrada == ":q") break;
+    if (entrada == ":ajuda") {
+      std::cout
+          << ":sair               encerra\n"
+          << ":carregar <arquivo>  registra as declaracoes (funcao, tipo, llm...) de um .tilt\n"
+          << "linha terminada em ':' abre um bloco; linha vazia o fecha\n"
+          << "uma expressao solta imprime o valor; variaveis persistem entre linhas\n";
+      continue;
+    }
+    if (entrada.rfind(":carregar ", 0) == 0) {
+      const std::string caminho = aparar_repl(entrada.substr(10));
+      std::ifstream in(caminho, std::ios::binary);
+      if (!in) {
+        std::cerr << "tilt: nao foi possivel abrir '" << caminho << "'\n";
+        continue;
+      }
+      std::ostringstream ss;
+      ss << in.rdbuf();
+      if (const ast::Program* p = analisar(ss.str())) {
+        try {
+          interp.repl_registrar(*p);
+          std::cout << "carregado: " << caminho << "\n";
+        } catch (const std::exception& e) {
+          std::cerr << "erro[T901]: " << e.what() << "\n";
+        }
+      }
+      continue;
+    }
+    // Bloco: linha terminada em ':' continua enquanto as proximas forem indentadas
+    // (ou `senao`/`capturar`, que continuam o bloco anterior); uma linha vazia ou
+    // sem indentacao o fecha — esta ultima vira a proxima entrada.
+    if (!entrada.empty() && entrada.back() == ':') {
+      std::string mais;
+      while (true) {
+        if (interativo) std::cout << "...   " << std::flush;
+        if (!std::getline(std::cin, mais)) break;
+        if (aparar_repl(mais).empty()) break;
+        const bool indentada = mais[0] == ' ' || mais[0] == '\t';
+        const std::string cabeca = aparar_repl(mais);
+        const bool continua_bloco =
+            cabeca.rfind("senao", 0) == 0 || cabeca.rfind("capturar", 0) == 0;
+        if (!indentada && !continua_bloco) {
+          pendente = mais;
+          break;
+        }
+        entrada += "\n" + mais;
+      }
+    }
+    avaliar(entrada);
   }
   return kOk;
 }

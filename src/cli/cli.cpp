@@ -102,6 +102,7 @@ void print_usage(std::ostream& os) {
      << "  testar [caminho...] [--filtro X]   roda os blocos `teste` (afirmar, afirmar_igual)\n"
      << "  formatar <caminho...> [--verificar]  normaliza espacos dos .tilt\n"
      << "  novo <nome>                        cria um projeto (programa, testes, README)\n"
+     << "  repl                               laco interativo com estado entre linhas\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "                                     [--requisicoes N] [--threads N]\n"
      << "  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via\n"
@@ -746,6 +747,7 @@ int run_cli(int argc, char** argv) {
   if (cmd == "testar") return cmd_testar(args);
   if (cmd == "formatar") return cmd_formatar(args);
   if (cmd == "novo") return cmd_novo(args);
+  if (cmd == "repl") return cmd_repl(args);
   if (cmd == "servir") return cmd_servir(args);
   if (cmd == "servir-catalogo") return cmd_servir_catalogo(args);
 

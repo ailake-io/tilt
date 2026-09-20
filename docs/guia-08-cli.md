@@ -58,6 +58,16 @@ indentação nem o conteúdo das linhas; é idempotente. `--verificar` não grav
 com `1` se algum arquivo precisaria mudar (útil no CI); `--stdout` imprime o
 resultado.
 
+## `tilt repl`
+
+Laço interativo (stdin → stdout, também aceita entrada por pipe) com estado entre
+linhas: variáveis, funções, lambdas e entidades (`llm`, `tipo`, ...) persistem.
+Uma expressão solta imprime o valor (`x * 2` → `6`); um erro de execução mostra a
+mensagem e a sessão continua. Uma linha terminada em `:` abre um bloco que segue
+enquanto as próximas linhas forem indentadas (ou `senao`/`capturar`); linha vazia
+fecha. Comandos: `:carregar <arquivo>` registra as declarações de um `.tilt`,
+`:ajuda`, `:sair`. Sem o verificador semântico (cada linha é analisada sozinha).
+
 ## `tilt novo <nome>`
 
 Cria a pasta `<nome>/` com `principal.tilt` (uma `funcao` e um `pipeline`),

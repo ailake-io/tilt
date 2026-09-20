@@ -411,7 +411,12 @@ void Interpreter::fail(Span span, std::string message, DiagCode code) {
 }
 
 void Interpreter::register_decls() {
-  for (const auto& item : program_.items) {
+  register_decls_de(program_);
+  tiltc_load();
+}
+
+void Interpreter::register_decls_de(const ast::Program& programa) {
+  for (const auto& item : programa.items) {
     if (!item || item->kind != ItemKind::Decl) continue;
     const std::string& kw = item->key;
     const std::string name = decl_name(*item);
@@ -464,7 +469,47 @@ void Interpreter::register_decls() {
       entities_[name] = item.get();
     }
   }
-  tiltc_load();
+}
+
+void Interpreter::repl_registrar(const ast::Program& programa) {
+  try {
+    register_decls_de(programa);
+  } catch (const RuntimeAbort& a) {
+    throw std::runtime_error("linha " + std::to_string(a.span.line) + ": " + a.message);
+  }
+}
+
+bool Interpreter::repl_executar(const ast::Block& passos, bool eco, std::string& erro) {
+  if (!repl_env_.parent) repl_env_.parent = &root_;
+  try {
+    for (const auto& item : passos.items) {
+      if (!item) continue;
+      const Item* conteudo = item.get();
+      while (conteudo && conteudo->kind == ItemKind::ListEntry) {
+        conteudo = conteudo->child ? conteudo->child.get()
+                                   : (conteudo->block && !conteudo->block->items.empty()
+                                          ? conteudo->block->items[0].get()
+                                          : nullptr);
+      }
+      if (eco && conteudo && conteudo->kind == ItemKind::Stmt && conteudo->stmt &&
+          conteudo->stmt->kind == StmtKind::Expr && conteudo->stmt->a) {
+        const Value v = eval(*conteudo->stmt->a, repl_env_);
+        if (v.kind != ValueKind::Nulo) out_ << to_display(v) << "\n";
+        continue;
+      }
+      exec_item(*item, repl_env_);
+    }
+    return true;
+  } catch (const RuntimeAbort& a) {
+    erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+  } catch (const ReturnSignal&) {
+    return true;
+  } catch (const BreakSignal&) {
+    erro = "'parar' fora de um laco";
+  } catch (const ContinueSignal&) {
+    erro = "'continuar' fora de um laco";
+  }
+  return false;
 }
 
 // ------------------------------------------------------------------ tiltc

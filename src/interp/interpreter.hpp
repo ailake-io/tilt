@@ -130,6 +130,15 @@ class Interpreter {
     bool ok = true;
     std::string mensagem;  // erro T901 (com linha) quando !ok
   };
+  // `tilt repl`: executa instrucoes (passos) num ambiente que persiste entre as
+  // chamadas. Com `eco`, o valor de uma expressao solta e impresso (se nao for
+  // nulo). Devolve false com a mensagem em `erro` (T901 com a linha). O `Program`
+  // dos passos e das declaracoes deve viver ate o fim da sessao.
+  bool repl_executar(const ast::Block& passos, bool eco, std::string& erro);
+  // Registra declaracoes de topo (funcao, tipo, llm, importar, seja...) de um
+  // Program novo; lanca std::runtime_error com a mensagem se falhar.
+  void repl_registrar(const ast::Program& programa);
+
   // `tilt testar`: roda os blocos `teste` do programa (na ordem do arquivo) cujo
   // nome contem `filtro` (vazio = todos). Cada teste roda isolado: uma falha
   // (afirmar, erro de execucao) nao interrompe os demais. Registra funcoes e
@@ -212,6 +221,8 @@ class Interpreter {
                          DiagCode code = DiagCode::RuntimeError);
 
   void register_decls();
+  void register_decls_de(const ast::Program& programa);
+  Env repl_env_;  // ambiente persistente do REPL (pai = root_ no primeiro uso)
   // Carrega o modulo `name` procurando `<from_dir>/name.tilt` e depois os
   // diretorios da stdlib (TILT_STDLIB_PATH, stdlib/ ao lado do binario,
   // <exe>/../share/tilt/stdlib). Falha com a lista de caminhos tentados.
