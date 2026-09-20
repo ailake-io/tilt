@@ -7779,6 +7779,47 @@ rt::ValueMap best_effort_args(const Item& tool_decl, const std::string& message)
   return targs;
 }
 
+// JSON Schema dos argumentos de uma `ferramenta` (campos de `entrada:`), para o
+// tool-calling nativo. Tipos desconhecidos viram string.
+Value tool_json_schema(const Item& tool_decl) {
+  Value props = Value::mapa();
+  Value required = Value::lista();
+  if (tool_decl.block) {
+    if (const Item* entrada = find_field(*tool_decl.block, "entrada"); entrada && entrada->block) {
+      for (const auto& f : entrada->block->items) {
+        if (!f || f->kind != ItemKind::Field) continue;
+        std::string base = "texto";
+        if (f->value && f->value->kind == ExprKind::Name) {
+          base = f->value->text;
+        } else if (f->value && f->value->kind == ExprKind::Index && f->value->lhs &&
+                   f->value->lhs->kind == ExprKind::Name) {
+          base = f->value->lhs->text;
+        }
+        const char* tipo = "string";
+        if (base == "inteiro")
+          tipo = "integer";
+        else if (base == "decimal")
+          tipo = "number";
+        else if (base == "logico")
+          tipo = "boolean";
+        else if (base == "lista")
+          tipo = "array";
+        else if (base == "mapa")
+          tipo = "object";
+        Value p = Value::mapa();
+        p.map->set("type", Value::texto(tipo));
+        props.map->set(f->key, std::move(p));
+        required.list->push_back(Value::texto(f->key));
+      }
+    }
+  }
+  Value schema = Value::mapa();
+  schema.map->set("type", Value::texto("object"));
+  schema.map->set("properties", std::move(props));
+  schema.map->set("required", std::move(required));
+  return schema;
+}
+
 std::string tool_params_desc(const Item& tool_decl) {
   std::string out;
   if (tool_decl.block) {
@@ -7904,6 +7945,72 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         answer = rt::llm_chat_cadeia(cadeia, system, prompt).texto;
       } catch (const std::exception& e) {
         fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+      }
+    } else if (field_word(cfg, "protocolo", "texto") == "nativo") {
+      // Tool-calling nativo do provedor (Anthropic tool_use / OpenAI tool_calls):
+      // o modelo devolve chamadas estruturadas, sem depender do protocolo de
+      // texto. Cada turno: chamadas -> observacoes (tool_result) -> proximo turno.
+      std::vector<rt::FerramentaLLM> defs;
+      for (const auto& [tname, tdecl] : tools) {
+        rt::FerramentaLLM d;
+        d.nome = tname;
+        d.descricao = field_str(*tdecl->block, "descricao");
+        d.schema = tool_json_schema(*tdecl);
+        defs.push_back(std::move(d));
+      }
+      std::vector<rt::MensagemLLM> conversa;
+      conversa.push_back({"user", prompt, {}, ""});
+      std::string observations;
+      for (int step = 1; step <= max_passos && answer.empty(); ++step) {
+        rt::RespostaFerramentas resp;
+        try {
+          resp = rt::llm_chat_ferramentas(cadeia, system, conversa, defs);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+        }
+        if (resp.chamadas.empty()) {
+          answer = resp.texto;
+          if (answer.empty()) answer = "[agente] o LLM nao devolveu texto nem chamadas";
+          break;
+        }
+        conversa.push_back({"assistant", resp.texto, resp.chamadas, ""});
+        for (const rt::ChamadaFerramenta& chamada : resp.chamadas) {
+          auto tit = entities_.find(chamada.nome);
+          const bool declarada = tit != entities_.end() && tit->second->key == "ferramenta" &&
+                                 std::any_of(tools.begin(), tools.end(), [&](const auto& t) {
+                                   return t.first == chamada.nome;
+                                 });
+          if (!declarada) {
+            fail(call.span, "agente '" + agent_name + "': o LLM pediu a ferramenta '" +
+                                chamada.nome + "', que nao esta declarada");
+          }
+          rt::ValueMap targs = best_effort_args(*tit->second, prompt);
+          if (chamada.argumentos.kind == ValueKind::Mapa && chamada.argumentos.map) {
+            for (const auto& [k, v] : chamada.argumentos.map->items) targs.set(k, v);
+          }
+          Value obs = run_tool(*tit->second, targs, call.span);
+          Value entry = Value::mapa();
+          entry.map->set("passo", Value::inteiro(step));
+          entry.map->set("ferramenta", Value::texto(chamada.nome));
+          entry.map->set("argumentos", args_to_value(targs));
+          entry.map->set("observacao", Value::texto(to_display(obs)));
+          rastro.list->push_back(std::move(entry));
+          observations += "- " + chamada.nome + ": " + to_display(obs) + "\n";
+          conversa.push_back({"tool", to_display(obs), {}, chamada.id});
+        }
+      }
+      if (answer.empty()) {
+        try {
+          answer = rt::llm_chat_cadeia(cadeia,
+                                       system +
+                                           "\n\nLimite de passos atingido. Responda agora "
+                                           "com uma sintese do que foi observado.",
+                                       "Pedido do usuario: " + prompt +
+                                           "\n\nObservacoes ate agora:\n" + observations)
+                       .texto;
+        } catch (...) {
+          answer = "[agente] limite de passos atingido sem resposta final";
+        }
       }
     } else {
       // Planner iterativo (M9.2): a cada passo o LLM escolhe a proxima acao
@@ -8117,6 +8224,54 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
   Value rastro = Value::lista();
   std::string current = message;
   std::string combined;
+
+  // `paralelo`: todos os agentes recebem a mesma mensagem e rodam ao mesmo
+  // tempo (o tempo e dominado por chamadas de rede ao LLM). Os resultados
+  // entram na ordem declarada; o 1o erro (na ordem) aborta depois de todos
+  // terminarem.
+  if (estrategia == "paralelo" && members.size() > 1) {
+    auto rodar = [&](const std::string& agente) {
+      Expr fake;
+      fake.kind = ExprKind::Call;
+      fake.span = call.span;
+      ast::Arg arg;
+      arg.value = std::make_unique<Expr>();
+      arg.value->kind = ExprKind::TextLit;
+      arg.value->text = message;
+      fake.args.push_back(std::move(arg));
+      return eval_agente_responder(agente, fake, env);
+    };
+    std::vector<std::future<Value>> futuros;
+    futuros.reserve(members.size());
+    for (const auto& membro : members) {
+      futuros.push_back(std::async(std::launch::async, rodar, membro.second));
+    }
+    std::vector<Value> respostas(members.size());
+    std::exception_ptr primeiro_erro;
+    for (std::size_t k = 0; k < futuros.size(); ++k) {
+      try {
+        respostas[k] = futuros[k].get();
+      } catch (...) {
+        if (!primeiro_erro) primeiro_erro = std::current_exception();
+      }
+    }
+    if (primeiro_erro) std::rethrow_exception(primeiro_erro);
+    for (std::size_t k = 0; k < members.size(); ++k) {
+      const Value& r = respostas[k];
+      const std::string texto = (r.kind == ValueKind::Mapa && r.map && r.map->find("texto"))
+                                    ? r.map->find("texto")->s
+                                    : "";
+      Value entry = Value::mapa();
+      entry.map->set("agente", Value::texto(members[k].first));
+      entry.map->set("texto", Value::texto(texto));
+      rastro.list->push_back(std::move(entry));
+      combined += members[k].first + ": " + texto + "\n";
+    }
+    Value out = Value::mapa();
+    out.map->set("texto", Value::texto(combined));
+    out.map->set("rastro", std::move(rastro));
+    return out;
+  }
 
   for (const auto& [rotulo, agente] : members) {
     Expr fake;  // synthesize a `<agente>.responder <texto>` call
@@ -10112,13 +10267,19 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     if (const Value* t = kw.find("tamanho")) win = static_cast<std::size_t>(t->as_number());
     if (const Value* o = kw.find("sobreposicao")) overlap = static_cast<std::size_t>(o->as_number());
     if (win == 0) win = 1;
-    const std::size_t step = win > overlap ? win - overlap : 1;
+    std::string modo = "tamanho";
+    if (const Value* m = kw.find("modo"); m && m->kind == ValueKind::Texto) modo = m->s;
+    // A sobreposicao padrao (100) e da janela fixa; nos modos por unidade
+    // (sentenca/paragrafo/linha) so vale se pedida.
+    if (modo != "tamanho" && !kw.find("sobreposicao")) overlap = 0;
     rt::ValueList chunks;
-    for (std::size_t start = 0; start < src.size(); start += step) {
-      chunks.push_back(Value::texto(src.substr(start, win)));
-      if (start + win >= src.size()) break;
+    try {
+      for (std::string& pedaco : rt::dividir_texto_em_pedacos(src, win, overlap, modo)) {
+        chunks.push_back(Value::texto(std::move(pedaco)));
+      }
+    } catch (const std::exception& e) {
+      fail(call.span, e.what());
     }
-    if (chunks.empty()) chunks.push_back(Value::texto(src));
     return Value::lista(std::move(chunks));
   }
   if (name == "ler") {

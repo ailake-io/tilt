@@ -635,6 +635,125 @@ const std::unordered_map<std::string, Handler>& tabela() {
 
 }  // namespace
 
+namespace {
+
+bool inicio_de_caractere(unsigned char c) { return (c & 0xC0) != 0x80; }
+
+// Janela fixa alinhada a caracteres UTF-8.
+std::vector<std::string> fatiar_utf8(const std::string& s, std::size_t win, std::size_t overlap) {
+  std::vector<std::string> out;
+  if (win == 0) win = 1;
+  if (overlap >= win) overlap = win - 1;
+  std::size_t start = 0;
+  while (start < s.size()) {
+    std::size_t end = std::min(s.size(), start + win);
+    if (end < s.size()) {
+      std::size_t recuo = end;
+      while (recuo > start && !inicio_de_caractere(static_cast<unsigned char>(s[recuo]))) --recuo;
+      if (recuo > start) end = recuo;
+    }
+    out.push_back(s.substr(start, end - start));
+    if (end >= s.size()) break;
+    std::size_t prox = end > overlap ? end - overlap : end;
+    if (prox <= start) prox = end;  // sempre avanca
+    while (prox < end && !inicio_de_caractere(static_cast<unsigned char>(s[prox]))) ++prox;
+    start = prox;
+  }
+  return out;
+}
+
+// Quebra em unidades (sentencas/paragrafos/linhas), mantendo o separador na
+// unidade que termina.
+std::vector<std::string> unidades_de(const std::string& s, const std::string& modo) {
+  std::vector<std::string> out;
+  std::string atual;
+  const auto fecha = [&] {
+    if (!atual.empty()) out.push_back(std::move(atual));
+    atual.clear();
+  };
+  for (std::size_t i = 0; i < s.size(); ++i) {
+    atual += s[i];
+    const bool ultimo = i + 1 == s.size();
+    if (modo == "linha") {
+      if (s[i] == '\n') fecha();
+    } else if (modo == "paragrafo") {
+      if (s[i] == '\n' && i + 1 < s.size() && s[i + 1] == '\n') {
+        while (i + 1 < s.size() && s[i + 1] == '\n') atual += s[++i];
+        fecha();
+      }
+    } else {  // sentenca
+      const bool pontua = s[i] == '.' || s[i] == '!' || s[i] == '?';
+      const bool proximo_espaco = ultimo || std::isspace(static_cast<unsigned char>(s[i + 1])) != 0;
+      if (pontua && proximo_espaco) {
+        while (i + 1 < s.size() && std::isspace(static_cast<unsigned char>(s[i + 1]))) {
+          atual += s[++i];
+        }
+        fecha();
+      } else if (s[i] == '\n' && i + 1 < s.size() && s[i + 1] == '\n') {
+        while (i + 1 < s.size() && s[i + 1] == '\n') atual += s[++i];
+        fecha();
+      }
+    }
+  }
+  fecha();
+  return out;
+}
+
+}  // namespace
+
+std::vector<std::string> dividir_texto_em_pedacos(const std::string& texto, std::size_t tamanho,
+                                                  std::size_t sobreposicao,
+                                                  const std::string& modo) {
+  if (modo == "tamanho") {
+    std::vector<std::string> out = fatiar_utf8(texto, tamanho, sobreposicao);
+    if (out.empty()) out.push_back(texto);
+    return out;
+  }
+  if (modo != "sentenca" && modo != "paragrafo" && modo != "linha") {
+    erro("dividir_texto: modo '" + modo +
+         "' invalido (use \"tamanho\", \"sentenca\", \"paragrafo\" ou \"linha\")");
+  }
+  if (tamanho == 0) tamanho = 1;
+  if (sobreposicao > tamanho / 2) sobreposicao = tamanho / 2;  // sempre avanca
+  // Unidades maiores que a janela viram varias unidades de janela fixa.
+  std::vector<std::string> unidades;
+  for (std::string& u : unidades_de(texto, modo)) {
+    if (u.size() <= tamanho) {
+      unidades.push_back(std::move(u));
+    } else {
+      for (std::string& p : fatiar_utf8(u, tamanho, 0)) unidades.push_back(std::move(p));
+    }
+  }
+  std::vector<std::string> out;
+  std::size_t i = 0;
+  while (i < unidades.size()) {
+    std::string pedaco;
+    std::size_t j = i;
+    while (j < unidades.size() &&
+           (pedaco.empty() || pedaco.size() + unidades[j].size() <= tamanho)) {
+      pedaco += unidades[j++];
+    }
+    out.push_back(std::move(pedaco));
+    if (j >= unidades.size()) break;
+    // Sobreposicao: reabre com as ultimas unidades que somam ate `sobreposicao`.
+    std::size_t volta = j;
+    std::size_t soma = 0;
+    while (volta > i + 1 && soma + unidades[volta - 1].size() <= sobreposicao) {
+      soma += unidades[volta - 1].size();
+      --volta;
+    }
+    // Se a sobreposicao impede a proxima unidade de caber, ela e descartada
+    // (senao o pedaco seguinte seria so a repeticao do anterior).
+    while (volta < j && soma + unidades[j].size() > tamanho) {
+      soma -= unidades[volta].size();
+      ++volta;
+    }
+    i = volta;
+  }
+  if (out.empty()) out.push_back(texto);
+  return out;
+}
+
 bool stdlib_existe(const std::string& nome) { return tabela().count(nome) != 0; }
 
 Value stdlib_chamar(const std::string& nome, const std::vector<Value>& args) {

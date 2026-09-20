@@ -149,6 +149,21 @@ pipeline textos:
     - imprimir pedacos[0]
 ```
 
+`modo:` escolhe como cortar (o padrão, `"tamanho"`, é a janela fixa, nunca no
+meio de um caractere UTF-8): `"sentenca"` junta sentenças inteiras (termina em
+`.` `!` `?` ou linha em branco), `"paragrafo"` respeita blocos separados por
+linha em branco e `"linha"` respeita linhas inteiras (bom para código). Nos
+modos por unidade, `tamanho` é o teto de bytes do pedaço, uma unidade maior que o
+teto cai na janela fixa e `sobreposicao` só vale se pedida (repete as últimas
+unidades que cabem nela).
+
+```tilt run
+pipeline sentencas:
+  passos:
+    - doc = "Tilt e uma linguagem. Ela e declarativa! Voce gosta? Sim."
+    - imprimir dividir_texto(doc, tamanho: 40, modo: "sentenca")
+```
+
 ## `indice` — RAG
 
 ```tilt run

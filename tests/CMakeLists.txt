@@ -56,6 +56,16 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME equipe_paralela
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/equipe_paralela_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME agent_native
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/agent_native_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME curl_secrets
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/curl_secrets_test.sh
           $<TARGET_FILE:tilt>)

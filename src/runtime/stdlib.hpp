@@ -13,6 +13,17 @@
 
 namespace tilt::rt {
 
+// Divide `texto` em pedacos de ate `tamanho` bytes (nunca no meio de um
+// caractere UTF-8), com `sobreposicao` bytes repetidos entre pedacos vizinhos.
+// modo: "tamanho" (janela fixa), "sentenca" (junta sentencas inteiras, termina
+// em . ! ? ou linha em branco), "paragrafo" (blocos separados por linha em
+// branco) ou "linha" (linhas inteiras — bom para codigo). Nos modos por unidade,
+// a unidade maior que `tamanho` cai na janela fixa. Lanca std::runtime_error
+// para modo desconhecido.
+std::vector<std::string> dividir_texto_em_pedacos(const std::string& texto, std::size_t tamanho,
+                                                  std::size_t sobreposicao,
+                                                  const std::string& modo);
+
 // true se `nome` e uma funcao da biblioteca padrao (ex.: "raiz", "substituir").
 bool stdlib_existe(const std::string& nome);
 

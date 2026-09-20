@@ -88,6 +88,20 @@ agente, turnos novos não entram. Outro valor em `memoria:` é erro (`T011`).
 No modo `TILT_LLM=mock` o planner é determinístico: cada
 ferramenta é chamada uma vez, na ordem declarada, e depois o mock responde.
 
+### Tool-calling nativo (`protocolo: nativo`)
+
+Com `protocolo: nativo` no `agente`, o interpretador usa o tool-calling do
+próprio provedor em vez do protocolo de texto acima: as ferramentas vão como
+`tools` (Anthropic: `input_schema`; OpenAI/local/vLLM: `function.parameters`),
+o schema JSON sai dos campos de `entrada:` (`texto`→string, `inteiro`→integer,
+`decimal`→number, `logico`→boolean, `lista`→array, `mapa`→object) e o modelo
+devolve chamadas estruturadas (`tool_use` / `tool_calls`). Cada resultado volta
+ao modelo como `tool_result` / mensagem `role: tool` com o mesmo id, até haver
+uma resposta sem chamadas ou `max_passos`. O padrão continua sendo
+`protocolo: texto`. Em `TILT_LLM=mock` o planner chama cada ferramenta uma vez,
+na ordem. Coberto por `tests/agent_native_test.sh` (servidor falso nos dois
+formatos).
+
 ## `equipe`
 
 ```tilt run
@@ -135,7 +149,7 @@ pipeline relatorio:
 `E.executar "mensagem"` (ou `E.responder`):
 
 - `sequencial` — a saída de um agente é a entrada do próximo; retorna a última.
-- `paralelo` — todos recebem a mesma mensagem; retorna `rotulo: texto` concatenado.
+- `paralelo` — todos recebem a mesma mensagem e rodam **ao mesmo tempo** (uma thread por agente; o tempo total é o do mais lento); retorna `rotulo: texto` concatenado, na ordem declarada, e o `rastro` na mesma ordem. O primeiro erro (na ordem) aborta depois de todos terminarem. Coberto por `tests/equipe_paralela_test.sh`.
 - `supervisor` — um LLM orquestra: a cada passo responde `delegar <rotulo>
   <tarefa>` (o agente roda com o planner iterativo) ou `responder: <final>`.
   Exige o campo `supervisor: <llm>`; rastro com `{ agente, tarefa, texto }`.

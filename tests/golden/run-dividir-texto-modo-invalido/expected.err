@@ -1,0 +1,7 @@
+erro[T901]: dividir_texto: modo 'xpto' invalido (use "tamanho", "sentenca", "paragrafo" ou "linha")
+  --> input.tilt:3:16
+   |
+ 3 |     - imprimir dividir_texto("x", modo: "xpto")
+   |                ^^^^^^^^^^^^^
+   |
+
