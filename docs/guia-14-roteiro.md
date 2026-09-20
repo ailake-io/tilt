@@ -162,6 +162,12 @@ Também foi concluído o query pushdown das fontes SQL: `pushdown.colunas`,
 são aplicados em SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse, com
 teste CTest local e sem interpolar valores no SQL.
 
+## Desempenho
+
+Medições, causas e o plano para acelerar lógica e dados estão no
+[guia 16](guia-16-desempenho.md): `Value` compacto, variáveis por slot, chamadas
+baratas, tabela colunar, leitura paralela e delegação ao DuckDB.
+
 ## Priorizacao sugerida
 
 1. ~~`experimento` executável~~ feito (1ª passada; ver acima).

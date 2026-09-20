@@ -1,0 +1,11 @@
+funcao soma n:
+  total = 0
+  i = 0
+  enquanto i < n:
+    total = total + i * 2
+    i = i + 1
+  retornar total
+
+pipeline p:
+  passos:
+    - imprimir soma(3000000)

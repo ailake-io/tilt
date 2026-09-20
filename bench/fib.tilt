@@ -1,0 +1,8 @@
+funcao fib n:
+  se n < 2:
+    retornar n
+  retornar fib(n - 1) + fib(n - 2)
+
+pipeline p:
+  passos:
+    - imprimir fib(30)

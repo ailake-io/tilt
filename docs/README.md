@@ -19,3 +19,6 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 11 | [Diagnósticos](guia-11-diagnosticos.md) | todos os códigos `Tnnn` com exemplo |
 | 12 | [Limitações](guia-12-limitacoes.md) | status da 1ª passada — o que ainda não funciona |
 | 13 | [Instalação e distribuição](guia-13-instalacao.md) | requisitos, instalação do fonte, binários pré-compilados, gerar tarball/`.deb`/Release, extensão VS Code |
+| 14 | [Roteiro](guia-14-roteiro.md) | o que falta por domínio (dados, ML, DL, LLM, agentes, MLOps) e prioridades |
+| 15 | [Solução de problemas](guia-15-troubleshooting.md) | erros comuns e como resolver |
+| 16 | [Desempenho](guia-16-desempenho.md) | medições reais (lógica e dados), por que é lento e o plano para acelerar, como medir com `bench/rodar.sh` |
