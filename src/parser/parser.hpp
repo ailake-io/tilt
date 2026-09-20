@@ -101,6 +101,11 @@ class Parser {
     Parser& p_;
     bool estourou_;
   };
+  // Cadeias montadas em laco (`a.b.c.d...`, `a + b + c...`) nao recursam no parser,
+  // mas a AST fica tao profunda quanto a cadeia e o checker/destrutor recursam nela:
+  // uma cadeia de milhares de itens estoura a pilha de 1 MB do Windows.
+  static constexpr int kCadeiaMax = 128;
+  bool cadeia_longa(int& contador);
   // Reporta (uma vez por arquivo) o aninhamento excessivo e pula o resto da linha.
   ast::ExprPtr recuperar_profundidade();
   bool profundidade_reportada_ = false;

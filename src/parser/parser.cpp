@@ -566,6 +566,19 @@ ExprPtr Parser::recuperar_profundidade() {
   return make_expr(ExprKind::NullLit, span);
 }
 
+bool Parser::cadeia_longa(int& contador) {
+  if (++contador <= kCadeiaMax) return false;
+  if (!profundidade_reportada_) {
+    profundidade_reportada_ = true;
+    report(DiagCode::UnexpectedToken, cur().span,
+           "cadeia longa demais (limite de " + std::to_string(kCadeiaMax) +
+               " operadores ou acessos encadeados numa expressao)",
+           {"divida a expressao em variaveis intermediarias"});
+  }
+  synchronize();  // progresso garantido: consome ate a proxima linha
+  return true;
+}
+
 ExprPtr Parser::parse_expr() {
   Nivel nivel(*this);
   if (nivel.estourou()) return recuperar_profundidade();
@@ -602,7 +615,9 @@ ExprPtr Parser::parse_union() {
 
 ExprPtr Parser::parse_or() {
   ExprPtr lhs = parse_and();
+  int cadeia = 0;
   while (at_keyword("ou")) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = std::string(advance().lexeme);
     e->lhs = std::move(lhs);
@@ -614,7 +629,9 @@ ExprPtr Parser::parse_or() {
 
 ExprPtr Parser::parse_and() {
   ExprPtr lhs = parse_equality();
+  int cadeia = 0;
   while (at_keyword("e")) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = std::string(advance().lexeme);
     e->lhs = std::move(lhs);
@@ -626,7 +643,9 @@ ExprPtr Parser::parse_and() {
 
 ExprPtr Parser::parse_equality() {
   ExprPtr lhs = parse_comparison();
+  int cadeia = 0;
   while (at(TokenKind::EqualEqual) || at(TokenKind::BangEqual) || at_keyword("contem")) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::EqualEqual) ? "==" : at(TokenKind::BangEqual) ? "!=" : "contem";
     advance();
@@ -639,8 +658,10 @@ ExprPtr Parser::parse_equality() {
 
 ExprPtr Parser::parse_comparison() {
   ExprPtr lhs = parse_additive();
+  int cadeia = 0;
   while (at(TokenKind::Less) || at(TokenKind::LessEqual) || at(TokenKind::Greater) ||
          at(TokenKind::GreaterEqual)) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::Less)        ? "<"
               : at(TokenKind::LessEqual) ? "<="
@@ -656,7 +677,9 @@ ExprPtr Parser::parse_comparison() {
 
 ExprPtr Parser::parse_additive() {
   ExprPtr lhs = parse_multiplicative();
+  int cadeia = 0;
   while (at(TokenKind::Plus) || at(TokenKind::Dash)) {
+    if (cadeia_longa(cadeia)) break;
     // `->` (tipo de retorno de `funcao`) nao e subtracao.
     if (at(TokenKind::Dash) && peek(1).kind == TokenKind::Greater) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
@@ -671,7 +694,9 @@ ExprPtr Parser::parse_additive() {
 
 ExprPtr Parser::parse_multiplicative() {
   ExprPtr lhs = parse_unary();
+  int cadeia = 0;
   while (at(TokenKind::Star) || at(TokenKind::Slash) || at(TokenKind::Percent)) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::Star) ? "*" : at(TokenKind::Slash) ? "/" : "%";
     advance();
@@ -710,8 +735,10 @@ ExprPtr Parser::parse_unary() {
 
 ExprPtr Parser::parse_postfix() {
   ExprPtr e = parse_primary();
+  int cadeia = 0;
 
   while (true) {
+    if (cadeia_longa(cadeia)) break;
     if (at(TokenKind::LParen) && (e->kind == ExprKind::Name || e->kind == ExprKind::Member ||
                                   (e->kind == ExprKind::Call && e->paren_call))) {
       // Parenthesized call: `f(a, b)` / `x.m(a)` / `f(a)(b)` (funcao devolvida).
