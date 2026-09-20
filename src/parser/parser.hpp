@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -87,22 +86,12 @@ class Parser {
   // Profundidade de recursao (expressoes e blocos): entrada hostil como 20 mil
   // `[` seguidos estouraria a pilha (segfault) em vez de virar diagnostico.
   int profundidade_ = 0;
-  static constexpr int kProfundidadeMax = 200;
-  // Alem da contagem de niveis, limita os bytes de pilha usados pelo parser desde
-  // parse_program: o MSVC (pilha de 1 MB, frames grandes em Debug) estoura bem antes
-  // de 200 niveis, e o tamanho do frame varia entre compiladores.
-  static constexpr std::uintptr_t kPilhaMaxBytes = 128 * 1024;
-  std::uintptr_t base_pilha_ = 0;
+  // Cada nivel de expressao passa por ~11 funcoes do parser (e conta 2: parse_expr e
+  // parse_unary); 64 fica folgado para a pilha de 1 MB do Windows/MSVC em Debug.
+  // Contagem, nao bytes de pilha: medir enderecos nao vale sob ASan (pilhas falsas).
+  static constexpr int kProfundidadeMax = 64;
   struct Nivel {
-    explicit Nivel(Parser& p) : p_(p), estourou_(++p.profundidade_ > kProfundidadeMax) {
-      if (!estourou_ && p.base_pilha_ != 0) {
-        char marcador = 0;
-        const auto agora = reinterpret_cast<std::uintptr_t>(&marcador);
-        const std::uintptr_t usado =
-            agora < p.base_pilha_ ? p.base_pilha_ - agora : agora - p.base_pilha_;
-        estourou_ = usado > kPilhaMaxBytes;
-      }
-    }
+    explicit Nivel(Parser& p) : p_(p), estourou_(++p.profundidade_ > kProfundidadeMax) {}
     ~Nivel() { --p_.profundidade_; }
     Nivel(const Nivel&) = delete;
     Nivel& operator=(const Nivel&) = delete;
