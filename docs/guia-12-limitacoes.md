@@ -365,6 +365,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## LLM / RAG
 
 - Sem `TILT_LLM`, a chamada real depende do `curl` no `PATH`.
+- Segredos (chave de API do LLM, headers de qualquer `http_*`/S3/Elasticsearch/
+  Pinecone, userinfo da URL) vão para o `curl` por um arquivo de configuração
+  `-K` temporário (0600, removido ao fim da chamada), nunca pelo argv — que
+  outros usuários da máquina leem em `ps`/`/proc`. O `curl` ainda é iniciado
+  por shell (`popen`); só caminhos de arquivos temporários passam pela linha
+  de comando. Coberto por `tests/curl_secrets_test.sh`.
 - Robustez do cliente (guia 05): `tempo_limite:` (segundos por tentativa,
   default 60, via `--max-time`), `tentativas:` (default 3, retry com backoff
   1s/2s/4s… teto 15s em erro de transporte, 429 e 5xx; 4xx falha rápido),

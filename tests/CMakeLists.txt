@@ -56,6 +56,11 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME curl_secrets
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/curl_secrets_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME pipeline_ops
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/pipeline_ops_test.sh
           $<TARGET_FILE:tilt>

@@ -3060,7 +3060,16 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
   std::string cmd = "curl -s ";
   if (falhar) cmd += "--fail-with-body ";
   cmd += "-w " + tilt_shell_quote("%{http_code}") + " -X " + method;
-  cmd += " -H " + tilt_shell_quote("Content-Type: application/json");
+  // URL (pode ter userinfo) e header vao num arquivo -K 0600, fora do argv.
+  std::string cfg_path;
+  if (!tilt_curl_config(url, {"Content-Type: application/json"}, cfg_path)) {
+    die("nao foi possivel montar a configuracao do curl (URL invalida)");
+  }
+  struct RemoveAoSair {  // die() lanca: o arquivo com URL/header some em qualquer saida
+    std::string path;
+    ~RemoveAoSair() { std::remove(path.c_str()); }
+  } remove_cfg{cfg_path};
+  cmd += " -K " + tilt_shell_quote(cfg_path);
   if (!body.empty()) {
     std::string body_path;
     const int fd = tilt_tempfile("iceberg_body", body_path);
@@ -3084,7 +3093,7 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
     die("nao foi possivel criar arquivo temporario");
   }
   tilt_close_file(ofd);
-  cmd += " -o " + tilt_shell_quote(out_file) + " " + tilt_shell_quote(url);
+  cmd += " -o " + tilt_shell_quote(out_file);
 
   std::string resp;
   {

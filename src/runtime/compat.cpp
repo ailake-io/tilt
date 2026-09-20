@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -421,5 +422,43 @@ std::string tilt_exe_path(const char* argv0) {
 }
 
 #endif
+
+bool tilt_curl_config(const std::string& url, const std::vector<std::string>& headers,
+                      std::string& path) {
+  // String entre aspas do arquivo de config do curl: \\ e \" escapados; CR/LF
+  // seriam injecao de opcoes (ou de header), entao a chamada falha.
+  auto quoted = [](const std::string& v, std::string& out) {
+    out += '"';
+    for (char c : v) {
+      if (c == '\n' || c == '\r' || c == '\0') return false;
+      if (c == '\\' || c == '"') out += '\\';
+      out += c;
+    }
+    out += '"';
+    return true;
+  };
+  std::string conteudo;
+  if (!url.empty()) {
+    conteudo += "url = ";
+    if (!quoted(url, conteudo)) return false;
+    conteudo += '\n';
+  }
+  for (const std::string& h : headers) {
+    conteudo += "header = ";
+    if (!quoted(h, conteudo)) return false;
+    conteudo += '\n';
+  }
+  const int fd = tilt_tempfile("curlcfg", path);
+  if (fd < 0) return false;
+  tilt_close_file(fd);
+  std::ofstream out(path, std::ios::trunc | std::ios::binary);
+  out << conteudo;
+  out.close();
+  if (!out) {
+    std::remove(path.c_str());
+    return false;
+  }
+  return true;
+}
 
 }  // namespace tilt::rt

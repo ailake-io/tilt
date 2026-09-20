@@ -141,11 +141,20 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
   }
   tilt_close_file(fd_headers);
 
-  std::string cmd = "curl -sS -X POST -H 'content-type: application/json'";
-  for (const std::string& h : headers) cmd += " -H " + tilt_shell_quote(h);
+  // Chave de API e URL num arquivo -K 0600, nunca no argv (visivel em ps//proc).
+  std::vector<std::string> todos_headers = {"content-type: application/json"};
+  todos_headers.insert(todos_headers.end(), headers.begin(), headers.end());
+  std::string config_file;
+  if (!tilt_curl_config(url, todos_headers, config_file)) {
+    std::remove(body_file.c_str());
+    std::remove(header_file.c_str());
+    throw std::runtime_error("nao foi possivel montar a configuracao do curl (URL ou header invalido)");
+  }
+
+  std::string cmd = "curl -sS -X POST";
   if (timeout_s > 0) cmd += " --max-time " + std::to_string(timeout_s);
-  cmd += " -D " + tilt_shell_quote(header_file) + " --data @" + tilt_shell_quote(body_file) +
-         " -w " + tilt_shell_quote("\n%{http_code}") + " " + tilt_shell_quote(url);
+  cmd += " -K " + tilt_shell_quote(config_file) + " -D " + tilt_shell_quote(header_file) +
+         " --data @" + tilt_shell_quote(body_file) + " -w " + tilt_shell_quote("\n%{http_code}");
 
   std::string resp;
   try {
@@ -153,9 +162,11 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
   } catch (const std::exception& e) {
     std::remove(body_file.c_str());
     std::remove(header_file.c_str());
+    std::remove(config_file.c_str());
     throw std::runtime_error(std::string("falha de transporte: ") + e.what());
   }
   std::remove(body_file.c_str());
+  std::remove(config_file.c_str());
   std::ifstream header_in(header_file);
   std::ostringstream header_text;
   header_text << header_in.rdbuf();
