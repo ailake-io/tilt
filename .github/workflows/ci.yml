@@ -211,6 +211,43 @@ jobs:
       - name: test
         run: ctest --preset debug --output-on-failure --timeout 300
 
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install gcovr
+        run: python3 -m pip install --user --disable-pip-version-check gcovr==8.3
+
+      - name: configure (Debug, gcov instrumentation)
+        run: cmake -S . -B build/coverage -DCMAKE_BUILD_TYPE=Debug -DTILT_COVERAGE=ON -DTILT_STATIC_LIBSTDCXX=OFF
+
+      - name: build
+        run: cmake --build build/coverage --parallel
+
+      - name: test (services that are not available skip themselves)
+        run: ctest --test-dir build/coverage -j2 --timeout 600 -E "vector_real|spark|tensor_benchmark|^golden$"
+
+      - name: golden tests
+        run: ctest --test-dir build/coverage --timeout 900 -R "^golden$"
+
+      - name: coverage report
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          gcovr -r . --object-directory build/coverage --filter 'src/' \
+            --print-summary --xml coverage.xml --html-details coverage.html
+          {
+            echo '### Cobertura de linhas (src/)'
+            gcovr -r . --object-directory build/coverage --filter 'src/' --print-summary | tail -3
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.xml
+            coverage*.html
+
   arm64_codegen:
     runs-on: ubuntu-24.04
     steps:

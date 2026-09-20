@@ -23,6 +23,12 @@ if(TILT_WERROR)
   endif()
 endif()
 
+option(TILT_COVERAGE "Instrument for gcov/gcovr line coverage (GCC/Clang)" OFF)
+if(TILT_COVERAGE AND NOT MSVC)
+  add_compile_options(--coverage -O0 -g)
+  add_link_options(--coverage)
+endif()
+
 option(TILT_SANITIZE "Enable AddressSanitizer + UBSan" OFF)
 if(TILT_SANITIZE AND NOT MSVC)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
