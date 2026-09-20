@@ -148,7 +148,8 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
   if (!tilt_curl_config(url, todos_headers, config_file)) {
     std::remove(body_file.c_str());
     std::remove(header_file.c_str());
-    throw std::runtime_error("nao foi possivel montar a configuracao do curl (URL ou header invalido)");
+    throw std::runtime_error(
+        "nao foi possivel montar a configuracao do curl (URL ou header invalido)");
   }
 
   std::string cmd = "curl -sS -X POST";
