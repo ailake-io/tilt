@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  workflow_dispatch:   # Actions > ci > Run workflow (qualquer branch)
 
 jobs:
   lint:

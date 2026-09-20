@@ -3,6 +3,9 @@ name: release
 on:
   push:
     tags: ['v*']
+  # Execucao manual: constroi e empacota (valida o release) mas NAO publica nada;
+  # so uma tag `v*` publica Release, Snap, Flatpak, Homebrew, VS Code e winget.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -76,7 +79,8 @@ jobs:
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
           done
 
-      - uses: softprops/action-gh-release@v2
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             build/release/tilt-*.tar.gz
@@ -124,7 +128,8 @@ jobs:
             sha256sum "$f" > "$f.sha256"
           done
 
-      - uses: softprops/action-gh-release@v2
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             build/release/tilt-*.msi
@@ -137,6 +142,7 @@ jobs:
   # contrário da action que escondia o erro). Publicação na Snap Store exige
   # SNAPCRAFT_TOKEN; falha no build vira skip com aviso, não derruba o release.
   snap:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -181,7 +187,8 @@ jobs:
           snap: ${{ steps.snapfile.outputs.snap }}
           release: stable
 
-      - uses: softprops/action-gh-release@v2
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         if: steps.snapfile.outputs.snap != ''
         with:
           files: ${{ steps.snapfile.outputs.snap }}
@@ -189,6 +196,7 @@ jobs:
   # --- Flatpak: valida o manifesto e o metainfo com flatpak-builder
   # (empacotamento local: flatpak-builder --repo=repo packaging/flatpak/...).
   flatpak:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -225,7 +233,8 @@ jobs:
       - name: checksum do bundle
         run: sha256sum "tilt-${GITHUB_REF_NAME#v}.flatpak" > "tilt-${GITHUB_REF_NAME#v}.flatpak.sha256"
 
-      - uses: softprops/action-gh-release@v2
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             tilt-*.flatpak
@@ -233,6 +242,7 @@ jobs:
 
   # --- Homebrew: valida a sintaxe da formula (brew test precisa de tap).
   homebrew:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -243,6 +253,7 @@ jobs:
   # Empacota a extensão VS Code e publica no Marketplace quando o secret
   # VSCE_PAT está configurado (sem o secret, só anexa o .vsix ao release).
   vscode:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -273,7 +284,8 @@ jobs:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: npx @vscode/vsce publish -p "$VSCE_PAT"
 
-      - uses: softprops/action-gh-release@v2
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           files: editors/vscode/*.vsix
 
@@ -283,6 +295,7 @@ jobs:
   # atualizado (versao/URL/SHA256 do .msi da release) e anexa ao release para
   # submissao manual com 'wingetcreate submit'.
   winget:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [windows]
     runs-on: ubuntu-24.04
     steps:
@@ -359,7 +372,8 @@ jobs:
             --urls "${{ steps.meta.outputs.msi_url }}" \
             --submit --token "$WINGET_TOKEN"
 
-      - uses: softprops/action-gh-release@v2
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         if: steps.tok.outputs.set == 'false'
         with:
           files: ${{ steps.manifesto.outputs.dir }}/ailake-io.tilt*.yaml
