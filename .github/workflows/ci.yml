@@ -108,7 +108,26 @@ jobs:
 
       - name: functional tests (CTest + PowerShell)
         shell: pwsh
+        env:
+          TILT_FUZZ_SALVAR: ${{ github.workspace }}\fuzz_ultimo.tilt
         run: ctest --test-dir build/release -C Debug --output-on-failure
+
+      - name: last fuzz input (only when the tests failed)
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:GITHUB_WORKSPACE\fuzz_ultimo.tilt") {
+            $t = Get-Content -Raw "$env:GITHUB_WORKSPACE\fuzz_ultimo.tilt"
+            "tamanho: $($t.Length) caracteres"
+            $t.Substring(0, [Math]::Min(4000, $t.Length))
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-ultimo-windows
+          path: fuzz_ultimo.tilt
+          if-no-files-found: ignore
 
   connectors:
     runs-on: ubuntu-24.04
@@ -234,11 +253,14 @@ jobs:
       - name: coverage report
         run: |
           export PATH="$HOME/.local/bin:$PATH"
+          # gcov (threads) as vezes emite contagens de branch negativas (GCC bug 68080).
           gcovr -r . --object-directory build/coverage --filter 'src/' \
+            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
             --print-summary --xml coverage.xml --html-details coverage.html
           {
             echo '### Cobertura de linhas (src/)'
-            gcovr -r . --object-directory build/coverage --filter 'src/' --print-summary | tail -3
+            gcovr -r . --object-directory build/coverage --filter 'src/' \
+              --gcov-ignore-parse-errors negative_hits.warn_once_per_file --print-summary | tail -3
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4

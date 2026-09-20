@@ -183,6 +183,9 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  // TILT_FUZZ_SALVAR=<arquivo>: grava cada entrada antes de processa-la, para
+  // recuperar o caso de um crash (segfault nao passa pelo catch nem pelo watchdog).
+  const char* salvar = std::getenv("TILT_FUZZ_SALVAR");
   std::thread vigia(vigiar);
   std::mt19937_64 rng(0xF022C0DEULL);
   std::size_t casos = 0;
@@ -198,6 +201,10 @@ int main(int argc, char** argv) {
       }
       g_valida = true;
       g_caso = casos;
+      if (salvar != nullptr && *salvar != '\0') {
+        std::ofstream out(salvar, std::ios::binary | std::ios::trunc);
+        out << variante;
+      }
       try {
         frontend(variante);
       } catch (const std::exception& e) {
