@@ -156,27 +156,24 @@ void SemanticChecker::collect() {
     const std::string name = decl_name(*item);
 
     if (kw == "importar") {
-      for (const auto& h : item->header) {
-        if (h && h->kind == ExprKind::Name && h->text != "importar") {
-          define(h->text, "modulo", Type::scalar(TypeKind::Unknown), item->span);
-        }
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
+        define(imp.alias, "modulo", Type::scalar(TypeKind::Unknown), item->span);
       }
       continue;
     }
     if (kw == "de") {
-      // `de <modulo> importar <nome>...`: o primeiro nome e o modulo; os
-      // demais passam a ser tratados como funcoes (o runtime resolve e
-      // valida as exportacoes ao carregar o arquivo).
+      // `de <modulo> importar <nome> [como apelido]...`: o primeiro nome e o
+      // modulo; os demais passam a ser tratados como funcoes (o runtime
+      // resolve e valida as exportacoes ao carregar o arquivo).
       bool first = true;
-      for (const auto& h : item->header) {
-        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
         if (first) {
-          define(h->text, "modulo", Type::scalar(TypeKind::Unknown), item->span);
+          define(imp.nome, "modulo", Type::scalar(TypeKind::Unknown), item->span);
           first = false;
         } else {
           Type ft;
           ft.kind = TypeKind::Funcao;
-          define(h->text, "funcao", std::move(ft), item->span);
+          define(imp.alias, "funcao", std::move(ft), item->span);
         }
       }
       continue;

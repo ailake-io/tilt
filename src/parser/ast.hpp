@@ -121,6 +121,32 @@ struct Item {
   ItemPtr child;  // ListEntry
 };
 
+// Nome importado por `importar mod [como apelido]` ou `de mod importar nome
+// [como apelido]`; `alias == nome` quando nao ha `como`.
+struct ImportName {
+  std::string nome;
+  std::string alias;
+};
+
+// Nomes do header de um Decl `importar` / `de`, sem a palavra 'importar' e com
+// os pares `x como y` resolvidos. Em `de`, o 1o item e o modulo.
+inline std::vector<ImportName> nomes_importados(const Item& item) {
+  std::vector<ImportName> out;
+  const auto eh_nome = [](const ExprPtr& h) { return h && h->kind == ExprKind::Name; };
+  const auto& hd = item.header;
+  for (std::size_t i = 0; i < hd.size(); ++i) {
+    if (!eh_nome(hd[i]) || hd[i]->text == "importar") continue;
+    ImportName n{hd[i]->text, hd[i]->text};
+    if (i + 2 < hd.size() && eh_nome(hd[i + 1]) && hd[i + 1]->text == "como" &&
+        eh_nome(hd[i + 2])) {
+      n.alias = hd[i + 2]->text;
+      i += 2;
+    }
+    out.push_back(std::move(n));
+  }
+  return out;
+}
+
 struct Program {
   std::vector<ItemPtr> items;
 };

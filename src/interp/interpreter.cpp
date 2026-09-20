@@ -416,33 +416,33 @@ void Interpreter::register_decls() {
     } else if (kw == "funcao") {
       if (!name.empty()) functions_[name] = item.get();
     } else if (kw == "importar") {
-      for (const auto& h : item->header) {
-        if (h && h->kind == ExprKind::Name && h->text != "importar") {
-          load_module(h->text, entry_dir_.empty() ? "." : entry_dir_, item->span);
-        }
+      // `importar a, b como c`: cada modulo fica visivel pelo apelido, se houver.
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
+        auto mod = load_module(imp.nome, entry_dir_.empty() ? "." : entry_dir_, item->span);
+        if (imp.alias != imp.nome) modules_[imp.alias] = mod;
       }
     } else if (kw == "de") {
-      // `de <modulo> importar <nome>...`: primeiro nome e o modulo, os
-      // demais (exceto a palavra 'importar') entram no escopo principal.
+      // `de <modulo> importar <nome> [como apelido]...`: primeiro nome e o
+      // modulo, os demais entram no escopo principal (pelo apelido, se houver).
       std::string module_name;
-      std::vector<std::string> imported;
-      for (const auto& h : item->header) {
-        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+      std::vector<ast::ImportName> imported;
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
         if (module_name.empty()) {
-          module_name = h->text;
+          module_name = imp.nome;
         } else {
-          imported.push_back(h->text);
+          imported.push_back(imp);
         }
       }
       if (module_name.empty()) continue;
       const std::string from = entry_dir_.empty() ? "." : entry_dir_;
       std::shared_ptr<Module> mod = load_module(module_name, from, item->span);
-      for (const std::string& n : imported) {
+      for (const ast::ImportName& imp : imported) {
+        const std::string& n = imp.nome;
         if (auto f = mod->funcs.find(n); f != mod->funcs.end()) {
-          functions_[n] = f->second;
+          functions_[imp.alias] = f->second;
           func_module_[f->second] = mod;
         } else if (auto v = mod->scope.vars.find(n); v != mod->scope.vars.end()) {
-          root_.vars[n] = v->second;
+          root_.vars[imp.alias] = v->second;
         } else {
           std::string exports;
           for (const auto& kv : mod->funcs) exports += (exports.empty() ? "" : ", ") + kv.first;
@@ -582,29 +582,28 @@ std::shared_ptr<Interpreter::Module> Interpreter::load_module(const std::string&
         mod->scope.vars[iname] = item->value ? eval(*item->value, mod->scope) : Value::nulo();
       }
     } else if (item->key == "importar") {
-      for (const auto& h : item->header) {
-        if (h && h->kind == ExprKind::Name && h->text != "importar") {
-          load_module(h->text, mod_dir, item->span);
-        }
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
+        auto dep = load_module(imp.nome, mod_dir, item->span);
+        if (imp.alias != imp.nome) modules_[imp.alias] = dep;
       }
     } else if (item->key == "de") {
       std::string module_name;
-      std::vector<std::string> imported;
-      for (const auto& h : item->header) {
-        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+      std::vector<ast::ImportName> imported;
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
         if (module_name.empty()) {
-          module_name = h->text;
+          module_name = imp.nome;
         } else {
-          imported.push_back(h->text);
+          imported.push_back(imp);
         }
       }
       if (module_name.empty()) continue;
       std::shared_ptr<Module> dep = load_module(module_name, mod_dir, item->span);
-      for (const std::string& n : imported) {
+      for (const ast::ImportName& imp : imported) {
+        const std::string& n = imp.nome;
         if (auto f = dep->funcs.find(n); f != dep->funcs.end()) {
-          mod->funcs[n] = f->second;  // chamavel sem prefixo dentro do modulo
+          mod->funcs[imp.alias] = f->second;  // chamavel sem prefixo dentro do modulo
         } else if (auto v = dep->scope.vars.find(n); v != dep->scope.vars.end()) {
-          mod->scope.vars[n] = v->second;
+          mod->scope.vars[imp.alias] = v->second;
         } else {
           fail(item->span, "modulo '" + module_name + "' nao exporta '" + n + "'");
         }

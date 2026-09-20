@@ -266,3 +266,7 @@ pipeline imports2:
 > lista onde foi procurado. A stdlib traz `io` (arquivos/caminhos),
 > `rede` (HTTP JSON: `get_json`/`post_json`) e `nn` (camadas sobre tensor) —
 > ver guia 04 e guia 12.
+>
+> Apelidos com `como`: `importar io como arquivos` (usa-se `arquivos.juntar_caminhos(...)`)
+> e `de io importar existe_arquivo como existe` (traz o nome com outro nome).
+> Com apelido, o `tilt checar` só reconhece o apelido.
