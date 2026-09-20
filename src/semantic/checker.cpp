@@ -573,7 +573,10 @@ std::optional<TensorShape> nested_list_dims(const std::vector<ast::ExprPtr>& ele
   if (elems.front()->kind == ExprKind::ListLit) {
     auto inner = nested_list_dims(elems.front()->elems);
     if (!inner) return std::nullopt;
-    for (const auto& el : elems) {
+    // O 1o elemento ja foi medido acima; recalcula-lo dobraria o custo a cada nivel
+    // (2^profundidade em listas aninhadas).
+    for (std::size_t i = 1; i < elems.size(); ++i) {
+      const auto& el = elems[i];
       if (!el || el->kind != ExprKind::ListLit) return std::nullopt;
       auto d = nested_list_dims(el->elems);
       if (!d || *d != *inner) return std::nullopt;  // lista aninhada irregular

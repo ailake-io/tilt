@@ -1,5 +1,7 @@
 #include "parser/parser.hpp"
 
+#include <cerrno>
+#include <cstdlib>
 #include <initializer_list>
 #include <string>
 #include <utility>
@@ -283,6 +285,11 @@ Block Parser::parse_block() {
   Block block;
   block.span = cur().span;
   if (!expect(TokenKind::Indent, "bloco indentado")) return block;
+  Nivel nivel(*this);
+  if (nivel.estourou()) {
+    (void)recuperar_profundidade();
+    return block;
+  }
 
   while (!at(TokenKind::Dedent) && !at(TokenKind::EndOfFile)) {
     skip_newlines();
@@ -546,7 +553,22 @@ StmtPtr Parser::parse_assign_or_expr_stmt() {
 // `valor se condicao senao outro`: condicional em expressao (baixa precedencia,
 // associa a direita). O `se` de instrucao so aparece no inicio da linha, entao
 // um `se` depois de uma expressao e sempre o deste operador.
+ExprPtr Parser::recuperar_profundidade() {
+  const Span span = cur().span;
+  if (!profundidade_reportada_) {
+    profundidade_reportada_ = true;
+    report(DiagCode::UnexpectedToken, span,
+           "expressao ou bloco aninhado demais (maximo " + std::to_string(kProfundidadeMax) +
+               " niveis)",
+           {"simplifique a estrutura ou divida em passos/variaveis intermediarias"});
+  }
+  synchronize();  // consome ate a proxima linha: garante progresso do parser
+  return make_expr(ExprKind::NullLit, span);
+}
+
 ExprPtr Parser::parse_expr() {
+  Nivel nivel(*this);
+  if (nivel.estourou()) return recuperar_profundidade();
   ExprPtr valor = parse_union();
   if (!at_keyword("se")) return valor;
   auto e = make_expr(ExprKind::Cond, valor->span);
@@ -661,6 +683,8 @@ ExprPtr Parser::parse_multiplicative() {
 }
 
 ExprPtr Parser::parse_unary() {
+  Nivel nivel(*this);
+  if (nivel.estourou()) return recuperar_profundidade();
   // C3: 'nao' so e operador quando seguido de operando. Seguido de fim de
   // expressao ('=', ',', fim de linha, ']', ')', fim de arquivo) e um nome
   // de variavel — cai no parse_primary abaixo.
@@ -886,6 +910,18 @@ ExprPtr Parser::parse_primary() {
   if (at(TokenKind::Integer)) {
     auto e = make_expr(ExprKind::IntLit, span);
     e->text = std::string(advance().lexeme);
+    // O checker e o interpretador convertem o texto com std::stoll, que lanca
+    // em literal fora de 64 bits: reporta aqui e guarda um valor valido.
+    errno = 0;
+    (void)std::strtoll(e->text.c_str(), nullptr, 10);
+    if (errno == ERANGE) {
+      report(DiagCode::UnexpectedToken, span,
+             "inteiro fora do intervalo de 64 bits: " + e->text.substr(0, 24) +
+                 (e->text.size() > 24 ? "..." : ""),
+             {"use um valor entre -9223372036854775808 e 9223372036854775807, ou um decimal (com "
+              "ponto)"});
+      e->text = "0";
+    }
     return e;
   }
   if (at(TokenKind::Decimal)) {

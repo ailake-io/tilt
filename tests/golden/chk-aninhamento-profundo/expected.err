@@ -1,0 +1,306 @@
+erro[T014]: expressao ou bloco aninhado demais (maximo 200 niveis)
+  --> input.tilt:3:110
+   |
+ 3 |     - x = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
+   |                                                                                                              ^
+   |
+   = simplifique a estrutura ou divida em passos/variaveis intermediarias
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+erro[T013]: esperado ']', encontrado DEDENT
+  --> input.tilt:4:1
+
+100 erro(s) em input.tilt

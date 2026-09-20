@@ -419,3 +419,16 @@ else()
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
     TIMEOUT 180)
 endif()
+
+# Fuzz por mutacao do frontend (lexer/parser/checker), deterministico: procura
+# crash, hang ou erro de memoria (rode tambem no preset debug com ASan/UBSan).
+add_executable(fuzz_frontend fuzz_frontend.cpp)
+target_link_libraries(fuzz_frontend PRIVATE tilt_core)
+set_target_properties(fuzz_frontend PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+add_test(
+  NAME fuzz_frontend
+  COMMAND fuzz_frontend 150
+          ${CMAKE_CURRENT_SOURCE_DIR}/golden
+          ${CMAKE_CURRENT_SOURCE_DIR}/../exemplos)
+set_tests_properties(fuzz_frontend PROPERTIES TIMEOUT 240)

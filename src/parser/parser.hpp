@@ -83,6 +83,24 @@ class Parser {
   const std::vector<Token>& toks_;
   DiagnosticEngine& diag_;
   std::size_t pos_ = 0;
+  // Profundidade de recursao (expressoes e blocos): entrada hostil como 20 mil
+  // `[` seguidos estouraria a pilha (segfault) em vez de virar diagnostico.
+  int profundidade_ = 0;
+  static constexpr int kProfundidadeMax = 200;
+  struct Nivel {
+    explicit Nivel(Parser& p) : p_(p), estourou_(++p.profundidade_ > kProfundidadeMax) {}
+    ~Nivel() { --p_.profundidade_; }
+    Nivel(const Nivel&) = delete;
+    Nivel& operator=(const Nivel&) = delete;
+    bool estourou() const { return estourou_; }
+
+   private:
+    Parser& p_;
+    bool estourou_;
+  };
+  // Reporta (uma vez por arquivo) o aninhamento excessivo e pula o resto da linha.
+  ast::ExprPtr recuperar_profundidade();
+  bool profundidade_reportada_ = false;
   int map_depth_ = 0;  // inside a `{ ... }` literal: `ident:` is a key, not a named arg
 };
 
