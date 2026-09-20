@@ -139,14 +139,23 @@ jobs:
             sleep 1
           done
 
+      - name: start Redis
+        run: |
+          docker run -d --name tilt-redis-ci -p 127.0.0.1:6379:6379 redis:7-alpine
+          for i in $(seq 1 30); do
+            docker exec tilt-redis-ci redis-cli ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
+
       - name: connector integration tests
         env:
           TILT_MONGO_REAL_URL: mongodb://127.0.0.1:27017/tilt_real
-        run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse|mongo_real)$" --output-on-failure
+          TILT_REDIS_REAL_URL: redis://127.0.0.1:6379/0
+        run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse|mongo_real|redis_real)$" --output-on-failure
 
-      - name: cleanup MongoDB
+      - name: cleanup MongoDB and Redis
         if: always()
-        run: docker rm -f tilt-mongo-ci || true
+        run: docker rm -f tilt-mongo-ci tilt-redis-ci || true
 
 
   vector_connectors:

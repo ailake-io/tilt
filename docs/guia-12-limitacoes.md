@@ -258,11 +258,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   auth por userinfo da URL ou env `CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD`.
 - Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, timeout fixo de 5s.
   AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT
-  via path numérico (`redis://host:6379/2`) ou opção `banco:`. Sem
-  pub/sub, streams, scripts Lua nem conexões persistentes/reconnect —
-  `redis_executar` cobre comandos avulsos e `redis_lote` roda um pipeline
-  de até 10 mil comandos numa única conexão; `ler_redis`/`escrever_redis`/
-  `redis_executar` abrem uma conexão por chamada.
+  via path numérico (`redis://host:6379/2`) ou opção `banco:`. Validado contra
+  um Redis 7 real (`tests/redis_real_test.sh`): `redis_executar` roda qualquer
+  comando de resposta única — inclusive streams (`XADD`/`XLEN`/`XRANGE`), hashes,
+  listas e `PUBLISH` — e `redis_lote` um pipeline de até 10 mil comandos numa
+  única conexão. Sem `SUBSCRIBE`/pub-sub assinante, `XREAD BLOCK` longo, scripts
+  Lua interativos nem conexões persistentes/reconnect: `ler_redis`/
+  `escrever_redis`/`redis_executar` abrem uma conexão por chamada.
 - TLS (redis/mongo/kafka): camada mínima em `src/runtime/tls.*` — OpenSSL
   carregado em runtime via `dlopen` (`libssl.so.3`, fallback `libssl.so`, e
   libcrypto correspondente), zero dependência de link. Verificação de
