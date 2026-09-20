@@ -4052,9 +4052,25 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
     doc.map->set("otimizador", Value::texto(cfg.otim));
     doc.map->set("taxa", Value::decimal(cfg.lr));
     doc.map->set("camadas", std::move(cl));
-    std::ofstream out(caminho, std::ios::trunc);
-    if (!out) fail(span, ctx + ": nao foi possivel gravar '" + caminho + "'");
-    out << rt::json_dump(doc) << "\n";
+    // Grava em arquivo temporario e renomeia: outros ranks do cluster (e um
+    // crash no meio da escrita) nunca veem um checkpoint pela metade.
+    const std::string tmp = caminho + ".tmp";
+    {
+      std::ofstream out(tmp, std::ios::trunc);
+      if (!out) fail(span, ctx + ": nao foi possivel gravar '" + caminho + "'");
+      out << rt::json_dump(doc) << "\n";
+      out.flush();
+      if (!out) {
+        std::remove(tmp.c_str());
+        fail(span, ctx + ": falha ao gravar '" + caminho + "'");
+      }
+    }
+    std::error_code ec_rename;
+    std::filesystem::rename(tmp, caminho, ec_rename);
+    if (ec_rename) {
+      std::remove(tmp.c_str());
+      fail(span, ctx + ": nao foi possivel publicar '" + caminho + "': " + ec_rename.message());
+    }
   };
 
   int adam_t = 0;

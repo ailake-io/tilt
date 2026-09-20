@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             asset: linux-x86_64
           - os: macos-latest
             asset: macos-arm64
@@ -137,7 +137,7 @@ jobs:
   # contrário da action que escondia o erro). Publicação na Snap Store exige
   # SNAPCRAFT_TOKEN; falha no build vira skip com aviso, não derruba o release.
   snap:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -189,7 +189,7 @@ jobs:
   # --- Flatpak: valida o manifesto e o metainfo com flatpak-builder
   # (empacotamento local: flatpak-builder --repo=repo packaging/flatpak/...).
   flatpak:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -243,7 +243,7 @@ jobs:
   # Empacota a extensão VS Code e publica no Marketplace quando o secret
   # VSCE_PAT está configurado (sem o secret, só anexa o .vsix ao release).
   vscode:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -284,7 +284,7 @@ jobs:
   # submissao manual com 'wingetcreate submit'.
   winget:
     needs: [windows]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

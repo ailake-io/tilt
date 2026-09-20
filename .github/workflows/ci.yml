@@ -2,12 +2,12 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,7 +23,7 @@ jobs:
         run: tests/lint_test.sh "$BASE_SHA" "$HEAD_SHA"
 
   lint_cpp:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +111,7 @@ jobs:
         run: ctest --test-dir build/release -C Debug --output-on-failure
 
   connectors:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -136,7 +136,7 @@ jobs:
 
 
   vector_connectors:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -177,7 +177,7 @@ jobs:
         run: docker rm -f tilt-qdrant-ci tilt-weaviate-ci tilt-chroma-ci tilt-pgvector-ci || true
 
   sanitizers:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -189,7 +189,7 @@ jobs:
         run: ctest --preset debug --output-on-failure --timeout 300
 
   arm64_codegen:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
