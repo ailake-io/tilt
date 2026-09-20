@@ -313,9 +313,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   Kafka, Mongo etc. sem `grupo:` nao têm checkpoint local; sem `grupo:` na fonte Kafka ela é relida do início por
   inteiro a cada tick, o que não escala para tópicos grandes (com `grupo:` o
   checkpoint é o offset commitado no broker).
-- `--agendar` entra em loop real de agenda, mas o parser cron é numérico
-  (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
-  E (não pelo OU do cron clássico). Janelas sobre arquivos persistem offset,
+- `--agendar` entra em loop real de agenda. O cron aceita 5 campos com números
+  ou nomes (`jan`..`dec`, `sun`..`sat`, sem diferenciar maiúsculas), listas,
+  faixas e passos, os atalhos `@hourly`, `@daily`/`@midnight`, `@weekly`,
+  `@monthly` e `@yearly`/`@annually`, e a semântica clássica: com dia-do-mês **e**
+  dia-da-semana restritos vale um **ou** o outro (coberto por
+  `tests/cron_nomes_test.sh`). Fuso: sempre o local da máquina. Janelas sobre arquivos persistem offset,
   buffer pendente e `last_run` entre disparos; conectores sem checkpoint de
   grupo continuam sujeitos às limitações descritas nas seções próprias.
 

@@ -56,6 +56,11 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME cron_nomes
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cron_nomes_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME dev_cmds
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/dev_cmds_test.sh
           $<TARGET_FILE:tilt>)

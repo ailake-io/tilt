@@ -797,7 +797,35 @@ struct CronField {
   }
 };
 
-bool parse_cron_field(const std::string& s, int lo, int hi, bool is_dow, CronField& out) {
+// Valor de um item de cron: numero ou nome (jan..dec nos meses; sun..sat nos
+// dias da semana, sem diferenciar maiusculas). -1 = invalido.
+int cron_valor(const std::string& tok, bool is_mon, bool is_dow) {
+  if (tok.empty()) return -1;
+  if (std::isdigit(static_cast<unsigned char>(tok[0]))) {
+    for (char c : tok) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) return -1;
+    }
+    return std::atoi(tok.c_str());
+  }
+  std::string nome = tok;
+  for (char& c : nome) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (is_mon) {
+    static const char* const kMeses[] = {"jan", "feb", "mar", "apr", "may", "jun",
+                                         "jul", "aug", "sep", "oct", "nov", "dec"};
+    for (int i = 0; i < 12; ++i) {
+      if (nome == kMeses[i]) return i + 1;
+    }
+  } else if (is_dow) {
+    static const char* const kDias[] = {"sun", "mon", "tue", "wed", "thu", "fri", "sat"};
+    for (int i = 0; i < 7; ++i) {
+      if (nome == kDias[i]) return i;
+    }
+  }
+  return -1;
+}
+
+bool parse_cron_field(const std::string& s, int lo, int hi, bool is_dow, CronField& out,
+                      bool is_mon = false) {
   out = CronField{};
   out.is_dow = is_dow;
   if (s == "*") {
@@ -821,10 +849,10 @@ bool parse_cron_field(const std::string& s, int lo, int hi, bool is_dow, CronFie
       a = lo;
       b = hi;
     } else if (const std::size_t dash = range.find('-'); dash != std::string::npos) {
-      a = std::atoi(range.substr(0, dash).c_str());
-      b = std::atoi(range.substr(dash + 1).c_str());
+      a = cron_valor(range.substr(0, dash), is_mon, is_dow);
+      b = cron_valor(range.substr(dash + 1), is_mon, is_dow);
     } else {
-      a = b = std::atoi(range.c_str());
+      a = b = cron_valor(range, is_mon, is_dow);
     }
     if (step < 1 || a < lo || a > b || b > hi) return false;
     out.ranges.push_back({a, b, step});
@@ -839,8 +867,27 @@ struct CronSpec {
   bool valid = false;
 };
 
-CronSpec parse_cron(const std::string& expr) {
+CronSpec parse_cron(std::string expr) {
   CronSpec c;
+  // Atalhos: @hourly @daily/@midnight @weekly @monthly @yearly/@annually.
+  {
+    std::string macro = expr;
+    while (!macro.empty() && std::isspace(static_cast<unsigned char>(macro.back())))
+      macro.pop_back();
+    while (!macro.empty() && std::isspace(static_cast<unsigned char>(macro.front())))
+      macro.erase(0, 1);
+    for (char& ch : macro) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (macro == "@hourly")
+      expr = "0 * * * *";
+    else if (macro == "@daily" || macro == "@midnight")
+      expr = "0 0 * * *";
+    else if (macro == "@weekly")
+      expr = "0 0 * * 0";
+    else if (macro == "@monthly")
+      expr = "0 0 1 * *";
+    else if (macro == "@yearly" || macro == "@annually")
+      expr = "0 0 1 1 *";
+  }
   std::vector<std::string> parts;
   std::size_t pos = 0;
   while (pos <= expr.size()) {
@@ -853,7 +900,7 @@ CronSpec parse_cron(const std::string& expr) {
   c.valid = parts.size() == 5 && parse_cron_field(parts[0], 0, 59, false, c.min) &&
             parse_cron_field(parts[1], 0, 23, false, c.hour) &&
             parse_cron_field(parts[2], 1, 31, false, c.dom) &&
-            parse_cron_field(parts[3], 1, 12, false, c.mon) &&
+            parse_cron_field(parts[3], 1, 12, false, c.mon, true) &&
             parse_cron_field(parts[4], 0, 7, true, c.dow);
   return c;
 }
@@ -867,8 +914,12 @@ std::time_t next_cron_fire(const CronSpec& c, std::time_t after) {
   for (int i = 0; i < 366 * 24 * 60; ++i, t += 60) {
     std::tm cur = rt::tilt_localtime(t);
     const int dow = cur.tm_wday;
-    if (c.min.matches(cur.tm_min) && c.hour.matches(cur.tm_hour) &&
-        c.dom.matches(cur.tm_mday) && c.mon.matches(cur.tm_mon + 1) && c.dow.matches(dow)) {
+    // Cron classico: com dia-do-mes E dia-da-semana restritos, vale um OU o outro.
+    const bool dia_ok = (!c.dom.any && !c.dow.any)
+                            ? (c.dom.matches(cur.tm_mday) || c.dow.matches(dow))
+                            : (c.dom.matches(cur.tm_mday) && c.dow.matches(dow));
+    if (c.min.matches(cur.tm_min) && c.hour.matches(cur.tm_hour) && dia_ok &&
+        c.mon.matches(cur.tm_mon + 1)) {
       return t;
     }
   }
