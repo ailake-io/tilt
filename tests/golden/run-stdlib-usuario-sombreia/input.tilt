@@ -1,0 +1,6 @@
+# Funcao do usuario com o nome de um builtin da stdlib tem prioridade.
+funcao abs x:
+  retornar "minha " + texto(x)
+
+funcao principal:
+  imprimir abs(-3)

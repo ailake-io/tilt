@@ -1,0 +1,7 @@
+erro[T901]: raiz: raiz de numero negativo (-1)
+  --> input.tilt:2:12
+   |
+ 2 |   imprimir raiz(-1)
+   |            ^^^^
+   |
+

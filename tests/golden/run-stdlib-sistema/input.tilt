@@ -1,0 +1,15 @@
+funcao principal:
+  imprimir formatar_data("2024-03-05T10:20:30Z", "%d/%m/%Y %H:%M")
+  imprimir formatar_data(0), formatar_data("2024-02-29"), formatar_data(86400, "%Y-%m-%d")
+  imprimir formatar_data("2024-12-31 23:59:59", "%j")
+  imprimir tamanho(agora()), timestamp() > 1700000000
+  imprimir sha256("abc")
+  imprimir base64_codificar("Man"), base64_codificar("Ma"), base64_codificar("M")
+  imprimir base64_decodificar("TWFu"), base64_decodificar("TWE="), base64_decodificar("TQ==")
+  imprimir json_texto({ a: [1, 2], b: "x" })
+  imprimir json_ler("""{"a": 7, "b": [true, null]}""").a
+  escrever_texto "saida_stdlib.txt", "oi"
+  anexar_texto "saida_stdlib.txt", "!!"
+  imprimir ler_texto("saida_stdlib.txt")
+  imprimir remover_arquivo("saida_stdlib.txt"), remover_arquivo("saida_stdlib.txt")
+  dormir 0

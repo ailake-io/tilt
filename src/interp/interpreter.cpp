@@ -63,6 +63,7 @@
 #include "runtime/safetensors.hpp"
 #include "runtime/sorteio.hpp"
 #include "runtime/sqlite.hpp"
+#include "runtime/stdlib.hpp"
 #include "runtime/vectorstore.hpp"
 #include "runtime/weaviate.hpp"
 #include "semantic/checker.hpp"
@@ -9363,6 +9364,17 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
 
 Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& env) {
   auto args = [&] { return eval_args(call, env); };
+
+  // Biblioteca padrao pura (matematica, texto, listas, datas...). Funcoes do
+  // usuario e de modulos ja foram resolvidas antes e, por isso, a sombreiam.
+  if (rt::stdlib_existe(name)) {
+    const std::vector<Value> a = args();
+    try {
+      return rt::stdlib_chamar(name, a);
+    } catch (const std::exception& e) {
+      fail(call.span, e.what());
+    }
+  }
 
   if (name == "imprimir" || name == "imprima" || name == "print") {
     auto a = args();

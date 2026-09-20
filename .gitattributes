@@ -1,0 +1,4 @@
+# Saidas esperadas dos testes de ouro sao capturas byte-a-byte da CLI (erros
+# terminam com linha em branco; `juntar([])` deixa espaco no fim): sem
+# checagem de whitespace no `git diff --check`.
+tests/golden/**/expected.* -whitespace

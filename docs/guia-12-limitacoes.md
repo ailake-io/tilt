@@ -453,6 +453,21 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 
 ## Stdlib
 
+**Funções embutidas** (`src/runtime/stdlib.cpp`, sem `importar`): matemática
+(`raiz`, `abs`, `exp`, `logaritmo`, `potencia`, `piso`, `teto`, `arredondar`,
+`seno`, `cosseno`, `tangente`, `pi`), conversões (`inteiro`, `decimal`, `texto`,
+`logico`, `tipo_de`), texto (`maiusculas`, `minusculas`, `aparar`, `substituir`,
+`comeca_com`, `termina_com`, `juntar`, `regex_casa`, `regex_extrair`,
+`regex_substituir` — ECMAScript), listas e mapas (`ordenar`, `unicos`, `reverso`,
+`zip`, `enumerar`, `chaves`, `valores`), tempo em UTC (`agora`, `timestamp`,
+`formatar_data`, `dormir`), arquivos de texto (`ler_texto`, `escrever_texto`,
+`anexar_texto`, `listar_arquivos`, `remover_arquivo`) e `sha256`,
+`base64_codificar`/`base64_decodificar`, `json_texto`/`json_ler`. Função do
+usuário com o mesmo nome tem prioridade. Limites: `maiusculas`/`minusculas`
+só ASCII; datas só UTC (sem fuso); `ordenar` compara só números com números ou
+textos com textos.
+
+
 A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
 "Importar" no guia 01) cobre em 1ª passada:
 

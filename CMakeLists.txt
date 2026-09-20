@@ -71,6 +71,7 @@ add_library(tilt_core STATIC
   src/runtime/tls.cpp
   src/runtime/s3.cpp
   src/runtime/sha256.cpp
+  src/runtime/stdlib.cpp
   src/runtime/sqlite.cpp
   src/runtime/sql_pool.cpp
   src/runtime/postgres.cpp
