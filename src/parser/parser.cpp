@@ -688,10 +688,10 @@ ExprPtr Parser::parse_postfix() {
   ExprPtr e = parse_primary();
 
   while (true) {
-    if (at(TokenKind::LParen) &&
-        (e->kind == ExprKind::Name || e->kind == ExprKind::Member)) {
-      // Parenthesized call: `f(a, b)` / `x.m(a)`. Unambiguous, unlike the
-      // paren-less bare-call form.
+    if (at(TokenKind::LParen) && (e->kind == ExprKind::Name || e->kind == ExprKind::Member ||
+                                  (e->kind == ExprKind::Call && e->paren_call))) {
+      // Parenthesized call: `f(a, b)` / `x.m(a)` / `f(a)(b)` (funcao devolvida).
+      // Unambiguous, unlike the paren-less bare-call form.
       advance();
       auto call = make_expr(ExprKind::Call, e->span);
       call->lhs = std::move(e);
@@ -854,8 +854,34 @@ bool Parser::attach_trailing_block(Expr* value) {
   return true;
 }
 
+// `funcao` + identificadores/virgulas + ':' + algo na mesma linha. A declaracao
+// de topo (`funcao f a:` + NEWLINE) nunca chega aqui: parse_top_level a consome.
+bool Parser::at_lambda() const {
+  if (!at(TokenKind::Identifier) || cur().lexeme != "funcao") return false;
+  std::size_t k = 1;
+  while (peek(k).kind == TokenKind::Identifier || peek(k).kind == TokenKind::Comma) ++k;
+  return peek(k).kind == TokenKind::Colon && peek(k + 1).kind != TokenKind::Newline;
+}
+
 ExprPtr Parser::parse_primary() {
   Span span = cur().span;
+
+  if (at_lambda()) {
+    auto e = make_expr(ExprKind::Lambda, span);
+    advance();  // 'funcao'
+    while (at(TokenKind::Identifier) || at(TokenKind::Comma)) {
+      if (at(TokenKind::Comma)) {
+        advance();
+        continue;
+      }
+      Arg p;
+      p.name = std::string(advance().lexeme);
+      e->args.push_back(std::move(p));
+    }
+    expect(TokenKind::Colon, "':' apos os parametros da funcao anonima");
+    e->rhs = parse_expr();
+    return e;
+  }
 
   if (at(TokenKind::Integer)) {
     auto e = make_expr(ExprKind::IntLit, span);

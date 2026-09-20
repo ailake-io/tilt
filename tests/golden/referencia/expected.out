@@ -49,6 +49,7 @@ BUILTINS
   listas:     ordenar unicos reverso zip enumerar chaves valores
   tempo:      agora timestamp formatar_data dormir   (UTC)
   arquivos:   ler_texto escrever_texto anexar_texto listar_arquivos remover_arquivo
+  ordem sup.: mapear filtrar reduzir qualquer todos   (com `funcao x: expr`)
   outros:     sha256 base64_codificar base64_decodificar json_texto json_ler
   executar_sql "<url>" "<sql>" [params]   (postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://; "?" vira $N/{pN}; transacao "<url>" [{sql:, params:?}])
   consultar_sql "<url>" "<sql>" [params]   (SELECT com "?", devolve tabela; mesma ligacao do executar_sql)

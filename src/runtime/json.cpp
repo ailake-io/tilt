@@ -242,6 +242,9 @@ void dump_value(const Value& v, std::string& out, int indent) {
       out += "] }";
       break;
     }
+    case ValueKind::Funcao:
+      out += "null";  // funcoes nao tem representacao JSON
+      break;
     case ValueKind::Mapa: {
       if (!v.map || v.map->items.empty()) {
         out += "{}";

@@ -1,0 +1,8 @@
+erro[T030]: nome 'y' nao definido
+  --> input.tilt:3:25
+   |
+ 3 |     - f = funcao x: x + y
+   |                         ^
+   |
+
+1 erro(s) em input.tilt

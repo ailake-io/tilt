@@ -121,6 +121,33 @@ pipeline funcoes:
 - `retornar <expr>` (ou `retornar` sem valor → `nulo`).
 - Chamada: `f(a, b)` (forma não ambígua) **ou** `f a, b` (estilo declarativo).
 
+### Funções anônimas
+
+`funcao x, y: <expressão>` cria um valor-função. O corpo é uma única expressão e
+as variáveis visíveis na criação são capturadas **por valor**. Chame com `f(x)`
+(ou `f(a)(b)` quando uma função devolve outra) e passe às funções de ordem
+superior `mapear`, `filtrar`, `reduzir`, `qualquer` e `todos`:
+
+```tilt run
+funcao somador n:
+  retornar funcao x: x + n
+
+pipeline anonimas:
+  passos:
+    - dobro = funcao x: x * 2
+    - imprimir dobro(4)                                        # 8
+    - imprimir mapear([1, 2, 3], funcao x: x * x)              # [1, 4, 9]
+    - imprimir filtrar([1, 2, 3, 4], funcao x: x % 2 == 0)     # [2, 4]
+    - imprimir reduzir([1, 2, 3], funcao acc, x: acc + x, 0)   # 6
+    - imprimir somador(5)(1)                                   # 6
+```
+
+`mapear`/`filtrar` como *função* (`mapear(lista, f)`) não se confundem com os
+métodos de tabela `t.mapear { col: expr }` / `t.filtrar cond`. O `tilt checar`
+resolve os nomes do corpo (parâmetros mais o escopo visível). Limites: só corpo
+em expressão (sem blocos), aridade exata e sem passar uma `funcao` nomeada
+diretamente como valor (embrulhe: `funcao x: minha(x)`).
+
 Funções cujo corpo cabe no subconjunto puro rodam numa VM de bytecode
 automaticamente — ver [guia 09](guia-09-vm-nativo.md).
 

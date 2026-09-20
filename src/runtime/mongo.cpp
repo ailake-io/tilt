@@ -115,6 +115,7 @@ void bson_encode_doc(std::string& out, const ValueMap& map, const std::string* o
       }
       case ValueKind::Tabela:
       case ValueKind::Tensor:
+      case ValueKind::Funcao:
         die(std::string("nao e possivel gravar ") + v.type_name() + " no MongoDB (campo '" + k +
             "')");
     }
@@ -281,7 +282,7 @@ std::string novo_object_id() {
     for (auto& c : b) c = static_cast<unsigned char>(rd() & 0xFF);
     return b;
   }();
-  static std::uint32_t contador = std::random_device{}() & 0xFFFFFFu;
+  static std::uint32_t contador = std::random_device()() & 0xFFFFFFu;
   contador = (contador + 1) & 0xFFFFFFu;
 
   const auto agora = std::chrono::duration_cast<std::chrono::seconds>(

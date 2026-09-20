@@ -24,6 +24,19 @@
 #include "vm/bytecode_cache.hpp"
 #include "vm/jit.hpp"
 
+namespace tilt::rt {
+
+// Funcao anonima (`funcao x: x * 2`): o corpo (no AST, que vive mais que o valor)
+// e as variaveis visiveis na criacao, capturadas por valor.
+struct Closure {
+  const ast::Expr* lambda = nullptr;
+  std::unordered_map<std::string, Value> capturadas;
+  // Tabela de funcoes do modulo onde a lambda nasceu (nullptr fora de modulo).
+  const std::unordered_map<std::string, const ast::Item*>* funcs = nullptr;
+};
+
+}  // namespace tilt::rt
+
 namespace tilt {
 
 // Estado da resposta sendo montada por `responder:`/`responder_em_fluxo:`
@@ -222,6 +235,7 @@ class Interpreter {
                           Env* module_scope = nullptr);
 
   std::vector<rt::Value> eval_args(const ast::Expr& call, Env& env);
+  rt::Value call_closure(const rt::Closure& fn, std::vector<rt::Value> args, Span span);
   rt::ValueMap eval_kwargs(const ast::Expr& call, Env& env);
   // `particionar_por:` como texto ou lista de textos (particao composta).
   std::vector<std::string> parse_particionar_por(const rt::ValueMap& kw, const char* builtin,

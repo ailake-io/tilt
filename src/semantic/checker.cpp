@@ -1386,6 +1386,8 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
     case ExprKind::NullLit: return TypeKind::Nulo;
     case ExprKind::ListLit: return TypeKind::Lista;
     case ExprKind::MapLit: return TypeKind::Mapa;
+    case ExprKind::Lambda:
+      return TypeKind::Funcao;
     case ExprKind::Cond: {
       // Tipo conhecido so quando os dois ramos concordam (inteiro + decimal
       // promove para decimal), como na fusao de `se`/`senao`.
@@ -1852,6 +1854,12 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
     case ExprKind::Device:
       if (e.lhs) check_expr(*e.lhs, scope);
       return;
+    case ExprKind::Lambda: {
+      Scope inner = scope;
+      for (const auto& p : e.args) inner.insert(p.name);
+      if (e.rhs) check_expr(*e.rhs, inner);
+      return;
+    }
     case ExprKind::Cond:
       if (e.extra) check_expr(*e.extra, scope);
       if (e.lhs) check_expr(*e.lhs, scope);

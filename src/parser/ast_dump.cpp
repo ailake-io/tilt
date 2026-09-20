@@ -138,6 +138,13 @@ struct Printer {
         expr(*e.lhs);
         os << ")";
         break;
+      case ExprKind::Lambda:
+        os << "(lambda (";
+        for (std::size_t k = 0; k < e.args.size(); ++k) os << (k ? " " : "") << e.args[k].name;
+        os << ") ";
+        expr(*e.rhs);
+        os << ")";
+        break;
       case ExprKind::Cond:
         os << "(cond ";
         expr(*e.extra);

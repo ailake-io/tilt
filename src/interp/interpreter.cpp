@@ -9037,6 +9037,17 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
     }
     case ExprKind::Device:
       return eval(*expr.lhs, env);
+    case ExprKind::Lambda: {
+      auto fn = std::make_shared<rt::Closure>();
+      fn->lambda = &expr;
+      // Snapshot das variaveis visiveis (as mais internas vencem); o escopo
+      // global (root_) e resolvido na chamada.
+      for (Env* e = &env; e && e != &root_; e = e->parent) {
+        for (const auto& kv : e->vars) fn->capturadas.emplace(kv.first, kv.second);
+        if (!fn->funcs) fn->funcs = e->funcs;  // lambda criada em modulo enxerga as funcoes dele
+      }
+      return Value::funcao(std::move(fn));
+    }
     case ExprKind::Cond:
       return eval(*expr.extra, env).truthy() ? eval(*expr.lhs, env) : eval(*expr.rhs, env);
     case ExprKind::Call:
@@ -9266,6 +9277,11 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
 
   if (callee.kind == ExprKind::Name) {
     const std::string& name = callee.text;
+    // Variavel que guarda uma funcao anonima: `f = funcao x: x * 2` / `f(3)`.
+    if (Value* v = env.lookup(name); v && v->kind == ValueKind::Funcao && v->closure) {
+      const std::shared_ptr<rt::Closure> fn = v->closure;
+      return call_closure(*fn, eval_args(expr, env), expr.span);
+    }
     // Funcao de modulo visivel no escopo (irma ou `de ... importar` aninhado):
     // anda na cadeia de envs procurando uma tabela de funcoes de modulo.
     for (Env* e = &env; e; e = e->parent) {
@@ -9285,12 +9301,38 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
     return eval_builtin(name, expr, env);
   }
 
+  // `f(a)(b)`: o resultado da 1a chamada precisa ser uma funcao anonima.
+  if (callee.kind == ExprKind::Call) {
+    const Value f = eval(callee, env);
+    if (f.kind != ValueKind::Funcao || !f.closure) {
+      fail(expr.span,
+           std::string("o resultado da chamada e ") + f.type_name() + ", nao uma funcao");
+    }
+    return call_closure(*f.closure, eval_args(expr, env), expr.span);
+  }
+
   fail(expr.span, "chamada invalida");
 }
 
 int Interpreter::run_jit() {
   jit_mode_ = true;
   return run_vm();
+}
+
+Value Interpreter::call_closure(const rt::Closure& fn, std::vector<Value> args, Span span) {
+  const Expr& lambda = *fn.lambda;
+  if (args.size() != lambda.args.size()) {
+    fail(span, "funcao anonima espera " + std::to_string(lambda.args.size()) +
+                   " argumento(s), recebeu " + std::to_string(args.size()));
+  }
+  Env env;
+  env.parent = &root_;
+  env.funcs = fn.funcs;
+  env.vars = fn.capturadas;
+  for (std::size_t k = 0; k < lambda.args.size(); ++k) {
+    env.vars[lambda.args[k].name] = std::move(args[k]);
+  }
+  return eval(*lambda.rhs, env);
 }
 
 Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span,
@@ -9404,6 +9446,46 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
 
 Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& env) {
   auto args = [&] { return eval_args(call, env); };
+
+  // Ordem superior: recebem uma funcao anonima e a aplicam a cada elemento.
+  if (word_in(name, {"mapear", "filtrar", "reduzir", "qualquer", "todos"})) {
+    std::vector<Value> a = args();
+    const bool reduz = name == "reduzir";
+    if (a.size() < 2 || a.size() > (reduz ? 3u : 2u) ||
+        (a[0].kind != ValueKind::Lista && a[0].kind != ValueKind::Tabela) ||
+        a[1].kind != ValueKind::Funcao || !a[1].closure) {
+      fail(call.span, name + " espera (lista, funcao" + (reduz ? ", inicial?)" : ")") +
+                          ", ex.: " + name + "(xs, funcao x: x * 2)");
+    }
+    const std::shared_ptr<rt::Closure> fn = a[1].closure;
+    const rt::ValueList itens = a[0].list ? *a[0].list : rt::ValueList{};
+    if (name == "reduzir") {
+      // funcao acc, x: ...; sem inicial, parte do 1o elemento.
+      std::size_t inicio = 0;
+      Value acc = a.size() == 3 ? a[2] : Value::nulo();
+      if (a.size() < 3 && !itens.empty()) acc = itens[inicio++];
+      for (; inicio < itens.size(); ++inicio) {
+        acc = call_closure(*fn, {acc, itens[inicio]}, call.span);
+      }
+      return acc;
+    }
+    rt::ValueList out;
+    for (const Value& item : itens) {
+      Value r = call_closure(*fn, {item}, call.span);
+      if (name == "mapear") {
+        out.push_back(std::move(r));
+      } else if (name == "filtrar") {
+        if (r.truthy()) out.push_back(item);
+      } else if (name == "qualquer") {
+        if (r.truthy()) return Value::logico(true);
+      } else if (!r.truthy()) {  // todos
+        return Value::logico(false);
+      }
+    }
+    if (name == "qualquer") return Value::logico(false);
+    if (name == "todos") return Value::logico(true);
+    return Value::lista(std::move(out));
+  }
 
   // Biblioteca padrao pura (matematica, texto, listas, datas...). Funcoes do
   // usuario e de modulos ja foram resolvidas antes e, por isso, a sombreiam.

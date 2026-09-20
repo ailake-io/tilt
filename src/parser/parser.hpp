@@ -65,6 +65,7 @@ class Parser {
   ast::ExprPtr parse_primary();
   std::vector<ast::Arg> parse_bare_args();
   bool attach_trailing_block(ast::Expr* value);
+  bool at_lambda() const;  // `funcao a, b: <expr>` em posicao de expressao
 
   // line classification helpers (scan the current logical line)
   struct LineScan {

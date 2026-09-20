@@ -413,6 +413,17 @@ const std::vector<BuiltinDoc>& stdlib_docs() {
       {"base64_codificar", "base64_codificar(texto)", "texto", "Codifica em Base64.", nullptr},
       {"base64_decodificar", "base64_decodificar(texto)", "texto", "Decodifica Base64.", nullptr},
       {"json_texto", "json_texto(valor)", "valor", "Converte um valor em texto JSON.", nullptr},
+      {"mapear", "mapear(lista, funcao)", "lista,funcao", "Aplica a funcao a cada elemento.",
+       "mapear([1, 2], funcao x: x * 2)"},
+      {"filtrar", "filtrar(lista, funcao)", "lista,funcao",
+       "Elementos para os quais a funcao devolve verdadeiro.", nullptr},
+      {"reduzir", "reduzir(lista, funcao, inicial?)", "lista,funcao,inicial",
+       "Acumula a lista com funcao(acumulado, elemento).",
+       "reduzir([1, 2], funcao a, x: a + x, 0)"},
+      {"qualquer", "qualquer(lista, funcao)", "lista,funcao",
+       "Verdadeiro se a funcao vale para algum elemento.", nullptr},
+      {"todos", "todos(lista, funcao)", "lista,funcao",
+       "Verdadeiro se a funcao vale para todos os elementos.", nullptr},
       {"json_ler", "json_ler(texto)", "texto", "Interpreta um texto JSON como valor.", nullptr},
   };
   return docs;

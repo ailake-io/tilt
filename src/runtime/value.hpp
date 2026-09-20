@@ -8,10 +8,11 @@
 
 namespace tilt::rt {
 
-enum class ValueKind { Nulo, Logico, Inteiro, Decimal, Texto, Lista, Mapa, Tabela, Tensor };
+enum class ValueKind { Nulo, Logico, Inteiro, Decimal, Texto, Lista, Mapa, Tabela, Tensor, Funcao };
 
 struct Value;
 struct Tensor;
+struct Closure;  // funcao anonima + variaveis capturadas; definida pelo interpretador
 
 // Insertion-ordered string map; keeps interpreter output deterministic.
 struct ValueMap {
@@ -33,6 +34,7 @@ struct Value {
   std::shared_ptr<ValueList> list;  // Lista, and Tabela (a list of Mapa rows)
   std::shared_ptr<ValueMap> map;    // Mapa
   std::shared_ptr<Tensor> tensor;   // Tensor
+  std::shared_ptr<Closure> closure;  // Funcao
 
   static Value nulo() { return {}; }
   static Value logico(bool v);
@@ -43,6 +45,7 @@ struct Value {
   static Value mapa();
   static Value tabela(ValueList rows = {});
   static Value tensor_de(Tensor t);
+  static Value funcao(std::shared_ptr<Closure> c);
 
   bool is_number() const { return kind == ValueKind::Inteiro || kind == ValueKind::Decimal; }
   bool truthy() const;
