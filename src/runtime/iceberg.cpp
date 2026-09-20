@@ -1,13 +1,10 @@
 #include "runtime/iceberg.hpp"
 
-#include "runtime/avro.hpp"
-#include "runtime/compat.hpp"
-
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,8 +20,10 @@
 #include <utility>
 #include <vector>
 
-#include "runtime/json.hpp"
+#include "runtime/avro.hpp"
+#include "runtime/compat.hpp"
 #include "runtime/http_client.hpp"
+#include "runtime/json.hpp"
 #include "runtime/parquet.hpp"
 #include "runtime/snappy_codec.hpp"
 
@@ -1735,7 +1734,7 @@ struct FileInfo {
   Value part_map;  // valores de particao (tipados) por coluna; vazio = sem particao
   std::int64_t sequence_number = 0;       // snapshot sequence do data file
   std::int64_t file_sequence_number = 0;  // file sequence number global
-  std::vector<std::int64_t> equality_ids; // field-ids usados por equality delete
+  std::vector<std::int64_t> equality_ids;  // field-ids usados por equality delete
 };
 
 std::string write_manifest(const std::string& meta_dir,
@@ -2036,7 +2035,7 @@ struct ActiveEntry {
   std::int64_t size = 0;
   std::int64_t sequence_number = 0;      // snapshot sequence do data file
   std::int64_t file_sequence_number = 0;  // file_sequence_number global do data file
-  std::vector<std::int64_t> equality_ids; // field-ids usados por equality delete
+  std::vector<std::int64_t> equality_ids;  // field-ids usados por equality delete
 };
 
 // Maior file_sequence_number ja atribuido em qualquer snapshot (para novos

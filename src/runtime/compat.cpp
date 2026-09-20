@@ -1,31 +1,28 @@
 #include "runtime/compat.hpp"
 
-#include <cstdlib>
-#include <cstring>
+#if defined(_WIN32)
+#include <direct.h>  // _mkdir
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>  // _getpid
+#else
+#include <unistd.h>  // getpid, getcwd, readlink, access
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>  // _NSGetExecutablePath
+#endif
+#endif
+
+#include <cerrno>
+#include <climits>  // PATH_MAX
+#include <cstdlib>  // realpath, getenv
+#include <cstring>  // strchr
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <sstream>  // PATH splitting
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-  #include <cerrno>
-  #include <direct.h>   // _mkdir
-  #include <fcntl.h>
-  #include <io.h>
-  #include <process.h>  // _getpid
-#else
-  #include <cerrno>
-  #include <climits>    // PATH_MAX
-  #include <cstdlib>    // realpath, getenv
-  #include <cstring>    // strchr
-  #include <sstream>    // PATH splitting
-  #include <unistd.h>   // getpid, getcwd, readlink, access
-  #if defined(__APPLE__)
-    #include <mach-o/dyld.h>  // _NSGetExecutablePath
-  #endif
-#endif
 
 namespace tilt::rt {
 
@@ -142,7 +139,8 @@ int tilt_tempfile(const char* tag, std::string& path) {
   std::string base = dir;
   while (!base.empty() && (base.back() == '\\' || base.back() == '/')) base.pop_back();
 
-  std::mt19937_64 gen(std::random_device{}());
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
   static constexpr char kHex[] = "0123456789abcdef";
   for (int tentativa = 0; tentativa < 100; ++tentativa) {
     std::string candidate = base + "\\tilt_" + tag + "_";
