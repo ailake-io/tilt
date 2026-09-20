@@ -112,6 +112,15 @@ endif()
 
 add_executable(tilt src/main.cpp)
 target_link_libraries(tilt PRIVATE tilt_core)
+# Windows: a pilha padrao do executavel e 1 MB (Linux/macOS: 8 MB); o parser e o
+# checker recursam na estrutura do programa e o MSVC usa frames grandes. 16 MB
+# da a mesma folga das outras plataformas (os limites de profundidade do parser
+# continuam valendo como protecao).
+if(MSVC)
+  target_link_options(tilt PRIVATE /STACK:16777216)
+elseif(WIN32)
+  target_link_options(tilt PRIVATE -Wl,--stack,16777216)
+endif()
 set_target_properties(tilt PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
