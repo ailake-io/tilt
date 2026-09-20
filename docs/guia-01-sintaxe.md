@@ -194,6 +194,11 @@ pipeline laco:
 | unário | `nao` `-` |
 | pós-fixo | `.campo` `?.campo` `[i]` `[a..b]` `f(...)` `f a, b` `no dispositivo <x>` |
 
+- `valor se condicao senao outro` é o condicional em linha (associa à direita;
+  só o ramo escolhido é avaliado). Tem a menor precedência: `(1 se c senao 2) + 10`
+  pede parênteses. Sem o `senao`, o `tilt checar` acusa `T013`.
+- `para cada i em 0..n:` percorre `0, 1, ..., n-1` (fim exclusivo, como o
+  fatiamento `lista[0..2]`); equivale a `intervalo(0, n)`.
 - `+` com texto concatena. `contem`: `"abcd" contem "bc"` ou `lista contem valor`.
 - `e`/`ou` fazem curto-circuito no interpretador (não na VM — ver guia 09).
 - `x?.campo` retorna `nulo` se `x` não tiver o campo, em vez de erro.

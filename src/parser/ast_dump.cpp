@@ -138,6 +138,15 @@ struct Printer {
         expr(*e.lhs);
         os << ")";
         break;
+      case ExprKind::Cond:
+        os << "(cond ";
+        expr(*e.extra);
+        os << " ";
+        expr(*e.lhs);
+        os << " ";
+        expr(*e.rhs);
+        os << ")";
+        break;
     }
     // A call may carry a nested block of named arguments.
     if (e.kind == ExprKind::Call && e.block) {

@@ -1,0 +1,10 @@
+funcao faixa x:
+  retornar "alta" se x >= 10 senao "media" se x >= 5 senao "baixa"
+
+pipeline t:
+  passos:
+    - a = 7
+    - r = "par" se a % 2 == 0 senao "impar"
+    - imprimir r, faixa(12), faixa(6), faixa(1)
+    - imprimir (1 se falso senao 2) + 10
+    - imprimir "so avalia o ramo escolhido:", 1 se verdadeiro senao 1 / 0

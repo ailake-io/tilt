@@ -39,6 +39,7 @@ enum class ExprKind {
   MapLit,   // entries
   Assign,   // lhs = target, rhs = value
   Device,   // lhs = inner expression, text = device name ("no dispositivo <name>")
+  Cond,     // `lhs se extra senao rhs` (lhs = valor se verdadeiro, extra = condicao, rhs = senao)
 };
 
 struct Arg {

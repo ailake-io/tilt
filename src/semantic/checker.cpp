@@ -1389,6 +1389,17 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
     case ExprKind::NullLit: return TypeKind::Nulo;
     case ExprKind::ListLit: return TypeKind::Lista;
     case ExprKind::MapLit: return TypeKind::Mapa;
+    case ExprKind::Cond: {
+      // Tipo conhecido so quando os dois ramos concordam (inteiro + decimal
+      // promove para decimal), como na fusao de `se`/`senao`.
+      if (!e.lhs || !e.rhs) return TypeKind::Unknown;
+      const TypeKind a = infer_type(*e.lhs, types);
+      const TypeKind b = infer_type(*e.rhs, types);
+      if (a == b) return a;
+      const bool numericos = (a == TypeKind::Inteiro || a == TypeKind::Decimal) &&
+                             (b == TypeKind::Inteiro || b == TypeKind::Decimal);
+      return numericos ? TypeKind::Decimal : TypeKind::Unknown;
+    }
     case ExprKind::Device:
       return e.lhs ? infer_type(*e.lhs, types) : TypeKind::Unknown;
     case ExprKind::Name: {
@@ -1839,6 +1850,11 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
       return;
     case ExprKind::Device:
       if (e.lhs) check_expr(*e.lhs, scope);
+      return;
+    case ExprKind::Cond:
+      if (e.extra) check_expr(*e.extra, scope);
+      if (e.lhs) check_expr(*e.lhs, scope);
+      if (e.rhs) check_expr(*e.rhs, scope);
       return;
     case ExprKind::Assign:
       if (e.rhs) check_expr(*e.rhs, scope);

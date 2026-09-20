@@ -454,6 +454,22 @@ StmtPtr Parser::parse_for_each() {
     report(DiagCode::ExpectedToken, cur().span, "esperado 'em' na iteracao 'para cada'");
   }
   s->a = parse_expr();
+  // `para cada i em 0..3:` = `intervalo(0, 3)` (fim exclusivo, como o fatiamento).
+  if (at(TokenKind::DotDot)) {
+    auto call = make_expr(ExprKind::Call, s->a->span);
+    auto nome = make_expr(ExprKind::Name, s->a->span);
+    nome->text = "intervalo";
+    call->lhs = std::move(nome);
+    call->paren_call = true;
+    Arg inicio;
+    inicio.value = std::move(s->a);
+    call->args.push_back(std::move(inicio));
+    advance();  // '..'
+    Arg fim;
+    fim.value = parse_expr();
+    call->args.push_back(std::move(fim));
+    s->a = std::move(call);
+  }
   if (expect(TokenKind::Colon, "':' apos o iteravel")) s->body = parse_body();
   return s;
 }
@@ -520,7 +536,26 @@ StmtPtr Parser::parse_assign_or_expr_stmt() {
 
 // ----------------------------------------------------------------- expressions
 
-ExprPtr Parser::parse_expr() { return parse_union(); }
+// `valor se condicao senao outro`: condicional em expressao (baixa precedencia,
+// associa a direita). O `se` de instrucao so aparece no inicio da linha, entao
+// um `se` depois de uma expressao e sempre o deste operador.
+ExprPtr Parser::parse_expr() {
+  ExprPtr valor = parse_union();
+  if (!at_keyword("se")) return valor;
+  auto e = make_expr(ExprKind::Cond, valor->span);
+  advance();  // 'se'
+  e->extra = parse_or();
+  e->lhs = std::move(valor);
+  if (at_keyword("senao")) {
+    advance();
+    e->rhs = parse_expr();
+  } else {
+    report(DiagCode::ExpectedToken, cur().span,
+           "esperado 'senao' no condicional em linha (`valor se condicao senao outro`)");
+    e->rhs = make_expr(ExprKind::NullLit, e->span);  // AST completa apos o erro
+  }
+  return e;
+}
 
 // Lowest precedence: '|' builds union-of-literals types ("a" | "b" | "c").
 ExprPtr Parser::parse_union() {
@@ -716,6 +751,11 @@ ExprPtr Parser::parse_postfix() {
                        !at(TokenKind::GreaterEqual) && !at(TokenKind::Plus) &&
                        !at(TokenKind::Dash) && !at(TokenKind::Star) && !at(TokenKind::Slash) &&
                        !at(TokenKind::Percent) && !at(TokenKind::Pipe) && !at(TokenKind::LBracket);
+    // `a se cond senao b`: 'se'/'senao' encerram o nome, nao viram argumento.
+    if (starts_args && at(TokenKind::Identifier) &&
+        (cur().lexeme == "se" || cur().lexeme == "senao")) {
+      starts_args = false;
+    }
     if (starts_args && at(TokenKind::Identifier) && is_operator_word(cur().lexeme)) {
       // C3: palavra operadora como argumento ('f nao', 'f e, 1') — so vale
       // como chamada se a palavra for um argumento completo (seguida de ',',

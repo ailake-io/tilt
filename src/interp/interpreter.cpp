@@ -9029,6 +9029,8 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
     }
     case ExprKind::Device:
       return eval(*expr.lhs, env);
+    case ExprKind::Cond:
+      return eval(*expr.extra, env).truthy() ? eval(*expr.lhs, env) : eval(*expr.rhs, env);
     case ExprKind::Call:
       return eval_call(expr, env);
   }
