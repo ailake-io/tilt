@@ -1,0 +1,22 @@
+funcao saudar nome, saudacao = "Ola":
+  retornar saudacao + ", " + nome
+
+funcao area base, altura = base:
+  retornar base * altura
+
+funcao pot b: inteiro, e: inteiro = 2 -> inteiro:
+  retornar potencia(b, e)
+
+funcao soma3 a, b = 10, c = 100:
+  retornar a + b + c
+
+funcao chama_com_padrao:
+  retornar saudar("Ana")
+
+pipeline t:
+  passos:
+    - imprimir saudar("Ana"), saudar("Bia", "Oi")
+    - imprimir area(3), area(3, 4)
+    - imprimir pot(3), pot(3, 3)
+    - imprimir soma3(1), soma3(1, 2), soma3(1, 2, 3)
+    - imprimir chama_com_padrao()

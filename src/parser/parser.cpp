@@ -229,6 +229,13 @@ ItemPtr Parser::parse_funcao_decl() {
       } else {
         p.optional = true;   // sem ':' com tipo => opcional; com '[]' => opcional
       }
+      // Valor padrao: `nome = <expr>` / `nome: tipo = <expr>`. Prefira literais;
+      // um nome como padrao precisa de virgula antes do proximo parametro (a
+      // chamada sem parenteses e gulosa).
+      if (at(TokenKind::Equal)) {
+        advance();
+        p.default_value = parse_or();
+      }
       it->params.push_back(std::move(p));
       continue;
     }
@@ -628,6 +635,8 @@ ExprPtr Parser::parse_comparison() {
 ExprPtr Parser::parse_additive() {
   ExprPtr lhs = parse_multiplicative();
   while (at(TokenKind::Plus) || at(TokenKind::Dash)) {
+    // `->` (tipo de retorno de `funcao`) nao e subtracao.
+    if (at(TokenKind::Dash) && peek(1).kind == TokenKind::Greater) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::Plus) ? "+" : "-";
     advance();

@@ -93,6 +93,13 @@ namespace {
 
 constexpr std::int64_t kLoopGuard = 5'000'000;
 
+// Funcao com parametro de valor padrao: fora do subconjunto da VM (que exige o
+// numero exato de argumentos); chamadas a ela tambem nao compilam para a VM.
+bool funcao_tem_padrao(const Item& fn) {
+  return std::any_of(fn.params.begin(), fn.params.end(),
+                     [](const ast::Arg& p) { return p.default_value != nullptr; });
+}
+
 bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
   for (std::string_view s : set) {
     if (w == s) return true;
@@ -991,7 +998,9 @@ int Interpreter::run_vm() {
 
     if (!pipelines_.empty()) {
       std::unordered_set<std::string> names;
-      for (const auto& kv : functions_) names.insert(kv.first);
+      for (const auto& kv : functions_) {
+        if (!funcao_tem_padrao(*kv.second)) names.insert(kv.first);
+      }
       for (const Item* p : pipelines_) {
         // Pipeline no subconjunto -> bytecode VM (.tiltc, senao compila);
         // fora dele -> arvore.
@@ -9289,87 +9298,98 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
                                  Env* module_scope) {
   // Funcoes de modulo rodam pela arvore: o subconjunto da VM resolve chamadas
   // por nome apenas contra 'functions_', sem a tabela do modulo (scope.funcs).
-  if (module_scope == nullptr) {
-  // Try the bytecode VM for functions in its pure subset; fall back otherwise.
-  // A compilacao e lazy e cacheada: o mutex so cobre o mapa; o Chunk em si
-  // e imutavel durante a execucao e pode ser rodado por varias threads.
-  std::shared_ptr<vm::Chunk> chunk;
-  {
-    std::lock_guard<std::mutex> lk(vm_chunks_mutex_);
-    auto cit = vm_chunks_.find(&fn);
-    if (cit == vm_chunks_.end()) {
-      // Disco antes de compilar (.tiltc; nparams valida contra a assinatura).
-      const std::string tkey = "funcao " + decl_name(fn);
-      if (auto tit = tiltc_prog_.entries.find(tkey);
-          tit != tiltc_prog_.entries.end() && !tit->second.is_pipeline &&
-          tit->second.nparams == static_cast<int>(fn.params.size())) {
-        chunk = std::make_shared<vm::Chunk>(tit->second.chunk);
-        tiltc_note("hit");
-      } else {
-        try {
-          std::unordered_set<std::string> names;
-          for (const auto& kv : functions_) names.insert(kv.first);
-          chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
-        } catch (const vm::NotCompilable&) {
-          chunk = nullptr;
+  // Funcao com valor padrao: so a arvore sabe preencher os argumentos faltantes.
+  if (module_scope == nullptr && !funcao_tem_padrao(fn)) {
+    // Try the bytecode VM for functions in its pure subset; fall back otherwise.
+    // A compilacao e lazy e cacheada: o mutex so cobre o mapa; o Chunk em si
+    // e imutavel durante a execucao e pode ser rodado por varias threads.
+    std::shared_ptr<vm::Chunk> chunk;
+    {
+      std::lock_guard<std::mutex> lk(vm_chunks_mutex_);
+      auto cit = vm_chunks_.find(&fn);
+      if (cit == vm_chunks_.end()) {
+        // Disco antes de compilar (.tiltc; nparams valida contra a assinatura).
+        const std::string tkey = "funcao " + decl_name(fn);
+        if (auto tit = tiltc_prog_.entries.find(tkey);
+            tit != tiltc_prog_.entries.end() && !tit->second.is_pipeline &&
+            tit->second.nparams == static_cast<int>(fn.params.size())) {
+          chunk = std::make_shared<vm::Chunk>(tit->second.chunk);
+          tiltc_note("hit");
+        } else {
+          try {
+            std::unordered_set<std::string> names;
+            for (const auto& kv : functions_) {
+              if (!funcao_tem_padrao(*kv.second)) names.insert(kv.first);
+            }
+            chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
+          } catch (const vm::NotCompilable&) {
+            chunk = nullptr;
+          }
+          if (chunk) {
+            vm::CachedChunk cc;
+            cc.is_pipeline = false;
+            cc.nparams = static_cast<int>(fn.params.size());
+            cc.chunk = *chunk;
+            tiltc_prog_.entries[tkey] = std::move(cc);
+            tiltc_dirty_ = true;
+          }
         }
-        if (chunk) {
-          vm::CachedChunk cc;
-          cc.is_pipeline = false;
-          cc.nparams = static_cast<int>(fn.params.size());
-          cc.chunk = *chunk;
-          tiltc_prog_.entries[tkey] = std::move(cc);
-          tiltc_dirty_ = true;
+        cit = vm_chunks_.emplace(&fn, chunk).first;
+        if (std::getenv("TILT_VM_DEBUG") && chunk) {
+          const vm::Chunk& c = *chunk;
+          std::lock_guard<std::mutex> log_lk(log_mutex_);
+          out_ << "; chunk " << decl_name(fn) << " locals=" << c.num_locals << "\n";
+          for (std::size_t i = 0; i < c.code.size(); ++i) {
+            out_ << ";  " << i << ": op=" << static_cast<int>(c.code[i].op) << " a=" << c.code[i].a
+                 << " b=" << c.code[i].b << "\n";
+          }
         }
       }
-      cit = vm_chunks_.emplace(&fn, chunk).first;
-      if (std::getenv("TILT_VM_DEBUG") && chunk) {
-        const vm::Chunk& c = *chunk;
-        std::lock_guard<std::mutex> log_lk(log_mutex_);
-        out_ << "; chunk " << decl_name(fn) << " locals=" << c.num_locals << "\n";
-        for (std::size_t i = 0; i < c.code.size(); ++i) {
-          out_ << ";  " << i << ": op=" << static_cast<int>(c.code[i].op) << " a=" << c.code[i].a
-               << " b=" << c.code[i].b << "\n";
+      chunk = cit->second;
+    }
+    if (chunk) {
+      if (jit_mode_) {
+        bool integer_args = true;
+        for (const Value& arg : args) {
+          if (arg.kind != ValueKind::Inteiro) {
+            integer_args = false;
+            break;
+          }
         }
+        vm::Jit jit(out_);
+        std::string why;
+        if (integer_args && jit.can_compile(*chunk, &why)) {
+          try {
+            return jit.run(*chunk, std::move(args));
+          } catch (const std::exception& e) {
+            fail(fn.span, std::string("JIT: ") + e.what());
+            return Value::nulo();
+          }
+        }
+      }
+      vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
+        return vm_call_hook(name, a, handled);
+      });
+      try {
+        return machine.run(*chunk, std::move(args));
+      } catch (const std::exception& e) {
+        fail(fn.span, std::string("VM: ") + e.what());
       }
     }
-    chunk = cit->second;
-  }
-  if (chunk) {
-    if (jit_mode_) {
-      bool integer_args = true;
-      for (const Value& arg : args) {
-        if (arg.kind != ValueKind::Inteiro) {
-          integer_args = false;
-          break;
-        }
-      }
-      vm::Jit jit(out_);
-      std::string why;
-      if (integer_args && jit.can_compile(*chunk, &why)) {
-        try {
-          return jit.run(*chunk, std::move(args));
-        } catch (const std::exception& e) {
-          fail(fn.span, std::string("JIT: ") + e.what());
-          return Value::nulo();
-        }
-      }
-    }
-    vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
-      return vm_call_hook(name, a, handled);
-    });
-    try {
-      return machine.run(*chunk, std::move(args));
-    } catch (const std::exception& e) {
-      fail(fn.span, std::string("VM: ") + e.what());
-    }
-  }
   }
 
   Env env;
   env.parent = module_scope ? module_scope : &root_;
   for (std::size_t k = 0; k < fn.params.size(); ++k) {
-    env.vars[fn.params[k].name] = k < args.size() ? args[k] : Value::nulo();
+    const ast::Arg& p = fn.params[k];
+    if (k < args.size()) {
+      env.vars[p.name] = args[k];
+    } else if (p.default_value) {
+      // Padrao avaliado a cada chamada, vendo os parametros anteriores.
+      env.vars[p.name] = eval(*p.default_value, env);
+    } else {
+      env.vars[p.name] = Value::nulo();
+    }
   }
   if (!fn.block) return Value::nulo();
   try {

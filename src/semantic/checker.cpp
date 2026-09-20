@@ -1787,7 +1787,7 @@ void SemanticChecker::check_funcao_arity(const std::string& name, const std::vec
   }
   int obrigatorios = 0;
   for (const auto& p : decl->params) {
-    if (p.optional_annotation.empty()) ++obrigatorios;
+    if (p.optional_annotation.empty() && !p.default_value) ++obrigatorios;
   }
   const int total = static_cast<int>(decl->params.size());
   if (npos >= obrigatorios && (npos <= total || !paren)) return;
@@ -1799,7 +1799,11 @@ void SemanticChecker::check_funcao_arity(const std::string& name, const std::vec
   if (total > 0) {
     nota += " (" + std::to_string(total) + " parametro(s)";
     if (obrigatorios < total) {
-      nota += ", " + std::to_string(total - obrigatorios) + " opcional(is) '[]'";
+      const bool com_padrao =
+          std::any_of(decl->params.begin(), decl->params.end(),
+                      [](const ast::Arg& p) { return p.default_value != nullptr; });
+      nota += ", " + std::to_string(total - obrigatorios) +
+              (com_padrao ? " opcional(is): '[]' ou valor padrao" : " opcional(is) '[]'");
     }
     nota += ")";
   }

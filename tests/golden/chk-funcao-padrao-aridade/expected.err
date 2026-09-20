@@ -1,0 +1,17 @@
+erro[T011]: 'f' espera entre 1 e 2 argumentos, encontrou 0
+  --> input.tilt:5:16
+   |
+ 5 |     - imprimir f()
+   |                ^
+   |
+   = assinatura: funcao f (2 parametro(s), 1 opcional(is): '[]' ou valor padrao)
+
+erro[T011]: 'f' espera entre 1 e 2 argumentos, encontrou 3
+  --> input.tilt:6:16
+   |
+ 6 |     - imprimir f(1, 2, 3)
+   |                ^
+   |
+   = assinatura: funcao f (2 parametro(s), 1 opcional(is): '[]' ou valor padrao)
+
+2 erro(s) em input.tilt

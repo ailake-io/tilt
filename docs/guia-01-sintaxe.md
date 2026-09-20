@@ -112,6 +112,11 @@ pipeline funcoes:
 - Parâmetros: `nome` ou `nome: <tipo>`, separados por espaço ou vírgula.
   Parâmetro opcional/composto: `nome[]` (sem tipo) ou `nome[]: <tipo>`
   (ex.: `limite[]: texto`).
+- Valor padrão: `nome = <expr>` ou `nome: <tipo> = <expr>` (ex.: `funcao
+  saudar nome, saudacao = "Ola":`). O padrão é avaliado a cada chamada e enxerga
+  os parâmetros anteriores (`funcao area base, altura = base:`). Prefira
+  literais; um nome como padrão precisa de vírgula antes do próximo parâmetro.
+  Funções com padrão rodam pelo interpretador de árvore (não pela VM).
 - Tipo de retorno opcional após `->` (inclui `mapa` como tipo base).
 - `retornar <expr>` (ou `retornar` sem valor → `nulo`).
 - Chamada: `f(a, b)` (forma não ambígua) **ou** `f a, b` (estilo declarativo).

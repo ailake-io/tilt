@@ -47,6 +47,7 @@ struct Arg {
   ExprPtr value;                 // anotacao de tipo opcional (ex.: texto, tensor)
   std::string optional_annotation;  // "[]" quando marcado como [opcional: tipo] ou []
   bool optional = false;         // marcado via [] (sem tipo) ou [opcional: tipo]
+  ExprPtr default_value;         // funcao: `nome = <expr>` (valor padrao do parametro)
 };
 
 struct MapEntry {
