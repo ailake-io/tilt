@@ -66,7 +66,7 @@ cruzada/quadrática, autograd manual.
 - **CNN de brinquedo**: `conv2d` (com viés), `norma_lote` (gama/beta +
   média/variância correntes), `agrupamento_max` e `achatar` treinam de
   verdade (mini-lotes em CPU). `incorporacao` também treina a tabela por SGD/Adam;
-  com recorrência RNN/LSTM/GRU e BPTT; abandono ainda é identidade no treino.
+  com recorrência RNN/LSTM/GRU e BPTT; `abandono` (dropout) atua no treino com máscara determinística pela semente.
 - **GPU não validada** (`TILT_GPU=fake` em CPU; CUDA nunca rodou em
   hardware real) + sem AMP real.
 - **Exportação**: `modelo <Nome>.exportar_onnx "modelo.onnx"` existe no

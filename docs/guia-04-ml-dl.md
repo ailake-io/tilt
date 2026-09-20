@@ -171,7 +171,7 @@ modelo Classificador:
   camadas:
     - linear: [4, 8]                 # ou  densa: 8  (infere a entrada)
     - ativacao: relu
-    - abandono: 0.1                  # identidade na inferência
+    - abandono: 0.1                  # zera 10% no treino (escala 1/0.9); identidade na inferência
     - linear: [8, 3]
     - softmax
 
@@ -253,7 +253,8 @@ cada `densa`/`linear` vira um `Gemm`, ativações viram `Relu`/`Gelu`/
 `Sigmoid`+`Mul` (`silu`) /`Sigmoid`/`Tanh`, mais `Softmax` (eixo 1),
 `LayerNormalization`, `Conv`, `BatchNormalization`, `MaxPool`, `Flatten`, `RNN`/`LSTM`/`GRU` e `residual` (`Gemm` + `Add`);
 `abandono` é identidade na inferência e não é
-exportado. A entrada é `[lote, ...]` (`lote` dinâmico, resto de
+exportado (no treino é dropout invertido: `p` em `[0, 1)`, máscara determinística
+por semente/época/lote — retomar continua bit-idêntico; ver `tests/abandono_test.sh`). A entrada é `[lote, ...]` (`lote` dinâmico, resto de
 `entrada: tensor[...]`). O arquivo passa no `onnx.checker` e roda em
 qualquer runtime ONNX (ex.: onnxruntime). `gelu` usa a aproximação tanh da
 Tilt, então pode diferir ~1e-4 do `Gelu` exato do ONNX.

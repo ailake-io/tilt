@@ -2449,6 +2449,14 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
         } else if (key == "abandono" || key == "dropout") {
           Layer l;
           l.kind = Layer::Dropout;
+          if (value && (value->kind == ExprKind::DecimalLit || value->kind == ExprKind::IntLit)) {
+            const double p = std::strtod(value->text.c_str(), nullptr);
+            if (p < 0.0 || p >= 1.0) {
+              fail(decl.span,
+                   "modelo '" + name + "': abandono deve estar em [0, 1), recebeu " + value->text);
+            }
+            l.taxa_abandono = static_cast<float>(p);
+          }
           layers.push_back(std::move(l));
         } else if (key == "norma_camada") {
           Layer l;
@@ -4565,6 +4573,11 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       std::vector<rt::Tensor> ins;
       ins.reserve(layers.size() + 1);
       std::vector<rt::RecurrentCache> recorrentes(layers.size());
+      // Mascaras de dropout do lote (vazias = camada sem efeito); o gerador so
+      // depende de (semente, epoca, lote), entao retomar == treino continuo.
+      std::vector<rt::Tensor> mascaras(layers.size());
+      std::mt19937_64 rng_abandono(cfg.seed_mistura * 0x9E3779B97F4A7C15ULL +
+                                   seed_sufixo * 1000003ULL + static_cast<std::uint64_t>(b0) + 1);
       rt::Tensor cur = xb;
       for (std::size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
         Layer& l = layers[layer_idx];
@@ -4594,7 +4607,21 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
             break;
           case Layer::Softmax: cur = rt::softmax_last(cur); break;
           case Layer::LayerNorm: cur = rt::layer_norm_last(cur); break;
-          case Layer::Dropout: break;
+          case Layer::Dropout: {
+            if (l.taxa_abandono > 0.0F) {
+              rt::Tensor mascara = cur;
+              const float mantem = 1.0F / (1.0F - l.taxa_abandono);
+              for (std::size_t k = 0; k < mascara.data.size(); ++k) {
+                // uniforme em [0, 1) sem std::uniform_real_distribution (varia entre bibliotecas)
+                const double u =
+                    static_cast<double>(rng_abandono() >> 11) * (1.0 / 9007199254740992.0);
+                mascara.data[k] = u >= static_cast<double>(l.taxa_abandono) ? mantem : 0.0F;
+                cur.data[k] *= mascara.data[k];
+              }
+              mascaras[layer_idx] = std::move(mascara);
+            }
+            break;
+          }
           case Layer::Conv2d:
             cur = rt::adicionar_vies_conv(rt::conv2d(cur, l.w, l.passo, l.padding, l.dilatacao), l.b);
             break;
@@ -4688,7 +4715,14 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       for (std::int64_t li = static_cast<std::int64_t>(layers.size()) - 1; li >= 0; --li) {
         Layer& l = layers[static_cast<std::size_t>(li)];
         const rt::Tensor& in = ins[static_cast<std::size_t>(li)];
-        if (l.kind == Layer::Softmax || l.kind == Layer::Dropout) continue;
+        if (l.kind == Layer::Softmax) continue;
+        if (l.kind == Layer::Dropout) {
+          const rt::Tensor& mascara = mascaras[static_cast<std::size_t>(li)];
+          for (std::size_t k = 0; k < mascara.data.size() && k < grad.data.size(); ++k) {
+            grad.data[k] *= mascara.data[k];
+          }
+          continue;
+        }
         if (l.kind == Layer::LayerNorm) {
           // Saida normalizada do forward: entrada da proxima camada, ou a
           // propria saida final (probs) quando norma_camada e a ultima camada.

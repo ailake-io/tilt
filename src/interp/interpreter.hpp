@@ -303,6 +303,10 @@ class Interpreter {
     std::int64_t plano = 0;
     // NormaLote: nome identificador
     std::string nome_norma_lote;
+    // Dropout (`abandono: p`): probabilidade de zerar um valor no treino
+    // (inverted dropout: os mantidos sao escalados por 1/(1-p)); identidade na
+    // inferencia.
+    float taxa_abandono = 0.5F;
   };
   rt::Tensor value_to_tensor(const rt::Value& v, Span span);
   void set_device(const ast::Item& decl);  // reads `dispositivo:` -> gpu on/off
