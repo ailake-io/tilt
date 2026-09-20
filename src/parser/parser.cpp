@@ -18,9 +18,9 @@ bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
 }
 
 bool is_decl_keyword(std::string_view w) {
-  return word_in(w, {"tipo", "fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa",
-                     "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente",
-                     "equipe", "servico"});
+  return word_in(w, {"tipo", "fonte", "pipeline", "verificar", "modelo", "treino", "busca",
+                     "tarefa", "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta",
+                     "agente", "equipe", "servico", "teste"});
 }
 
 bool is_stmt_keyword(std::string_view w) {

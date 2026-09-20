@@ -31,11 +31,11 @@ bool starts_with_ci(std::string_view s, std::string_view prefix) {
   return true;
 }
 
-const std::array<std::string_view, 22> kDeclKeywords = {
+const std::array<std::string_view, 23> kDeclKeywords = {
     "tipo",       "funcao",      "seja",      "constante", "importar", "de",
     "fonte",      "pipeline",    "verificar", "modelo",    "treino",   "busca",
     "tarefa",     "experimento", "avaliacao", "llm",       "indice",   "fluxo",
-    "ferramenta", "agente",      "equipe",    "servico"};
+    "ferramenta", "agente",      "equipe",    "servico",   "teste"};
 
 const std::array<std::string_view, 9> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar", "parar", "continuar"};
@@ -137,8 +137,10 @@ const std::vector<FieldSet>& field_sets() {
         "conf"}},
       {"pipeline", {"passos", "agenda", "ao_falhar"}},
       {"fluxo", {"entrada", "passos"}},
-      {"ferramenta", {"descricao", "entrada", "executar"}},
-      {"agente", {"llm", "papel", "ferramentas", "memoria", "max_passos"}},
+      {"ferramenta", {"descricao", "entrada", "executar", "requer_aprovacao"}},
+      {"agente",
+       {"llm", "papel", "ferramentas", "memoria", "max_passos", "protocolo", "max_tokens_sessao"}},
+      {"teste", {"passos"}},
       {"equipe", {"agentes", "estrategia", "supervisor", "objetivo"}},
       {"servico", {"porta", "dispositivo", "meio", "rota"}},
       {"verificar", {"nao_nulo", "unico", "intervalo", "ao_violar"}},
@@ -413,6 +415,11 @@ const std::vector<BuiltinDoc>& stdlib_docs() {
       {"base64_codificar", "base64_codificar(texto)", "texto", "Codifica em Base64.", nullptr},
       {"base64_decodificar", "base64_decodificar(texto)", "texto", "Decodifica Base64.", nullptr},
       {"json_texto", "json_texto(valor)", "valor", "Converte um valor em texto JSON.", nullptr},
+      {"afirmar", "afirmar(condicao, mensagem?)", "condicao,mensagem",
+       "Falha o `teste` (T901) se a condicao for falsa.", "afirmar total == 3, \"total errado\""},
+      {"afirmar_igual", "afirmar_igual(obtido, esperado, mensagem?)", "obtido,esperado,mensagem",
+       "Falha o `teste` mostrando esperado e obtido se forem diferentes.",
+       "afirmar_igual(dobro(2), 4)"},
       {"reranquear", "reranquear(consulta, itens, top_k?)", "consulta,itens,top_k",
        "Reordena resultados de buscar fundindo o ranking original com BM25 (RRF).",
        "reranquear(\"gato\", hits, 3)"},
@@ -457,6 +464,7 @@ const std::vector<KeywordDoc>& keyword_docs() {
       {"de", "Acompanha `importar`: `de stdlib.math importar media`."},
       {"fonte", "Declara uma fonte de dados (arquivo, URL, query, broker)."},
       {"pipeline", "Declara um pipeline de dados (bloco com `passos:`, `agenda:`, ...)."},
+      {"teste", "Declara um teste (bloco `passos:` com `afirmar`); rode com `tilt testar`."},
       {"verificar", "Declara regras de verificacao de dados."},
       {"modelo", "Declara um modelo (bloco com `camadas:`, `entrada:`, ...)."},
       {"treino", "Bloco de treino de um modelo (`dados:`, `perda:`, `epocas:`, ...)."},

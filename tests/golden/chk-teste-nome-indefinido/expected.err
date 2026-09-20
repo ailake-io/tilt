@@ -1,0 +1,8 @@
+erro[T030]: nome 'total' nao definido
+  --> input.tilt:3:15
+   |
+ 3 |     - afirmar total == 3
+   |               ^^^^^
+   |
+
+1 erro(s) em input.tilt

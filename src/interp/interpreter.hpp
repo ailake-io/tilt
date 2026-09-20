@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <ctime>
+#include <functional>
 #include <iosfwd>
 #include <map>
 #include <memory>
@@ -122,6 +123,21 @@ class Interpreter {
 
   // Returns 0 on success, 1 if a runtime error was reported.
   int run();
+
+  // Resultado de um bloco `teste nome:` (ver run_testes).
+  struct ResultadoTeste {
+    std::string nome;
+    bool ok = true;
+    std::string mensagem;  // erro T901 (com linha) quando !ok
+  };
+  // `tilt testar`: roda os blocos `teste` do programa (na ordem do arquivo) cujo
+  // nome contem `filtro` (vazio = todos). Cada teste roda isolado: uma falha
+  // (afirmar, erro de execucao) nao interrompe os demais. Registra funcoes e
+  // declaracoes antes; nao roda pipelines nem treinos.
+  // `apos_cada` (opcional) e chamado logo depois de cada teste, para o chamador
+  // recolher a saida produzida por ele.
+  std::vector<ResultadoTeste> run_testes(
+      const std::string& filtro, const std::function<void(const ResultadoTeste&)>& apos_cada = {});
 
   // `tilt executar --agendar`: loop forever (or TILT_AGENDAR_MAX runs with the
   // TILT_AGORA fake clock) firing each pipeline at its `agenda:` cron.

@@ -952,6 +952,54 @@ int Interpreter::run() {
   }
 }
 
+std::vector<Interpreter::ResultadoTeste> Interpreter::run_testes(
+    const std::string& filtro, const std::function<void(const ResultadoTeste&)>& apos_cada) {
+  std::vector<ResultadoTeste> resultados;
+  try {
+    register_decls();
+  } catch (const RuntimeAbort& a) {
+    ResultadoTeste r;
+    r.nome = "(preparacao)";
+    r.ok = false;
+    r.mensagem = "linha " + std::to_string(a.span.line) + ": " + a.message;
+    if (apos_cada) apos_cada(r);
+    resultados.push_back(std::move(r));
+    return resultados;
+  }
+  for (const auto& item : program_.items) {
+    if (!item || item->kind != ItemKind::Decl || item->key != "teste") continue;
+    ResultadoTeste r;
+    r.nome = decl_name(*item);
+    if (r.nome.empty()) r.nome = "(sem nome)";
+    if (!filtro.empty() && r.nome.find(filtro) == std::string::npos) continue;
+    const Item* passos = item->block ? find_field(*item->block, "passos") : nullptr;
+    if (!passos || !passos->block) {
+      r.ok = false;
+      r.mensagem = "linha " + std::to_string(item->span.line) +
+                   ": o teste precisa de um bloco 'passos:' (ex.: passos: / - afirmar 1 == 1)";
+      if (apos_cada) apos_cada(r);
+      resultados.push_back(std::move(r));
+      continue;
+    }
+    try {
+      Env env;
+      env.parent = &root_;
+      env.vars["teste"] = Value::texto(r.nome);
+      exec_block(*passos->block, env);
+    } catch (const RuntimeAbort& a) {
+      r.ok = false;
+      r.mensagem = "linha " + std::to_string(a.span.line) + ": " + a.message;
+    } catch (const ReturnSignal&) {
+      // `retornar` encerra o teste sem falha
+    } catch (const BreakSignal&) {
+    } catch (const ContinueSignal&) {
+    }
+    if (apos_cada) apos_cada(r);
+    resultados.push_back(std::move(r));
+  }
+  return resultados;
+}
+
 Value Interpreter::vm_call_hook(const std::string& name, std::vector<Value>& args, bool* handled) {
   // `ler_csv "arq"` compilado pela VM: tabela do runtime, como no interpretador.
   if (name == "ler_csv") {

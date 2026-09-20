@@ -93,7 +93,8 @@ add_library(tilt_core STATIC
   src/lsp/completion.cpp
   src/lsp/lsp_server.cpp
   src/interp/interpreter.cpp
-  src/cli/cli.cpp)
+  src/cli/cli.cpp
+  src/cli/dev_cmds.cpp)
 target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/generated)

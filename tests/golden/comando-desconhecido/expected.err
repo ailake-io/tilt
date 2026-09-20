@@ -9,6 +9,9 @@ comandos:
   executar <arquivo> [--agendar]     roda o programa no interpretador
   executar --vm <arquivo>            roda pipelines pelo bytecode VM
   executar --jit <arquivo>           JIT nativo; fallback para a VM
+  testar [caminho...] [--filtro X]   roda os blocos `teste` (afirmar, afirmar_igual)
+  formatar <caminho...> [--verificar]  normaliza espacos dos .tilt
+  novo <nome>                        cria um projeto (programa, testes, README)
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
                                      [--requisicoes N] [--threads N]
   servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via

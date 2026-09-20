@@ -1,0 +1,3 @@
+teste soma:
+  passos:
+    - afirmar total == 3

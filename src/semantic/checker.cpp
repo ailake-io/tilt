@@ -26,9 +26,9 @@ bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
 }
 
 bool is_entity_keyword(std::string_view kw) {
-  return word_in(kw, {"fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa", "experimento",
-                       "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente", "equipe",
-                       "servico"});
+  return word_in(kw, {"fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa",
+                      "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente",
+                      "equipe", "servico", "teste"});
 }
 
 bool is_secret_key(std::string_view key) {

@@ -531,6 +531,23 @@ const std::unordered_map<std::string, Handler>& tabela() {
       return Value::lista(std::move(out));
     };
 
+    // ---- testes (`teste nome:` + `tilt testar`) ----
+    m["afirmar"] = [](const Args& a) {
+      a.aridade(1, 2, "(condicao [, mensagem])");
+      if (!a[0].truthy()) {
+        a.falha("afirmacao falhou" + (a.tamanho() > 1 ? ": " + to_display(a[1]) : std::string()));
+      }
+      return Value::nulo();
+    };
+    m["afirmar_igual"] = [](const Args& a) {
+      a.aridade(2, 3, "(obtido, esperado [, mensagem])");
+      if (!equals(a[0], a[1])) {
+        a.falha("afirmacao falhou: esperado " + to_display(a[1]) + ", obtido " + to_display(a[0]) +
+                (a.tamanho() > 2 ? " (" + to_display(a[2]) + ")" : std::string()));
+      }
+      return Value::nulo();
+    };
+
     // ---- RAG ----
     m["reranquear"] = [](const Args& a) {
       a.aridade(2, 3, "(consulta, itens [, top_k])");

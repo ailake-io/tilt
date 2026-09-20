@@ -56,6 +56,11 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME dev_cmds
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/dev_cmds_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME equipe_paralela
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/equipe_paralela_test.sh
           $<TARGET_FILE:tilt>)

@@ -17,13 +17,14 @@
 #include <utility>
 #include <vector>
 
+#include "cli/dev_cmds.hpp"
+#include "codegen/codegen_arm64.hpp"
+#include "codegen/codegen_x86_64.hpp"
 #include "common/source.hpp"
 #include "diagnostics/diagnostic.hpp"
+#include "interp/interpreter.hpp"
 #include "lexer/lexer.hpp"
 #include "lexer/token.hpp"
-#include "codegen/codegen_x86_64.hpp"
-#include "codegen/codegen_arm64.hpp"
-#include "interp/interpreter.hpp"
 #include "lsp/completion.hpp"
 #include "lsp/lsp_server.hpp"
 #include "parser/ast_dump.hpp"
@@ -98,6 +99,9 @@ void print_usage(std::ostream& os) {
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
      << "  executar --vm <arquivo>            roda pipelines pelo bytecode VM\n"
      << "  executar --jit <arquivo>           JIT nativo; fallback para a VM\n"
+     << "  testar [caminho...] [--filtro X]   roda os blocos `teste` (afirmar, afirmar_igual)\n"
+     << "  formatar <caminho...> [--verificar]  normaliza espacos dos .tilt\n"
+     << "  novo <nome>                        cria um projeto (programa, testes, README)\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "                                     [--requisicoes N] [--threads N]\n"
      << "  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via\n"
@@ -451,6 +455,7 @@ BUILTINS
   listas:     ordenar unicos reverso zip enumerar chaves valores
   tempo:      agora timestamp formatar_data dormir   (UTC)
   arquivos:   ler_texto escrever_texto anexar_texto listar_arquivos remover_arquivo
+  testes:     afirmar afirmar_igual   (blocos `teste nome:` + `tilt testar`)
   rag:        reranquear   (indice.buscar ..., modo: "hibrido" so em memoria)
   ordem sup.: mapear filtrar reduzir qualquer todos   (com `funcao x: expr`)
   outros:     sha256 base64_codificar base64_decodificar json_texto json_ler
@@ -738,6 +743,9 @@ int run_cli(int argc, char** argv) {
   if (cmd == "lsp") return tilt::lsp::run_lsp(std::cin, std::cout);
   if (cmd == "checar") return cmd_checar(args);
   if (cmd == "executar") return cmd_executar(args);
+  if (cmd == "testar") return cmd_testar(args);
+  if (cmd == "formatar") return cmd_formatar(args);
+  if (cmd == "novo") return cmd_novo(args);
   if (cmd == "servir") return cmd_servir(args);
   if (cmd == "servir-catalogo") return cmd_servir_catalogo(args);
 
