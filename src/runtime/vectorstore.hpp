@@ -28,6 +28,15 @@ class MemoryIndex {
   std::vector<Entry> entries_;
 };
 
+// Resultado de `buscar` nos backends externos (qdrant, pgvector, weaviate,
+// pinecone, chroma): id, similaridade (maior = melhor) e o texto guardado no
+// `inserir` (vazio se o ponto foi gravado sem texto).
+struct VectorHit {
+  std::string id;
+  double score = 0.0;
+  std::string texto;
+};
+
 float cosine(const std::vector<float>& a, const std::vector<float>& b);
 
 }  // namespace tilt::rt

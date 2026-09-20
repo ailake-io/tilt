@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/vectorstore.hpp"
+
 namespace tilt::rt {
 
 // Indice vetorial remoto em Postgres + pgvector (SQL montado sobre o
@@ -13,9 +15,7 @@ namespace tilt::rt {
 // Distancia de cosseno via operador <=> do pgvector.
 void pgvector_upsert(const std::string& url, const std::string& tabela, const std::string& id,
                      const std::string& text, const std::vector<float>& vec);
-std::vector<std::pair<std::string, double>> pgvector_search(const std::string& url,
-                                                            const std::string& tabela,
-                                                            const std::vector<float>& vec,
-                                                            std::size_t k);
+std::vector<VectorHit> pgvector_search(const std::string& url, const std::string& tabela,
+                                       const std::vector<float>& vec, std::size_t k);
 
 }  // namespace tilt::rt

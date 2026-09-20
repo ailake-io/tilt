@@ -107,10 +107,33 @@ class MockWeaviate(http.server.BaseHTTPRequestHandler):
                 if partes[2] not in classes:
                     return self._enviar(*erro("classe nao encontrada: " + partes[2], 404))
                 return self._enviar({"class": partes[2], "vectorizer": "none"})
+            # Comportamento do Weaviate real: GET diz se o objeto existe; POST
+            # cria; PUT so atualiza um objeto existente (id novo => 500).
+            if len(partes) == 4 and partes[:2] == ["v1", "objects"] and metodo == "GET":
+                nome, oid = partes[2], partes[3]
+                if oid not in classes.get(nome, {}):
+                    return self._enviar(*erro("objeto nao encontrado: " + oid, 404))
+                return self._enviar({"class": nome, "id": oid})
+            if partes == ["v1", "objects"] and metodo == "POST":
+                corpo = self._corpo()
+                nome, oid = corpo.get("class"), corpo.get("id")
+                if nome not in classes:
+                    return self._enviar(*erro("classe nao encontrada: %s" % nome, 404))
+                if not oid or oid in classes[nome]:
+                    return self._enviar(*erro("id ausente ou ja existe", 422))
+                if not isinstance(corpo.get("vector"), list) or not corpo["vector"]:
+                    return self._enviar(*erro("objeto invalido: vector ausente", 422))
+                classes[nome][oid] = {
+                    "texto": (corpo.get("properties") or {}).get("texto", ""),
+                    "vector": corpo["vector"],
+                }
+                return self._enviar({"class": nome, "id": oid})
             if len(partes) == 4 and partes[:2] == ["v1", "objects"] and metodo == "PUT":
                 nome, oid = partes[2], partes[3]
                 if nome not in classes:
                     return self._enviar(*erro("classe nao encontrada: " + nome, 404))
+                if oid not in classes[nome]:
+                    return self._enviar(*erro("no object with id '%s'" % oid, 500))
                 corpo = self._corpo()
                 if not isinstance(corpo.get("vector"), list) or not corpo["vector"]:
                     return self._enviar(*erro("objeto invalido: vector ausente", 422))
@@ -147,9 +170,14 @@ class MockWeaviate(http.server.BaseHTTPRequestHandler):
             cos = sum(a * b for a, b in zip(vetor, ov)) / (norm * onorm)
             achados.append((oid, 1.0 - cos))  # distancia de cosseno
         achados.sort(key=lambda par: (par[1], par[0]))
+        quer_texto = re.search(r"\btexto\b", query.split("_additional")[0]) is not None
+        def item(oid, dist):
+            d = {"_additional": {"id": oid, "distance": dist}}
+            if quer_texto:
+                d["texto"] = classes[nome][oid]["texto"]
+            return d
         return self._enviar({"data": {"Get": {nome: [
-            {"_additional": {"id": oid, "distance": dist}}
-            for oid, dist in achados[:limite]]}}})
+            item(oid, dist) for oid, dist in achados[:limite]]}}})
 
     do_GET = lambda self: self._servir("GET")
     do_POST = lambda self: self._servir("POST")
@@ -206,6 +234,10 @@ check_output() {
   }
   echo "$linhas" | grep -q "c1" && {
     echo "c1 nao deveria estar no top 2: $out"; fail=1;
+  }
+  # o texto guardado no `inserir` volta no `buscar`
+  echo "$out" | grep -q "textos: gato e cachorro | gato domestico" || {
+    echo "saida sem os textos dos achados: $out"; fail=1;
   }
   echo "$out" | grep -q "top1: b1" || {
     echo "saida sem 'top1: b1': $out"; fail=1;

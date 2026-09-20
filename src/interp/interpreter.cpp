@@ -7604,7 +7604,7 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
           fail(call.span, std::string(e.what()));
         }
       }
-      std::vector<std::pair<std::string, double>> hits;
+      std::vector<rt::VectorHit> hits;
       try {
         if (qdrant) {
           hits = rt::qdrant_search(qdrant_base, qdrant_col, rt::llm_embed(emb_model, qt), k);
@@ -7624,8 +7624,9 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
       }
       for (const auto& h : hits) {
         Value row = Value::mapa();
-        row.map->set("id", Value::texto(h.first));
-        row.map->set("score", Value::decimal(h.second));
+        row.map->set("id", Value::texto(h.id));
+        row.map->set("texto", Value::texto(h.texto));
+        row.map->set("score", Value::decimal(h.score));
         out.list->push_back(std::move(row));
       }
       return out;

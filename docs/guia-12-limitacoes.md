@@ -273,12 +273,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   hora com a CLI `openssl`). Quando OpenSSL ou uma DLL/SO estiver ausente, o erro
   preserva os nomes tentados e o detalhe do carregador para orientar a instalação.
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
-  id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
-  `texto`, que fica no payload do ponto).
+  id tilt; `buscar` contra Qdrant devolve `id`, `texto` e `score` (ambos vêm do
+  payload do ponto; pontos de versões antigas, sem `tilt_id`, devolvem o UUID).
 - Weaviate: a classe é criada com `vectorizer: "none"` (o vetor vem pronto do
   `embeddings:`) e o nome deve ser de GraphQL (`[A-Z][_a-zA-Z0-9]*`); a busca
-  é GraphQL `nearVector` (cosseno, `score = 1 - distance`) e devolve `id` e
-  `score` (sem o `texto`, que fica na propriedade `texto` do objeto); no
+  é GraphQL `nearVector` (cosseno, `score = 1 - distance`) e devolve `id`,
+  `texto` (propriedade `texto` do objeto) e `score`; a gravação faz GET e depois
+  PUT (existe) ou POST (novo), pois o PUT de um id novo falha; no
   Weaviate real o `id` do objeto deve ser UUID; auth só por env
   `WEAVIATE_API_KEY` (Bearer), sem usuário/senha nem TLS dedicado (HTTP puro).
 - Pinecone: data plane apenas — o índice deve já existir na conta (criar
@@ -286,13 +287,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   é obrigatória (header `Api-Key`), com erro claro antes da rede quando
   ausente; o score já é similaridade de cosseno (maior = melhor, sem conversão
   como no Weaviate); `ensure` consulta `describe_index_stats` e valida o namespace antes de buscar; o upsert continua criando-o implicitamente;
-  `buscar` devolve `id` e `score`, sem o `texto` (que vai no `metadata.texto`).
+  `buscar` devolve `id`, `texto` (de `metadata.texto`) e `score`.
 - Chroma: HTTP puro, sem auth (Chroma open-source padrão; Chroma Cloud com
   auth/tls fica fora de escopo); a coleção é get-or-create (`POST
   /api/v1/collections` com o nome) e o `id` devolvido endereça add/query;
   a query devolve `distances` (`distance = 1 - cosseno` com `hnsw:space
   cosine`), então o score tilt é `1 - distance`; `buscar` devolve `id` e
-  `score`, sem o `texto` (que fica em `metadatas[].texto`/`documents[]`).
+  `texto` (de `documents[]`) e `score`.
 - pgvector: exige a extensão `vector` instalada no banco (o Tilt tenta
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
@@ -383,14 +384,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
   `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
-  `buscar` devolve `{ id, score }`, sem o texto), `"weaviate://host:porta/classe"`
-  (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, score }`, sem
-  o texto; auth por env `WEAVIATE_API_KEY`),
+  `buscar` devolve `{ id, texto, score }`), `"weaviate://host:porta/classe"`
+  (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, texto, score }`; auth por env `WEAVIATE_API_KEY`),
   `"pinecone://host-do-indice/namespace"` (REST via `curl`, sempre HTTPS,
-  `POST /query`; `buscar` devolve `{ id, score }`, sem o texto; exige env
+  `POST /query`; `buscar` devolve `{ id, texto, score }`; exige env
   `PINECONE_API_KEY` e índice já criado na conta) e
   `"chroma://host[:porta]/colecao"` (REST via `curl`, HTTP puro, sem auth;
-  coleção get-or-create; `buscar` devolve `{ id, score }`, sem o texto; o
+  coleção get-or-create; `buscar` devolve `{ id, texto, score }`; o
   score é `1 - distance` da query do Chroma).
 - Os embeddings do modo `mock` mantêm 16 dimensões e combinam tokens hasheados com trigrams
   com padding de borda e normalização L2; continuam sendo apenas um mock determinístico, não relevância real.

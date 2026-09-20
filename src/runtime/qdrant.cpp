@@ -101,18 +101,16 @@ void qdrant_upsert(const std::string& base, const std::string& collection,
                    const std::vector<float>& vec) {
   if (vec.empty()) die("vetor vazio para o id '" + id + "'");
   ensure_collection(base, collection, vec.size());
-  const std::string body = "{\"points\":[{\"id\":\"" + uuid_from_id(id) + "\",\"vector\":" +
-                           vec_json(vec) + ",\"payload\":{\"text\":\"" + json_escape(text) +
-                           "\"}}]}";
+  const std::string body = "{\"points\":[{\"id\":\"" + uuid_from_id(id) +
+                           "\",\"vector\":" + vec_json(vec) + ",\"payload\":{\"text\":\"" +
+                           json_escape(text) + "\",\"tilt_id\":\"" + json_escape(id) + "\"}}]}";
   http_json("PUT", base + "/collections/" + collection + "/points?wait=true", body);
 }
 
-std::vector<std::pair<std::string, double>> qdrant_search(const std::string& base,
-                                                          const std::string& collection,
-                                                          const std::vector<float>& vec,
-                                                          std::size_t k) {
+std::vector<VectorHit> qdrant_search(const std::string& base, const std::string& collection,
+                                     const std::vector<float>& vec, std::size_t k) {
   const std::string body = "{\"vector\":" + vec_json(vec) + ",\"limit\":" + std::to_string(k) +
-                           ",\"with_payload\":false}";
+                           ",\"with_payload\":true}";
   const std::string resp = http_json("POST", base + "/collections/" + collection + "/points/search",
                                      body);
   Value parsed;
@@ -121,7 +119,7 @@ std::vector<std::pair<std::string, double>> qdrant_search(const std::string& bas
   } catch (const std::exception& e) {
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
-  std::vector<std::pair<std::string, double>> out;
+  std::vector<VectorHit> out;
   if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
   const Value* result = parsed.map->find("result");
   if (!result || result->kind != ValueKind::Lista || !result->list) return out;
@@ -129,11 +127,23 @@ std::vector<std::pair<std::string, double>> qdrant_search(const std::string& bas
     if (hit.kind != ValueKind::Mapa || !hit.map) continue;
     const Value* id = hit.map->find("id");
     const Value* score = hit.map->find("score");
-    const std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
+    std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
     const double sc = score && (score->kind == ValueKind::Decimal || score->kind == ValueKind::Inteiro)
                           ? score->as_number()
                           : 0.0;
-    out.emplace_back(id_s, sc);
+    std::string texto;
+    if (const Value* payload = hit.map->find("payload");
+        payload && payload->kind == ValueKind::Mapa && payload->map) {
+      if (const Value* t = payload->map->find("text"); t && t->kind == ValueKind::Texto) {
+        texto = t->s;
+      }
+      // O id do Qdrant e um UUID derivado; devolve o id que o usuario inseriu.
+      if (const Value* orig = payload->map->find("tilt_id");
+          orig && orig->kind == ValueKind::Texto) {
+        id_s = orig->s;
+      }
+    }
+    out.push_back({id_s, sc, texto});
   }
   return out;
 }
