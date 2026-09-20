@@ -8706,6 +8706,10 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
       }
       return;
     }
+    case StmtKind::Break:
+      throw BreakSignal{};
+    case StmtKind::Continue:
+      throw ContinueSignal{};
     case StmtKind::ForEach: {
       Value seq = stmt.a ? eval(*stmt.a, env) : Value::nulo();
       if (seq.kind != ValueKind::Lista && seq.kind != ValueKind::Tabela) {
@@ -8720,17 +8724,27 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
           break;
         }
       }
+      // Corpo do laco; false = `parar`. `continuar` so encerra a iteracao.
+      auto rodar_corpo = [&](Env& inner) {
+        try {
+          exec_block(stmt.body, inner);
+        } catch (const ContinueSignal&) {
+        } catch (const BreakSignal&) {
+          return false;
+        }
+        return true;
+      };
       if (seq.list) {
         for (const Value& element : *seq.list) {
           Env inner;
           inner.parent = &env;
           inner.vars[stmt.name] = element;
           if (!qst) {
-            exec_block(stmt.body, inner);
+            if (!rodar_corpo(inner)) break;
             continue;
           }
           try {
-            exec_block(stmt.body, inner);
+            if (!rodar_corpo(inner)) break;
           } catch (const RuntimeAbort& a) {
             Value doc = Value::mapa();
             doc.map->set("linha", element);
@@ -8750,7 +8764,12 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
         if (++guard > kLoopGuard) fail(stmt.span, "laco 'enquanto' excedeu o limite de iteracoes");
         Env inner;
         inner.parent = &env;
-        exec_block(stmt.body, inner);
+        try {
+          exec_block(stmt.body, inner);
+        } catch (const ContinueSignal&) {
+        } catch (const BreakSignal&) {
+          break;
+        }
       }
       return;
     }

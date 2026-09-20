@@ -6,7 +6,7 @@
 
 namespace tilt {
 
-using namespace ast;
+using namespace ast;  // NOLINT(build/namespaces)
 
 namespace {
 
@@ -326,6 +326,19 @@ ItemPtr Parser::parse_item() {
 }
 
 ItemPtr Parser::parse_line_content(Span span) {
+  // `parar` / `continuar` sozinhos na linha controlam o laco; com qualquer
+  // outra coisa depois (`parar = 1`, `parar(x)`) continuam sendo nomes comuns.
+  if (at(TokenKind::Identifier) && (cur().lexeme == "parar" || cur().lexeme == "continuar")) {
+    const TokenKind proximo = peek(1).kind;
+    if (proximo == TokenKind::Newline || proximo == TokenKind::Dedent ||
+        proximo == TokenKind::EndOfFile) {
+      auto it = std::make_unique<Item>();
+      it->kind = ItemKind::Stmt;
+      it->span = span;
+      it->stmt = parse_loop_control();
+      return it;
+    }
+  }
   if (at(TokenKind::Identifier) && is_stmt_keyword(cur().lexeme) && cur().lexeme != "senao") {
     auto it = std::make_unique<Item>();
     it->kind = ItemKind::Stmt;
@@ -475,6 +488,14 @@ StmtPtr Parser::parse_return() {
   if (!at(TokenKind::Newline) && !at(TokenKind::Dedent) && !at(TokenKind::EndOfFile)) {
     s->a = parse_expr();
   }
+  accept(TokenKind::Newline);
+  return s;
+}
+
+StmtPtr Parser::parse_loop_control() {
+  auto s = std::make_unique<Stmt>();
+  s->kind = cur().lexeme == "parar" ? StmtKind::Break : StmtKind::Continue;
+  s->span = advance().span;
   accept(TokenKind::Newline);
   return s;
 }

@@ -156,6 +156,29 @@ pipeline fluxo:
   reservadas: o contexto sintático decide entre operador e nome).
 - `enquanto` tem guarda de 5 milhões de iterações (aborta com `T901`).
 - `tentar/capturar` captura `T9xx` de execução; a variável do `capturar` recebe a mensagem.
+- `parar` sai do laço mais interno e `continuar` pula para a próxima iteração.
+  Valem sozinhos na linha, dentro de `para cada`/`enquanto`; fora de laço o
+  `tilt checar` acusa `T014`. (`parar = 1` continua sendo uma atribuição comum.)
+
+```tilt run
+funcao primeiro_par lista:
+  para cada x em lista:
+    se x % 2 == 0:
+      retornar x
+  retornar nulo
+
+pipeline laco:
+  passos:
+    - soma = 0
+    - para cada n em [1, 2, 3, 4, 5, 6]:
+        se n % 2 == 0:
+          continuar      # pula os pares
+        se n > 5:
+          parar          # sai do laço
+        soma = soma + n
+    - imprimir soma                       # 9  (1 + 3 + 5)
+    - imprimir primeiro_par([1, 3, 8, 5]) # 8
+```
 
 ## Operadores
 

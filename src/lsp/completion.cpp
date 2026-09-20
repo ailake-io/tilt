@@ -37,8 +37,8 @@ const std::array<std::string_view, 22> kDeclKeywords = {
     "tarefa",     "experimento", "avaliacao", "llm",       "indice",   "fluxo",
     "ferramenta", "agente",      "equipe",    "servico"};
 
-const std::array<std::string_view, 7> kStmtKeywords = {
-    "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
+const std::array<std::string_view, 9> kStmtKeywords = {
+    "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar", "parar", "continuar"};
 
 const std::array<std::string_view, 65> kBuiltins = {"imprimir",
                                                     "registrar",

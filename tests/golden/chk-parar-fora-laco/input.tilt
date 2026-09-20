@@ -1,0 +1,6 @@
+funcao f:
+  parar
+
+pipeline t:
+  passos:
+    - imprimir 1

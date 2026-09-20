@@ -1989,6 +1989,18 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       if (s.a) check_expr(*s.a, scope);
       check_return(s.a.get(), s.span, types, shapes);
       return;
+    case ast::StmtKind::Break:
+    case ast::StmtKind::Continue: {
+      if (loop_depth_ == 0) {
+        const bool parar = s.kind == ast::StmtKind::Break;
+        report(DiagCode::UnexpectedToken, s.span,
+               std::string("'") + (parar ? "parar" : "continuar") + "' fora de um laco",
+               {std::string("so vale dentro de 'para cada' ou 'enquanto'"),
+                std::string("sugestao: mova '") + (parar ? "parar" : "continuar") +
+                    "' para dentro do laco, ou use 'retornar' para sair da funcao"});
+      }
+      return;
+    }
     case ast::StmtKind::If: {
       if (s.a) check_expr(*s.a, scope);
       const Scope scope_salva = scope;
@@ -2087,7 +2099,9 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       const MapShapes formas_salvas = formas_mapa_;
       const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
+      ++loop_depth_;
       walk_stmt_block(s.body, std::move(inner), shapes, types);
+      --loop_depth_;
       formas_mapa_ = formas_salvas;
       formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;
@@ -2098,7 +2112,9 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       const MapShapes formas_salvas = formas_mapa_;
       const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
+      ++loop_depth_;
       walk_stmt_block(s.body, scope, shapes, types);
+      --loop_depth_;
       formas_mapa_ = formas_salvas;
       formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;

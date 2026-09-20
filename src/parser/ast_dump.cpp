@@ -7,7 +7,7 @@
 namespace tilt {
 namespace {
 
-using namespace ast;
+using namespace ast;  // NOLINT(build/namespaces)
 
 std::string quote(std::string_view s) {
   std::string r = "\"";
@@ -182,6 +182,12 @@ struct Printer {
         expr(*s.b);
         os << ")\n";
         call_block(*s.b, ind + 1);
+        break;
+      case StmtKind::Break:
+        os << "(parar)\n";
+        break;
+      case StmtKind::Continue:
+        os << "(continuar)\n";
         break;
       case StmtKind::Return:
         os << "(retornar";

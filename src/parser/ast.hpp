@@ -44,7 +44,7 @@ enum class ExprKind {
 struct Arg {
   std::string name;              // vazio => posicional; [] => opcional/composicao
   ExprPtr value;                 // anotacao de tipo opcional (ex.: texto, tensor)
-  std::string optional_annotation; // "[]" quando marcado como [opcional: tipo] ou []
+  std::string optional_annotation;  // "[]" quando marcado como [opcional: tipo] ou []
   bool optional = false;         // marcado via [] (sem tipo) ou [opcional: tipo]
 };
 
@@ -74,7 +74,7 @@ struct Expr {
 
 // ---------------------------------------------------------------- statements
 
-enum class StmtKind { Expr, Assign, If, ForEach, While, Try, Return };
+enum class StmtKind { Expr, Assign, If, ForEach, While, Try, Return, Break, Continue };
 
 struct ElseIf {
   ExprPtr cond;

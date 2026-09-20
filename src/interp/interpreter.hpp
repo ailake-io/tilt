@@ -168,6 +168,10 @@ class Interpreter {
   struct ReturnSignal {
     rt::Value value;
   };
+  // `parar` / `continuar`: lancados por exec_stmt e consumidos pelo laco mais
+  // interno (o checker garante que so aparecem dentro de um).
+  struct BreakSignal {};
+  struct ContinueSignal {};
   struct RuntimeAbort {
     Span span;
     std::string message;

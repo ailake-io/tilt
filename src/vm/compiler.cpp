@@ -346,6 +346,9 @@ struct Builder {
         chunk.code[static_cast<std::size_t>(j_end)].a = static_cast<std::int32_t>(chunk.code.size());
         return;
       }
+      case StmtKind::Break:
+      case StmtKind::Continue:
+        bail("parar/continuar: fora do subconjunto da VM");
       case StmtKind::ForEach: {
         // Dessugar: it = <iteravel>; i = 0; enquanto i < tamanho(it): var =
         // it[i]; <corpo>; i = i + 1

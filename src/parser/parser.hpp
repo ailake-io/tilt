@@ -48,6 +48,7 @@ class Parser {
   ast::StmtPtr parse_while();
   ast::StmtPtr parse_try();
   ast::StmtPtr parse_return();
+  ast::StmtPtr parse_loop_control();  // `parar` / `continuar`
   ast::StmtPtr parse_assign_or_expr_stmt();
 
   // expressions
