@@ -1,0 +1,6 @@
+busca Otimizar: 4 de 90 combinacoes (aleatoria)
+  #1 taxa=0.001 lote=1 otimizador=sgd epocas=8 -> perda 0.8486
+  #2 taxa=0.05 lote=1 otimizador=adam epocas=3 -> perda 0.7928
+  #3 taxa=0.05 lote=4 otimizador=adam epocas=5 -> perda 0.7198
+  #4 taxa=0.005 lote=2 otimizador=sgd epocas=3 -> perda 0.8503
+busca Otimizar: melhor #3 (taxa=0.05 lote=4 otimizador=adam epocas=5) perda 0.7198

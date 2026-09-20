@@ -442,6 +442,13 @@ Roda todas as combinações (máx. 64) com os mesmos dados, imprime a tabela
 e deixa os melhores pesos no `modelo`. Aceita os mesmos campos do `treino`
 (`lote:`, `semente:`, `validacao:`, ...) menos `checkpoint:`/`retomar:`.
 
+**Busca aleatória**: para grades grandes, `estrategia: aleatoria` com
+`tentativas: N` (1 a 64) treina só `N` combinações sorteadas, sem repetição, de
+uma grade de até 1 milhão (`estrategia: grade` é o padrão). O sorteio é
+determinístico pela `semente:` da busca; a saída mostra `N de TOTAL combinacoes
+(aleatoria)`. Chaves de `grade`: `taxa`, `lote`, `otimizador`, `semente`, `epocas`.
+Busca bayesiana não existe.
+
 ### Dataloader streaming
 
 `carregador "dados.csv" ou "dados.parquet", alvo: "y", fluxo: verdadeiro` não materializa

@@ -5188,8 +5188,45 @@ void Interpreter::run_busca(const Item& decl) {
   }
   std::size_t total = 1;
   for (const Dimensao& d : grade) total *= d.valores.size();
-  if (total > 64) {
-    fail(decl.span, ctx + ": grade grande demais (" + std::to_string(total) + " > 64 combinacoes)");
+  // Estrategia: `grade` (todas as combinacoes, ate 64) ou `aleatoria`
+  // (`tentativas:` combinacoes sorteadas sem repeticao da grade, ate 64, sobre
+  // grades de ate 1 milhao; deterministica pela `semente:` da busca).
+  std::string estrategia = "grade";
+  if (const Item* fe = find_field(cfg, "estrategia"); fe && fe->value) {
+    if (fe->value->kind != ExprKind::Name ||
+        (fe->value->text != "grade" && fe->value->text != "aleatoria")) {
+      fail(decl.span, ctx + ": 'estrategia' deve ser grade | aleatoria");
+    }
+    estrategia = fe->value->text;
+  }
+  const bool aleatoria = estrategia == "aleatoria";
+  std::vector<std::size_t> escolhidas;  // indices (mista-base) das combinacoes a treinar
+  if (aleatoria) {
+    if (total > 1000000) {
+      fail(decl.span, ctx + ": grade grande demais para sortear (" + std::to_string(total) +
+                          " > 1000000 combinacoes)");
+    }
+    const int pedidas = field_int(cfg, "tentativas", 8);
+    if (pedidas < 1 || pedidas > 64) {
+      fail(decl.span, ctx + ": 'tentativas' deve estar entre 1 e 64");
+    }
+    const std::size_t n_sorteio = std::min<std::size_t>(static_cast<std::size_t>(pedidas), total);
+    std::vector<std::size_t> todas(total);
+    for (std::size_t i = 0; i < total; ++i) todas[i] = i;
+    std::mt19937_64 rng_busca(base.seed_mistura * 0x9E3779B97F4A7C15ULL + 0xB05CA);
+    // Fisher-Yates parcial: as n_sorteio primeiras posicoes sao a amostra.
+    for (std::size_t i = 0; i < n_sorteio; ++i) {
+      const std::size_t j = i + static_cast<std::size_t>(sortear_indice(rng_busca, total - i));
+      std::swap(todas[i], todas[j]);
+    }
+    escolhidas.assign(todas.begin(), todas.begin() + static_cast<std::ptrdiff_t>(n_sorteio));
+  } else {
+    if (total > 64) {
+      fail(decl.span, ctx + ": grade grande demais (" + std::to_string(total) +
+                          " > 64 combinacoes; use 'estrategia: aleatoria' com 'tentativas: N')");
+    }
+    escolhidas.resize(total);
+    for (std::size_t i = 0; i < total; ++i) escolhidas[i] = i;
   }
 
   auto rotulo_valor = [&](const std::string& chave, const ast::Expr* v) {
@@ -5201,14 +5238,28 @@ void Interpreter::run_busca(const Item& decl) {
     }
     return v->text;
   };
-  out_ << "busca " << name << ": " << total << " combinacoes\n";
+  if (aleatoria) {
+    out_ << "busca " << name << ": " << escolhidas.size() << " de " << total
+         << " combinacoes (aleatoria)\n";
+  } else {
+    out_ << "busca " << name << ": " << total << " combinacoes\n";
+  }
   double melhor_nota = 0.0;
   bool tem_melhor = false;
   std::size_t melhor_i = 0;
   std::string melhor_rotulo;
   TreinoRelato melhor_relato;
   std::vector<std::size_t> pos(grade.size(), 0);
-  for (std::size_t comb = 0; comb < total; ++comb) {
+  for (std::size_t comb = 0; comb < escolhidas.size(); ++comb) {
+    // Decodifica o indice em posicoes por dimensao (a ultima varia mais rapido,
+    // como na grade completa).
+    {
+      std::size_t resto = escolhidas[comb];
+      for (std::size_t k = grade.size(); k-- > 0;) {
+        pos[k] = resto % grade[k].valores.size();
+        resto /= grade[k].valores.size();
+      }
+    }
     TreinoCfg tentativa = base;
     std::string rotulo;
     for (std::size_t k = 0; k < grade.size(); ++k) {
@@ -5250,10 +5301,6 @@ void Interpreter::run_busca(const Item& decl) {
       melhor_nota = criterio == "perda" ? r.ultima : nota;
       melhor_rotulo = rotulo;
       melhor_relato = std::move(r);
-    }
-    for (std::size_t k = grade.size(); k-- > 0;) {
-      if (++pos[k] < grade[k].valores.size()) break;
-      pos[k] = 0;
     }
   }
   {

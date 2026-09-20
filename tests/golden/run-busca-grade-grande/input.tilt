@@ -1,0 +1,22 @@
+modelo Rede:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 4
+      ativacao: relu
+    - densa: 2
+    - softmax
+
+busca Otimizar:
+  modelo: Rede
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  perda: entropia_cruzada
+  epocas: 5
+  semente: 11
+  estrategia: grade
+  tentativas: 4
+  criterio: perda
+  grade:
+    taxa: [0.001, 0.005, 0.01, 0.05, 0.1]
+    lote: [1, 2, 4]
+    otimizador: [sgd, adam]
+    epocas: [3, 5, 8]

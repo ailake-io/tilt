@@ -54,7 +54,7 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `validacao_cruzada:`, `imputar:`, métricas (acurácia, f1 ponderado, auc,
   matriz_confusao, rmse, r2, inércia) e `registrar_em: mlflow://` via
   Tracking REST. Detalhes e limites no guia 04 e no guia 12.
-- Restam busca aleatória/bayesiana e outras estratégias além da grade.
+- Busca aleatória existe (`estrategia: aleatoria`); resta a bayesiana.
 
 ## Deep learning — treino real, mas de brinquedo
 
@@ -79,7 +79,7 @@ cruzada/quadrática, autograd manual.
   de taxa (`cosseno`/`degrau`), `validacao:` + `parar_cedo:` (restaura
   melhores pesos), `busca` em grade com `criterio:`, dataloader streaming de CSV e Parquet (`carregador ..., fluxo: verdadeiro` + `bloco:`)
   e exportação `gguf` (v3, só escrita), Safetensors F32 e exportação ONNX das recorrentes e residuais.
-- **Faltam**: busca de hiperparâmetros além de grade (random/bayesiana),
+- **Faltam**: busca bayesiana de hiperparâmetros (grade e aleatória existem),
   `gguf` com quantização (hoje só F32).
 
 ## LLM / RAG — funcional, falta engenharia de produção
