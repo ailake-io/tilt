@@ -232,6 +232,33 @@ pipeline indexar:
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).
 
+
+### Busca híbrida e reranking
+
+Índice `"memoria"`: `buscar "consulta", modo: "hibrido"` funde (RRF, k = 60) o
+ranking por vetor com o de palavras-chave (BM25 sobre o `texto`); o `score` do hit
+passa a ser o score fundido, não um cosseno. Para qualquer backend (inclusive
+Qdrant, pgvector etc.), busque mais candidatos e reordene:
+`reranquear(consulta, hits, top_k)` faz o mesmo BM25 sobre os candidatos, funde com
+a ordem de entrada e devolve os `top_k` melhores (o `score` antigo vira
+`score_original`). Aceita também uma lista de textos. `modo: "hibrido"` em backend
+externo é erro claro.
+
+```tilt run
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+  dimensao: 16
+  metrica: cosseno
+
+pipeline hibrido:
+  passos:
+    - base.inserir([{ id: "a", texto: "o gato dorme no sofa" }, { id: "b", texto: "kafka e streaming" }])
+    - candidatos = base.buscar("gato", top_k: 2)
+    - melhores = reranquear("gato", candidatos, 1)
+    - imprimir tamanho melhores
+```
+
 ## `avaliacao` (evals)
 
 Evals de 1ª passada: o bloco `avaliacao` roda `executar:` uma vez por caso

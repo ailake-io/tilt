@@ -22,6 +22,7 @@
 #include "runtime/compat.hpp"
 #include "runtime/json.hpp"
 #include "runtime/sha256.hpp"
+#include "runtime/vectorstore.hpp"
 
 namespace tilt::rt {
 
@@ -527,6 +528,55 @@ const std::unordered_map<std::string, Handler>& tabela() {
       a.aridade(1, 1, "(mapa)");
       ValueList out;
       for (const auto& kv : a.mapa(0).items) out.push_back(kv.second);
+      return Value::lista(std::move(out));
+    };
+
+    // ---- RAG ----
+    m["reranquear"] = [](const Args& a) {
+      a.aridade(2, 3, "(consulta, itens [, top_k])");
+      const std::string& consulta = a.txt(0);
+      const ValueList& itens = a.lista(1);
+      std::size_t k = itens.size();
+      if (a.tamanho() > 2) {
+        const double kd = a.num(2);
+        if (kd < 1) a.falha("top_k deve ser >= 1");
+        k = std::min<std::size_t>(k, static_cast<std::size_t>(kd));
+      }
+      // Cada item: mapa com `texto` (ex.: resultado de `buscar`) ou o proprio texto.
+      std::vector<std::string> textos;
+      for (const Value& it : itens) {
+        if (it.kind == ValueKind::Texto) {
+          textos.push_back(it.s);
+        } else if (it.kind == ValueKind::Mapa && it.map && it.map->find("texto") &&
+                   it.map->find("texto")->kind == ValueKind::Texto) {
+          textos.push_back(it.map->find("texto")->s);
+        } else {
+          a.falha("cada item deve ser um texto ou um mapa com o campo 'texto'");
+        }
+      }
+      // A ordem de entrada e o ranking original (1o = melhor): vira score decrescente.
+      std::vector<double> original(itens.size());
+      for (std::size_t i = 0; i < itens.size(); ++i) {
+        original[i] = static_cast<double>(itens.size() - i);
+      }
+      const std::vector<double> fundido = fusao_rrf(original, bm25_scores(consulta, textos));
+      std::vector<std::size_t> ordem(itens.size());
+      for (std::size_t i = 0; i < ordem.size(); ++i) ordem[i] = i;
+      std::stable_sort(ordem.begin(), ordem.end(),
+                       [&](std::size_t x, std::size_t y) { return fundido[x] > fundido[y]; });
+      ValueList out;
+      for (std::size_t r = 0; r < k; ++r) {
+        const Value& it = itens[ordem[r]];
+        Value item = Value::mapa();
+        if (it.kind == ValueKind::Mapa) {
+          for (const auto& kv : it.map->items) item.map->set(kv.first, kv.second);
+          if (const Value* s = it.map->find("score")) item.map->set("score_original", *s);
+        } else {
+          item.map->set("texto", it);
+        }
+        item.map->set("score", Value::decimal(fundido[ordem[r]]));
+        out.push_back(std::move(item));
+      }
       return Value::lista(std::move(out));
     };
 

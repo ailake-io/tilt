@@ -7597,6 +7597,13 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
     Value out = Value::lista();
     if (qdrant || pgvector || weaviate || pinecone || chroma) {
+      if (const Value* mb = kw.find("modo");
+          mb && mb->kind == ValueKind::Texto && mb->s == "hibrido") {
+        fail(
+            call.span,
+            "buscar: modo \"hibrido\" so vale para armazenamento \"memoria\"; com backend "
+            "externo busque mais candidatos (top_k maior) e use reranquear(consulta, hits, top_k)");
+      }
       if (pinecone) {
         try {
           rt::pinecone_ensure_namespace(pinecone_base, pinecone_ns);
@@ -7631,7 +7638,14 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
       }
       return out;
     }
-    auto hits = store.search(rt::llm_embed(emb_model, qt), k);
+    std::string modo_busca = "vetorial";
+    if (const Value* mb = kw.find("modo"); mb && mb->kind == ValueKind::Texto) modo_busca = mb->s;
+    if (modo_busca != "vetorial" && modo_busca != "hibrido") {
+      fail(call.span,
+           "buscar: modo '" + modo_busca + "' invalido (use \"vetorial\" ou \"hibrido\")");
+    }
+    auto hits = modo_busca == "hibrido" ? store.search_hibrido(qt, rt::llm_embed(emb_model, qt), k)
+                                        : store.search(rt::llm_embed(emb_model, qt), k);
     for (const auto& h : hits) {
       Value row = Value::mapa();
       row.map->set("id", Value::texto(h.id));
