@@ -1,0 +1,31 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+ferramenta eco:
+  descricao: "Repete."
+  entrada:
+    texto: texto
+  executar:
+    retornar texto
+
+agente Curto:
+  llm: gpt
+  papel: "Responde."
+  ferramentas: [eco, eco, eco]
+  max_passos: 6
+  max_tokens_sessao: 30
+
+agente Livre:
+  llm: gpt
+  papel: "Responde."
+  ferramentas: [eco, eco, eco]
+  max_passos: 6
+
+pipeline p:
+  passos:
+    - a = Curto.responder "um texto razoavelmente longo para gastar tokens"
+    - imprimir a.texto, tamanho(a.rastro)
+    - b = Livre.responder "um texto razoavelmente longo para gastar tokens"
+    - imprimir b.texto, tamanho(b.rastro)

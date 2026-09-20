@@ -1,0 +1,41 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+ferramenta apagar_tudo:
+  descricao: "Apaga tudo (destrutiva)."
+  requer_aprovacao: verdadeiro
+  entrada:
+    texto: texto
+  executar:
+    retornar "apagado"
+
+ferramenta ler:
+  descricao: "Le algo."
+  entrada:
+    texto: texto
+  executar:
+    retornar "lido"
+
+agente Ops:
+  llm: gpt
+  papel: "Opera."
+  ferramentas: [ler, apagar_tudo]
+  max_passos: 5
+
+agente Nativo:
+  llm: gpt
+  papel: "Opera."
+  ferramentas: [ler, apagar_tudo]
+  protocolo: nativo
+  max_passos: 5
+
+pipeline p:
+  passos:
+    - r = Ops.responder "limpar"
+    - para cada x em r.rastro:
+        imprimir "texto:", x.passo, x.ferramenta, x.observacao, x?.negada
+    - r2 = Nativo.responder "limpar"
+    - para cada x em r2.rastro:
+        imprimir "nativo:", x.passo, x.ferramenta, x.observacao, x?.negada

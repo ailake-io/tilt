@@ -102,6 +102,18 @@ uma resposta sem chamadas ou `max_passos`. O padrão continua sendo
 na ordem. Coberto por `tests/agent_native_test.sh` (servidor falso nos dois
 formatos).
 
+### Guardrails
+
+- `ferramenta` com `requer_aprovacao: verdadeiro` só roda depois de uma
+  aprovação humana. `TILT_APROVAR=sim` (ou `todas`) aprova, `TILT_APROVAR=nao`
+  nega; sem a variável, o `tilt` pergunta no terminal (`Executar? [s/N]`) e, sem
+  terminal interativo, nega. Uma ferramenta negada não aborta o agente: a
+  observação vira `[negada] <motivo>` e a entrada do `rastro` ganha
+  `negada: verdadeiro`.
+- `agente` com `max_tokens_sessao: N` para de chamar o LLM quando a soma de
+  tokens (entrada + saída) de uma chamada de `.responder` chega a `N` e responde
+  `[agente] limite de tokens da sessao (N) atingido`. `0`/ausente = sem teto.
+
 ## `equipe`
 
 ```tilt run

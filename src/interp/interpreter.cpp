@@ -1,5 +1,9 @@
 #include "interp/interpreter.hpp"
 
+#if !defined(_WIN32)
+#include <unistd.h>  // isatty (aprovacao de ferramentas)
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -7835,6 +7839,40 @@ Value tool_json_schema(const Item& tool_decl) {
   return schema;
 }
 
+bool field_bool(const ast::Block& block, std::string_view key, bool fallback) {
+  const Item* f = find_field(block, key);
+  if (f && f->value && f->value->kind == ExprKind::BoolLit) return f->value->boolean;
+  return fallback;
+}
+
+// Aprovacao humana antes de uma `ferramenta` com `requer_aprovacao: verdadeiro`
+// ser executada por um agente. TILT_APROVAR=sim|todas aprova, =nao nega; sem a
+// variavel, pergunta no terminal (stdin e stderr interativos) ou nega.
+bool aprovar_execucao(const std::string& nome, const rt::ValueMap& args, std::string& motivo) {
+  const char* v = std::getenv("TILT_APROVAR");
+  const std::string modo = v ? v : "";
+  if (modo == "sim" || modo == "todas") return true;
+  if (modo == "nao") {
+    motivo = "TILT_APROVAR=nao";
+    return false;
+  }
+#if !defined(_WIN32)
+  if (isatty(STDIN_FILENO) != 0 && isatty(STDERR_FILENO) != 0) {
+    std::cerr << "[aprovacao] o agente quer executar a ferramenta '" << nome << "' com "
+              << to_display(args_to_value(args)) << ". Executar? [s/N] " << std::flush;
+    std::string linha;
+    if (std::getline(std::cin, linha)) {
+      for (char& c : linha) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (linha == "s" || linha == "sim" || linha == "y" || linha == "yes") return true;
+    }
+    motivo = "negada pelo usuario";
+    return false;
+  }
+#endif
+  motivo = "requer aprovacao (defina TILT_APROVAR=sim ou rode em um terminal interativo)";
+  return false;
+}
+
 std::string tool_params_desc(const Item& tool_decl) {
   std::string out;
   if (tool_decl.block) {
@@ -7934,6 +7972,26 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   Value rastro = Value::lista();
   std::string answer;
 
+  // Guardrails: `max_tokens_sessao` (entrada + saida acumuladas nesta chamada
+  // de .responder) e `requer_aprovacao: verdadeiro` nas ferramentas.
+  const long long teto_tokens_sessao = field_int(cfg, "max_tokens_sessao", 0);
+  long long tokens_usados = 0;
+  bool teto_estourado = false;
+  const std::string msg_teto =
+      "[agente] limite de tokens da sessao (" + std::to_string(teto_tokens_sessao) + ") atingido";
+  auto executar_ferramenta = [&](const Item& decl, const std::string& nome, const rt::ValueMap& a,
+                                 bool& negada) -> Value {
+    negada = false;
+    if (decl.block && field_bool(*decl.block, "requer_aprovacao", false)) {
+      std::string motivo;
+      if (!aprovar_execucao(nome, a, motivo)) {
+        negada = true;
+        return Value::texto("[negada] " + motivo);
+      }
+    }
+    return run_tool(decl, a, call.span);
+  };
+
   if (llm_name.empty()) {
     // Sem LLM: cada ferramenta roda uma vez com entradas best-effort e a
     // resposta e' local.
@@ -7941,13 +7999,15 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
     for (const auto& [tname, tdecl] : tools) {
       if (step >= max_passos) break;
       rt::ValueMap targs = best_effort_args(*tdecl, prompt);
-      Value obs = run_tool(*tdecl, targs, call.span);
+      bool negada = false;
+      Value obs = executar_ferramenta(*tdecl, tname, targs, negada);
       ++step;
       Value entry = Value::mapa();
       entry.map->set("passo", Value::inteiro(step));
       entry.map->set("ferramenta", Value::texto(tname));
       entry.map->set("argumentos", args_to_value(targs));
       entry.map->set("observacao", Value::texto(to_display(obs)));
+      if (negada) entry.map->set("negada", Value::logico(true));
       rastro.list->push_back(std::move(entry));
     }
     answer = "[sem llm] " + message;
@@ -7977,12 +8037,17 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
       conversa.push_back({"user", prompt, {}, ""});
       std::string observations;
       for (int step = 1; step <= max_passos && answer.empty(); ++step) {
+        if (teto_tokens_sessao > 0 && tokens_usados >= teto_tokens_sessao) {
+          teto_estourado = true;
+          break;
+        }
         rt::RespostaFerramentas resp;
         try {
           resp = rt::llm_chat_ferramentas(cadeia, system, conversa, defs);
         } catch (const std::exception& e) {
           fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
         }
+        tokens_usados += resp.tok_entrada + resp.tok_saida;
         if (resp.chamadas.empty()) {
           answer = resp.texto;
           if (answer.empty()) answer = "[agente] o LLM nao devolveu texto nem chamadas";
@@ -8003,17 +8068,20 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
           if (chamada.argumentos.kind == ValueKind::Mapa && chamada.argumentos.map) {
             for (const auto& [k, v] : chamada.argumentos.map->items) targs.set(k, v);
           }
-          Value obs = run_tool(*tit->second, targs, call.span);
+          bool negada = false;
+          Value obs = executar_ferramenta(*tit->second, chamada.nome, targs, negada);
           Value entry = Value::mapa();
           entry.map->set("passo", Value::inteiro(step));
           entry.map->set("ferramenta", Value::texto(chamada.nome));
           entry.map->set("argumentos", args_to_value(targs));
           entry.map->set("observacao", Value::texto(to_display(obs)));
+          if (negada) entry.map->set("negada", Value::logico(true));
           rastro.list->push_back(std::move(entry));
           observations += "- " + chamada.nome + ": " + to_display(obs) + "\n";
           conversa.push_back({"tool", to_display(obs), {}, chamada.id});
         }
       }
+      if (answer.empty() && teto_estourado) answer = msg_teto;
       if (answer.empty()) {
         try {
           answer = rt::llm_chat_cadeia(cadeia,
@@ -8045,11 +8113,17 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
 
       std::string observations;
       for (int step = 1; step <= max_passos && answer.empty(); ++step) {
+        if (teto_tokens_sessao > 0 && tokens_usados >= teto_tokens_sessao) {
+          teto_estourado = true;
+          break;
+        }
         std::string user = "Pedido do usuario: " + prompt + "\n";
         if (!observations.empty()) user += "\nObservacoes ate agora:\n" + observations;
         std::string raw;
         try {
-          raw = rt::llm_chat_cadeia(cadeia, system, user).texto;
+          const rt::RespostaLLM resp = rt::llm_chat_cadeia(cadeia, system, user);
+          raw = resp.texto;
+          tokens_usados += resp.tok_entrada + resp.tok_saida;
         } catch (const std::exception& e) {
           fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
         }
@@ -8065,17 +8139,20 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         }
         rt::ValueMap targs = best_effort_args(*tit->second, prompt);
         for (const auto& [k, v] : action.args.items) targs.set(k, v);  // JSON sobrescreve
-        Value obs = run_tool(*tit->second, targs, call.span);
+        bool negada = false;
+        Value obs = executar_ferramenta(*tit->second, action.tool, targs, negada);
 
         Value entry = Value::mapa();
         entry.map->set("passo", Value::inteiro(step));
         entry.map->set("ferramenta", Value::texto(action.tool));
         entry.map->set("argumentos", args_to_value(targs));
         entry.map->set("observacao", Value::texto(to_display(obs)));
+        if (negada) entry.map->set("negada", Value::logico(true));
         rastro.list->push_back(std::move(entry));
         observations += "- " + action.tool + ": " + to_display(obs) + "\n";
       }
 
+      if (answer.empty() && teto_estourado) answer = msg_teto;
       if (answer.empty()) {
         // Estourou max_passos sem resposta final: uma ultima chamada pede a
         // sintese com o que foi observado.
