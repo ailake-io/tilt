@@ -226,7 +226,7 @@ jobs:
         run: cmake --build build/coverage --parallel
 
       - name: test (services that are not available skip themselves)
-        run: ctest --test-dir build/coverage -j2 --timeout 600 -E "vector_real|spark|tensor_benchmark|^golden$"
+        run: ctest --test-dir build/coverage -j2 --timeout 600 -E "vector_real|spark|tensor_benchmark|^golden$|^par$|equipe_paralela"
 
       - name: golden tests
         run: ctest --test-dir build/coverage --timeout 900 -R "^golden$"

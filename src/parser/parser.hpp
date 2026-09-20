@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -87,8 +88,21 @@ class Parser {
   // `[` seguidos estouraria a pilha (segfault) em vez de virar diagnostico.
   int profundidade_ = 0;
   static constexpr int kProfundidadeMax = 200;
+  // Alem da contagem de niveis, limita os bytes de pilha usados pelo parser desde
+  // parse_program: o MSVC (pilha de 1 MB, frames grandes em Debug) estoura bem antes
+  // de 200 niveis, e o tamanho do frame varia entre compiladores.
+  static constexpr std::uintptr_t kPilhaMaxBytes = 128 * 1024;
+  std::uintptr_t base_pilha_ = 0;
   struct Nivel {
-    explicit Nivel(Parser& p) : p_(p), estourou_(++p.profundidade_ > kProfundidadeMax) {}
+    explicit Nivel(Parser& p) : p_(p), estourou_(++p.profundidade_ > kProfundidadeMax) {
+      if (!estourou_ && p.base_pilha_ != 0) {
+        char marcador = 0;
+        const auto agora = reinterpret_cast<std::uintptr_t>(&marcador);
+        const std::uintptr_t usado =
+            agora < p.base_pilha_ ? p.base_pilha_ - agora : agora - p.base_pilha_;
+        estourou_ = usado > kPilhaMaxBytes;
+      }
+    }
     ~Nivel() { --p_.profundidade_; }
     Nivel(const Nivel&) = delete;
     Nivel& operator=(const Nivel&) = delete;

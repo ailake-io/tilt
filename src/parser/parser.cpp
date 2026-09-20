@@ -104,6 +104,8 @@ void Parser::report(DiagCode code, Span span, std::string message, std::vector<s
 // --------------------------------------------------------------------- program
 
 Program Parser::parse_program() {
+  char marcador_pilha = 0;  // referencia para medir a pilha usada pela recursao
+  base_pilha_ = reinterpret_cast<std::uintptr_t>(&marcador_pilha);
   Program program;
   skip_newlines();
   while (!at(TokenKind::EndOfFile)) {
@@ -558,8 +560,9 @@ ExprPtr Parser::recuperar_profundidade() {
   if (!profundidade_reportada_) {
     profundidade_reportada_ = true;
     report(DiagCode::UnexpectedToken, span,
-           "expressao ou bloco aninhado demais (maximo " + std::to_string(kProfundidadeMax) +
-               " niveis)",
+           "expressao ou bloco aninhado demais (limite de profundidade do parser: ~" +
+               std::to_string(kProfundidadeMax) + " niveis ou " +
+               std::to_string(kPilhaMaxBytes / 1024) + " KB de pilha)",
            {"simplifique a estrutura ou divida em passos/variaveis intermediarias"});
   }
   synchronize();  // consome ate a proxima linha: garante progresso do parser

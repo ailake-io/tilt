@@ -1,8 +1,8 @@
-erro[T014]: expressao ou bloco aninhado demais (maximo 200 niveis)
-  --> input.tilt:3:110
+erro[T014]: expressao ou bloco aninhado demais (limite de profundidade do parser: ~200 niveis ou 128 KB de pilha)
+  --> input.tilt:3:82
    |
  3 |     - x = [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]
-   |                                                                                                              ^
+   |                                                                                  ^
    |
    = simplifique a estrutura ou divida em passos/variaveis intermediarias
 
@@ -219,88 +219,4 @@ erro[T013]: esperado ']', encontrado DEDENT
 erro[T013]: esperado ']', encontrado DEDENT
   --> input.tilt:4:1
 
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-erro[T013]: esperado ']', encontrado DEDENT
-  --> input.tilt:4:1
-
-100 erro(s) em input.tilt
+72 erro(s) em input.tilt
