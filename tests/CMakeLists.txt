@@ -56,6 +56,11 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME mongo_real
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mongo_real_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME cron_nomes
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cron_nomes_test.sh
           $<TARGET_FILE:tilt>)

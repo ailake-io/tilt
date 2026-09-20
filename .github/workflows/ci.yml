@@ -131,8 +131,22 @@ jobs:
       - name: build
         run: cmake --build --preset release
 
+      - name: start MongoDB
+        run: |
+          docker run -d --name tilt-mongo-ci -p 127.0.0.1:27017:27017 mongo:7
+          for i in $(seq 1 60); do
+            docker exec tilt-mongo-ci mongosh --quiet --eval 'db.runCommand({ping:1}).ok' 2>/dev/null | grep -q 1 && break
+            sleep 1
+          done
+
       - name: connector integration tests
-        run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse)$" --output-on-failure
+        env:
+          TILT_MONGO_REAL_URL: mongodb://127.0.0.1:27017/tilt_real
+        run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse|mongo_real)$" --output-on-failure
+
+      - name: cleanup MongoDB
+        if: always()
+        run: docker rm -f tilt-mongo-ci || true
 
 
   vector_connectors:

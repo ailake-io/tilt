@@ -191,10 +191,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   com reverse proxy local ou a rede interna).
 - MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
   `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
-  básico completo — restam: `mongo_agregar` lê só o `firstBatch` do cursor
-  (sem `getMore`; use `$limit`/`$skip` para caber no primeiro batch) e não
-  valida as etapas (erro de pipeline vira erro claro do servidor), update só
-  com `$set`/`$inc` (sem `$unset` e demais operadores), projeção de
+  básico completo, validado contra um `mongod` 7 real (`tests/mongo_real_test.sh`):
+  `mongo_buscar` e `mongo_agregar` seguem o cursor com `getMore` até o fim
+  (o `cursor.id` é int64), `mongo_agregar` não valida as etapas (erro de
+  pipeline vira erro claro do servidor) e o update aceita `$set`, `$inc`,
+  `$unset`, `$push`, `$addToSet`, `$pull`, `$mul`, `$min`, `$max`, `$rename` e
+  `$currentDate` — restam: projeção de
   `mongo_buscar` só whitelist (`somente:`; sem exclusões tipo `{campo: 0}`),
   sem índices de texto/TTL, filtro de `mongo_buscar` só por igualdade exata
   top-level (combinado por E), `mongo_deletar` remove sempre todos que casam
