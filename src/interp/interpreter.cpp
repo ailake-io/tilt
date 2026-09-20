@@ -9436,6 +9436,40 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
         Value* f = base.map->find(idx.kind == ValueKind::Texto ? idx.s : to_display(idx));
         return f ? *f : Value::nulo();
       }
+      if (base.kind == ValueKind::Tensor && base.tensor) {
+        // `t[i]` / `t[i, j]`: cada indice fixa um eixo (negativo conta do fim). Com
+        // todos os eixos fixos devolve o escalar (decimal); senao o sub-tensor.
+        const rt::Tensor& t = *base.tensor;
+        if (t.shape.empty() || expr.elems.size() > t.shape.size()) {
+          fail(expr.span, "tensor de rank " + std::to_string(t.shape.size()) + " nao aceita " +
+                              std::to_string(expr.elems.size()) + " indice(s)");
+        }
+        std::int64_t deslocamento = 0;
+        for (std::size_t eixo = 0; eixo < expr.elems.size(); ++eixo) {
+          const Value iv = eixo == 0 ? idx : eval(*expr.elems[eixo], env);
+          if (!iv.is_number()) fail(expr.span, "indice de tensor deve ser numero");
+          std::int64_t i = static_cast<std::int64_t>(iv.as_number());
+          const std::int64_t dim = t.shape[eixo];
+          if (i < 0) i += dim;
+          if (i < 0 || i >= dim) {
+            fail(expr.span, "indice " + std::to_string(static_cast<std::int64_t>(iv.as_number())) +
+                                " fora dos limites do eixo " + std::to_string(eixo) + " (tamanho " +
+                                std::to_string(dim) + ")");
+          }
+          deslocamento = deslocamento * dim + i;
+        }
+        std::vector<std::int64_t> resto(
+            t.shape.begin() + static_cast<std::ptrdiff_t>(expr.elems.size()), t.shape.end());
+        std::int64_t bloco = 1;
+        for (std::int64_t d : resto) bloco *= d;
+        const std::size_t ini = static_cast<std::size_t>(deslocamento * bloco);
+        if (resto.empty()) return Value::decimal(static_cast<double>(t.data[ini]));
+        rt::Tensor sub = rt::Tensor::zeros(resto);
+        for (std::int64_t k = 0; k < bloco; ++k) {
+          sub.data[static_cast<std::size_t>(k)] = t.data[ini + static_cast<std::size_t>(k)];
+        }
+        return Value::tensor_de(std::move(sub));
+      }
       fail(expr.span, std::string("nao e possivel indexar '") + base.type_name() + "'");
     }
     case ExprKind::Slice: {
