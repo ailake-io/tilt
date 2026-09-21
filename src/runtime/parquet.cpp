@@ -17,7 +17,9 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/aws_kms.hpp"
 #include "runtime/compat.hpp"
+#include "runtime/json.hpp"
 #include "runtime/sha256.hpp"
 #include "runtime/snappy_codec.hpp"
 
@@ -260,6 +262,11 @@ constexpr int CRYPTO_CTRL_GCM_SET_TAG = 0x11;
 struct ParquetCrypto {
   std::array<std::uint8_t, 32> key{};
   std::string file_unique;
+  std::string key_metadata;
+  ~ParquetCrypto() {
+    volatile std::uint8_t* p = key.data();
+    for (std::size_t i = 0; i < key.size(); ++i) p[i] = 0;
+  }
 };
 
 AesGcmApi& aes_gcm() {
@@ -2018,6 +2025,7 @@ struct ColMeta {
 struct ParsedParquetCrypto {
   bool encrypted = false;
   ParquetCrypto material;
+  std::string key_metadata;
 };
 
 // Descritor de coluna extraido da arvore de schema: nome exposto (grupo
@@ -3106,9 +3114,26 @@ void parquet_write(const std::string& path, const Value& tabela,
   }
 
   ParquetCrypto crypto;
-  const bool encrypted = !opts.chave.empty();
+  if (!opts.chave.empty() && !opts.chave_kms.empty()) {
+    die("use 'chave' ou 'chave_kms', nao ambos");
+  }
+  const bool local_key = !opts.chave.empty();
+  const bool kms_key = !opts.chave_kms.empty();
+  const bool encrypted = local_key || kms_key;
   if (encrypted) {
-    crypto.key = parquet_key(opts.chave);
+    if (local_key) {
+      crypto.key = parquet_key(opts.chave);
+      crypto.key_metadata = "tilt-local-key-v1";
+    } else {
+      std::string ciphertext_blob;
+      std::string resolved_key_id;
+      aws_kms_generate_data_key(opts.chave_kms, crypto.key, ciphertext_blob, resolved_key_id);
+      Value metadata = Value::mapa();
+      metadata.map->set("provider", Value::texto("aws-kms-v1"));
+      metadata.map->set("key_id", Value::texto(resolved_key_id));
+      metadata.map->set("ciphertext_blob", Value::texto(ciphertext_blob));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    }
     crypto.file_unique = random_bytes(16);
   }
   std::string body = encrypted ? "PARE" : "PAR1";
@@ -3429,7 +3454,7 @@ void parquet_write(const std::string& path, const Value& tabela,
   cmw.field_str(2, crypto.file_unique);
   cmw.struct_end();
   cmw.struct_end();
-  cmw.field_str(2, "tilt-local-key-v1");
+  cmw.field_str(2, crypto.key_metadata);
   cmw.struct_end();
   const std::string encrypted_footer = encrypt_footer(footer, crypto);
   out.write(crypto_meta.data(), static_cast<std::streamsize>(crypto_meta.size()));
@@ -3628,15 +3653,38 @@ ParsedParquetCrypto parse_crypto_metadata(const std::string& file, std::size_t s
         }
       }
     } else {
-      tr.skip(tt);
+      if (id == 2 && tt == T_BINARY)
+        out.key_metadata = binary(tr);
+      else
+        tr.skip(tt);
     }
   }
   if (out.material.file_unique.empty()) die("FileCryptoMetaData sem aad_file_unique");
-  const char* secret = std::getenv("TILT_PARQUET_KEY");
-  if (!secret || !*secret) {
-    die("arquivo Parquet criptografado; defina TILT_PARQUET_KEY para ler a chave local");
+  if (out.key_metadata.empty()) die("FileCryptoMetaData sem key metadata");
+  if (out.key_metadata == "tilt-local-key-v1") {
+    const char* secret = std::getenv("TILT_PARQUET_KEY");
+    if (!secret || !*secret) {
+      die("arquivo Parquet criptografado; defina TILT_PARQUET_KEY para ler a chave local");
+    }
+    out.material.key = parquet_key(secret);
+  } else {
+    Value metadata;
+    try {
+      metadata = json_parse(out.key_metadata);
+    } catch (const std::exception&) {
+      die("key metadata Parquet desconhecido ou invalido");
+    }
+    const Value* provider = metadata.map ? metadata.map->find("provider") : nullptr;
+    const Value* key_id = metadata.map ? metadata.map->find("key_id") : nullptr;
+    const Value* blob = metadata.map ? metadata.map->find("ciphertext_blob") : nullptr;
+    if (metadata.kind != ValueKind::Mapa || !metadata.map || !provider ||
+        provider->kind != ValueKind::Texto || provider->s != "aws-kms-v1" || !key_id ||
+        key_id->kind != ValueKind::Texto || key_id->s.empty() || !blob ||
+        blob->kind != ValueKind::Texto || blob->s.empty()) {
+      die("key metadata AWS KMS invalido");
+    }
+    aws_kms_decrypt_data_key(key_id->s, blob->s, out.material.key);
   }
-  out.material.key = parquet_key(secret);
   return out;
 }
 

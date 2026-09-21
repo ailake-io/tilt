@@ -58,8 +58,10 @@ struct ParquetWriteOpts {
   bool dicionario = true;
   // Modular Encryption (AES_GCM_V1): segredo local derivado por SHA-256.
   // O leitor usa TILT_PARQUET_KEY, evitando persistir a chave no arquivo.
-  // KMS externo ainda deve ser fornecido por um resolvedor de chaves.
   std::string chave;
+  // AWS KMS: KeyId para GenerateDataKey (AES_256); o arquivo persiste somente
+  // o KeyId resolvido e CiphertextBlob, nunca a data key em claro.
+  std::string chave_kms;
 };
 
 void parquet_write(const std::string& path, const Value& tabela,

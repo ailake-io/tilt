@@ -10830,6 +10830,12 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       }
       opts.chave = chave->s;
     }
+    if (const Value* chave_kms = kw.find("chave_kms")) {
+      if (chave_kms->kind != ValueKind::Texto || chave_kms->s.empty()) {
+        fail(call.span, "escrever_parquet: 'chave_kms' deve ser texto nao vazio");
+      }
+      opts.chave_kms = chave_kms->s;
+    }
     try {
       rt::parquet_write(a[1].s, a[0], nullptr, opts);
     } catch (const std::exception& e) {

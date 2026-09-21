@@ -295,6 +295,11 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/parquet_interop.tilt)
 
 add_test(
+  NAME parquet_kms
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/parquet_kms_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME avro
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/avro_test.sh
           $<TARGET_FILE:tilt>)

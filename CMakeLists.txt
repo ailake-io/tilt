@@ -79,6 +79,8 @@ add_library(tilt_core STATIC
   src/runtime/checkpoint.cpp
   src/runtime/mongo.cpp
   src/runtime/tls.cpp
+  src/runtime/aws_sigv4.cpp
+  src/runtime/aws_kms.cpp
   src/runtime/s3.cpp
   src/runtime/sha256.cpp
   src/runtime/stdlib.cpp

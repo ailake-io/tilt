@@ -1,16 +1,14 @@
 #include "runtime/s3.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <cstdlib>
-#include <ctime>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "runtime/compat.hpp"
+#include "runtime/aws_sigv4.hpp"
 #include "runtime/http_client.hpp"
 #include "runtime/sha256.hpp"
 
@@ -149,77 +147,6 @@ Credenciais credenciais() {
   return c;
 }
 
-struct Assinatura {
-  std::string authorization;
-  std::string amz_date;
-};
-
-// AWS SigV4 (service "s3"), com CanonicalQueryString generica.
-std::string hex_lower(const std::array<std::uint8_t, 32>& bytes) {
-  static constexpr char kDigits[] = "0123456789abcdef";
-  std::string out(64, '0');
-  for (std::size_t i = 0; i < bytes.size(); ++i) {
-    out[2 * i] = kDigits[(bytes[i] >> 4) & 0x0F];
-    out[2 * i + 1] = kDigits[bytes[i] & 0x0F];
-  }
-  return out;
-}
-
-Assinatura assinar(const Credenciais& c, const std::string& method,
-                   const std::string& canonical_uri, const std::string& query,
-                   const std::string& host, const std::string& payload_hash,
-                   const std::vector<std::pair<std::string, std::string>>& extras) {
-  const std::time_t agora = std::time(nullptr);
-  const std::tm tm_utc = tilt_gmtime(agora);
-  char data_buf[9];
-  std::strftime(data_buf, sizeof data_buf, "%Y%m%d", &tm_utc);
-  const std::string date_stamp = data_buf;
-  char amz_buf[17];
-  std::strftime(amz_buf, sizeof amz_buf, "%Y%m%dT%H%M%SZ", &tm_utc);
-  const std::string amz_date = amz_buf;
-
-  const std::string scope = date_stamp + "/" + c.region + "/s3/aws4_request";
-
-  // Headers assinados em ordem lexicografica: host, x-amz-content-sha256,
-  // x-amz-date, extras (ex.: x-amz-copy-source) e x-amz-security-token.
-  std::vector<std::pair<std::string, std::string>> canon = {
-      {"host", host},
-      {"x-amz-content-sha256", payload_hash},
-      {"x-amz-date", amz_date},
-  };
-  canon.insert(canon.end(), extras.begin(), extras.end());
-  if (!c.token.empty()) canon.emplace_back("x-amz-security-token", c.token);
-  std::sort(canon.begin(), canon.end());
-
-  std::string canonical_headers;
-  std::string signed_headers;
-  for (std::size_t i = 0; i < canon.size(); ++i) {
-    canonical_headers += canon[i].first + ":" + canon[i].second + "\n";
-    if (i) signed_headers += ";";
-    signed_headers += canon[i].first;
-  }
-
-  const std::string canonical_request = method + "\n" + canonical_uri + "\n" +
-                                        query + "\n" + canonical_headers + "\n" +
-                                        signed_headers + "\n" + payload_hash;
-
-  const std::string string_to_sign = "AWS4-HMAC-SHA256\n" + amz_date + "\n" + scope +
-                                     "\n" + sha256_hex(canonical_request);
-
-  const auto k_date = hmac_sha256_raw("AWS4" + c.sk, date_stamp);
-  const auto k_region = hmac_sha256_raw(k_date, c.region);
-  const auto k_service = hmac_sha256_raw(k_region, "s3");
-  const auto k_signing = hmac_sha256_raw(k_service, "aws4_request");
-  const std::string signature =
-      hex_lower(hmac_sha256_raw(k_signing, string_to_sign));
-
-  Assinatura a;
-  a.amz_date = amz_date;
-  a.authorization = "AWS4-HMAC-SHA256 Credential=" + c.ak + "/" + scope +
-                    ", SignedHeaders=" + signed_headers + ", Signature=" + signature;
-  return a;
-}
-
 }  // namespace
 
 // Nucleo comum: monta URI + query canonical, assina SigV4 e executa o HTTP
@@ -244,8 +171,9 @@ std::pair<int, std::string> s3_request(
   if (!query.empty()) url += "?" + query;
   const std::string payload_hash = sha256_hex(body);
 
-  const Assinatura a =
-      assinar(c, method, canonical_uri, query, host, payload_hash, extra_headers);
+  const AwsSigV4Credentials signer{c.ak, c.sk, c.token, c.region};
+  const AwsSigV4Signature a =
+      aws_sigv4_sign(signer, "s3", method, canonical_uri, query, host, payload_hash, extra_headers);
   std::vector<std::pair<std::string, std::string>> headers = {
       {"Host", host},
       {"X-Amz-Content-Sha256", payload_hash},

@@ -297,9 +297,15 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   chave: "segredo"` grava `PARE` com AES-GCM-256 (`AES_GCM_V1`), cifrando
   headers/payloads de páginas e o footer. A leitura exige a mesma chave em
   `TILT_PARQUET_KEY`; a chave não é persistida no arquivo e a autenticação
-  rejeita arquivo adulterado ou segredo incorreto. O resolvedor AWS KMS ainda
-  é uma etapa separada (o formato já preserva `FileCryptoMetaData` e
-  `ColumnCryptoMetaData` padrão);
+  rejeita arquivo adulterado ou segredo incorreto. AWS KMS também pode ser
+  usado com `chave_kms: "arn:aws:kms:REGIAO:CONTA:key/ID"`: o tilt chama
+  `GenerateDataKey(AES_256)` ao gravar e `Decrypt` ao ler. O footer persiste
+  somente o `KeyId` resolvido e o `CiphertextBlob`; a data key em claro não
+  é persistida. Configure `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_REGION` (padrão `us-east-1`) e, opcionalmente, `AWS_SESSION_TOKEN`;
+  a identidade precisa de `kms:GenerateDataKey` e `kms:Decrypt` na chave.
+  `KMS_ENDPOINT` permite apontar para um endpoint compatível/local.
+  `chave` e `chave_kms` são mutuamente exclusivas;
 - escrita: encoding **PLAIN** ou **DICTIONARY** (acima), um row group por arquivo;
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;

@@ -85,7 +85,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
   gzip/deflate (zlib via `dlopen`), **snappy** (codec próprio) e **ZSTD**
   (libzstd via `dlopen`). Ainda fora do subconjunto: 4+ níveis de lista e
-  criptografia Parquet.
+  provedores de chaves além de AWS KMS e chave local. Modular Encryption
+  `AES_GCM_V1` cobre páginas/footer; a chave local usa `TILT_PARQUET_KEY`,
+  e AWS KMS usa `chave_kms` com permissões `GenerateDataKey`/`Decrypt`.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
