@@ -2131,11 +2131,15 @@ void csv_linhas(const char* buf, std::size_t ini, std::size_t fim, char sep,
     if (cabecalhos_unicos) {
       row.map->items.reserve(headers.size());
       for (std::size_t k = 0; k < headers.size(); ++k) {
-        row.map->items.emplace_back(headers[k], k < ncell ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k])) : Value::nulo());
+        row.map->items.emplace_back(
+            headers[k],
+            k < ncell ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k])) : Value::nulo());
       }
     } else {  // cabecalho repetido: o ultimo valor vence (ValueMap::set)
       for (std::size_t k = 0; k < headers.size(); ++k) {
-        row.map->set(headers[k], k < ncell ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k])) : Value::nulo());
+        row.map->set(headers[k], k < ncell
+                                     ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k]))
+                                     : Value::nulo());
       }
     }
     rows.push_back(std::move(row));
