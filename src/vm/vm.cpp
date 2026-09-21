@@ -127,7 +127,16 @@ rt::Value Vm::run(const Chunk& chunk, std::vector<rt::Value> args) {
 
 const Chunk* Vm::alvo_da_chamada(const Chunk& chunk, std::size_t idx_nome) {
   if (!resolver_) return nullptr;
-  Chamadas& c = chamadas_[&chunk];
+  // Recursao/laco chamam do mesmo chunk em sequencia: evita o hash a cada chamada.
+  Chamadas* alvo_cache = nullptr;
+  if (&chunk == ultimo_chunk_) {
+    alvo_cache = ultimas_chamadas_;
+  } else {
+    alvo_cache = &chamadas_[&chunk];  // nos do unordered_map tem endereco estavel
+    ultimo_chunk_ = &chunk;
+    ultimas_chamadas_ = alvo_cache;
+  }
+  Chamadas& c = *alvo_cache;
   if (c.alvos.empty()) {
     c.alvos.assign(chunk.names.size(), nullptr);
     c.resolvido.assign(chunk.names.size(), 0);

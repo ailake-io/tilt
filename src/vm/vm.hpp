@@ -47,6 +47,8 @@ class Vm {
     std::vector<char> resolvido;
   };
   std::unordered_map<const Chunk*, Chamadas> chamadas_;
+  const Chunk* ultimo_chunk_ = nullptr;
+  Chamadas* ultimas_chamadas_ = nullptr;
 };
 
 }  // namespace tilt::vm
