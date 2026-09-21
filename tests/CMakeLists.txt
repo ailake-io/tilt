@@ -472,5 +472,6 @@ add_test(
   NAME fuzz_frontend
   COMMAND fuzz_frontend 150
           ${CMAKE_CURRENT_SOURCE_DIR}/golden
+          ${CMAKE_CURRENT_SOURCE_DIR}/aliases
           ${CMAKE_CURRENT_SOURCE_DIR}/../exemplos)
 set_tests_properties(fuzz_frontend PROPERTIES TIMEOUT 240)
