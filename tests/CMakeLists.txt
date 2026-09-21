@@ -90,6 +90,16 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/rpc_test.sh
           $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)
 
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME python_cliente
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_SOURCE_DIR}/python/testes
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python)
+  set_tests_properties(python_cliente PROPERTIES
+    ENVIRONMENT "TILT_BIN=$<TARGET_FILE:tilt>;PYTHONPATH=${CMAKE_SOURCE_DIR}/python")
+endif()
+
 add_test(
   NAME equipe_paralela
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/equipe_paralela_test.sh

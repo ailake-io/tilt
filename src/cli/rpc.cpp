@@ -142,6 +142,27 @@ std::string tratar(Interpreter& interp, std::ostringstream& saida, const std::st
   if (!fn || fn->kind != rt::ValueKind::Texto) {
     return resposta_erro(id, "requisicao sem 'chamar', 'pipeline', 'listar', 'ping' ou 'sair'", "");
   }
+  // `lote`: lista de listas de argumentos; uma so ida e volta para N chamadas.
+  // O resultado e a lista de resultados; a primeira falha aborta o lote.
+  if (const Value* lote = campo(req, "lote")) {
+    if (lote->kind != rt::ValueKind::Lista || !lote->list) {
+      return resposta_erro(id, "'lote' deve ser uma lista de listas de argumentos", "");
+    }
+    Value resultados = Value::lista();
+    for (std::size_t k = 0; k < lote->list->size(); ++k) {
+      const Value& item = (*lote->list)[k];
+      if (item.kind != rt::ValueKind::Lista || !item.list) {
+        return resposta_erro(id, "'lote' deve ser uma lista de listas de argumentos", "");
+      }
+      Value um;
+      std::string erro;
+      if (!interp.chamar_por_nome(fn->s, *item.list, {}, um, erro)) {
+        return resposta_erro(id, "item " + std::to_string(k) + " do lote: " + erro, saida.str());
+      }
+      resultados.list->push_back(std::move(um));
+    }
+    return ok(&resultados);
+  }
   std::vector<Value> args;
   if (const Value* a = campo(req, "args")) {
     if (a->kind != rt::ValueKind::Lista || !a->list) {

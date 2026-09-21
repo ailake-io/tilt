@@ -25,6 +25,9 @@ esta linha nao e json
 {"id":9,"pipeline":"demo"}
 {"id":10,"chamar":"enriquecer","args":[[{"valor":10},{"valor":60},{"valor":100.5}]]}
 {"id":11,"ping":true}
+{"id":14,"chamar":"classificar","lote":[[10],[60],[200]]}
+{"id":15,"chamar":"classificar","lote":[[10],[1,2,3]]}
+{"id":16,"chamar":"classificar","lote":[[10],5]}
 {"id":12,"sair":true}
 {"id":13,"chamar":"classificar","args":[1]}
 REQ
@@ -50,6 +53,9 @@ ck '"erro":"requisicao invalida: esperado um objeto JSON"'
 ck '{"id":9,"ok":true,"saida":"== pipeline demo ==\npipeline demo rodou\n"}'
 ck '{"id":10,"ok":true,"resultado":[{"valor":10,"faixa":"baixo"},{"valor":60,"faixa":"medio"},{"valor":100.5,"faixa":"alto"}]}'
 ck '{"id":11,"ok":true}'
+ck '{"id":14,"ok":true,"resultado":["baixo","medio","alto"]}'
+ck '"erro":"item 1 do lote:'
+ck '{"id":16,"ok":false,"erro":"'"'"'lote'"'"' deve ser uma lista de listas de argumentos"}'
 ck '{"id":12,"ok":true}'
 grep -qF '"id":13' "$tmp/resp.jsonl" && { echo "FALHA: respondeu depois de sair"; fail=1; }
 
