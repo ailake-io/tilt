@@ -473,9 +473,12 @@ pipeline iceberg_demo:
   cada `data_file` do manifest ganha um record `partition` com um campo por
   coluna, no tipo da coluna (string/long/double/boolean). `ler_iceberg`
   resolve o spec do metadata e reidrata as colunas a partir dos manifests,
-  convertendo pelo tipo do schema. Valor nulo em coluna de partição, texto
-  com `/` e coluna repetida ou inexistente falham com erro claro (sem
-  `__HIVE_DEFAULT_PARTITION__` nem escaping);
+  convertendo pelo tipo do schema. Nulo usa `__HIVE_DEFAULT_PARTITION__` no
+  caminho e permanece tipado como null no record `partition`; os summaries
+  marcam `contains_null`, e leitura/pruning aceitam `nulo`. Campos opcionais
+  continuam com tipo definido pelo schema Iceberg mesmo quando um data file
+  contém apenas nulos. O marcador literal é reservado. Texto com `/`, coluna
+  repetida ou inexistente seguem falhando com erro claro (sem escaping);
 - **partição bucket (Fase 12-5a)**: `particionar_por: ["bucket[4](id)"]`
   (coluna inteira/texto/lógica) cria o campo `id_bucket_4` com transform
   `bucket[4]` (murmur3_x86_32 da spec, validado contra referência e

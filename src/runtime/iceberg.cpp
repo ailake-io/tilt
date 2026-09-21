@@ -988,9 +988,7 @@ int extract_iso_component(const std::string& s, const std::string& component) {
 
 // Aplica um transform de particao a um valor de origem.
 Value apply_transform(const Value& v, const PartitionField& pf) {
-  if (v.kind == ValueKind::Nulo)
-    die("valor nulo em coluna de particao '" + pf.source_name +
-        "' (fase 26: particao com nulo nao e suportada)");
+  if (v.kind == ValueKind::Nulo) return Value::nulo();
   if (pf.transform == "identity" || pf.transform.empty()) return v;
   if (pf.transform.rfind("bucket[", 0) == 0) {
     return Value::inteiro(bucket_of(v, pf.source_type, pf.num_buckets, pf.source_name));
@@ -1078,6 +1076,15 @@ void collect_struct_fields(const std::vector<const Value*>& cells, Column& out) 
   }
 }
 
+bool column_has_null_value(const Value& tabela, const std::string& col) {
+  for (const Value& row : *tabela.list) {
+    if (row.kind != ValueKind::Mapa || !row.map) return true;
+    const Value* cell = row.map->find(col);
+    if (!cell || cell->kind == ValueKind::Nulo) return true;
+  }
+  return false;
+}
+
 std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
   if (tabela.kind != ValueKind::Lista && tabela.kind != ValueKind::Tabela) {
     die(std::string(ctx) + " espera uma tabela (lista de mapas)");
@@ -1118,8 +1125,8 @@ std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
       }
       collect_struct_fields(cells, c);
     } else {
-      c.type = iceberg_type_name(kv.second);
-      c.sample = kv.second;
+      c.type = iceberg_type_name(*rep);
+      c.sample = *rep;
     }
     cols.push_back(std::move(c));
   }
@@ -1276,13 +1283,12 @@ std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
   return spec;
 }
 
-// Valor de particao como string (path hive-style no data file). Erro claro
-// em nulo e em texto com '/' (fase 26: sem escaping de caracteres especiais).
+constexpr const char* kHiveNullPartition = "__HIVE_DEFAULT_PARTITION__";
+
+// Null usa o marcador Hive no path; o marcador literal e reservado.
 std::string partition_value_string(const Value& v, const std::string& col) {
   switch (v.kind) {
-    case ValueKind::Nulo:
-      die("valor nulo em coluna de particao '" + col +
-          "' (fase 26: particao com nulo nao e suportada)");
+    case ValueKind::Nulo: return kHiveNullPartition;
     case ValueKind::Logico: return v.b ? "true" : "false";
     case ValueKind::Inteiro: return std::to_string(v.i);
     case ValueKind::Decimal: {
@@ -1294,6 +1300,10 @@ std::string partition_value_string(const Value& v, const std::string& col) {
       if (v.s.find('/') != std::string::npos) {
         die("valor da coluna de particao '" + col +
             "' contem '/' (fase 26: caracteres especiais nao suportados)");
+      }
+      if (v.s == kHiveNullPartition) {
+        die("valor da coluna de particao '" + col +
+            "' e reservado para representar nulo no layout Hive");
       }
       return v.s;
     default:
@@ -1347,6 +1357,27 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela,
       it = grupos.insert(grupos.end(), std::move(candidato));
     }
     it->rows.list->push_back(strip_partition_columns(row, spec));
+  }
+  // Em grupos onde a origem de um transform e totalmente null, omite-se essa
+  // coluna opcional do Parquet. O schema Iceberg mantem o tipo declarado e os
+  // leitores projetam null; isso evita inferir o tipo de uma coluna sem valores.
+  for (const PartitionField& pf : spec) {
+    if (pf.transform == "identity") continue;
+    for (PartitionGroup& group : grupos) {
+      const bool all_null = std::all_of(
+          group.rows.list->begin(), group.rows.list->end(), [&](const Value& r) {
+            const Value* cell = r.map ? r.map->find(pf.source_name) : nullptr;
+            return !cell || cell->kind == ValueKind::Nulo;
+          });
+      if (!all_null) continue;
+      for (Value& r : *group.rows.list) {
+        Value projected = Value::mapa();
+        for (const auto& kv : r.map->items) {
+          if (kv.first != pf.source_name) projected.map->set(kv.first, kv.second);
+        }
+        r = std::move(projected);
+      }
+    }
   }
   return grupos;
 }
@@ -2224,6 +2255,10 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
         if (std::find(removidas.begin(), removidas.end(), col.name) != removidas.end()) {
           continue;  // identity fora do parquet
         }
+        if (g.rows.list->empty() || !g.rows.list->front().map ||
+            !g.rows.list->front().map->find(col.name)) {
+          continue;  // campo opcional totalmente nulo, omitido neste data file
+        }
         std::vector<int> tmp;
         leaf_ids(std::vector<Column>{col}, tmp);
         field_ids.insert(field_ids.end(), tmp.begin(), tmp.end());
@@ -2304,6 +2339,10 @@ MergedSchema merge_append_schema(const TableMeta& meta, const Value& tabela) {
             die("anexar_iceberg: coluna '" + ctx + old.name +
                 "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de "
                 "colunas)");
+          }
+          if (ctx.empty() && old.required && column_has_null_value(tabela, old.name)) {
+            old.required = false;
+            merged.evolved = true;
           }
           if (old.is_struct || ty->is_struct) {
             if (!old.is_struct || !ty->is_struct) {
@@ -2395,11 +2434,14 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
   // reais so reidratam campo optional)
   std::int64_t proximo = 0;
   assign_ids(wc.cols, proximo);
-  for (std::size_t k = 0; k < wc.cols.size(); ++k) {
-    wc.cols[k].required = std::find(part_cols.begin(), part_cols.end(), wc.cols[k].name) ==
-                          part_cols.end();
-  }
   const std::vector<PartitionField> spec = make_spec(wc.cols, part_cols, "escrever_iceberg");
+  for (std::size_t k = 0; k < wc.cols.size(); ++k) {
+    const bool partition_source =
+        std::any_of(spec.begin(), spec.end(), [&](const PartitionField& pf) {
+          return pf.source_name == wc.cols[k].name;
+        });
+    wc.cols[k].required = !partition_source && !column_has_null_value(tabela, wc.cols[k].name);
+  }
   const std::vector<PartitionField>* pspec = spec.empty() ? nullptr : &spec;
   mkdir_if_missing(dir);
   const std::string meta_dir = dir + "/metadata";
@@ -2648,13 +2690,13 @@ OndeFilter split_onde(const Value* onde, const std::vector<PartitionField>& spec
   return f;
 }
 
-// Data file passa no pruning se bater com TODOS os predicados de particao
-// (valor ausente/nulo no record `partition` nunca bate igualdade).
+// Data file passa no pruning se bater com TODOS os predicados de particao;
+// um predicado `nulo` casa com o null tipado do record `partition`.
 bool passa_pruning(const ActiveEntry& e, const std::vector<std::pair<std::string, Value>>& prune,
                    const std::vector<PartitionField>& spec) {
   for (const auto& [col, pred] : prune) {
     const Value* pv = e.partition.map ? e.partition.map->find(col) : nullptr;
-    if (!pv || pv->kind == ValueKind::Nulo) return false;
+    if (!pv) return false;
     // texto divergente e convertido pelo tipo declarado no spec (tabelas de
     // outros escritores podem serializar o valor de particao como string)
     std::string ty = "string";

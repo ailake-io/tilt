@@ -159,7 +159,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
    Os manifest lists carregam `partitions` com `contains_null`, `lower_bound` e
    `upper_bound` por campo, além de `sequence_number`/`min_sequence_number`;
    snapshots e entradas de manifest também recebem sequence numbers reais da
-   spec v2 (validado com pyiceberg). Mas: valor nulo em coluna de partição,
+   spec v2 (validado com pyiceberg). Partições null são suportadas com marcador
+   Hive, valor null no manifest, summaries `contains_null` e pruning null-safe;
    valores com `/` e coluna repetida não são suportados (erro claro, sem
    escaping). A estrutura escrita (metadata, manifest list, manifest e
    parquet com field-ids) carrega no **pyiceberg**.
