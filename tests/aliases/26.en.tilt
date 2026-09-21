@@ -1,0 +1,24 @@
+model Mini:
+  input: tensor[f32, 2]
+  layers:
+    - dense: 2
+    - softmax
+
+type PedidoVetor:
+  vetor: tensor[f32, 2]
+
+service ApiPredicao:
+  port: 8080
+  device: "cuda:0"
+  middleware:
+    - registro_requisicoes
+    - limite_taxa: { por_minuto: 120 }
+
+  route post "/v1/predict":
+    input: PedidoVetor
+    steps:
+      - probs = model Mini.run input.vetor
+      - respond:
+          status: 200
+          data:
+            classe: probs.argmax

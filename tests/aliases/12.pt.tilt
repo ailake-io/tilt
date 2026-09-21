@@ -1,0 +1,19 @@
+modelo Classificador:
+  dispositivo: auto              # cuda:0 -> metal -> cpu, nessa ordem
+  entrada: tensor[f32, 1536]
+  camadas:
+    - densa: 512
+      ativacao: relu
+    - abandono: 0.1
+    - densa: 128
+      ativacao: relu
+    - densa: 10
+    - softmax
+  pesos: "modelos/classificador.pesos"   # carregados se existirem
+
+pipeline demo:
+  passos:
+    # Vetor de 1536 uns: atravessa a rede e sai com 10 classes.
+    - entrada = uns [1536]
+    - probs = modelo Classificador.executar entrada
+    - imprimir probs.forma   # [10]

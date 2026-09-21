@@ -1,0 +1,43 @@
+let rate = 0.001
+const MAX_TOKENS = 4096
+
+function center t:
+  average = t.mean
+  return t - average
+
+type Order:
+  text: text
+  from: text
+  count: integer
+
+pipeline demo:
+  steps:
+    - print rate * 2
+    - print center(tensor [1, 2, 3])
+    - table = [
+        { region: "south", value: 30 },
+        { region: "north", value: 120 },
+        { region: "south", value: 5 }
+      ]
+    - summary = table.group_by "region", { total: sum "value", orders: count }
+    - print summary
+    - label = "?"
+    - if rate >= 0.9:
+        label = "high"
+    else if rate >= 0.0005:
+        label = "medium"
+    else:
+        label = "low"
+    - print label
+    - for each row in table:
+        print row.region
+    - attempts = 0
+    - while attempts < 3:
+        attempts = attempts + 1
+    - print attempts, true and not false, null
+    - big = table.filter row.value >= 50
+    - print length(big)
+    - try:
+        x = read_csv "does_not_exist_zzz.csv"
+    catch err:
+        print "failed: {{err}}"

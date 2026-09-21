@@ -44,6 +44,7 @@ add_library(tilt_core STATIC
   src/diagnostics/codes.cpp
   src/diagnostics/diagnostic.cpp
   src/lexer/token.cpp
+  src/lexer/aliases_en.cpp
   src/lexer/lexer.cpp
   src/parser/parser.cpp
   src/parser/ast_dump.cpp

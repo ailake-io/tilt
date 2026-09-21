@@ -33,6 +33,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "lexer/aliases_en.hpp"
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
 #include "runtime/avro.hpp"
@@ -9532,7 +9533,13 @@ std::string Interpreter::interpolate(const std::string& text, Env& env) {
         std::string name = text.substr(k + 2, end - (k + 2));
         while (!name.empty() && name.front() == ' ') name.erase(name.begin());
         while (!name.empty() && name.back() == ' ') name.pop_back();
-        if (Value* v = env.lookup(name)) {
+        Value* v = env.lookup(name);
+        if (v == nullptr) {
+          // `{{row}}` num programa em ingles: o lexer traduziu o nome no codigo.
+          const std::string_view pt = alias_en_para_pt(name);
+          if (!pt.empty()) v = env.lookup(std::string(pt));
+        }
+        if (v != nullptr) {
           out += to_display(*v);
         } else {
           out += "{{" + name + "}}";
@@ -9611,6 +9618,14 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
       }
       if (base.kind == ValueKind::Mapa && base.map) {
         if (Value* f = base.map->find(expr.text)) return *f;
+      }
+      // Programa em ingles: campos que o runtime devolve em portugues (`r.text` ->
+      // `texto`, `r.trace` -> `rastro`) — so quando a chave do usuario nao existe.
+      if ((base.kind == ValueKind::Mapa || base.kind == ValueKind::Tabela) && base.map) {
+        const std::string_view pt = alias_en_para_pt(expr.text);
+        if (!pt.empty()) {
+          if (Value* f = base.map->find(std::string(pt))) return *f;
+        }
       }
       if (expr.text == "tamanho") {
         if (base.kind == ValueKind::Lista || base.kind == ValueKind::Tabela) {

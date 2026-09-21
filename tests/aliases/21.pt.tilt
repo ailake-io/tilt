@@ -1,0 +1,14 @@
+indice base_conhecimento:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"   # qdrant | pgvector | weaviate | pinecone | chroma
+  dimensao: 16               # 1536 no modelo real; 16 no mock determinístico
+  metrica: cosseno
+
+pipeline rag:
+  passos:
+    # inserir devolve a contagem; argumento lista exige parênteses.
+    - total = base_conhecimento.inserir([{ texto: "tilt é declarativa" }])
+    - imprimir total   # 1
+    - trechos = base_conhecimento.buscar "tilt", top_k: 1
+    - para cada h em trechos:
+        imprimir h.id, h.score

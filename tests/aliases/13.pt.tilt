@@ -1,0 +1,12 @@
+# XOR em 4 amostras: 'dados:' inline { x: tensor 2D, y: lista }.
+modelo Mini:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 2
+    - softmax
+
+treino Mini:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  perda: entropia_cruzada
+  otimizador: sgd
+  epocas: 3

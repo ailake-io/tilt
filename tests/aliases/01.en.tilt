@@ -1,0 +1,11 @@
+let taxa = 0.001
+const MAX_TOKENS = 4096
+
+function centralizar t:
+  media = t.mean
+  return t - media
+
+pipeline f:
+  steps:
+    - print taxa * 2
+    - print centralizar(tensor [1, 2, 3])

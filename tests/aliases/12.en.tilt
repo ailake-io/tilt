@@ -1,0 +1,18 @@
+model Classificador:
+  device: auto
+  input: tensor[f32, 1536]
+  layers:
+    - dense: 512
+      activation: relu
+    - dropout: 0.1
+    - dense: 128
+      activation: relu
+    - dense: 10
+    - softmax
+  weights: "models/classifier.weights"
+
+pipeline demo:
+  steps:
+    - entrada = ones [1536]
+    - probs = model Classificador.run entrada
+    - print probs.shape

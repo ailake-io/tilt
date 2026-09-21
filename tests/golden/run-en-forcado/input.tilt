@@ -1,0 +1,6 @@
+# language: en
+# passos em portugues, funcoes em ingles: o comentario forca o modo
+pipeline misto:
+  passos:
+    - names = ["ana", "bia"]
+    - print length(names), upper("ok")

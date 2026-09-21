@@ -3,6 +3,8 @@
 #include <string>
 #include <utility>
 
+#include "lexer/aliases_en.hpp"
+
 namespace tilt {
 namespace {
 
@@ -98,7 +100,9 @@ std::vector<Token> Lexer::tokenize() {
     lex_token();
   }
   finish();
-  return std::move(out_);
+  std::vector<Token> tokens = std::move(out_);
+  aplicar_aliases_en(tokens, idioma_do_fonte(src_));
+  return tokens;
 }
 
 void Lexer::handle_line_start() {

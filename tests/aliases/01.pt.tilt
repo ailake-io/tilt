@@ -1,0 +1,11 @@
+seja taxa = 0.001          # 'seja' é opcional; 'taxa = 0.001' também vale
+constante MAX_TOKENS = 4096
+
+funcao centralizar t:
+  media = t.media
+  retornar t - media
+
+pipeline f:
+  passos:
+    - imprimir taxa * 2                    # 0.002
+    - imprimir centralizar(tensor [1, 2, 3])  # [-1, 0, 1]

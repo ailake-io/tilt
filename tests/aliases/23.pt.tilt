@@ -1,0 +1,26 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+ferramenta eco:
+  descricao: "Repete o texto de volta."
+  entrada:
+    texto: texto
+  executar:
+    retornar texto
+
+agente AssistenteTecnico:
+  llm: gpt
+  papel: "Especialista em análise preditiva e dados estruturados."
+  ferramentas: [eco]
+  memoria: conversa            # nenhuma | conversa | vetorial
+  max_passos: 8
+  ao_passo:
+    - registrar { passo: passo.indice, ferramenta: passo.ferramenta }
+
+pipeline pergunta:
+  passos:
+    # Com TILT_LLM=mock, o planner chama cada ferramenta uma vez, em ordem.
+    - r = AssistenteTecnico.responder "resuma tilt"
+    - imprimir r.texto

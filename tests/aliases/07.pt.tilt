@@ -1,0 +1,19 @@
+fonte clientes:
+  tipo: csv
+  caminho: "clientes.csv"
+
+pipeline etl_clientes:
+  agenda: "0 * * * *"           # cron; ausente = sob demanda (--agendar agenda)
+  ao_falhar: repetir 3, espera: "30s"
+
+  passos:
+    - cru = [{ email: "ana@x.com", valor: 10 }, { email: "ruim", valor: 5 }]
+    - escrever_csv cru, "clientes.csv"   # grava para o 'ler' abaixo ler
+    - bruto = ler clientes
+    - limpo = bruto.filtrar linha.email contem "@"
+    - com_dom = limpo.derivar { dominio: dividir(linha.email, "@")[1] }
+    - agregado = com_dom.agrupar_por "dominio", {
+        total: contar,
+        receita: somar "valor"
+      }
+    - escrever_parquet agregado, "vendas_por_dominio.parquet"

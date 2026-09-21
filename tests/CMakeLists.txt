@@ -85,6 +85,14 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/dev_cmds_test.sh
           $<TARGET_FILE:tilt>)
 
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(
+    NAME aliases_en
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/aliases_test.py
+            $<TARGET_FILE:tilt> ${CMAKE_CURRENT_SOURCE_DIR}/aliases)
+endif()
+
 add_test(
   NAME rpc
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/rpc_test.sh
@@ -105,7 +113,6 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/chamar_python_test.sh
           $<TARGET_FILE:tilt>)
 
-find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
   add_test(
     NAME python_cliente
