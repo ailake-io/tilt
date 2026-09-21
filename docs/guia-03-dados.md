@@ -660,6 +660,51 @@ urllib exercendo o subconjunto + traversal + read-only) e validado com
 `apache/spark:3.5.3` + `iceberg-spark-runtime`, `--network host` e o dir montado
 no mesmo path absoluto — manifests/data continuam `file://` absolutos).
 
+## SQL sobre tabelas Tilt: `sql`
+
+SQL é cidadão de primeira classe: `sql` roda uma consulta sobre tabelas que já estão
+na memória do programa, sem servidor e sem `fonte`. O resultado é uma `tabela` normal
+(`.filtrar`, `escrever_parquet`, outro `sql`...).
+
+```tilt run
+pipeline sql_local:
+  passos:
+    - vendas = [
+        { regiao: "sul", valor: 30 },
+        { regiao: "norte", valor: 120 },
+        { regiao: "sul", valor: 5 }
+      ]
+    - clientes = [{ regiao: "sul", nome: "ana" }, { regiao: "norte", nome: "bia" }]
+    # variaveis-tabela citadas no SQL entram sozinhas
+    - resumo = sql "select regiao, sum(valor) as total from vendas group by regiao order by regiao"
+    - imprimir resumo[0].regiao, resumo[0].total
+    # join, parametros com ? e nome explicito
+    - j = sql "select c.nome, sum(v.valor) as total from vendas v join clientes c on c.regiao = v.regiao group by c.nome order by c.nome"
+    - imprimir j[0].nome, j[0].total
+    - altos = sql "select * from vendas where valor >= ?", [30]
+    - imprimir tamanho(altos)
+    - n = sql "select count(*) as n from t", t: vendas
+    - imprimir n[0].n
+    # metodo: a propria tabela e `t`
+    - m = vendas.sql "select max(valor) as maior from t"
+    - imprimir m[0].maior
+```
+
+- **Tabelas**: variáveis-tabela citadas no SQL entram sozinhas; `nome: valor` registra
+  explicitamente; `tabela.sql "... from t"` usa a própria tabela como `t`.
+- **Parâmetros**: `sql "... where x >= ?", [30]` (o `?` é ligado por tipo, sem interpolar texto).
+- **Colunas**: as chaves das linhas; o tipo (`INTEGER`, `REAL`, `TEXT`) vem dos valores.
+  `logico` vira 0/1; lista/mapa viram texto JSON. Uma tabela vazia não tem colunas e dá erro.
+- **Motor** (`motor: "sqlite" | "duckdb" | "auto"`, padrão `auto`): SQLite em memória
+  para tabelas (sempre disponível com `libsqlite3`). Se a consulta lê arquivos
+  (`from 'vendas.csv'`, `'x.parquet'`, `read_csv(...)`) o `auto` usa o **DuckDB**
+  (`libduckdb.so` no `LD_LIBRARY_PATH`), que lê CSV/Parquet direto e é muito mais
+  rápido em agregações grandes (1 M de linhas em ~0,2 s contra ~1,1 s do
+  `ler_csv` + `agrupar_por`). Os dialetos diferem em detalhes (ex.: `7/2` é `3` no
+  SQLite e `3.5` no DuckDB); fixe o `motor:` quando isso importar.
+- Para bancos de verdade (Postgres, MySQL, SQLite em arquivo) use `fonte`, `consultar_sql`
+  e `executar_sql` (seção abaixo).
+
 ## Bancos relacionais (SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse)
 
 `fonte tipo: sqlite`, `fonte tipo: postgres`, `fonte tipo: duckdb`,

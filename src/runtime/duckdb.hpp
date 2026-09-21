@@ -41,4 +41,11 @@ void duckdb_exec_params(const std::string& db_path, const std::string& sql,
 void duckdb_transact(const std::string& db_path,
                      const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos);
 
+// SQL sobre tabelas tilt no DuckDB (banco em memoria; carga por appender). Igual a
+// sqlite_consulta_tabelas, mas o SQL tambem pode ler arquivos direto
+// (`select ... from 'vendas.parquet'`, `read_csv_auto('x.csv')`).
+Value duckdb_consulta_tabelas(const std::string& sql,
+                              const std::vector<std::pair<std::string, Value>>& tabelas,
+                              const std::vector<SqlParam>& params);
+
 }  // namespace tilt::rt

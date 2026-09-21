@@ -68,6 +68,7 @@
 #include "runtime/s3.hpp"
 #include "runtime/safetensors.hpp"
 #include "runtime/sorteio.hpp"
+#include "runtime/sql_tabelas.hpp"
 #include "runtime/sqlite.hpp"
 #include "runtime/stdlib.hpp"
 #include "runtime/vectorstore.hpp"
@@ -9553,6 +9554,40 @@ std::string Interpreter::interpolate(const std::string& text, Env& env) {
   return out;
 }
 
+// Identificadores de um SQL (fora de literais 'x'/"x" e comentarios), sem repeticao.
+std::vector<std::string> identificadores_sql(const std::string& sql) {
+  std::vector<std::string> ids;
+  std::size_t i = 0;
+  while (i < sql.size()) {
+    const char c = sql[i];
+    if (c == '\'' || c == '"') {
+      const char fim = c;
+      for (++i; i < sql.size() && sql[i] != fim; ++i) {
+      }
+      ++i;
+    } else if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+      while (i < sql.size() && sql[i] != '\n') ++i;
+    } else if (std::isalpha(static_cast<unsigned char>(c)) != 0 || c == '_') {
+      std::size_t j = i;
+      while (j < sql.size() &&
+             (std::isalnum(static_cast<unsigned char>(sql[j])) != 0 || sql[j] == '_'))
+        ++j;
+      std::string id = sql.substr(i, j - i);
+      if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(std::move(id));
+      i = j;
+    } else {
+      ++i;
+    }
+  }
+  return ids;
+}
+
+bool parece_tabela(const Value& v) {
+  if (v.kind == ValueKind::Tabela) return true;
+  return v.kind == ValueKind::Lista && v.list && !v.list->empty() &&
+         (*v.list)[0].kind == ValueKind::Mapa;
+}
+
 Value Interpreter::eval(const Expr& expr, Env& env) {
   switch (expr.kind) {
     case ExprKind::IntLit:
@@ -11681,6 +11716,52 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
   }
+  if (name == "sql") {
+    // sql "select ... from vendas", [params]?, nome: tabela, ... -> tabela
+    // Sem nome explicito, as variaveis-tabela citadas no SQL entram sozinhas.
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "sql espera (consulta [, params], tabela: valor...), ex.: sql \"select regiao, "
+           "sum(valor) as total from vendas group by regiao\", vendas: tabela");
+    }
+    std::vector<rt::SqlParam> params;
+    if (a.size() >= 2) {
+      if (a[1].kind != ValueKind::Lista || !a[1].list) {
+        fail(call.span, "sql: 'params' deve ser uma lista [v1, v2, ...] (use '?' no SQL)");
+      }
+      for (const Value& v : *a[1].list) {
+        try {
+          params.push_back(rt::param_de_valor(v, "sql"));
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
+    }
+    std::string motor = "auto";
+    std::vector<std::pair<std::string, Value>> tabelas;
+    for (const auto& [chave, v] : kw.items) {
+      if (chave == "motor") {
+        if (v.kind != ValueKind::Texto) fail(call.span, "sql: 'motor' deve ser texto");
+        motor = v.s;
+      } else {
+        tabelas.emplace_back(chave, v);
+      }
+    }
+    for (const std::string& id : identificadores_sql(a[0].s)) {
+      bool ja = false;
+      for (const auto& t : tabelas) ja = ja || t.first == id;
+      if (ja) continue;
+      if (Value* v = env.lookup(id); v != nullptr && parece_tabela(*v))
+        tabelas.emplace_back(id, *v);
+    }
+    try {
+      return rt::sql_tabelas(motor, a[0].s, tabelas, params);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "chamar_python") {
     auto a = args();
     rt::ValueMap kw = eval_kwargs(call, env);
@@ -12095,6 +12176,35 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       out.push_back(std::move(r));
     }
     return Value::tabela(std::move(out));
+  }
+  if (is_table && method == "sql") {
+    // tabela.sql "select ... from t where ..." — a propria tabela e `t`.
+    auto a = eval_args(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "sql espera o texto da consulta, ex.: tabela.sql \"select count(*) as n from t\"");
+    }
+    std::vector<rt::SqlParam> params;
+    if (a.size() >= 2 && a[1].kind == ValueKind::Lista && a[1].list) {
+      for (const Value& v : *a[1].list) {
+        try {
+          params.push_back(rt::param_de_valor(v, "sql"));
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
+    }
+    std::vector<std::pair<std::string, Value>> tabelas = {{"t", receiver}};
+    for (const std::string& id : identificadores_sql(a[0].s)) {
+      if (id == "t") continue;
+      if (Value* v = env.lookup(id); v != nullptr && parece_tabela(*v))
+        tabelas.emplace_back(id, *v);
+    }
+    try {
+      return rt::sql_tabelas("auto", a[0].s, tabelas, params);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
   }
   if (is_table && method == "selecionar") {
     auto cols = eval_args(call, env);

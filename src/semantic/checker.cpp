@@ -886,6 +886,13 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       {"mongo_deletar", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_criar_indice", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_agregar", 2, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      // SQL sobre tabelas tilt
+      {"sql",
+       1,
+       {TypeKind::Texto},
+       {},
+       TypeKind::Tabela,
+       "sql \"select ... from tabela\", tabela: valor"},
       // interoperabilidade
       {"chamar_python",
        2,
@@ -934,7 +941,7 @@ bool is_tensor_method(std::string_view m) {
 }
 bool is_table_method(std::string_view m) {
   return word_in(m, {"filtrar", "derivar", "mapear", "agrupar_por", "selecionar", "ordenar_por",
-                     "limite", "primeiros", "distinto", "tamanho"});
+                     "limite", "primeiros", "distinto", "tamanho", "sql"});
 }
 bool is_texto_method(std::string_view m) { return word_in(m, {"maiusculas", "minusculas"}); }
 // Metodos resolvidos dinamicamente sobre texto-nome-de-entidade (agente,
@@ -1626,7 +1633,8 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
             !is_entity_method(m)) {
           report(DiagCode::TypeMismatch, e.span,
                  "'" + type_kind_name(base) + "' nao tem o metodo '" + m + "'",
-                 {"metodos de tabela: filtrar, derivar, mapear, agrupar_por, selecionar, ordenar_por, limite, primeiros, distinto"});
+                 {"metodos de tabela: filtrar, derivar, mapear, agrupar_por, selecionar, "
+                  "ordenar_por, limite, primeiros, distinto, sql"});
           return TypeKind::Unknown;
         }
         if (base == TypeKind::Tensor && !is_tensor_method(m) && !is_entity_method(m)) {

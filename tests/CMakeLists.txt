@@ -94,6 +94,10 @@ if(Python3_Interpreter_FOUND)
 endif()
 
 add_test(
+  NAME sql_duckdb
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sql_duckdb_test.sh $<TARGET_FILE:tilt>)
+
+add_test(
   NAME rpc
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/rpc_test.sh
           $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)

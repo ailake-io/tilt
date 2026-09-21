@@ -40,7 +40,7 @@ const std::array<std::string_view, 23> kDeclKeywords = {
 const std::array<std::string_view, 9> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar", "parar", "continuar"};
 
-const std::array<std::string_view, 66> kBuiltins = {"imprimir",
+const std::array<std::string_view, 67> kBuiltins = {"imprimir",
                                                     "registrar",
                                                     "env",
                                                     "tamanho",
@@ -102,14 +102,15 @@ const std::array<std::string_view, 66> kBuiltins = {"imprimir",
                                                     "s3_concluir_upload",
                                                     "s3_abortar_upload",
                                                     "chamar_python",
+                                                    "sql",
                                                     "http_get_json",
                                                     "http_post_json",
                                                     "es_buscar",
                                                     "es_executar"};
 
-const std::array<std::string_view, 11> kTableMethods = {
+const std::array<std::string_view, 12> kTableMethods = {
     "filtrar", "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",
-    "limite",  "primeiros", "distinto", "tamanho",     "inserir"};
+    "limite",  "primeiros", "distinto", "tamanho",     "inserir",    "sql"};
 
 const std::array<std::string_view, 17> kTensorMethods = {
     "forma", "dados",    "matmul", "transposta", "reformar", "conv2d", "norma_lote", "relu", "gelu",
@@ -329,6 +330,9 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Conclui um upload multipart S3.", nullptr},
       {"s3_abortar_upload", "s3_abortar_upload(id, ...)", "id", "Aborta um upload multipart S3.",
        nullptr},
+      {"sql", "sql(consulta, params?, tabela: valor...)", "consulta",
+       "Roda SQL sobre tabelas tilt (SQLite em memoria); variaveis-tabela citadas entram sozinhas.",
+       "sql \"select regiao, sum(valor) as total from vendas group by regiao\""},
       {"chamar_python", "chamar_python(modulo, funcao, args...)", "modulo,funcao",
        "Chama uma funcao Python (python3 em subprocesso; args e resultado em JSON).",
        "chamar_python \"math\", \"sqrt\", 16"},
