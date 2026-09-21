@@ -22,6 +22,8 @@ namespace tilt::rt {
 
 namespace {
 
+constexpr const char* kHiveNullPartition = "__HIVE_DEFAULT_PARTITION__";
+
 [[noreturn]] void die(const std::string& m) { throw std::runtime_error("delta: " + m); }
 
 // definido mais abaixo; usado pelo schemaString e pelo log
@@ -176,6 +178,33 @@ std::vector<std::pair<std::string, std::string>> deduced_column_types(const Valu
   return out;
 }
 
+bool column_has_null(const Value& tabela, const std::string& col) {
+  for (const Value& row : *tabela.list) {
+    if (row.kind != ValueKind::Mapa || !row.map) return true;
+    const Value* cell = row.map->find(col);
+    if (!cell || cell->kind == ValueKind::Nulo) return true;
+  }
+  return false;
+}
+
+bool schema_column_nullable(const std::string& schema_json, const std::string& col) {
+  Value schema;
+  try {
+    schema = json_parse(schema_json);
+  } catch (const std::exception&) {
+    return false;
+  }
+  const Value* fields = schema.map ? schema.map->find("fields") : nullptr;
+  if (!fields || fields->kind != ValueKind::Lista || !fields->list) return false;
+  for (const Value& field : *fields->list) {
+    const Value* name = field.map ? field.map->find("name") : nullptr;
+    if (!name || name->kind != ValueKind::Texto || name->s != col) continue;
+    const Value* nullable = field.map->find("nullable");
+    return nullable && nullable->kind == ValueKind::Logico && nullable->b;
+  }
+  return false;
+}
+
 bool contains_col(const std::vector<std::pair<std::string, std::string>>& cols,
                   const std::string& name) {
   for (const auto& c : cols) {
@@ -191,12 +220,17 @@ std::string delta_schema_string(const Value& tabela, const char* ctx) {
   if (tabela.list->empty()) die(std::string(ctx) + ": tabela vazia (sem schema deduzivel)");
   const Value& first = tabela.list->front();
   if (first.kind != ValueKind::Mapa || !first.map) die("linhas devem ser mapas { campo: valor }");
+  const auto types = deduced_column_types(tabela, ctx);
   Value fields = Value::lista();
   for (const auto& kv : first.map->items) {
     Value f = Value::mapa();
     f.map->set("name", Value::texto(kv.first));
-    f.map->set("type", Value::texto(delta_type_name(kv.second)));
-    f.map->set("nullable", Value::logico(false));
+    const auto type = std::find_if(types.begin(), types.end(),
+                                   [&](const auto& item) { return item.first == kv.first; });
+    f.map->set("type", Value::texto(type != types.end() && !type->second.empty()
+                                         ? type->second
+                                         : "string"));
+    f.map->set("nullable", Value::logico(column_has_null(tabela, kv.first)));
     f.map->set("metadata", Value::mapa());
     fields.list->push_back(std::move(f));
   }
@@ -345,14 +379,11 @@ std::vector<std::string> current_partition_columns(const std::vector<std::string
   return cols;
 }
 
-// Valor de particao como string (nome do diretorio hive-style). Erro claro
-// em nulo e em texto com '/' (sem __HIVE_DEFAULT_PARTITION__ nem escaping de
-// caracteres especiais).
+// Valor de particao no caminho hive-style. Null usa o marcador padrao Hive;
+// esse marcador e reservado, pois leitores Hive o interpretam como NULL.
 std::string partition_value_string(const Value& v, const std::string& col) {
   switch (v.kind) {
-    case ValueKind::Nulo:
-      die("valor nulo em coluna de particao '" + col +
-          "' (particao com nulo nao e suportada)");
+    case ValueKind::Nulo: return kHiveNullPartition;
     case ValueKind::Logico: return v.b ? "true" : "false";
     case ValueKind::Inteiro: return std::to_string(v.i);
     case ValueKind::Decimal: {
@@ -364,6 +395,10 @@ std::string partition_value_string(const Value& v, const std::string& col) {
       if (v.s.find('/') != std::string::npos) {
         die("valor da coluna de particao '" + col +
             "' contem '/' (caracteres especiais nao suportados)");
+      }
+      if (v.s == kHiveNullPartition) {
+        die("valor da coluna de particao '" + col +
+            "' e reservado para representar nulo no layout Hive");
       }
       return v.s;
     default:
@@ -425,6 +460,14 @@ Value partition_rehydrate(const std::string& s, const std::string& delta_type) {
     // fora de formato/alcance: mantem texto (decisao da fase 25)
   }
   return Value::texto(s);
+}
+
+bool partition_values_match(const Value& stored, const Value& predicate) {
+  if (stored.kind == ValueKind::Nulo || predicate.kind == ValueKind::Nulo) {
+    return stored.kind == ValueKind::Nulo && predicate.kind == ValueKind::Nulo;
+  }
+  return stored.kind == ValueKind::Texto && predicate.kind == ValueKind::Texto &&
+         stored.s == predicate.s;
 }
 
 // Garante que todas as colunas de particao existem no schema da tabela (1a
@@ -490,7 +533,7 @@ Value strip_partition_columns(const Value& row, const std::vector<std::string>& 
 
 struct PartitionGroup {
   std::string key;  // caminho relativo do diretorio: "c1=v1/c2=v2" ("" = raiz)
-  std::vector<std::pair<std::string, std::string>> partvals;  // (coluna, valor) na ordem
+  std::vector<std::pair<std::string, Value>> partvals;  // valor tipado; null permanece null
   Value rows;         // tabela sem as colunas de particao
 };
 
@@ -504,8 +547,9 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela,
     PartitionGroup candidato;
     for (const std::string& col : cols) {
       const Value* cell = row.map->find(col);
-      const std::string valor = partition_value_string(cell ? *cell : Value::nulo(), col);
-      candidato.partvals.emplace_back(col, valor);
+      const Value part_value = cell ? *cell : Value::nulo();
+      const std::string valor = partition_value_string(part_value, col);
+      candidato.partvals.emplace_back(col, part_value);
       candidato.key += (candidato.key.empty() ? "" : "/") + col + "=" + valor;
     }
     auto it = std::find_if(grupos.begin(), grupos.end(),
@@ -520,12 +564,16 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela,
 }
 
 Value make_add(const std::string& rel_path,
-               const std::vector<std::pair<std::string, std::string>>& partvals,
+               const std::vector<std::pair<std::string, Value>>& partvals,
                std::int64_t size, std::int64_t ts) {
   Value add = Value::mapa();
   add.map->set("path", Value::texto(rel_path));
   Value pv = Value::mapa();
-  for (const auto& kv : partvals) pv.map->set(kv.first, Value::texto(kv.second));
+  for (const auto& kv : partvals) {
+    pv.map->set(kv.first, kv.second.kind == ValueKind::Nulo
+                              ? Value::nulo()
+                              : Value::texto(partition_value_string(kv.second, kv.first)));
+  }
   add.map->set("partitionValues", std::move(pv));
   add.map->set("size", Value::inteiro(size));
   add.map->set("modificationTime", Value::inteiro(ts));
@@ -883,7 +931,9 @@ std::vector<CpAdd> coletar_ativos(const std::vector<std::string>& versions) {
             pv && pv->kind == ValueKind::Mapa && pv->map) {
           Value cpi = Value::mapa();
           for (const auto& kv : pv->map->items) {
-            if (kv.second.kind == ValueKind::Texto) cpi.map->set(kv.first, kv.second);
+            if (kv.second.kind == ValueKind::Texto || kv.second.kind == ValueKind::Nulo) {
+              cpi.map->set(kv.first, kv.second);
+            }
           }
           a.part_json = json_compact(cpi);
         } else {
@@ -1037,7 +1087,9 @@ std::optional<StdCheckpoint> load_standard_checkpoint(const std::string& log_dir
               pv && pv->kind == ValueKind::Mapa && pv->map) {
             Value cpi = Value::mapa();
             for (const auto& kv : pv->map->items) {
-              if (kv.second.kind == ValueKind::Texto) cpi.map->set(kv.first, kv.second);
+              if (kv.second.kind == ValueKind::Texto || kv.second.kind == ValueKind::Nulo) {
+                cpi.map->set(kv.first, kv.second);
+              }
             }
             a.part_json = json_compact(cpi);
           } else {
@@ -1211,6 +1263,7 @@ void delta_append(const std::string& dir, const Value& tabela,
   const std::vector<std::pair<std::string, std::string>> new_types =
       deduced_column_types(tabela, "anexar_delta");
   std::vector<std::pair<std::string, std::string>> added_cols;
+  std::vector<std::string> nullable_cols;
   // Nome -> tipo promovido (widening int->long, float->double).
   std::vector<std::pair<std::string, std::string>> widened_cols;
   for (const auto& old : cur_fields) {
@@ -1221,6 +1274,10 @@ void delta_append(const std::string& dir, const Value& tabela,
     if (!ty) {
       die("anexar_delta: coluna '" + old.first +
           "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de colunas)");
+    }
+    if (column_has_null(tabela, old.first) &&
+        !schema_column_nullable(cur_schema_v->s, old.first)) {
+      nullable_cols.push_back(old.first);
     }
     if (!ty->empty() && *ty != old.second) {
       if (is_widening(old.second, *ty)) {
@@ -1240,7 +1297,7 @@ void delta_append(const std::string& dir, const Value& tabela,
   // schemaString estendido (colunas novas nullable no fim; tipos promovidos
   // reescritos) para o commit.
   std::string new_schema;
-  if (!added_cols.empty() || !widened_cols.empty()) {
+  if (!added_cols.empty() || !widened_cols.empty() || !nullable_cols.empty()) {
     Value schema;
     try {
       schema = json_parse(cur_schema_v->s);
@@ -1255,6 +1312,10 @@ void delta_append(const std::string& dir, const Value& tabela,
       if (f.kind != ValueKind::Mapa || !f.map) continue;
       const Value* nm = f.map->find("name");
       if (!nm || nm->kind != ValueKind::Texto) continue;
+      if (std::find(nullable_cols.begin(), nullable_cols.end(), nm->s) !=
+          nullable_cols.end()) {
+        f.map->set("nullable", Value::logico(true));
+      }
       for (const auto& [wname, wty] : widened_cols) {
         if (nm->s == wname) f.map->set("type", Value::texto(wty));
       }
@@ -1400,18 +1461,18 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
     for (const auto& kv : onde->map->items) {
       auto is_part = std::find(part_cols.begin(), part_cols.end(), kv.first);
       if (is_part != part_cols.end()) {
-        // Normaliza o predicado para a mesma string do partitionValues
-        // (mesma regra do nome do diretorio hive-style).
-        prune_preds.emplace_back(kv.first,
-                                 Value::texto(partition_value_string(kv.second, kv.first)));
+        // PartitionValues do Delta sao strings, exceto null, que permanece tipado.
+        prune_preds.emplace_back(
+            kv.first, kv.second.kind == ValueKind::Nulo
+                          ? Value::nulo()
+                          : Value::texto(partition_value_string(kv.second, kv.first)));
       } else {
         residual_preds.push_back(kv);
       }
     }
   }
 
-  // Arquivos ativos + seus partitionValues (Texto; Nulo = particao default
-  // de tabelas externas, reidratada como nulo).
+  // Arquivos ativos + partitionValues: textos e null tipado para particoes Hive default.
   struct ActiveFile {
     std::string path;
     std::string dv_id;
@@ -1427,7 +1488,7 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
     for (const auto& [col, val] : prune_preds) {
       auto pv = std::find_if(partvals.begin(), partvals.end(),
                              [&](const auto& kv) { return kv.first == col; });
-      if (pv == partvals.end() || pv->second.kind != ValueKind::Texto || pv->second.s != val.s) {
+      if (pv == partvals.end() || !partition_values_match(pv->second, val)) {
         return false;
       }
     }
@@ -1443,7 +1504,9 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
         Value pv = json_parse(a.part_json);
         if (pv.kind == ValueKind::Mapa && pv.map) {
           for (const auto& kv : pv.map->items) {
-            if (kv.second.kind == ValueKind::Texto) f.partvals.emplace_back(kv.first, kv.second);
+            if (kv.second.kind == ValueKind::Texto || kv.second.kind == ValueKind::Nulo) {
+              f.partvals.emplace_back(kv.first, kv.second);
+            }
           }
         }
       } catch (const std::exception&) {
@@ -1514,14 +1577,12 @@ Value delta_read(const std::string& dir, const Value* onde, long long versao) {
               }
             }
           }
-          // Pruning: arquivo so entra se bater com TODOS os predicados de
-          // particao (partitionValues ausente/nulo nunca bate igualdade).
+          // Pruning: arquivo precisa bater com todos os predicados, inclusive null.
           bool passa = true;
           for (const auto& [col, val] : prune_preds) {
             auto pv = std::find_if(f.partvals.begin(), f.partvals.end(),
                                    [&](const auto& kv) { return kv.first == col; });
-            if (pv == f.partvals.end() || pv->second.kind != ValueKind::Texto ||
-                pv->second.s != val.s) {
+            if (pv == f.partvals.end() || !partition_values_match(pv->second, val)) {
               passa = false;
               break;
             }

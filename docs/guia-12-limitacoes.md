@@ -94,9 +94,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `particionar_por: ["c1", "c2"]`, layout `<c1>=<v1>/<c2>=<valor>/part-NNNNN.parquet`,
   colunas reidratadas na leitura) e há **pruning** de partições em
   `ler_delta ... onde: {...}` (igualdade; predicados em coluna de partição pulam
-  arquivos inteiros pelo log, o resto filtra linhas). Ainda assim: valor nulo
-  em coluna de partição e valores com `/` não são suportados (erro claro, sem
-  `__HIVE_DEFAULT_PARTITION__` nem escaping) e checkpoint tilt-native a cada
+  arquivos inteiros pelo log, o resto filtra linhas). Partição nula é suportada
+  com `__HIVE_DEFAULT_PARTITION__` no caminho, `null` no log e leitura/poda
+  null-safe; valores com `/` seguem sem suporte (erro claro, sem escaping). Há checkpoint tilt-native a cada
   10 versões (`<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` em
   _delta_log, ignorados por leitores externos) mais leitura do checkpoint
   padrão (`_last_checkpoint` + `<v>.checkpoint*.parquet` no schema oficial,

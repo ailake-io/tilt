@@ -368,9 +368,12 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   de partição nos dados (padrão Delta — os valores vivem no diretório e no
   `partitionValues` de cada `add`; o `metaData` registra `partitionColumns` e o
   `schemaString` continua listando as colunas). Valor nulo em coluna de partição
-  ou texto com `/` → erro claro (sem `__HIVE_DEFAULT_PARTITION__` nem
-  escaping). `anexar_delta` herda a partição da tabela existente (chamar sem a
-  opção ou com o mesmo valor, na mesma ordem); `particionar_por` explícito e
+  usa `__HIVE_DEFAULT_PARTITION__` no caminho Hive e `null` no `partitionValues`;
+  `ler_delta` reidrata e permite poda com `nulo`. O marcador literal é reservado
+  (não pode ser usado como valor textual). Colunas passam a `nullable` no schema
+  ao anexar linhas nulas. Texto com `/` continua sendo erro claro, sem escaping.
+  `anexar_delta` herda a partição da tabela existente (chamar sem a opção ou
+  com o mesmo valor, na mesma ordem); `particionar_por` explícito e
   divergente, ou opção em tabela não particionada → erro claro. Na leitura as
   colunas são reidratadas a partir de `partitionValues`, convertidas para o tipo
   declarado no schema (falha de conversão mantém texto). Tabelas particionadas
