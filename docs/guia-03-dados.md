@@ -713,6 +713,36 @@ pipeline limpeza:
 | `limpar_texto ["nome"], caixa: "minusculas"` | tira espaços das pontas e repetidos (e muda a caixa) |
 | `ordenar_por "a", "b", desc: verdadeiro` | várias colunas, estável |
 
+### Ler e gravar CSV de verdade
+
+`ler_csv` aceita opções (todas opcionais; sem opção o comportamento é o de sempre):
+
+```tilt skip
+t = ler_csv "vendas.csv", separador: ";", pular: 2, nulos: ["NA", "-", ""],
+      tipos: { valor: "decimal", data: "data" }
+u = ler_csv "x.txt", separador: "auto"                      # detecta , ; tab |
+v = ler_csv "sem_titulo.csv", sem_cabecalho: verdadeiro, colunas: ["id", "nome"]
+```
+
+- `separador:` um caractere, `"tab"` ou `"auto"`; `fonte tipo: csv` também aceita `separador:`.
+- `pular: n` descarta as n primeiras linhas (títulos); `sem_cabecalho: verdadeiro` lê a
+  primeira linha como dado (colunas `coluna1..N`, ou os nomes de `colunas:`).
+- `nulos: [...]` lê esses textos como `nulo`; `tipos: { coluna: tipo }` converte na leitura
+  (os mesmos tipos de `converter`, inclusive `"1,5"` como decimal e `31/01/2024` como data).
+- `escrever_csv tabela, "x.csv", separador: ";"` coloca entre aspas o campo que tiver o
+  separador, aspas ou quebra de linha (RFC 4180) e grava `nulo` como campo vazio.
+
+### Datas e nulos
+
+| Função | O que faz |
+|---|---|
+| `converter_data("31/01/2024")` | `2024-01-31` (aceita `AAAA-MM-DD`, `AAAA/MM/DD`, `DD/MM/AAAA` e hora opcional); `nulo` se inválida |
+| `ano(d)`, `mes(d)`, `dia(d)` | partes de uma data ISO (`nulo` se inválida) |
+| `adicionar_dias(d, n)` | soma (ou subtrai, com `n` negativo) dias |
+| `dias_entre(a, b)` | dias de `a` até `b` (negativo se `b` < `a`) |
+| `coalescer(a, b, ...)` | o primeiro valor que não é nulo nem texto vazio |
+
+
 Métodos sem argumentos (`descrever`, `deduplicar`, `remover_nulos`, `limpar_texto`) podem
 ser escritos sem parênteses; um argumento que seja lista literal exige parênteses
 (`a.empilhar([...])`, pois `a.empilhar [...]` é lido como índice). Em 1 M de linhas,

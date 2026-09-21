@@ -291,7 +291,16 @@ class Interpreter {
                                                  const Span& span);
   std::string interpolate(const std::string& text, Env& env);
 
-  rt::Value read_csv_file(const std::string& path, Span span);
+  // Opcoes de leitura de CSV (`ler_csv "x.csv", separador: ";", nulos: ["NA"], ...`).
+  struct CsvOpcoes {
+    char separador = ',';
+    bool detectar_separador = false;   // separador: "auto"
+    bool cabecalho = true;             // sem_cabecalho: verdadeiro -> false
+    std::vector<std::string> colunas;  // nomes das colunas (substituem/definem o cabecalho)
+    std::size_t pular = 0;             // linhas ignoradas no inicio
+    std::vector<std::string> nulos;    // textos lidos como nulo (ex.: "NA", "-")
+  };
+  rt::Value read_csv_file(const std::string& path, Span span, const CsvOpcoes* opcoes = nullptr);
   rt::Value read_fonte(const std::string& name, Span span);
 
   // Deep learning.

@@ -22,6 +22,7 @@
 #include "runtime/compat.hpp"
 #include "runtime/json.hpp"
 #include "runtime/sha256.hpp"
+#include "runtime/tabela_ops.hpp"
 #include "runtime/vectorstore.hpp"
 
 namespace tilt::rt {
@@ -621,6 +622,52 @@ const std::unordered_map<std::string, Handler>& tabela() {
       }
       return Value::texto(
           formatar_epoca(epoca, a.tamanho() > 1 ? a.txt(1).c_str() : "%Y-%m-%dT%H:%M:%SZ"));
+    };
+    // ---- datas e nulos para limpeza de dados ----
+    m["converter_data"] = [](const Args& a) {
+      a.aridade(1, 1, "(texto)");
+      if (a[0].kind != ValueKind::Texto) return Value::nulo();
+      const std::string d = normalizar_data(a[0].s);
+      return d.empty() ? Value::nulo() : Value::texto(d);
+    };
+    m["dias_entre"] = [](const Args& a) {
+      a.aridade(2, 2, "(data_inicial, data_final)");
+      std::int64_t e0 = 0;
+      std::int64_t e1 = 0;
+      if (a[0].kind != ValueKind::Texto || !ler_data_iso(a[0].s, e0) ||
+          a[1].kind != ValueKind::Texto || !ler_data_iso(a[1].s, e1)) {
+        a.falha("dias_entre espera datas ISO (AAAA-MM-DD); use converter_data para normalizar");
+      }
+      const std::int64_t dif = e1 - e0;
+      return Value::inteiro(dif >= 0 ? dif / 86400 : -((-dif + 86399) / 86400));
+    };
+    m["adicionar_dias"] = [](const Args& a) {
+      a.aridade(2, 2, "(data, dias)");
+      std::int64_t e = 0;
+      if (a[0].kind != ValueKind::Texto || !ler_data_iso(a[0].s, e)) {
+        a.falha(
+            "adicionar_dias espera uma data ISO (AAAA-MM-DD); use converter_data para normalizar");
+      }
+      e += static_cast<std::int64_t>(a.num(1)) * 86400;
+      return Value::texto(
+          formatar_epoca(e, a[0].s.size() <= 10 ? "%Y-%m-%d" : "%Y-%m-%dT%H:%M:%S"));
+    };
+    for (const auto& [nome, campo] :
+         {std::pair<const char*, int>{"ano", 0}, {"mes", 1}, {"dia", 2}}) {
+      m[nome] = [campo](const Args& a) {
+        a.aridade(1, 1, "(data)");
+        std::int64_t e = 0;
+        if (a[0].kind != ValueKind::Texto || !ler_data_iso(a[0].s, e)) return Value::nulo();
+        const std::string f = formatar_epoca(e, campo == 0 ? "%Y" : campo == 1 ? "%m" : "%d");
+        return Value::inteiro(std::strtoll(f.c_str(), nullptr, 10));
+      };
+    }
+    m["coalescer"] = [](const Args& a) {
+      a.aridade(1, 64, "(a, b, ...)");
+      for (std::size_t k = 0; k < a.tamanho(); ++k) {
+        if (!celula_nula(&a[k])) return a[k];
+      }
+      return Value::nulo();
     };
     m["dormir"] = [](const Args& a) {
       a.aridade(1, 1, "(segundos)");

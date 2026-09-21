@@ -2068,7 +2068,7 @@ namespace {
 
 // Divide a linha [pos, fim) de `buf` em celulas (aspas, `""` e `\r` como em
 // split_csv_line); `cells` e reaproveitado entre linhas. Devolve o numero de celulas.
-std::size_t csv_celulas(const char* buf, std::size_t pos, std::size_t fim,
+std::size_t csv_celulas(const char* buf, std::size_t pos, std::size_t fim, char sep,
                         std::vector<std::string>& cells) {
   std::size_t ncell = 0;
   auto nova_celula = [&]() -> std::string* {
@@ -2094,7 +2094,7 @@ std::size_t csv_celulas(const char* buf, std::size_t pos, std::size_t fim,
       }
     } else if (c == '"') {
       quoted = true;
-    } else if (c == ',') {
+    } else if (c == sep) {
       campo = nova_celula();
     } else if (c != '\r') {
       campo->push_back(c);
@@ -2103,10 +2103,16 @@ std::size_t csv_celulas(const char* buf, std::size_t pos, std::size_t fim,
   return ncell;
 }
 
+// Celula -> valor (o marcador vira nulo; ver `nulos:`).
+Value csv_valor(const std::string& cell) {
+  if (cell.size() == 5 && cell[0] == '\x01' && cell == "\x01NULO") return Value::nulo();
+  return parse_scalar(cell);
+}
+
 // Linhas de dados [ini, fim) do buffer viram mapas (uma por linha nao vazia).
-void csv_linhas(const char* buf, std::size_t ini, std::size_t fim,
+void csv_linhas(const char* buf, std::size_t ini, std::size_t fim, char sep,
                 const std::vector<std::string>& headers, bool cabecalhos_unicos,
-                rt::ValueList& rows) {
+                const std::vector<std::string>& nulos, rt::ValueList& rows) {
   std::vector<std::string> cells;
   std::size_t pos = ini;
   while (pos < fim) {
@@ -2117,17 +2123,27 @@ void csv_linhas(const char* buf, std::size_t ini, std::size_t fim,
       pos = fim_linha + 1;
       continue;
     }
-    const std::size_t ncell = csv_celulas(buf, pos, fim_linha, cells);
+    const std::size_t ncell = csv_celulas(buf, pos, fim_linha, sep, cells);
     pos = fim_linha + 1;
+    if (!nulos.empty()) {
+      for (std::size_t k = 0; k < ncell; ++k) {
+        for (const std::string& n : nulos) {
+          if (cells[k] == n) {
+            cells[k] = "\x01NULO";
+            break;
+          }
+        }
+      }
+    }
     Value row = Value::mapa();
     if (cabecalhos_unicos) {
       row.map->items.reserve(headers.size());
       for (std::size_t k = 0; k < headers.size(); ++k) {
-        row.map->items.emplace_back(headers[k], k < ncell ? parse_scalar(cells[k]) : Value::nulo());
+        row.map->items.emplace_back(headers[k], k < ncell ? csv_valor(cells[k]) : Value::nulo());
       }
     } else {  // cabecalho repetido: o ultimo valor vence (ValueMap::set)
       for (std::size_t k = 0; k < headers.size(); ++k) {
-        row.map->set(headers[k], k < ncell ? parse_scalar(cells[k]) : Value::nulo());
+        row.map->set(headers[k], k < ncell ? csv_valor(cells[k]) : Value::nulo());
       }
     }
     rows.push_back(std::move(row));
@@ -2136,7 +2152,7 @@ void csv_linhas(const char* buf, std::size_t ini, std::size_t fim,
 
 }  // namespace
 
-Value Interpreter::read_csv_file(const std::string& path, Span span) {
+Value Interpreter::read_csv_file(const std::string& path, Span span, const CsvOpcoes* opcoes) {
   std::ifstream in(path, std::ios::binary);
   if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
   // Arquivo inteiro num buffer e varredura sem alocar por linha/celula. Mesma regra de
@@ -2152,25 +2168,59 @@ Value Interpreter::read_csv_file(const std::string& path, Span span) {
   const std::size_t n = static_cast<std::size_t>(in.gcount());
   const char* dados = buf.data();
 
-  // Cabecalho: primeira linha nao vazia.
+  const CsvOpcoes padrao;
+  const CsvOpcoes& op = opcoes ? *opcoes : padrao;
   std::size_t pos = 0;
-  std::vector<std::string> headers;
-  bool tem_cabecalho = false;
-  while (pos < n) {
+  // `pular: n`: descarta as n primeiras linhas (titulos, comentarios).
+  for (std::size_t k = 0; k < op.pular && pos < n; ++k) {
     const void* nl = std::memchr(dados + pos, '\n', n - pos);
-    const std::size_t fim = nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - dados) : n;
-    if (fim == pos) {
-      pos = fim + 1;
-      continue;
-    }
-    std::vector<std::string> cells;
-    const std::size_t ncell = csv_celulas(dados, pos, fim, cells);
-    headers.assign(cells.begin(), cells.begin() + static_cast<std::ptrdiff_t>(ncell));
-    pos = fim + 1;
-    tem_cabecalho = true;
-    break;
+    pos = nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - dados) + 1 : n;
   }
-  if (!tem_cabecalho) return Value::tabela({});
+  auto primeira_linha_util = [&](std::size_t& de, std::size_t& ate) {
+    while (de < n) {
+      const void* nl = std::memchr(dados + de, '\n', n - de);
+      ate = nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - dados) : n;
+      if (ate != de) return true;
+      de = ate + 1;
+    }
+    return false;
+  };
+  std::size_t fim_cab = 0;
+  if (!primeira_linha_util(pos, fim_cab)) return Value::tabela({});
+  char sep = op.separador;
+  if (op.detectar_separador) {  // o mais frequente fora de aspas na primeira linha
+    std::size_t contagem[4] = {0, 0, 0, 0};
+    const char candidatos[4] = {',', ';', '\t', '|'};
+    bool aspas = false;
+    for (std::size_t k = pos; k < fim_cab; ++k) {
+      if (dados[k] == '"') aspas = !aspas;
+      if (aspas) continue;
+      for (int c = 0; c < 4; ++c) contagem[c] += dados[k] == candidatos[c] ? 1 : 0;
+    }
+    int melhor = 0;
+    for (int c = 1; c < 4; ++c) {
+      if (contagem[c] > contagem[melhor]) melhor = c;
+    }
+    sep = candidatos[melhor];
+  }
+  std::vector<std::string> headers;
+  {
+    std::vector<std::string> cells;
+    const std::size_t ncell = csv_celulas(dados, pos, fim_cab, sep, cells);
+    if (op.cabecalho) {
+      headers.assign(cells.begin(), cells.begin() + static_cast<std::ptrdiff_t>(ncell));
+      pos = fim_cab + 1;
+    } else {  // sem cabecalho: a 1a linha ja e dado; colunas dadas ou coluna1..N
+      for (std::size_t k = 0; k < ncell; ++k) headers.push_back("coluna" + std::to_string(k + 1));
+    }
+    if (!op.colunas.empty()) {
+      for (std::size_t k = 0; k < op.colunas.size() && k < headers.size(); ++k) {
+        headers[k] = op.colunas[k];
+      }
+      for (std::size_t k = headers.size(); k < op.colunas.size(); ++k)
+        headers.push_back(op.colunas[k]);
+    }
+  }
   bool cabecalhos_unicos = true;
   for (std::size_t a = 0; a < headers.size() && cabecalhos_unicos; ++a) {
     for (std::size_t b = a + 1; b < headers.size(); ++b) {
@@ -2203,14 +2253,15 @@ Value Interpreter::read_csv_file(const std::string& path, Span span) {
   std::vector<rt::ValueList> partes(nfaixas);
   if (nfaixas == 1) {
     partes[0].reserve(static_cast<std::size_t>(std::count(dados + pos, dados + n, '\n')) + 1);
-    csv_linhas(dados, pos, n, headers, cabecalhos_unicos, partes[0]);
+    csv_linhas(dados, pos, n, sep, headers, cabecalhos_unicos, op.nulos, partes[0]);
   } else {
     std::vector<std::thread> threads;
     for (std::size_t f = 0; f < nfaixas; ++f) {
       threads.emplace_back([&, f] {
         partes[f].reserve(
             static_cast<std::size_t>(std::count(dados + corte[f], dados + corte[f + 1], '\n')) + 1);
-        csv_linhas(dados, corte[f], corte[f + 1], headers, cabecalhos_unicos, partes[f]);
+        csv_linhas(dados, corte[f], corte[f + 1], sep, headers, cabecalhos_unicos, op.nulos,
+                   partes[f]);
       });
     }
     for (std::thread& t : threads) t.join();
@@ -2242,7 +2293,19 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
   if (tipo == "sqlite" && path.rfind("sqlite://", 0) == 0) path = path.substr(9);
   if (tipo == "csv") {
     if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
-    return read_csv_file(path, span);
+    const std::string sep = field_text("separador");
+    if (sep.empty()) return read_csv_file(path, span);
+    CsvOpcoes op;
+    if (sep == "auto") {
+      op.detectar_separador = true;
+    } else if (sep == "tab") {
+      op.separador = '\t';
+    } else if (sep.size() == 1) {
+      op.separador = sep[0];
+    } else {
+      fail(span, "fonte '" + name + "': 'separador' deve ser um caractere (ou \"auto\", \"tab\")");
+    }
+    return read_csv_file(path, span, &op);
   }
   if (tipo == "json") {
     if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
@@ -10459,7 +10522,43 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   if (name == "ler_csv") {
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_csv espera um caminho");
-    return read_csv_file(a[0].s, call.span);
+    const rt::ValueMap kw = eval_kwargs(call, env);
+    if (kw.items.empty()) return read_csv_file(a[0].s, call.span);
+    CsvOpcoes op;
+    const auto nomes = [&](const char* chave, std::vector<std::string>& destino) {
+      const Value* v = kw.find(chave);
+      if (v == nullptr) return;
+      if (v->kind != ValueKind::Lista || !v->list) {
+        fail(call.span, std::string("ler_csv: '") + chave + "' deve ser uma lista de textos");
+      }
+      for (const Value& e : *v->list)
+        destino.push_back(e.kind == ValueKind::Texto ? e.s : to_display(e));
+    };
+    if (const Value* v = kw.find("separador")) {
+      if (v->kind != ValueKind::Texto) fail(call.span, "ler_csv: 'separador' deve ser texto");
+      if (v->s == "auto") {
+        op.detectar_separador = true;
+      } else if (v->s == "tab" || v->s == "\\t") {
+        op.separador = '\t';
+      } else if (v->s.size() == 1) {
+        op.separador = v->s[0];
+      } else {
+        fail(call.span, "ler_csv: 'separador' deve ser um caractere (ou \"auto\", \"tab\")");
+      }
+    }
+    if (const Value* v = kw.find("sem_cabecalho")) op.cabecalho = !v->truthy();
+    if (const Value* v = kw.find("pular")) op.pular = static_cast<std::size_t>(v->as_number());
+    nomes("colunas", op.colunas);
+    nomes("nulos", op.nulos);
+    Value t = read_csv_file(a[0].s, call.span, &op);
+    if (const Value* tipos = kw.find("tipos")) {
+      try {
+        t = rt::tabela_converter(t, *tipos);
+      } catch (const std::exception& e) {
+        fail(call.span, std::string("ler_csv: ") + e.what());
+      }
+    }
+    return t;
   }
   if (name == "ler_parquet") {
     auto a = args();
@@ -10630,20 +10729,40 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
   if (name == "escrever_csv") {
     auto a = args();
+    const rt::ValueMap kw = eval_kwargs(call, env);
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "escrever espera (tabela, caminho)");
     }
+    char sep = ',';
+    if (const Value* v = kw.find("separador")) {
+      if (v->kind != ValueKind::Texto || !(v->s.size() == 1 || v->s == "tab")) {
+        fail(call.span, "escrever_csv: 'separador' deve ser um caractere (ou \"tab\")");
+      }
+      sep = v->s == "tab" ? '\t' : v->s[0];
+    }
     std::ofstream outf(a[1].s);
     if (!outf) fail(call.span, "nao foi possivel escrever '" + a[1].s + "'");
+    // Campo com separador, aspas ou quebra de linha vai entre aspas (RFC 4180); nulo = vazio.
+    const auto campo = [&](const std::string& txt) {
+      if (txt.find_first_of(std::string("\"\n\r") + sep) == std::string::npos) return txt;
+      std::string q = "\"";
+      for (const char c : txt) {
+        if (c == '"') q += '"';
+        q += c;
+      }
+      return q + "\"";
+    };
     const auto& rows = *a[0].list;
     if (!rows.empty() && rows[0].kind == ValueKind::Mapa && rows[0].map) {
       const auto& hdr = rows[0].map->items;
-      for (std::size_t k = 0; k < hdr.size(); ++k) outf << (k ? "," : "") << hdr[k].first;
+      for (std::size_t k = 0; k < hdr.size(); ++k)
+        outf << (k ? std::string(1, sep) : "") << campo(hdr[k].first);
       outf << '\n';
       for (const Value& r : rows) {
         for (std::size_t k = 0; k < hdr.size(); ++k) {
           const Value* c = r.map ? r.map->find(hdr[k].first) : nullptr;
-          outf << (k ? "," : "") << (c ? to_display(*c) : "");
+          outf << (k ? std::string(1, sep) : "")
+               << campo(c && c->kind != ValueKind::Nulo ? to_display(*c) : "");
         }
         outf << '\n';
       }
