@@ -5,6 +5,7 @@
 #endif
 
 #include <algorithm>
+#include <numeric>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -12298,18 +12299,61 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     const std::string col = a[0].s;
     const Value* desc = kw.find("desc");
     const bool descending = desc && desc->truthy();
-    rt::ValueList out = receiver.list ? *receiver.list : rt::ValueList{};
-    std::stable_sort(out.begin(), out.end(), [&](const Value& x, const Value& y) {
-      const Value* xa = x.map ? x.map->find(col) : nullptr;
-      const Value* ya = y.map ? y.map->find(col) : nullptr;
-      bool less;
-      if (xa && ya && xa->is_number() && ya->is_number()) {
-        less = xa->as_number() < ya->as_number();
+    // Ordena indices por chaves extraidas uma vez (antes: copiava a tabela e procurava a
+    // coluna no mapa a cada comparacao). Empates mantem a ordem original (estavel).
+    static const rt::ValueList vazia;
+    const rt::ValueList& linhas = receiver.list ? *receiver.list : vazia;
+    const std::size_t n = linhas.size();
+    std::vector<const Value*> chaves(n);
+    bool todos_num = true;
+    bool todos_txt = true;
+    for (std::size_t i = 0; i < n; ++i) {
+      const Value* k = linhas[i].map ? linhas[i].map->find(col) : nullptr;
+      chaves[i] = k;
+      if (!(k && k->is_number())) todos_num = false;
+      if (!(k && k->kind == ValueKind::Texto)) todos_txt = false;
+    }
+    std::vector<std::uint32_t> ordem(n);
+    std::iota(ordem.begin(), ordem.end(), std::uint32_t{0});
+    if (todos_num) {
+      std::vector<double> num(n);
+      for (std::size_t i = 0; i < n; ++i) num[i] = chaves[i]->as_number();
+      if (descending) {
+        std::stable_sort(ordem.begin(), ordem.end(),
+                         [&](std::uint32_t x, std::uint32_t y) { return num[y] < num[x]; });
       } else {
-        less = (xa ? to_display(*xa) : "") < (ya ? to_display(*ya) : "");
+        std::stable_sort(ordem.begin(), ordem.end(),
+                         [&](std::uint32_t x, std::uint32_t y) { return num[x] < num[y]; });
       }
-      return descending ? !less : less;
-    });
+    } else if (todos_txt) {
+      if (descending) {
+        std::stable_sort(ordem.begin(), ordem.end(), [&](std::uint32_t x, std::uint32_t y) {
+          return chaves[y]->s < chaves[x]->s;
+        });
+      } else {
+        std::stable_sort(ordem.begin(), ordem.end(), [&](std::uint32_t x, std::uint32_t y) {
+          return chaves[x]->s < chaves[y]->s;
+        });
+      }
+    } else {  // coluna mista/ausente: numero contra numero, senao texto de exibicao
+      std::vector<std::string> texto(n);
+      for (std::size_t i = 0; i < n; ++i) texto[i] = chaves[i] ? to_display(*chaves[i]) : "";
+      const auto menor = [&](std::uint32_t x, std::uint32_t y) {
+        if (chaves[x] && chaves[y] && chaves[x]->is_number() && chaves[y]->is_number()) {
+          return chaves[x]->as_number() < chaves[y]->as_number();
+        }
+        return texto[x] < texto[y];
+      };
+      if (descending) {
+        std::stable_sort(ordem.begin(), ordem.end(),
+                         [&](std::uint32_t x, std::uint32_t y) { return menor(y, x); });
+      } else {
+        std::stable_sort(ordem.begin(), ordem.end(), menor);
+      }
+    }
+    rt::ValueList out;
+    out.reserve(n);
+    for (const std::uint32_t i : ordem) out.push_back(linhas[i]);
     return Value::tabela(std::move(out));
   }
   if (is_table && (method == "limite" || method == "primeiros")) {
