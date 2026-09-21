@@ -517,6 +517,102 @@ bool Interpreter::repl_executar(const ast::Block& passos, bool eco, std::string&
   return false;
 }
 
+// -------------------------------------------------------------------- rpc
+
+bool Interpreter::preparar_chamadas(std::string& erro) {
+  try {
+    register_decls();
+    return true;
+  } catch (const RuntimeAbort& a) {
+    erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+  }
+  return false;
+}
+
+std::vector<Interpreter::FuncaoPublica> Interpreter::funcoes_publicas() const {
+  std::vector<FuncaoPublica> lista;
+  for (const auto& [nome, fn] : functions_) {
+    if (nome.empty() || nome[0] == '_') continue;
+    FuncaoPublica f;
+    f.nome = nome;
+    for (const ast::Arg& p : fn->params) f.params.push_back(p.name);
+    lista.push_back(std::move(f));
+  }
+  std::sort(lista.begin(), lista.end(),
+            [](const FuncaoPublica& a, const FuncaoPublica& b) { return a.nome < b.nome; });
+  return lista;
+}
+
+std::vector<std::string> Interpreter::pipelines_publicos() const {
+  std::vector<std::string> nomes;
+  for (const Item* p : pipelines_) nomes.push_back(decl_name(*p));
+  std::sort(nomes.begin(), nomes.end());
+  return nomes;
+}
+
+bool Interpreter::chamar_por_nome(const std::string& nome, std::vector<Value> args,
+                                  const std::vector<std::pair<std::string, Value>>& nomeados,
+                                  Value& resultado, std::string& erro) {
+  const auto it = functions_.find(nome);
+  if (it == functions_.end() || nome.empty() || nome[0] == '_') {
+    erro = "funcao '" + nome + "' nao existe";
+    return false;
+  }
+  const Item& fn = *it->second;
+  if (args.size() > fn.params.size()) {
+    erro = "'" + nome + "' aceita " + std::to_string(fn.params.size()) + " argumento(s), recebeu " +
+           std::to_string(args.size());
+    return false;
+  }
+  // Nomeados entram na posicao do parametro; buracos ate ele ficam nulos e os
+  // parametros depois do ultimo nomeado mantem o valor padrao.
+  for (const auto& [chave, valor] : nomeados) {
+    std::size_t pos = fn.params.size();
+    for (std::size_t k = 0; k < fn.params.size(); ++k) {
+      if (fn.params[k].name == chave) pos = k;
+    }
+    if (pos == fn.params.size()) {
+      erro = "'" + nome + "' nao tem o parametro '" + chave + "'";
+      return false;
+    }
+    if (args.size() <= pos) args.resize(pos + 1, Value::nulo());
+    args[pos] = valor;
+  }
+  try {
+    resultado = call_function(fn, std::move(args), fn.span);
+    return true;
+  } catch (const RuntimeAbort& a) {
+    erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+  } catch (const ReturnSignal& r) {
+    resultado = r.value;
+    return true;
+  } catch (const BreakSignal&) {
+    erro = "'parar' fora de um laco";
+  } catch (const ContinueSignal&) {
+    erro = "'continuar' fora de um laco";
+  } catch (const std::exception& e) {
+    erro = e.what();
+  }
+  return false;
+}
+
+bool Interpreter::rodar_pipeline_por_nome(const std::string& nome, std::string& erro) {
+  for (const Item* p : pipelines_) {
+    if (decl_name(*p) != nome) continue;
+    try {
+      run_pipeline(*p);
+      return true;
+    } catch (const RuntimeAbort& a) {
+      erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+    } catch (const std::exception& e) {
+      erro = e.what();
+    }
+    return false;
+  }
+  erro = "pipeline '" + nome + "' nao existe";
+  return false;
+}
+
 // ------------------------------------------------------------------ tiltc
 
 bool tiltc_off() {

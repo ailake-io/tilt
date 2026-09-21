@@ -139,6 +139,23 @@ class Interpreter {
   // Program novo; lanca std::runtime_error com a mensagem se falhar.
   void repl_registrar(const ast::Program& programa);
 
+  // `tilt rpc`: expoe funcoes e pipelines do programa a outros processos.
+  // preparar_chamadas registra as declaracoes (uma vez); false + `erro` se falhar.
+  bool preparar_chamadas(std::string& erro);
+  struct FuncaoPublica {
+    std::string nome;
+    std::vector<std::string> params;
+  };
+  // Funcoes de topo (sem prefixo `_`) e nomes de pipelines, ordenados.
+  std::vector<FuncaoPublica> funcoes_publicas() const;
+  std::vector<std::string> pipelines_publicos() const;
+  // Chama `nome` com args posicionais e depois nomeados (mapeados pelo nome do
+  // parametro). false + `erro` (com a linha) em falha.
+  bool chamar_por_nome(const std::string& nome, std::vector<rt::Value> args,
+                       const std::vector<std::pair<std::string, rt::Value>>& nomeados,
+                       rt::Value& resultado, std::string& erro);
+  bool rodar_pipeline_por_nome(const std::string& nome, std::string& erro);
+
   // `tilt testar`: roda os blocos `teste` do programa (na ordem do arquivo) cujo
   // nome contem `filtro` (vazio = todos). Cada teste roda isolado: uma falha
   // (afirmar, erro de execucao) nao interrompe os demais. Registra funcoes e

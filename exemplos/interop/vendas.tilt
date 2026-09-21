@@ -1,0 +1,30 @@
+# Funcoes chamaveis de fora (Python, PySpark, Kof) por `tilt rpc` / `tilt chamar`.
+# Rode:  tilt rpc exemplos/interop/vendas.tilt   (protocolo em docs/guia-17)
+
+funcao total_por_regiao linhas:
+  retornar linhas.agrupar_por "regiao", { total: somar "valor", pedidos: contar }
+
+funcao so_altos linhas, minimo = 50:
+  retornar linhas.filtrar linha.valor >= minimo
+
+funcao classificar valor:
+  se valor >= 100:
+    retornar "alto"
+  senao se valor >= 50:
+    retornar "medio"
+  retornar "baixo"
+
+funcao enriquecer linhas:
+  retornar linhas.derivar { faixa: classificar(linha.valor) }
+
+funcao saudar nome:
+  imprimir "saudando {{nome}}"
+  retornar "ola, {{nome}}"
+
+funcao falhar:
+  afirmar 1 == 2, "sempre falha"
+  retornar nulo
+
+pipeline demo:
+  passos:
+    - imprimir "pipeline demo rodou"

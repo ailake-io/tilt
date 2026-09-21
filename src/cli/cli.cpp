@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "cli/dev_cmds.hpp"
+#include "cli/rpc.hpp"
 #include "codegen/codegen_arm64.hpp"
 #include "codegen/codegen_x86_64.hpp"
 #include "common/source.hpp"
@@ -103,6 +104,8 @@ void print_usage(std::ostream& os) {
      << "  formatar <caminho...> [--verificar]  normaliza espacos dos .tilt\n"
      << "  novo <nome>                        cria um projeto (programa, testes, README)\n"
      << "  repl                               laco interativo com estado entre linhas\n"
+     << "  rpc <arquivo>                      expoe funcoes e pipelines por JSON-lines\n"
+     << "  chamar <arquivo> <funcao> [json]   chama uma funcao e imprime o resultado em JSON\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "                                     [--requisicoes N] [--threads N]\n"
      << "  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via\n"
@@ -748,6 +751,8 @@ int run_cli(int argc, char** argv) {
   if (cmd == "formatar") return cmd_formatar(args);
   if (cmd == "novo") return cmd_novo(args);
   if (cmd == "repl") return cmd_repl(args);
+  if (cmd == "rpc") return cmd_rpc(args);
+  if (cmd == "chamar") return cmd_chamar(args);
   if (cmd == "servir") return cmd_servir(args);
   if (cmd == "servir-catalogo") return cmd_servir_catalogo(args);
 

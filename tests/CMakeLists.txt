@@ -86,6 +86,11 @@ add_test(
           $<TARGET_FILE:tilt>)
 
 add_test(
+  NAME rpc
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/rpc_test.sh
+          $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)
+
+add_test(
   NAME equipe_paralela
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/equipe_paralela_test.sh
           $<TARGET_FILE:tilt>)
