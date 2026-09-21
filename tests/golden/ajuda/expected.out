@@ -11,6 +11,8 @@ comandos:
   formatar <caminho...> [--verificar]  normaliza espacos dos .tilt
   novo <nome>                        cria um projeto (programa, testes, README)
   repl                               laco interativo com estado entre linhas
+  rpc <arquivo>                      expoe funcoes e pipelines por JSON-lines
+  chamar <arquivo> <funcao> [json]   chama uma funcao e imprime o resultado em JSON
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
                                      [--requisicoes N] [--threads N]
   servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via
