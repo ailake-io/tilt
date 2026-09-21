@@ -61,6 +61,7 @@
 #include "runtime/pgvector.hpp"
 #include "runtime/pinecone.hpp"
 #include "runtime/postgres.hpp"
+#include "runtime/python_interop.hpp"
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
 #include "runtime/s3.hpp"
@@ -11661,6 +11662,37 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     try {
       if (eh_post) return rt::http_post_json(a[0].s, a[1], headers);
       return rt::http_get_json(a[0].s, headers);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "chamar_python") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "chamar_python espera (modulo, funcao, args...), ex.: chamar_python \"math\", "
+           "\"sqrt\", 16  ou  chamar_python \"limpeza.py\", \"normalizar\", tabela, escala: 2");
+    }
+    std::string modulo = a[0].s;
+    // Caminho relativo de .py: procura ao lado do programa antes do diretorio atual.
+    if (modulo.size() > 3 && modulo.compare(modulo.size() - 3, 3, ".py") == 0 &&
+        !std::filesystem::path(modulo).is_absolute()) {
+      const std::filesystem::path ao_lado = std::filesystem::path(entry_dir_) / modulo;
+      std::error_code ec;
+      if (!entry_dir_.empty() && std::filesystem::exists(ao_lado, ec)) modulo = ao_lado.string();
+    }
+    std::string python;
+    if (const Value* p = kw.find("python"); p != nullptr) {
+      if (p->kind != ValueKind::Texto) fail(call.span, "chamar_python: 'python' deve ser texto");
+      python = p->s;
+      kw.items.erase(std::remove_if(kw.items.begin(), kw.items.end(),
+                                    [](const auto& kv) { return kv.first == "python"; }),
+                     kw.items.end());
+    }
+    try {
+      return rt::chamar_python(modulo, a[1].s, std::vector<Value>(a.begin() + 2, a.end()), kw,
+                               python);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
     }

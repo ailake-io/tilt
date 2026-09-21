@@ -886,6 +886,13 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       {"mongo_deletar", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_criar_indice", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_agregar", 2, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      // interoperabilidade
+      {"chamar_python",
+       2,
+       {TypeKind::Texto},
+       {TypeKind::Texto},
+       TypeKind::Unknown,
+       "chamar_python \"math\", \"sqrt\", 16"},
       // http generico
       {"http_get_json",
        1,

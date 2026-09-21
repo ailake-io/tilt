@@ -52,6 +52,7 @@ add_library(tilt_core STATIC
   src/runtime/compat.cpp
   src/runtime/value.cpp
   src/runtime/json.cpp
+  src/runtime/python_interop.cpp
   src/runtime/tensor.cpp
   src/runtime/safetensors.cpp
   src/runtime/onnx.cpp

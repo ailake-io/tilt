@@ -90,6 +90,11 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/rpc_test.sh
           $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)
 
+add_test(
+  NAME chamar_python
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/chamar_python_test.sh
+          $<TARGET_FILE:tilt>)
+
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
   add_test(

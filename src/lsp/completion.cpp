@@ -40,7 +40,7 @@ const std::array<std::string_view, 23> kDeclKeywords = {
 const std::array<std::string_view, 9> kStmtKeywords = {
     "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar", "parar", "continuar"};
 
-const std::array<std::string_view, 65> kBuiltins = {"imprimir",
+const std::array<std::string_view, 66> kBuiltins = {"imprimir",
                                                     "registrar",
                                                     "env",
                                                     "tamanho",
@@ -101,6 +101,7 @@ const std::array<std::string_view, 65> kBuiltins = {"imprimir",
                                                     "s3_enviar_parte",
                                                     "s3_concluir_upload",
                                                     "s3_abortar_upload",
+                                                    "chamar_python",
                                                     "http_get_json",
                                                     "http_post_json",
                                                     "es_buscar",
@@ -328,6 +329,9 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Conclui um upload multipart S3.", nullptr},
       {"s3_abortar_upload", "s3_abortar_upload(id, ...)", "id", "Aborta um upload multipart S3.",
        nullptr},
+      {"chamar_python", "chamar_python(modulo, funcao, args...)", "modulo,funcao",
+       "Chama uma funcao Python (python3 em subprocesso; args e resultado em JSON).",
+       "chamar_python \"math\", \"sqrt\", 16"},
       {"http_get_json", "http_get_json(url, cabecalhos?)", "url,cabecalhos",
        "Faz um GET HTTP e retorna o JSON da resposta.", "http_get_json \"https://api/status\""},
       {"http_post_json", "http_post_json(url, corpo, cabecalhos?)", "url,corpo,cabecalhos",
