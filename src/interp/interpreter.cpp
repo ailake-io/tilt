@@ -5,7 +5,6 @@
 #endif
 
 #include <algorithm>
-#include <numeric>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -25,6 +24,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <ostream>
 #include <random>
 #include <regex>
