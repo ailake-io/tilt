@@ -2337,7 +2337,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       for (std::int64_t k = 0; k < page_values; ++k) {
         const int def = static_cast<int>(defs[static_cast<std::size_t>(k)]);
         if (def == max_def) {
-          out.push_back(vals[vi++]);
+          out.push_back(std::move(vals[vi++]));
         } else {
           out.push_back(Value::nulo());
         }
@@ -2417,7 +2417,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
             cur.list->push_back(Value::lista());
             tags_open = true;
           }
-          cur.list->back().list->push_back(vals[vi++]);
+          cur.list->back().list->push_back(std::move(vals[vi++]));
           ++k;
           continue;
         }
@@ -2504,7 +2504,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
             if (primeira || reps[k] == 1) {
               row.list->push_back(Value::lista());
             }
-            row.list->back().list->push_back(vals[vi++]);
+            row.list->back().list->push_back(std::move(vals[vi++]));
             primeira = false;
             ++k;
             continue;
@@ -2644,7 +2644,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
             if (rep == 0 || rep == 1 || mid < 0) abre_mid();
             if (rep == 0 || rep == 1 || rep == 2 || inr < 0) abre_inr();
             (*(*row.list)[static_cast<std::size_t>(mid)].list)[static_cast<std::size_t>(inr)]
-                .list->push_back(vals[vi++]);
+                .list->push_back(std::move(vals[vi++]));
             primeira = false;
             ++k;
             continue;
@@ -2691,7 +2691,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
         cur_maxdef = static_cast<int>(def);
       }
       if (static_cast<int>(def) == max_def) {
-        cur.list->push_back(vals[vi++]);
+        cur.list->push_back(std::move(vals[vi++]));
       } else if (cd.elem_null_level >= 0 && static_cast<int>(def) == cd.elem_null_level) {
         cur.list->push_back(Value::nulo());  // marcador de elemento Nulo (B2b)
       } else if (cd.elem_nullable && static_cast<int>(def) == max_def - 1) {
@@ -4376,10 +4376,32 @@ Value parquet_read(const std::string& path) {
   // Remontagem via montar_no (funcao de arquivo, reutilizada na leitura por grupo).
 
   Value tabela = Value::tabela();
+  tabela.list->reserve(static_cast<std::size_t>(num_rows));
+  // Nomes de topo repetidos exigem ValueMap::set (o ultimo vence); sem repeticao vale o
+  // caminho rapido: folhas simples MOVEM o valor da coluna (cada celula e lida uma vez).
+  bool nomes_unicos = true;
+  for (std::size_t a = 0; a < top.size() && nomes_unicos; ++a) {
+    for (std::size_t b = a + 1; b < top.size(); ++b) {
+      if (top[a].name == top[b].name) nomes_unicos = false;
+    }
+  }
   for (std::int64_t r = 0; r < num_rows; ++r) {
     Value row = Value::mapa();
+    row.map->items.reserve(top.size());
     for (const RField& t : top) {
-      row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+      const bool folha = !t.is_struct && !t.struct_list && !t.is_map;
+      if (nomes_unicos && folha) {
+        auto& col = columns[static_cast<std::size_t>(t.leaf_idx)];
+        if (static_cast<std::size_t>(r) >= col.size()) {
+          die("coluna '" + t.name + "' tem menos valores que 'num_rows'");
+        }
+        row.map->items.emplace_back(t.name, std::move(col[static_cast<std::size_t>(r)]));
+      } else if (nomes_unicos) {
+        row.map->items.emplace_back(t.name,
+                                    montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+      } else {
+        row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+      }
     }
     tabela.list->push_back(std::move(row));
   }
