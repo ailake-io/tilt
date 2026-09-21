@@ -2,14 +2,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -3132,7 +3135,12 @@ void parquet_write(const std::string& path, const Value& tabela,
   std::deque<Column> owned;  // folhas sinteticas (refs estaveis)
   const std::vector<FlatLeaf> leaves = flatten_columns(cols, owned);
 
-  for (std::size_t leaf_index = 0; leaf_index < leaves.size(); ++leaf_index) {
+  // Cada folha vira um pedaco de bytes independente (offsets relativos ao pedaco); o
+  // arquivo e montado na ordem, somando o deslocamento. Com muitas colunas grandes e sem
+  // criptografia (nonce aleatorio compartilhado) os pedacos sao gerados em threads.
+  using FolhaGerada = std::pair<std::string, ChunkInfo>;
+  const auto gerar_folha = [&](std::size_t leaf_index) -> FolhaGerada {
+    std::string corpo;
     const FlatLeaf& fl = leaves[leaf_index];
     const Column& c = *fl.leaf;
     const ColumnLevels& lv = fl.lv;
@@ -3199,7 +3207,7 @@ void parquet_write(const std::string& path, const Value& tabela,
 
     // Dictionary page antes da data page (valores do dicionario em PLAIN).
     if (dict) {
-      ci.dict_page_offset = static_cast<std::int64_t>(body.size());
+      ci.dict_page_offset = static_cast<std::int64_t>(corpo.size());
       const std::string dict_comp = compress_payload(values_plain, codec, c.name);
       std::string dict_header;
       Tw dw{dict_header};
@@ -3218,18 +3226,18 @@ void parquet_write(const std::string& path, const Value& tabela,
                                             static_cast<std::uint32_t>(leaf_index));
         const std::string ep = encrypt_page(dict_comp, 3, crypto,
                                             static_cast<std::uint32_t>(leaf_index));
-        body += eh;
-        body += ep;
+        corpo += eh;
+        corpo += ep;
         ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
         ci.dict_compressed = static_cast<std::int64_t>(eh.size() + ep.size());
       } else {
-        body += dict_header;
-        body += dict_comp;
+        corpo += dict_header;
+        corpo += dict_comp;
         ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
         ci.dict_compressed = static_cast<std::int64_t>(dict_header.size() + dict_comp.size());
       }
     }
-    ci.data_page_offset = static_cast<std::int64_t>(body.size());
+    ci.data_page_offset = static_cast<std::int64_t>(corpo.size());
 
     std::string data_header;
     Tw hw{data_header};
@@ -3273,21 +3281,56 @@ void parquet_write(const std::string& path, const Value& tabela,
                                           dict ? 1u : 0u);
       ci.uncompressed_size = static_cast<std::int64_t>(data_header.size() + payload_uncompressed);
       ci.compressed_size = static_cast<std::int64_t>(eh.size() + ep.size());
-      body += eh;
-      body += ep;
+      corpo += eh;
+      corpo += ep;
     } else {
       ci.uncompressed_size = static_cast<std::int64_t>(data_header.size()) + payload_uncompressed;
       ci.compressed_size = static_cast<std::int64_t>(data_header.size()) +
                            static_cast<std::int64_t>(payload.size());
-      body += data_header;
-      body += payload;
+      corpo += data_header;
+      corpo += payload;
     }
     if (ci.dict) {
       // Tamanhos cobrem dictionary + data page (mesmo ColumnChunk).
       ci.uncompressed_size += ci.dict_uncompressed;
       ci.compressed_size += ci.dict_compressed;
     }
-    infos.push_back(ci);
+    return {std::move(corpo), std::move(ci)};
+  };
+  std::vector<FolhaGerada> geradas(leaves.size());
+  std::size_t linhas_grandes = nrows;
+  const std::size_t nthreads_folhas =
+      std::min<std::size_t>(std::max(1u, std::thread::hardware_concurrency()), leaves.size());
+  if (!encrypted && leaves.size() > 1 && linhas_grandes >= 50000 && nthreads_folhas > 1) {
+    std::atomic<std::size_t> proxima{0};
+    std::vector<std::exception_ptr> erros(nthreads_folhas);
+    std::vector<std::thread> threads;
+    for (std::size_t t = 0; t < nthreads_folhas; ++t) {
+      threads.emplace_back([&, t] {
+        try {
+          for (std::size_t i = proxima.fetch_add(1); i < leaves.size(); i = proxima.fetch_add(1)) {
+            geradas[i] = gerar_folha(i);
+          }
+        } catch (...) {
+          erros[t] = std::current_exception();
+          proxima = leaves.size();
+        }
+      });
+    }
+    for (std::thread& th : threads) th.join();
+    for (const std::exception_ptr& e : erros) {
+      if (e) std::rethrow_exception(e);
+    }
+  } else {
+    for (std::size_t i = 0; i < leaves.size(); ++i) geradas[i] = gerar_folha(i);
+  }
+  for (FolhaGerada& g : geradas) {
+    const auto base = static_cast<std::int64_t>(body.size());
+    ChunkInfo& ci = g.second;
+    if (ci.dict) ci.dict_page_offset += base;
+    ci.data_page_offset += base;
+    body += g.first;
+    infos.push_back(std::move(ci));
   }
 
   const std::int64_t total_bytes = static_cast<std::int64_t>(body.size()) - 4;
