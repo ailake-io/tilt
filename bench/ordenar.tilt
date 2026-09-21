@@ -1,0 +1,5 @@
+pipeline ordenar:
+  passos:
+    - t = ler_csv "vendas.csv"
+    - o = t.ordenar_por "valor"
+    - imprimir tamanho(o)

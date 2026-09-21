@@ -1,0 +1,6 @@
+pipeline parquet:
+  passos:
+    - t = ler_csv "vendas.csv"
+    - escrever_parquet t, "ida_e_volta.parquet"
+    - p = ler_parquet "ida_e_volta.parquet"
+    - imprimir tamanho(p)

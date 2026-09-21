@@ -9,25 +9,78 @@ retorno, com como medir cada passo.
 
 ## Medições de referência
 
-Build Release, uma máquina Linux x86-64, uma execução cada (Python 3.14 como
-referência). Reproduza com `bench/rodar.sh` — o que importa é comparar *antes/depois
-na mesma máquina*, não os números absolutos.
+Build Release, uma máquina Linux x86-64 (8 núcleos), melhor de 3 execuções, Python 3.14
+como referência. Reproduza com `bench/rodar.sh` (tabela legível) ou
+`bench/comparar.py` (normaliza pela velocidade da máquina e falha em regressão). O que
+importa é comparar *antes/depois na mesma máquina*, não os números absolutos.
 
-| Caso | Interpretador | VM (`--vm`) | JIT (`--jit`) | Referência |
-|---|---|---|---|---|
-| Laço de 3 milhões de iterações (`bench/laco.tilt`) | 1,16 s | 1,18 s | **0,12 s** | CPython 0,36 s |
-| `fib(30)`, 1,6 milhão de chamadas (`bench/fib.tilt`) | 1,50 s | 1,54 s | 2,03 s | CPython 0,18 s |
-| CSV de 1 M linhas: `ler_csv` + `agrupar_por` + `escrever_parquet` (`bench/dados.tilt`) | 1,71 s | — | — | Python `csv` puro 2,85 s; DuckDB 0,17 s |
+| Caso | Antes | Agora | Referência |
+|---|---|---|---|
+| Laço de 3 milhões de iterações, interpretador | 1,16 s | **0,56 s** | CPython 0,36 s |
+| Laço de 3 milhões, VM (`--vm`) | 1,18 s | **0,55 s** | |
+| Laço de 3 milhões, JIT (`--jit`) | 0,12 s | 0,12 s | |
+| `fib(30)`, 1,6 milhão de chamadas, interpretador/VM | 1,50 / 1,54 s | **0,41 s** | CPython 0,18 s |
+| `fib(30)`, JIT | 2,03 s | 1,60 s | (cai para a VM a cada chamada) |
+| CSV 1 M linhas: `ler_csv` + `agrupar_por` + `escrever_parquet` | 1,71 s | **0,73 s** | Python `csv` 2,85 s |
+| `ler_csv` de 1 M linhas | 1,21 s | **0,53 s** | |
+| `ordenar_por` em 1 M linhas (com a leitura) | 4,6 s | **1,0 s** | |
+| `ler_parquet` de 1 M linhas | 2,5 s | **1,7 s** | |
+| `escrever_parquet` de 1 M linhas | ~1,0 s | **~0,55 s** | |
+| `sql` sobre o CSV com DuckDB (agregação de 1 M linhas) | — | **0,19 s** | DuckDB CLI 0,17 s |
 
-O que os números dizem:
+## O que já foi feito
 
-- **Dados:** mais rápido que Python puro, mas ~10× mais lento que um motor colunar.
-- **Lógica no interpretador/VM:** 3× (laço) a 8× (recursão) mais lenta que o CPython.
-- **A VM não ganha do interpretador** (1,18 s contra 1,16 s): o bytecode ainda opera
-  sobre o mesmo `Value` pesado e as mesmas tabelas de nomes.
-- **O JIT só ajuda em laço de inteiros.** Em chamadas ele é até mais lento que a VM
-  (2,03 s contra 1,54 s), porque cai para a VM a cada chamada. No Apple Silicon ele
-  nunca ativa (só existe backend x86-64).
+Ordem cronológica; cada item é um commit com o antes/depois na mensagem.
+
+**Lógica (VM e interpretador)**
+- Operadores pré-decodificados na VM (`BinOp`), aritmética inteira/decimal *in place* sem
+  alocar `Value` temporário, escalares copiados campo a campo.
+- Chamada de função VM → VM direta: quadro novo na mesma pilha, sem `Env`, sem mutex, sem
+  vetor de argumentos por chamada; tabela de destinos por chunk (com cache do último).
+
+**Dados**
+- `ler_csv`: arquivo inteiro num buffer, varredura sem alocar por célula, cabeçalho
+  resolvido uma vez e, acima de ~2 MB, leitura em até 8 threads (faixas alinhadas a `\n`).
+- `agrupar_por`, `filtrar`, `derivar`: sem cópias de `Value` por linha, um `Env` reaproveitado.
+- `ordenar_por`: ordena índices sobre chaves extraídas uma vez (antes copiava a tabela e
+  procurava a coluna a cada comparação); estável.
+- Parquet: dicionário por `unordered_map` (teto de 1024 distintos), gzip no nível rápido,
+  colunas geradas em paralelo na escrita (sem criptografia) e valores *movidos* na leitura.
+- **`sql`** (e `tabela.sql`) roda SQL sobre tabelas em memória; com DuckDB lê CSV/Parquet
+  direto, 6× mais rápido que `ler_csv` + `agrupar_por` (guia 03).
+
+**Ferramentas**
+- `bench/comparar.py` + `bench/baseline.json`: sete casos normalizados por uma calibração
+  da máquina; falha se algum ficar mais de 1,6× pior que a referência.
+
+## Próximos passos
+
+Em ordem de prioridade. O critério é o que mais pesa em **limpeza de dados e pipelines**;
+lógica pura em laços fica por último porque o gargalo dela (o `Value` de 120 bytes) é uma
+mudança grande e isolada.
+
+1. **API de limpeza de dados nativa** (o que falta para não precisar cair em `derivar`
+   linha a linha ou em SQL): `remover_nulos`, `preencher_nulos`, `renomear`,
+   `remover_colunas`, `converter` (tipos), `deduplicar`, `juntar` (join), `empilhar`,
+   `descrever` (perfilagem: nulos, distintos, min/max/média por coluna), `amostra`,
+   `contar_valores` e conversão de datas. Detalhes em [guia 14](guia-14-roteiro.md).
+2. **`ler_parquet` (1,7 s)**: falta o custo de criar cada `Value`; leitura por row group em
+   paralelo e materialização direta nos mapas.
+3. **`derivar` (~1 s por 1 M de linhas, 1,5 GB)**: avaliar expressões simples (coluna
+   operador constante/coluna) sem passar pelo interpretador, e paralelizar por faixas.
+4. **VM**: superinstruções (`local op local`, `local op const`, comparar-e-saltar) montadas
+   em tempo de carga sem mexer no bytecode que o JIT e o cache `.tiltc` leem; ganho
+   estimado de 25–30% em laços.
+5. **DuckDB como motor opcional de `agrupar_por`/`juntar`** em tabelas grandes, com o mesmo
+   resultado (ordem e tipos) do caminho nativo.
+6. **`Value` compacto (~16–24 bytes)**: tag + união escalar e um ponteiro para a carga
+   pesada (texto, lista, mapa, tensor, função). É a mudança que destrava lógica, memória
+   (hoje ~650 bytes por linha de 3 colunas) e leitura de Parquet. Envolve ~1 800 pontos de
+   uso (`.map`, `.list`, `.s`...): fazer em branch próprio, com a suíte completa e os
+   *goldens* a cada etapa.
+7. **JIT com chamadas e decimais** e backend ARM64, depois do item 6.
+8. **CI**: rodar `bench/comparar.py` num job Linux (não bloqueante no início, para calibrar
+   a tolerância) e, depois, tornar bloqueante.
 
 ## Por que a lógica é lenta
 
@@ -45,7 +98,7 @@ O que os números dizem:
 5. **Tabela = lista de mapas.** Uma `tabela` de 1 M linhas são 1 M `ValueMap` com
    chaves em texto e valores boxeados: muita memória, pouca localidade de cache.
 
-## Plano para a lógica (do maior ganho para o menor)
+## Plano de fundo: lógica (detalhe do item 6 acima)
 
 1. **`Value` compacto (~16 bytes).** Tag + union (`int64`/`double`/`bool`) e um único
    ponteiro para a carga pesada (texto, lista, mapa, tensor, função). Inteiros e
@@ -63,7 +116,7 @@ O que os números dizem:
 5. **JIT com chamadas e decimais**, e **backend ARM64** (`macos-latest` e servidores
    Graviton hoje não têm JIT). Depende dos passos 1–4 para o custo compensar.
 
-## Plano para os dados
+## Plano de fundo: dados (parte já feita acima)
 
 1. **Tabela colunar.** Guardar cada coluna como vetor tipado (`int64`, `double`,
    texto por dicionário), como no Arrow, em vez de lista de mapas. `somar`, `contar`,
@@ -86,13 +139,12 @@ O que os números dizem:
 
 ## Como medir e não regredir
 
-- `bench/rodar.sh [caminho-do-tilt]` roda os três casos no interpretador, na VM e no
-  JIT (gera `bench/vendas.csv` na primeira vez; o arquivo é ignorado pelo git).
+- `bench/rodar.sh [caminho-do-tilt]` roda os casos no interpretador, na VM e no JIT (gera
+  `bench/vendas.csv` na primeira vez; o arquivo é ignorado pelo git).
+- `bench/comparar.py <tilt>` compara com `bench/baseline.json` (`--atualizar` regrava, ao
+  final de uma otimização confirmada); a comparação é por tempo / calibração da máquina.
 - Compare *antes/depois na mesma máquina*, com o mesmo binário Release
   (`cmake --preset release`), e repita 3 vezes: os números variam com a carga.
-- Próximo passo natural: um comando `tilt bench` e um job de CI que falha se um caso
-  ficar mais de X% mais lento que a referência registrada, para que otimizações e
-  novas *features* não escondam regressões.
 - Regra de trabalho: **uma otimização por vez**, com o número antes e depois no
   commit; o interpretador tem ~12 mil linhas e vários pontos de acoplamento
   (`Value`, `Env`, VM, JIT, codegen), então mudanças de representação (`Value`,

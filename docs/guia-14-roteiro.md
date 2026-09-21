@@ -40,6 +40,19 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 - **Qualidade de dados**: `verificar` valida e `quarentena:` já desvia linhas
   ruins em iterações; ainda faltam perfilagem/estatísticas e contrato de
   schema versionado na entrada.
+- **Limpeza de dados (próximo foco)**: hoje `filtrar`, `derivar`,
+  `agrupar_por`, `ordenar_por`, `selecionar`, `distinto`, `sql` e as funções de texto
+  cobrem o básico. Faltam métodos de tabela simples e nomeados, todos devolvendo uma
+  nova `tabela` e com nome em inglês equivalente:
+  `remover_nulos [colunas]`, `preencher_nulos { coluna: valor }`,
+  `renomear { antigo: "novo" }`, `remover_colunas ...`,
+  `converter { coluna: "inteiro" | "decimal" | "texto" | "logico" | "data" }`,
+  `deduplicar [colunas]`, `juntar outra, por: "chave", tipo: "esquerda"`,
+  `empilhar outra`, `descrever` (nulos, distintos, min/max/média por coluna),
+  `amostra n, semente: s`, `contar_valores coluna`, e funções de data
+  (`data "2024-01-31"`, `formatar_data`) e `coalescer(a, b)`. A perfilagem
+  (`descrever`) alimenta `verificar`. Desempenho de cada uma medido com
+  `bench/comparar.py`.
 - **Escrita analítica**: Delta/Iceberg particionam, compactam com
   `otimizar_delta`/`otimizar_iceberg`, z-order determinístico via `z_order:` e
   `vacuum_*` conservador para Parquet órfão; `ordenar_por` continua disponível
@@ -166,7 +179,9 @@ teste CTest local e sem interpolar valores no SQL.
 
 Medições, causas e o plano para acelerar lógica e dados estão no
 [guia 16](guia-16-desempenho.md): `Value` compacto, variáveis por slot, chamadas
-baratas, tabela colunar, leitura paralela e delegação ao DuckDB.
+baratas, tabela colunar, leitura paralela e delegação ao DuckDB. Já entregues: leitura de
+CSV/Parquet em paralelo, `ordenar_por` por índices, chamadas VM → VM diretas e `sql` com
+DuckDB (ver "O que já foi feito" no guia 16).
 
 ## Priorizacao sugerida
 
