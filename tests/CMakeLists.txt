@@ -91,6 +91,16 @@ add_test(
           $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)
 
 add_test(
+  NAME rpc_http
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/rpc_http_test.sh
+          $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)
+
+add_test(
+  NAME kof_interop
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/kof_interop_test.sh
+          $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)
+
+add_test(
   NAME chamar_python
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/chamar_python_test.sh
           $<TARGET_FILE:tilt>)

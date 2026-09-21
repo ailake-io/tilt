@@ -1,0 +1,21 @@
+// Kof -> Tilt: chama funcoes do exemplos/interop/vendas.tilt por HTTP.
+//   1) tilt rpc exemplos/interop/vendas.tilt --porta 8090
+//   2) kof run cliente.kf
+import kof.http
+
+record Regiao(String regiao, Int total, Int pedidos) {}
+record RespRegioes(Bool ok, List<Regiao> resultado) {}
+record RespTexto(Bool ok, String resultado) {}
+
+String tilt(String funcao, String args) {
+    return http.post("http://127.0.0.1:8090/chamar/" + funcao, args, "Content-Type: application/json")
+}
+
+main() {
+    var faixa = json.decode<RespTexto>(tilt("classificar", "[120]"))
+    println(faixa.resultado)
+    var linhas = "[{\"regiao\":\"sul\",\"valor\":30},{\"regiao\":\"norte\",\"valor\":120},{\"regiao\":\"sul\",\"valor\":5}]"
+    var r = json.decode<RespRegioes>(tilt("total_por_regiao", "[" + linhas + "]"))
+    println(r.resultado.size())
+    println(r.resultado.get(0).regiao + " " + r.resultado.get(0).total)
+}

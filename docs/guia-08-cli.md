@@ -73,6 +73,13 @@ fecha. Comandos: `:carregar <arquivo>` registra as declarações de um `.tilt`,
 Cria a pasta `<nome>/` com `principal.tilt` (uma `funcao` e um `pipeline`),
 `testes.tilt` (exemplo de `teste`), `README.md` e `.gitignore`.
 
+## `tilt rpc <arquivo> [--porta N [--host H]]` / `tilt chamar <arquivo> <funcao> [json...]`
+
+Expõem as funções e pipelines de um `.tilt` a outros processos: `rpc` fala JSON-lines
+por stdin/stdout (ou HTTP com `--porta`); `chamar` faz uma chamada e imprime o
+resultado em JSON (cada argumento é JSON; texto que não é JSON vale como texto).
+Protocolo, Python, PySpark e Kof: [guia 17](guia-17-interoperabilidade.md).
+
 ## `tilt servir <arquivo> [--porta N] [--requisicoes N]`
 
 Sobe o primeiro `servico` declarado. `--porta` sobrepõe `porta:`.

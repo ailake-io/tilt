@@ -8,8 +8,8 @@
 
 namespace tilt {
 
-// `tilt rpc <arquivo>`: le uma requisicao JSON por linha do stdin e responde uma
-// linha JSON por requisicao no stdout (a saida de `imprimir` vai no campo `saida`).
+// `tilt rpc <arquivo> [--porta N [--host H]]`: le uma requisicao JSON por linha do stdin e responde
+// uma linha JSON por requisicao no stdout (a saida de `imprimir` vai no campo `saida`).
 int cmd_rpc(const std::vector<std::string_view>& args);
 
 // `tilt chamar <arquivo> <funcao> [arg-json...]`: chama uma funcao uma vez e

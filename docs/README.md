@@ -22,3 +22,4 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 14 | [Roteiro](guia-14-roteiro.md) | o que falta por domínio (dados, ML, DL, LLM, agentes, MLOps) e prioridades |
 | 15 | [Solução de problemas](guia-15-troubleshooting.md) | erros comuns e como resolver |
 | 16 | [Desempenho](guia-16-desempenho.md) | medições reais (lógica e dados), por que é lento e o plano para acelerar, como medir com `bench/rodar.sh` |
+| 17 | [Interoperabilidade](guia-17-interoperabilidade.md) | `tilt rpc` (JSON-lines e HTTP), `tilt chamar`, pacote Python `tilt`, `chamar_python`, PySpark (`tilt.spark`), Kof nas duas direções |

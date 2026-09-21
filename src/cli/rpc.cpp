@@ -1,5 +1,6 @@
 #include "cli/rpc.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -12,6 +13,7 @@
 #include "interp/interpreter.hpp"
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
+#include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
 #include "semantic/checker.hpp"
 #include "tilt/version.hpp"
@@ -185,14 +187,118 @@ std::string tratar(Interpreter& interp, std::ostringstream& saida, const std::st
   return ok(&resultado);
 }
 
+// Modo HTTP (`tilt rpc <arquivo> --porta N`): mesmas chamadas do JSON-lines, para
+// quem nao fala processo+pipe (Kof, JVM, JS, curl).
+//   GET  /funcoes             -> banner (funcoes, pipelines, versao)
+//   GET  /saude               -> {"ok":true}
+//   POST /chamar/<funcao>     -> corpo {"args":[...],"nomeados":{...}} ou uma lista
+//                                de argumentos; resposta como no JSON-lines
+//   POST /lote/<funcao>       -> corpo: lista de listas de argumentos
+//   POST /pipeline/<nome>     -> roda o pipeline
+// Erro de execucao = 400, funcao/pipeline inexistente = 404.
+rt::HttpResponse tratar_http(Interpreter& interp, std::ostringstream& saida,
+                             const rt::HttpRequest& req) {
+  auto resposta = [](int status, const std::string& corpo) {
+    rt::HttpResponse r;
+    r.status = status;
+    r.body = corpo;
+    return r;
+  };
+  bool sair = false;
+  const std::string& p = req.path;
+  if (req.method == "GET" && (p == "/funcoes" || p == "/")) {
+    return resposta(200, banner(interp));
+  }
+  if (req.method == "GET" && p == "/saude") return resposta(200, "{\"ok\":true}");
+  const auto barra = p.find('/', 1);
+  if (req.method != "POST" || barra == std::string::npos) {
+    return resposta(404, resposta_erro(nullptr, "rota desconhecida: " + req.method + " " + p, ""));
+  }
+  const std::string acao = p.substr(1, barra - 1);
+  const std::string nome = p.substr(barra + 1);
+  Value corpo = Value::nulo();
+  if (!req.body.empty()) {
+    try {
+      corpo = rt::json_parse(req.body);
+    } catch (const std::exception& e) {
+      return resposta(400, resposta_erro(nullptr, std::string("corpo invalido: ") + e.what(), ""));
+    }
+  }
+  Value pedido = Value::mapa();
+  if (acao == "chamar") {
+    pedido.map->items.emplace_back("chamar", texto(nome));
+    if (corpo.kind == rt::ValueKind::Lista) {
+      pedido.map->items.emplace_back("args", corpo);
+    } else if (corpo.kind == rt::ValueKind::Mapa) {
+      for (const auto& kv : corpo.map->items) {
+        if (kv.first == "args" || kv.first == "nomeados") pedido.map->items.push_back(kv);
+      }
+    }
+  } else if (acao == "lote") {
+    pedido.map->items.emplace_back("chamar", texto(nome));
+    pedido.map->items.emplace_back("lote",
+                                   corpo.kind == rt::ValueKind::Nulo ? Value::lista() : corpo);
+  } else if (acao == "pipeline") {
+    pedido.map->items.emplace_back("pipeline", texto(nome));
+  } else {
+    return resposta(404, resposta_erro(nullptr, "rota desconhecida: " + p, ""));
+  }
+  const std::string linha = tratar(interp, saida, rt::json_dump_compacto(pedido), sair);
+  bool ok = false;
+  bool inexistente = false;
+  try {
+    const Value r = rt::json_parse(linha);
+    const Value* okv = campo(r, "ok");
+    ok = okv != nullptr && okv->kind == rt::ValueKind::Logico && okv->b;
+    const Value* erro = campo(r, "erro");
+    inexistente = erro != nullptr && erro->kind == rt::ValueKind::Texto &&
+                  erro->s.find("nao existe") != std::string::npos;
+  } catch (const std::exception&) {
+  }
+  return resposta(ok ? 200 : (inexistente ? 404 : 400), linha);
+}
+
+int servir_http(Interpreter& interp, std::ostringstream& saida, const std::string& host, int porta,
+                int max_requisicoes) {
+  rt::HttpServer servidor;
+  const std::string erro = servidor.listen_on(host, porta);
+  if (!erro.empty()) {
+    std::cerr << "tilt: " << erro << "\n";
+    return kFalha;
+  }
+  std::cout << "tilt rpc: escutando http://" << host << ":" << porta << "\n" << std::flush;
+  // Serial (threads = 1): o interpretador e compartilhado entre as chamadas.
+  const int n =
+      servidor.run([&](const rt::HttpRequest& req) { return tratar_http(interp, saida, req); },
+                   max_requisicoes, 1);
+  return n < 0 ? kFalha : kOk;
+}
+
 }  // namespace
 
 int cmd_rpc(const std::vector<std::string_view>& args) {
-  if (args.size() != 2 || args[1].rfind("-", 0) == 0) {
-    std::cerr << "tilt: uso: tilt rpc <arquivo>\n";
+  std::string caminho;
+  std::string host = "127.0.0.1";
+  int porta = 0;
+  int max_requisicoes = 0;
+  for (std::size_t k = 1; k < args.size(); ++k) {
+    if (args[k] == "--porta" && k + 1 < args.size()) {
+      porta = std::atoi(std::string(args[++k]).c_str());
+    } else if (args[k] == "--host" && k + 1 < args.size()) {
+      host = std::string(args[++k]);
+    } else if (args[k] == "--requisicoes" && k + 1 < args.size()) {
+      max_requisicoes = std::atoi(std::string(args[++k]).c_str());
+    } else if (args[k].rfind("--", 0) == 0 || !caminho.empty()) {
+      std::cerr << "tilt: uso: tilt rpc <arquivo> [--porta N [--host H]]\n";
+      return kUso;
+    } else {
+      caminho = std::string(args[k]);
+    }
+  }
+  if (caminho.empty()) {
+    std::cerr << "tilt: uso: tilt rpc <arquivo> [--porta N [--host H]]\n";
     return kUso;
   }
-  const std::string caminho(args[1]);
   Programa prog;
   if (!carregar(caminho, prog)) return kFalha;
   std::ostringstream saida;
@@ -203,6 +309,7 @@ int cmd_rpc(const std::vector<std::string_view>& args) {
     std::cerr << "erro[T901]: " << erro << "\n";
     return kFalha;
   }
+  if (porta > 0) return servir_http(interp, saida, host, porta, max_requisicoes);
   std::cout << banner(interp) << "\n" << std::flush;
   std::string linha;
   bool sair = false;
