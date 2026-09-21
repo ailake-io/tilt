@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <filesystem>
@@ -2061,83 +2062,61 @@ void Interpreter::janela_offset_save(WindowState& st, const std::string& pipelin
   st.persisted_offset = st.offset;
 }
 
-Value Interpreter::read_csv_file(const std::string& path, Span span) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
-  // Arquivo inteiro num buffer e varredura sem alocar por linha/celula (antes: getline +
-  // vector<string> novo por linha). Mesma regra de aspas/`""`/`\r` de split_csv_line.
-  in.seekg(0, std::ios::end);
-  const std::streamoff tamanho = in.tellg();
-  in.seekg(0, std::ios::beg);
-  // Arquivo vazio, ou "arquivo" que nao e regular (diretorio: o ifstream abre e tellg
-  // devolve um valor absurdo): tabela vazia, como antes (io.existe_arquivo depende disso).
-  if (tamanho <= 0 || tamanho > (std::streamoff{1} << 44)) return Value::tabela({});
-  std::string buf(static_cast<std::size_t>(tamanho > 0 ? tamanho : 0), '\0');
-  if (!buf.empty()) in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
-  const std::size_t n = static_cast<std::size_t>(in.gcount());
+namespace {
 
-  std::vector<std::string> headers;
-  bool cabecalhos_unicos = true;
-  rt::ValueList rows;
-  {
-    std::size_t linhas = 0;
-    for (std::size_t p = 0; p < n; ++p) linhas += buf[p] == '\n' ? 1 : 0;
-    rows.reserve(linhas);
-  }
-  std::vector<std::string> cells;  // reaproveitadas de linha em linha
-  bool first = true;
-  std::size_t pos = 0;
-  while (pos < n) {
-    std::size_t fim = buf.find('\n', pos);
-    if (fim == std::string::npos || fim > n) fim = n;
-    if (fim == pos) {  // linha vazia
-      pos = fim + 1;
-      continue;
+// Divide a linha [pos, fim) de `buf` em celulas (aspas, `""` e `\r` como em
+// split_csv_line); `cells` e reaproveitado entre linhas. Devolve o numero de celulas.
+std::size_t csv_celulas(const char* buf, std::size_t pos, std::size_t fim,
+                        std::vector<std::string>& cells) {
+  std::size_t ncell = 0;
+  auto nova_celula = [&]() -> std::string* {
+    if (ncell == cells.size()) {
+      cells.emplace_back();
+    } else {
+      cells[ncell].clear();
     }
-    std::size_t ncell = 0;
-    auto nova_celula = [&]() -> std::string* {
-      if (ncell == cells.size()) {
-        cells.emplace_back();
-      } else {
-        cells[ncell].clear();
-      }
-      return &cells[ncell++];
-    };
-    std::string* campo = nova_celula();
-    bool quoted = false;
-    for (std::size_t k = pos; k < fim; ++k) {
-      const char c = buf[k];
-      if (quoted) {
-        if (c == '"' && k + 1 < fim && buf[k + 1] == '"') {
-          campo->push_back('"');
-          ++k;
-        } else if (c == '"') {
-          quoted = false;
-        } else {
-          campo->push_back(c);
-        }
+    return &cells[ncell++];
+  };
+  std::string* campo = nova_celula();
+  bool quoted = false;
+  for (std::size_t k = pos; k < fim; ++k) {
+    const char c = buf[k];
+    if (quoted) {
+      if (c == '"' && k + 1 < fim && buf[k + 1] == '"') {
+        campo->push_back('"');
+        ++k;
       } else if (c == '"') {
-        quoted = true;
-      } else if (c == ',') {
-        campo = nova_celula();
-      } else if (c != '\r') {
+        quoted = false;
+      } else {
         campo->push_back(c);
       }
+    } else if (c == '"') {
+      quoted = true;
+    } else if (c == ',') {
+      campo = nova_celula();
+    } else if (c != '\r') {
+      campo->push_back(c);
     }
-    pos = fim + 1;
-    if (first) {
-      headers.assign(cells.begin(), cells.begin() + static_cast<std::ptrdiff_t>(ncell));
-      for (std::size_t a = 0; a < headers.size() && cabecalhos_unicos; ++a) {
-        for (std::size_t b = a + 1; b < headers.size(); ++b) {
-          if (headers[a] == headers[b]) {
-            cabecalhos_unicos = false;
-            break;
-          }
-        }
-      }
-      first = false;
+  }
+  return ncell;
+}
+
+// Linhas de dados [ini, fim) do buffer viram mapas (uma por linha nao vazia).
+void csv_linhas(const char* buf, std::size_t ini, std::size_t fim,
+                const std::vector<std::string>& headers, bool cabecalhos_unicos,
+                rt::ValueList& rows) {
+  std::vector<std::string> cells;
+  std::size_t pos = ini;
+  while (pos < fim) {
+    const void* nl = std::memchr(buf + pos, '\n', fim - pos);
+    const std::size_t fim_linha =
+        nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - buf) : fim;
+    if (fim_linha == pos) {  // linha vazia
+      pos = fim_linha + 1;
       continue;
     }
+    const std::size_t ncell = csv_celulas(buf, pos, fim_linha, cells);
+    pos = fim_linha + 1;
     Value row = Value::mapa();
     if (cabecalhos_unicos) {
       row.map->items.reserve(headers.size());
@@ -2150,6 +2129,98 @@ Value Interpreter::read_csv_file(const std::string& path, Span span) {
       }
     }
     rows.push_back(std::move(row));
+  }
+}
+
+}  // namespace
+
+Value Interpreter::read_csv_file(const std::string& path, Span span) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
+  // Arquivo inteiro num buffer e varredura sem alocar por linha/celula. Mesma regra de
+  // aspas/`""`/`\r` de split_csv_line. Arquivos grandes sao lidos em varias threads.
+  in.seekg(0, std::ios::end);
+  const std::streamoff tamanho = in.tellg();
+  in.seekg(0, std::ios::beg);
+  // Arquivo vazio, ou "arquivo" que nao e regular (diretorio: o ifstream abre e tellg
+  // devolve um valor absurdo): tabela vazia, como antes (io.existe_arquivo depende disso).
+  if (tamanho <= 0 || tamanho > (std::streamoff{1} << 44)) return Value::tabela({});
+  std::string buf(static_cast<std::size_t>(tamanho), '\0');
+  in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+  const std::size_t n = static_cast<std::size_t>(in.gcount());
+  const char* dados = buf.data();
+
+  // Cabecalho: primeira linha nao vazia.
+  std::size_t pos = 0;
+  std::vector<std::string> headers;
+  bool tem_cabecalho = false;
+  while (pos < n) {
+    const void* nl = std::memchr(dados + pos, '\n', n - pos);
+    const std::size_t fim = nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - dados) : n;
+    if (fim == pos) {
+      pos = fim + 1;
+      continue;
+    }
+    std::vector<std::string> cells;
+    const std::size_t ncell = csv_celulas(dados, pos, fim, cells);
+    headers.assign(cells.begin(), cells.begin() + static_cast<std::ptrdiff_t>(ncell));
+    pos = fim + 1;
+    tem_cabecalho = true;
+    break;
+  }
+  if (!tem_cabecalho) return Value::tabela({});
+  bool cabecalhos_unicos = true;
+  for (std::size_t a = 0; a < headers.size() && cabecalhos_unicos; ++a) {
+    for (std::size_t b = a + 1; b < headers.size(); ++b) {
+      if (headers[a] == headers[b]) {
+        cabecalhos_unicos = false;
+        break;
+      }
+    }
+  }
+  if (pos >= n) return Value::tabela({});
+
+  // Faixas alinhadas a '\n': uma por thread (arquivo pequeno = uma faixa so).
+  constexpr std::size_t kBytesPorThread = std::size_t{2} << 20;  // 2 MB
+  const std::size_t util = n - pos;
+  std::size_t nthreads =
+      std::min<std::size_t>(std::max(1u, std::thread::hardware_concurrency()), 8);
+  nthreads = std::min(nthreads, std::max<std::size_t>(1, util / kBytesPorThread));
+  std::vector<std::size_t> corte = {pos};
+  for (std::size_t k = 1; k < nthreads; ++k) {
+    std::size_t alvo = pos + util * k / nthreads;
+    if (alvo <= corte.back()) continue;
+    const void* nl = std::memchr(dados + alvo, '\n', n - alvo);
+    if (nl == nullptr) break;
+    alvo = static_cast<std::size_t>(static_cast<const char*>(nl) - dados) + 1;
+    if (alvo > corte.back() && alvo < n) corte.push_back(alvo);
+  }
+  corte.push_back(n);
+  const std::size_t nfaixas = corte.size() - 1;
+
+  std::vector<rt::ValueList> partes(nfaixas);
+  if (nfaixas == 1) {
+    partes[0].reserve(static_cast<std::size_t>(std::count(dados + pos, dados + n, '\n')) + 1);
+    csv_linhas(dados, pos, n, headers, cabecalhos_unicos, partes[0]);
+  } else {
+    std::vector<std::thread> threads;
+    for (std::size_t f = 0; f < nfaixas; ++f) {
+      threads.emplace_back([&, f] {
+        partes[f].reserve(
+            static_cast<std::size_t>(std::count(dados + corte[f], dados + corte[f + 1], '\n')) + 1);
+        csv_linhas(dados, corte[f], corte[f + 1], headers, cabecalhos_unicos, partes[f]);
+      });
+    }
+    for (std::thread& t : threads) t.join();
+  }
+  if (nfaixas == 1) return Value::tabela(std::move(partes[0]));
+  std::size_t total = 0;
+  for (const auto& p : partes) total += p.size();
+  rt::ValueList rows;
+  rows.reserve(total);
+  for (auto& p : partes) {
+    for (Value& v : p) rows.push_back(std::move(v));
+    rt::ValueList().swap(p);
   }
   return Value::tabela(std::move(rows));
 }
