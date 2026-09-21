@@ -243,8 +243,8 @@
 
 ### 10.2 Formatos (P2)
 - [x] Adicionar suporte a Parquet com ZSTD compression (codec 6, dlopen de libzstd, leitura/escrita e teste pyarrow nos dois sentidos)
-- [~] Implementar Parquet com encryption (local key concluída: PARE/AES_GCM_V1;
-  falta resolvedor AWS KMS)
+- [x] Implementar Parquet com encryption local e AWS KMS (chave_kms,
+  GenerateDataKey AES_256/Decrypt, metadata sem plaintext e testes com mock SigV4)
 - [x] Adicionar suporte a Avro para Kafka Schema Registry (envelope Confluent,
   records/arrays/maps/uniões, `avro_codificar`/`avro_decodificar`, lookup e
   registro REST e integração `escrever_kafka`/`ler_kafka`)
@@ -296,11 +296,12 @@ documentação fecha sem o antigo T032 duplo (`docs` 102/102).
 5. [x] Triar T032 checkpoint/retomar — virou fix: isenção `treino`+`retomar:`
    no checker + `modelo Xor:` nos 3 blocos do guia-04; docs 102/102.
 
-### Enfileirado (pós-Sprint 3): aceitar nulo em coluna de partição
-- Hoje: erro claro fase 26 (Delta + Iceberg). Proposta: convenção Hive
-  `__HIVE_DEFAULT_PARTITION__` no layout + `null` no log/manifest, reidratar
-  marcador→`nulo` na leitura + poda com `nulo`, validar pyiceberg/Spark.
-  Irmão gêmeo (`/` em valores) fica de fora salvo pedido.
+### Partições nulas em colunas particionadas (concluída)
+- [x] Delta: marcador Hive `__HIVE_DEFAULT_PARTITION__` no caminho, `null` no
+  `partitionValues`, reidratação e poda com `nulo`, schema nullable em append e
+  preservação por checkpoints; coberto por teste com pyarrow.
+- [x] Iceberg: marcador no layout, `null` tipado em manifest/summary, leitura,
+  pruning e schema optional em append; validado com teste funcional e pyiceberg.
 
 ### Sprint 3 — entregue
 - [x] S3.4 Hover com tipos (assinatura, campos, valor em uso, expr + forma)

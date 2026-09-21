@@ -1,10 +1,11 @@
 #include "runtime/sqlite.hpp"
 
-#include "runtime/compat.hpp"
-#include "runtime/sql_params.hpp"
-
 #include <cstdint>
 #include <stdexcept>
+
+#include "runtime/compat.hpp"
+#include "runtime/json.hpp"
+#include "runtime/sql_params.hpp"
 
 namespace tilt::rt {
 
@@ -46,6 +47,7 @@ struct SqliteApi {
   int (*bind_text)(void*, int, const char*, int, void (*)(void*)) = nullptr;
   int (*bind_null)(void*, int) = nullptr;
   int (*bind_count)(void*) = nullptr;
+  int (*reset)(void*) = nullptr;
 };
 
 template <typename F>
@@ -86,7 +88,8 @@ const SqliteApi& api() {
                     bind_sym(a.lib, a.bind_double, "sqlite3_bind_double") &&
                     bind_sym(a.lib, a.bind_text, "sqlite3_bind_text") &&
                     bind_sym(a.lib, a.bind_null, "sqlite3_bind_null") &&
-                    bind_sym(a.lib, a.bind_count, "sqlite3_bind_parameter_count");
+                    bind_sym(a.lib, a.bind_count, "sqlite3_bind_parameter_count") &&
+                    bind_sym(a.lib, a.reset, "sqlite3_reset");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = SqliteApi{};
@@ -417,6 +420,153 @@ void sqlite_transact(const std::string& db_path,
     throw;
   }
   db.close(conn);
+}
+
+namespace {
+
+std::string ident_sql(const std::string& nome) {
+  std::string out = "\"";
+  for (const char c : nome) {
+    if (c == '"') out += '"';
+    out += c;
+  }
+  return out + "\"";
+}
+
+// Tipo SQLite de uma coluna, pelo que aparece nas linhas.
+struct ColunaSql {
+  std::string nome;
+  bool viu_int = false;
+  bool viu_real = false;
+  bool viu_outro = false;
+  const char* tipo() const {
+    if (viu_outro) return "TEXT";
+    if (viu_real) return "REAL";
+    return viu_int ? "INTEGER" : "TEXT";
+  }
+};
+
+}  // namespace
+
+Value sqlite_consulta_tabelas(const std::string& sql,
+                              const std::vector<std::pair<std::string, Value>>& tabelas,
+                              const std::vector<SqlParam>& params) {
+  const SqliteApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("sqlite3.dll nao encontrada; instale o SQLite para Windows");
+#else
+    die("libsqlite3.so.0 nao encontrada; instale o pacote libsqlite3");
+#endif
+  }
+  void* conn = nullptr;
+  if (db.open_v2(":memory:", &conn, kSqliteOpenReadwrite | kSqliteOpenCreate, nullptr) !=
+      kSqliteOk) {
+    die("nao foi possivel abrir o banco em memoria");
+  }
+  try {
+    exec_um(db, conn, "PRAGMA journal_mode=OFF", {}, "");
+    exec_um(db, conn, "PRAGMA synchronous=OFF", {}, "");
+    for (const auto& [nome, tabela] : tabelas) {
+      if ((tabela.kind != ValueKind::Tabela && tabela.kind != ValueKind::Lista) || !tabela.list) {
+        die("'" + nome + "' deve ser uma tabela (lista de mapas)");
+      }
+      const ValueList& linhas = *tabela.list;
+      std::vector<ColunaSql> colunas;
+      for (const Value& linha : linhas) {
+        if (linha.kind != ValueKind::Mapa || !linha.map) {
+          die("'" + nome + "' deve ser uma tabela (lista de mapas)");
+        }
+        for (const auto& [chave, v] : linha.map->items) {
+          ColunaSql* c = nullptr;
+          for (ColunaSql& existente : colunas) {
+            if (existente.nome == chave) {
+              c = &existente;
+              break;
+            }
+          }
+          if (c == nullptr) {
+            colunas.push_back(ColunaSql{chave});
+            c = &colunas.back();
+          }
+          switch (v.kind) {
+            case ValueKind::Nulo:
+              break;
+            case ValueKind::Logico:
+            case ValueKind::Inteiro:
+              c->viu_int = true;
+              break;
+            case ValueKind::Decimal:
+              c->viu_real = true;
+              break;
+            default:
+              c->viu_outro = true;
+              break;
+          }
+        }
+      }
+      if (colunas.empty()) {
+        die("a tabela '" + nome + "' esta vazia: sem colunas para criar");
+      }
+      std::string ddl = "CREATE TABLE " + ident_sql(nome) + " (";
+      std::string insert = "INSERT INTO " + ident_sql(nome) + " VALUES (";
+      for (std::size_t k = 0; k < colunas.size(); ++k) {
+        ddl += (k ? ", " : "") + ident_sql(colunas[k].nome) + " " + colunas[k].tipo();
+        insert += k ? ",?" : "?";
+      }
+      exec_um(db, conn, ddl + ")", {}, "");
+      exec_um(db, conn, "BEGIN", {}, "");
+      insert += ")";
+      void* ins = nullptr;
+      if (db.prepare_v2(conn, insert.c_str(), static_cast<int>(insert.size()) + 1, &ins, nullptr) !=
+          kSqliteOk) {
+        die(std::string("falha ao preparar a carga de '") + nome + "': " + db.errmsg(conn));
+      }
+      void (*transiente)(void*) = reinterpret_cast<void (*)(void*)>(-1);
+      for (const Value& linha : linhas) {
+        for (std::size_t k = 0; k < colunas.size(); ++k) {
+          const int idx = static_cast<int>(k + 1);
+          const Value* v = linha.map->find(colunas[k].nome);
+          if (v == nullptr || v->kind == ValueKind::Nulo) {
+            db.bind_null(ins, idx);
+          } else if (v->kind == ValueKind::Logico) {
+            db.bind_int64(ins, idx, v->b ? 1 : 0);
+          } else if (v->kind == ValueKind::Inteiro && !colunas[k].viu_outro) {
+            colunas[k].viu_real ? db.bind_double(ins, idx, static_cast<double>(v->i))
+                                : db.bind_int64(ins, idx, v->i);
+          } else if (v->kind == ValueKind::Decimal && !colunas[k].viu_outro) {
+            db.bind_double(ins, idx, v->d);
+          } else {
+            const std::string txt = v->kind == ValueKind::Texto ? v->s : json_dump_compacto(*v);
+            db.bind_text(ins, idx, txt.c_str(), static_cast<int>(txt.size()), transiente);
+          }
+        }
+        const int rc = db.step(ins);
+        if (rc != kSqliteDone) {
+          const std::string msg = db.errmsg(conn) ? db.errmsg(conn) : "erro desconhecido";
+          db.finalize(ins);
+          die("falha ao carregar '" + nome + "': " + msg);
+        }
+        db.reset(ins);
+      }
+      db.finalize(ins);
+      exec_um(db, conn, "COMMIT", {}, "");
+    }
+
+    void* stmt = prepara_e_liga(db, conn, sql, params, "", "consulta");
+    const int ncols = db.column_count(stmt);
+    if (ncols == 0) {
+      db.finalize(stmt);
+      die("sql espera uma consulta que devolva linhas (SELECT/WITH)");
+    }
+    ValueList rows = consome_select(db, conn, stmt, ncols);
+    db.finalize(stmt);
+    db.close(conn);
+    return Value::tabela(std::move(rows));
+  } catch (...) {
+    db.close(conn);
+    throw;
+  }
 }
 
 }  // namespace tilt::rt

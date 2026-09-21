@@ -45,24 +45,34 @@ std::string base64_encode(const std::string& in) {
 }
 
 struct EsUrl {
-  std::string base;    // "http://host:porta"
+  std::string base;    // "http://host:porta" (ou "https://" com o esquema +https)
   std::string indice;  // vazio = todos os indices
   std::string auth;    // valor do header Authorization, vazio = sem auth
 };
 
 // "elasticsearch://[usuario[:senha]@]host[:porta][/indice]" (ou opensearch://,
-// mesmo formato e porta default 9200). Sem userinfo, usuario/senha caem para
+// mesmo formato e porta default 9200); "elasticsearch+https://" e
+// "opensearch+https://" falam HTTPS (o certificado e verificado pelo curl; para
+// CA propria use CURL_CA_BUNDLE). Sem userinfo, usuario/senha caem para
 // ELASTIC_USER/ELASTIC_PASSWORD do ambiente; sem nenhum dos dois, nenhum
 // header de autenticacao e enviado.
 EsUrl parse_url(const std::string& url) {
   std::string rest;
+  bool https = false;
   if (url.rfind("elasticsearch://", 0) == 0) {
     rest = url.substr(16);
   } else if (url.rfind("opensearch://", 0) == 0) {
     rest = url.substr(13);
+  } else if (url.rfind("elasticsearch+https://", 0) == 0) {
+    rest = url.substr(22);
+    https = true;
+  } else if (url.rfind("opensearch+https://", 0) == 0) {
+    rest = url.substr(19);
+    https = true;
   } else {
     die("url invalida: '" + url +
-        "' (use elasticsearch://[usuario[:senha]@]host[:porta][/indice])");
+        "' (use elasticsearch://[usuario[:senha]@]host[:porta][/indice] ou "
+        "elasticsearch+https://...)");
   }
 
   EsUrl out;
@@ -113,7 +123,7 @@ EsUrl parse_url(const std::string& url) {
     host = hostport.substr(0, colon);
     if (host.empty()) host = "localhost";
   }
-  out.base = "http://" + host + ":" + std::to_string(port);
+  out.base = std::string(https ? "https://" : "http://") + host + ":" + std::to_string(port);
   return out;
 }
 

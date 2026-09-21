@@ -112,9 +112,41 @@ pipeline funcoes:
 - Parâmetros: `nome` ou `nome: <tipo>`, separados por espaço ou vírgula.
   Parâmetro opcional/composto: `nome[]` (sem tipo) ou `nome[]: <tipo>`
   (ex.: `limite[]: texto`).
+- Valor padrão: `nome = <expr>` ou `nome: <tipo> = <expr>` (ex.: `funcao
+  saudar nome, saudacao = "Ola":`). O padrão é avaliado a cada chamada e enxerga
+  os parâmetros anteriores (`funcao area base, altura = base:`). Prefira
+  literais; um nome como padrão precisa de vírgula antes do próximo parâmetro.
+  Funções com padrão rodam pelo interpretador de árvore (não pela VM).
 - Tipo de retorno opcional após `->` (inclui `mapa` como tipo base).
 - `retornar <expr>` (ou `retornar` sem valor → `nulo`).
 - Chamada: `f(a, b)` (forma não ambígua) **ou** `f a, b` (estilo declarativo).
+
+### Funções anônimas
+
+`funcao x, y: <expressão>` cria um valor-função. O corpo é uma única expressão e
+as variáveis visíveis na criação são capturadas **por valor**. Chame com `f(x)`
+(ou `f(a)(b)` quando uma função devolve outra) e passe às funções de ordem
+superior `mapear`, `filtrar`, `reduzir`, `qualquer` e `todos`:
+
+```tilt run
+funcao somador n:
+  retornar funcao x: x + n
+
+pipeline anonimas:
+  passos:
+    - dobro = funcao x: x * 2
+    - imprimir dobro(4)                                        # 8
+    - imprimir mapear([1, 2, 3], funcao x: x * x)              # [1, 4, 9]
+    - imprimir filtrar([1, 2, 3, 4], funcao x: x % 2 == 0)     # [2, 4]
+    - imprimir reduzir([1, 2, 3], funcao acc, x: acc + x, 0)   # 6
+    - imprimir somador(5)(1)                                   # 6
+```
+
+`mapear`/`filtrar` como *função* (`mapear(lista, f)`) não se confundem com os
+métodos de tabela `t.mapear { col: expr }` / `t.filtrar cond`. O `tilt checar`
+resolve os nomes do corpo (parâmetros mais o escopo visível). Limites: só corpo
+em expressão (sem blocos), aridade exata e sem passar uma `funcao` nomeada
+diretamente como valor (embrulhe: `funcao x: minha(x)`).
 
 Funções cujo corpo cabe no subconjunto puro rodam numa VM de bytecode
 automaticamente — ver [guia 09](guia-09-vm-nativo.md).
@@ -156,6 +188,29 @@ pipeline fluxo:
   reservadas: o contexto sintático decide entre operador e nome).
 - `enquanto` tem guarda de 5 milhões de iterações (aborta com `T901`).
 - `tentar/capturar` captura `T9xx` de execução; a variável do `capturar` recebe a mensagem.
+- `parar` sai do laço mais interno e `continuar` pula para a próxima iteração.
+  Valem sozinhos na linha, dentro de `para cada`/`enquanto`; fora de laço o
+  `tilt checar` acusa `T014`. (`parar = 1` continua sendo uma atribuição comum.)
+
+```tilt run
+funcao primeiro_par lista:
+  para cada x em lista:
+    se x % 2 == 0:
+      retornar x
+  retornar nulo
+
+pipeline laco:
+  passos:
+    - soma = 0
+    - para cada n em [1, 2, 3, 4, 5, 6]:
+        se n % 2 == 0:
+          continuar      # pula os pares
+        se n > 5:
+          parar          # sai do laço
+        soma = soma + n
+    - imprimir soma                       # 9  (1 + 3 + 5)
+    - imprimir primeiro_par([1, 3, 8, 5]) # 8
+```
 
 ## Operadores
 
@@ -171,6 +226,11 @@ pipeline fluxo:
 | unário | `nao` `-` |
 | pós-fixo | `.campo` `?.campo` `[i]` `[a..b]` `f(...)` `f a, b` `no dispositivo <x>` |
 
+- `valor se condicao senao outro` é o condicional em linha (associa à direita;
+  só o ramo escolhido é avaliado). Tem a menor precedência: `(1 se c senao 2) + 10`
+  pede parênteses. Sem o `senao`, o `tilt checar` acusa `T013`.
+- `para cada i em 0..n:` percorre `0, 1, ..., n-1` (fim exclusivo, como o
+  fatiamento `lista[0..2]`); equivale a `intervalo(0, n)`.
 - `+` com texto concatena. `contem`: `"abcd" contem "bc"` ou `lista contem valor`.
 - `e`/`ou` fazem curto-circuito no interpretador (não na VM — ver guia 09).
 - `x?.campo` retorna `nulo` se `x` não tiver o campo, em vez de erro.
@@ -233,3 +293,7 @@ pipeline imports2:
 > lista onde foi procurado. A stdlib traz `io` (arquivos/caminhos),
 > `rede` (HTTP JSON: `get_json`/`post_json`) e `nn` (camadas sobre tensor) —
 > ver guia 04 e guia 12.
+>
+> Apelidos com `como`: `importar io como arquivos` (usa-se `arquivos.juntar_caminhos(...)`)
+> e `de io importar existe_arquivo como existe` (traz o nome com outro nome).
+> Com apelido, o `tilt checar` só reconhece o apelido.

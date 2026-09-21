@@ -133,10 +133,8 @@ void pinecone_upsert(const std::string& base, const std::string& ns,
   http_json("POST", base + "/vectors/upsert", body);
 }
 
-std::vector<std::pair<std::string, double>> pinecone_search(const std::string& base,
-                                                            const std::string& ns,
-                                                            const std::vector<float>& vec,
-                                                            std::size_t k) {
+std::vector<VectorHit> pinecone_search(const std::string& base, const std::string& ns,
+                                       const std::vector<float>& vec, std::size_t k) {
   if (vec.empty()) die("vetor de consulta vazio");
   const std::string body = "{\"namespace\":\"" + json_escape(ns) +
                            "\",\"vector\":" + vec_json(vec) + ",\"topK\":" +
@@ -148,7 +146,7 @@ std::vector<std::pair<std::string, double>> pinecone_search(const std::string& b
   } catch (const std::exception& e) {
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
-  std::vector<std::pair<std::string, double>> out;
+  std::vector<VectorHit> out;
   if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
   const Value* matches = parsed.map->find("matches");
   if (!matches || matches->kind != ValueKind::Lista || !matches->list) return out;
@@ -159,7 +157,14 @@ std::vector<std::pair<std::string, double>> pinecone_search(const std::string& b
     const std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
     // score do Pinecone ja e similaridade de cosseno (maior = melhor).
     const double sc = score && score->is_number() ? score->as_number() : 0.0;
-    out.emplace_back(id_s, sc);
+    std::string texto;
+    if (const Value* meta = hit.map->find("metadata");
+        meta && meta->kind == ValueKind::Mapa && meta->map) {
+      if (const Value* t = meta->map->find("texto"); t && t->kind == ValueKind::Texto) {
+        texto = t->s;
+      }
+    }
+    out.push_back({id_s, sc, texto});
   }
   return out;
 }

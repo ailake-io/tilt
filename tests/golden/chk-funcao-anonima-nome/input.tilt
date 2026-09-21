@@ -1,0 +1,4 @@
+pipeline t:
+  passos:
+    - f = funcao x: x + y
+    - imprimir f(1)

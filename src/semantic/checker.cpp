@@ -26,9 +26,9 @@ bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
 }
 
 bool is_entity_keyword(std::string_view kw) {
-  return word_in(kw, {"fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa", "experimento",
-                       "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente", "equipe",
-                       "servico"});
+  return word_in(kw, {"fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa",
+                      "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente",
+                      "equipe", "servico", "teste"});
 }
 
 bool is_secret_key(std::string_view key) {
@@ -156,27 +156,24 @@ void SemanticChecker::collect() {
     const std::string name = decl_name(*item);
 
     if (kw == "importar") {
-      for (const auto& h : item->header) {
-        if (h && h->kind == ExprKind::Name && h->text != "importar") {
-          define(h->text, "modulo", Type::scalar(TypeKind::Unknown), item->span);
-        }
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
+        define(imp.alias, "modulo", Type::scalar(TypeKind::Unknown), item->span);
       }
       continue;
     }
     if (kw == "de") {
-      // `de <modulo> importar <nome>...`: o primeiro nome e o modulo; os
-      // demais passam a ser tratados como funcoes (o runtime resolve e
-      // valida as exportacoes ao carregar o arquivo).
+      // `de <modulo> importar <nome> [como apelido]...`: o primeiro nome e o
+      // modulo; os demais passam a ser tratados como funcoes (o runtime
+      // resolve e valida as exportacoes ao carregar o arquivo).
       bool first = true;
-      for (const auto& h : item->header) {
-        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
         if (first) {
-          define(h->text, "modulo", Type::scalar(TypeKind::Unknown), item->span);
+          define(imp.nome, "modulo", Type::scalar(TypeKind::Unknown), item->span);
           first = false;
         } else {
           Type ft;
           ft.kind = TypeKind::Funcao;
-          define(h->text, "funcao", std::move(ft), item->span);
+          define(imp.alias, "funcao", std::move(ft), item->span);
         }
       }
       continue;
@@ -576,7 +573,10 @@ std::optional<TensorShape> nested_list_dims(const std::vector<ast::ExprPtr>& ele
   if (elems.front()->kind == ExprKind::ListLit) {
     auto inner = nested_list_dims(elems.front()->elems);
     if (!inner) return std::nullopt;
-    for (const auto& el : elems) {
+    // O 1o elemento ja foi medido acima; recalcula-lo dobraria o custo a cada nivel
+    // (2^profundidade em listas aninhadas).
+    for (std::size_t i = 1; i < elems.size(); ++i) {
+      const auto& el = elems[i];
       if (!el || el->kind != ExprKind::ListLit) return std::nullopt;
       auto d = nested_list_dims(el->elems);
       if (!d || *d != *inner) return std::nullopt;  // lista aninhada irregular
@@ -886,6 +886,20 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       {"mongo_deletar", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_criar_indice", 2, {TypeKind::Texto}, {}, TypeKind::Nulo, nullptr},
       {"mongo_agregar", 2, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      // SQL sobre tabelas tilt
+      {"sql",
+       1,
+       {TypeKind::Texto},
+       {},
+       TypeKind::Tabela,
+       "sql \"select ... from tabela\", tabela: valor"},
+      // interoperabilidade
+      {"chamar_python",
+       2,
+       {TypeKind::Texto},
+       {TypeKind::Texto},
+       TypeKind::Unknown,
+       "chamar_python \"math\", \"sqrt\", 16"},
       // http generico
       {"http_get_json",
        1,
@@ -926,8 +940,13 @@ bool is_tensor_method(std::string_view m) {
                      "argmax", "item", "forma", "dados", "transposta", "tamanho"});
 }
 bool is_table_method(std::string_view m) {
-  return word_in(m, {"filtrar", "derivar", "mapear", "agrupar_por", "selecionar", "ordenar_por",
-                     "limite", "primeiros", "distinto", "tamanho"});
+  return word_in(
+      m, {"filtrar",     "derivar",        "mapear",          "agrupar_por", "selecionar",
+          "ordenar_por", "limite",         "primeiros",       "distinto",    "tamanho",
+          "sql",         "remover_nulos",  "preencher_nulos", "renomear",    "remover_colunas",
+          "converter",   "deduplicar",     "juntar",          "empilhar",    "descrever",
+          "amostra",     "contar_valores", "limpar_texto",    "pivotar",     "despivotar",
+          "janela",      "dividir_coluna", "converter_fuso"});
 }
 bool is_texto_method(std::string_view m) { return word_in(m, {"maiusculas", "minusculas"}); }
 // Metodos resolvidos dinamicamente sobre texto-nome-de-entidade (agente,
@@ -1389,6 +1408,19 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
     case ExprKind::NullLit: return TypeKind::Nulo;
     case ExprKind::ListLit: return TypeKind::Lista;
     case ExprKind::MapLit: return TypeKind::Mapa;
+    case ExprKind::Lambda:
+      return TypeKind::Funcao;
+    case ExprKind::Cond: {
+      // Tipo conhecido so quando os dois ramos concordam (inteiro + decimal
+      // promove para decimal), como na fusao de `se`/`senao`.
+      if (!e.lhs || !e.rhs) return TypeKind::Unknown;
+      const TypeKind a = infer_type(*e.lhs, types);
+      const TypeKind b = infer_type(*e.rhs, types);
+      if (a == b) return a;
+      const bool numericos = (a == TypeKind::Inteiro || a == TypeKind::Decimal) &&
+                             (b == TypeKind::Inteiro || b == TypeKind::Decimal);
+      return numericos ? TypeKind::Decimal : TypeKind::Unknown;
+    }
     case ExprKind::Device:
       return e.lhs ? infer_type(*e.lhs, types) : TypeKind::Unknown;
     case ExprKind::Name: {
@@ -1550,6 +1582,10 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
         }
       } else if (base == TypeKind::Tabela || base == TypeKind::Lista) {
         if (m == "tamanho") return TypeKind::Inteiro;
+        // Metodos de limpeza sem argumentos podem ser escritos sem parenteses.
+        if (word_in(m, {"descrever", "deduplicar", "remover_nulos", "limpar_texto"})) {
+          return TypeKind::Tabela;
+        }
       } else if (base == TypeKind::Texto) {
         if (m == "tamanho") return TypeKind::Inteiro;
       } else if (base == TypeKind::Mapa || base == TypeKind::Registro) {
@@ -1606,7 +1642,11 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
             !is_entity_method(m)) {
           report(DiagCode::TypeMismatch, e.span,
                  "'" + type_kind_name(base) + "' nao tem o metodo '" + m + "'",
-                 {"metodos de tabela: filtrar, derivar, mapear, agrupar_por, selecionar, ordenar_por, limite, primeiros, distinto"});
+                 {"metodos de tabela: filtrar, derivar, mapear, agrupar_por, selecionar, "
+                  "ordenar_por, limite, primeiros, distinto, sql, remover_nulos, preencher_nulos, "
+                  "renomear, remover_colunas, converter, deduplicar, juntar, empilhar, descrever, "
+                  "amostra, contar_valores, limpar_texto, pivotar, despivotar, janela, "
+                  "dividir_coluna, converter_fuso"});
           return TypeKind::Unknown;
         }
         if (base == TypeKind::Tensor && !is_tensor_method(m) && !is_entity_method(m)) {
@@ -1776,7 +1816,7 @@ void SemanticChecker::check_funcao_arity(const std::string& name, const std::vec
   }
   int obrigatorios = 0;
   for (const auto& p : decl->params) {
-    if (p.optional_annotation.empty()) ++obrigatorios;
+    if (p.optional_annotation.empty() && !p.default_value) ++obrigatorios;
   }
   const int total = static_cast<int>(decl->params.size());
   if (npos >= obrigatorios && (npos <= total || !paren)) return;
@@ -1788,7 +1828,11 @@ void SemanticChecker::check_funcao_arity(const std::string& name, const std::vec
   if (total > 0) {
     nota += " (" + std::to_string(total) + " parametro(s)";
     if (obrigatorios < total) {
-      nota += ", " + std::to_string(total - obrigatorios) + " opcional(is) '[]'";
+      const bool com_padrao =
+          std::any_of(decl->params.begin(), decl->params.end(),
+                      [](const ast::Arg& p) { return p.default_value != nullptr; });
+      nota += ", " + std::to_string(total - obrigatorios) +
+              (com_padrao ? " opcional(is): '[]' ou valor padrao" : " opcional(is) '[]'");
     }
     nota += ")";
   }
@@ -1839,6 +1883,17 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
       return;
     case ExprKind::Device:
       if (e.lhs) check_expr(*e.lhs, scope);
+      return;
+    case ExprKind::Lambda: {
+      Scope inner = scope;
+      for (const auto& p : e.args) inner.insert(p.name);
+      if (e.rhs) check_expr(*e.rhs, inner);
+      return;
+    }
+    case ExprKind::Cond:
+      if (e.extra) check_expr(*e.extra, scope);
+      if (e.lhs) check_expr(*e.lhs, scope);
+      if (e.rhs) check_expr(*e.rhs, scope);
       return;
     case ExprKind::Assign:
       if (e.rhs) check_expr(*e.rhs, scope);
@@ -1989,6 +2044,18 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       if (s.a) check_expr(*s.a, scope);
       check_return(s.a.get(), s.span, types, shapes);
       return;
+    case ast::StmtKind::Break:
+    case ast::StmtKind::Continue: {
+      if (loop_depth_ == 0) {
+        const bool parar = s.kind == ast::StmtKind::Break;
+        report(DiagCode::UnexpectedToken, s.span,
+               std::string("'") + (parar ? "parar" : "continuar") + "' fora de um laco",
+               {std::string("so vale dentro de 'para cada' ou 'enquanto'"),
+                std::string("sugestao: mova '") + (parar ? "parar" : "continuar") +
+                    "' para dentro do laco, ou use 'retornar' para sair da funcao"});
+      }
+      return;
+    }
     case ast::StmtKind::If: {
       if (s.a) check_expr(*s.a, scope);
       const Scope scope_salva = scope;
@@ -2087,7 +2154,9 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       const MapShapes formas_salvas = formas_mapa_;
       const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
+      ++loop_depth_;
       walk_stmt_block(s.body, std::move(inner), shapes, types);
+      --loop_depth_;
       formas_mapa_ = formas_salvas;
       formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;
@@ -2098,7 +2167,9 @@ void SemanticChecker::walk_stmt(const Stmt& s, Scope& scope, ShapeEnv& shapes, T
       const MapShapes formas_salvas = formas_mapa_;
       const MapTensorShapes formas_tensor_salvas = formas_tensor_mapa_;
       const ListElems elems_salvos = elem_lista_;
+      ++loop_depth_;
       walk_stmt_block(s.body, scope, shapes, types);
+      --loop_depth_;
       formas_mapa_ = formas_salvas;
       formas_tensor_mapa_ = formas_tensor_salvas;
       elem_lista_ = elems_salvos;

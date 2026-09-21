@@ -1,0 +1,8 @@
+funcao principal:
+  imprimir ordenar([3, 1, 2]), ordenar(["b", "a", "c"]), ordenar([2, 1.5, 3])
+  imprimir ordenar([3, 1, 2], "decrescente")
+  imprimir unicos([1, 1, 2, 1, "1"]), reverso([1, 2, 3])
+  imprimir zip([1, 2, 3], ["a", "b"])
+  imprimir enumerar(["x", "y"])
+  m = { a: 1, b: 2 }
+  imprimir chaves(m), valores(m)

@@ -1,30 +1,28 @@
 #include "runtime/compat.hpp"
 
-#include <cstdlib>
-#include <cstring>
+#if defined(_WIN32)
+#include <direct.h>  // _mkdir
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>  // _getpid
+#else
+#include <unistd.h>  // getpid, getcwd, readlink, access
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>  // _NSGetExecutablePath
+#endif
+#endif
+
+#include <cerrno>
+#include <climits>  // PATH_MAX
+#include <cstdlib>  // realpath, getenv
+#include <cstring>  // strchr
 #include <filesystem>
+#include <fstream>
 #include <random>
+#include <sstream>  // PATH splitting
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-  #include <cerrno>
-  #include <direct.h>   // _mkdir
-  #include <fcntl.h>
-  #include <io.h>
-  #include <process.h>  // _getpid
-#else
-  #include <cerrno>
-  #include <climits>    // PATH_MAX
-  #include <cstdlib>    // realpath, getenv
-  #include <cstring>    // strchr
-  #include <sstream>    // PATH splitting
-  #include <unistd.h>   // getpid, getcwd, readlink, access
-  #if defined(__APPLE__)
-    #include <mach-o/dyld.h>  // _NSGetExecutablePath
-  #endif
-#endif
 
 namespace tilt::rt {
 
@@ -141,7 +139,8 @@ int tilt_tempfile(const char* tag, std::string& path) {
   std::string base = dir;
   while (!base.empty() && (base.back() == '\\' || base.back() == '/')) base.pop_back();
 
-  std::mt19937_64 gen(std::random_device{}());
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
   static constexpr char kHex[] = "0123456789abcdef";
   for (int tentativa = 0; tentativa < 100; ++tentativa) {
     std::string candidate = base + "\\tilt_" + tag + "_";
@@ -421,5 +420,43 @@ std::string tilt_exe_path(const char* argv0) {
 }
 
 #endif
+
+bool tilt_curl_config(const std::string& url, const std::vector<std::string>& headers,
+                      std::string& path) {
+  // String entre aspas do arquivo de config do curl: \\ e \" escapados; CR/LF
+  // seriam injecao de opcoes (ou de header), entao a chamada falha.
+  auto quoted = [](const std::string& v, std::string& out) {
+    out += '"';
+    for (char c : v) {
+      if (c == '\n' || c == '\r' || c == '\0') return false;
+      if (c == '\\' || c == '"') out += '\\';
+      out += c;
+    }
+    out += '"';
+    return true;
+  };
+  std::string conteudo;
+  if (!url.empty()) {
+    conteudo += "url = ";
+    if (!quoted(url, conteudo)) return false;
+    conteudo += '\n';
+  }
+  for (const std::string& h : headers) {
+    conteudo += "header = ";
+    if (!quoted(h, conteudo)) return false;
+    conteudo += '\n';
+  }
+  const int fd = tilt_tempfile("curlcfg", path);
+  if (fd < 0) return false;
+  tilt_close_file(fd);
+  std::ofstream out(path, std::ios::trunc | std::ios::binary);
+  out << conteudo;
+  out.close();
+  if (!out) {
+    std::remove(path.c_str());
+    return false;
+  }
+  return true;
+}
 
 }  // namespace tilt::rt

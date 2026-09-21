@@ -1,0 +1,11 @@
+pipeline t:
+  passos:
+    - t = "Tilt e uma linguagem. Ela e declarativa! Voce gosta? Sim. Acentuacao: coracao, ação e emoção."
+    - imprimir dividir_texto(t, tamanho: 40, modo: "sentenca")
+    - imprimir dividir_texto(t, tamanho: 40, sobreposicao: 20, modo: "sentenca")
+    - imprimir dividir_texto("aaaa bbbb cccc", tamanho: 6)
+    - imprimir dividir_texto("ação ação ação", tamanho: 5)
+    - imprimir dividir_texto("l1\nl2\nl3\nl4", tamanho: 6, modo: "linha")
+    - imprimir dividir_texto("p1 a.\n\np2 b.\n\np3", tamanho: 12, modo: "paragrafo")
+    - imprimir dividir_texto("curto", tamanho: 100, modo: "sentenca")
+    - imprimir dividir_texto("", tamanho: 10, modo: "sentenca")

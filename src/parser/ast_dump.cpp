@@ -7,7 +7,7 @@
 namespace tilt {
 namespace {
 
-using namespace ast;
+using namespace ast;  // NOLINT(build/namespaces)
 
 std::string quote(std::string_view s) {
   std::string r = "\"";
@@ -138,6 +138,22 @@ struct Printer {
         expr(*e.lhs);
         os << ")";
         break;
+      case ExprKind::Lambda:
+        os << "(lambda (";
+        for (std::size_t k = 0; k < e.args.size(); ++k) os << (k ? " " : "") << e.args[k].name;
+        os << ") ";
+        expr(*e.rhs);
+        os << ")";
+        break;
+      case ExprKind::Cond:
+        os << "(cond ";
+        expr(*e.extra);
+        os << " ";
+        expr(*e.lhs);
+        os << " ";
+        expr(*e.rhs);
+        os << ")";
+        break;
     }
     // A call may carry a nested block of named arguments.
     if (e.kind == ExprKind::Call && e.block) {
@@ -182,6 +198,12 @@ struct Printer {
         expr(*s.b);
         os << ")\n";
         call_block(*s.b, ind + 1);
+        break;
+      case StmtKind::Break:
+        os << "(parar)\n";
+        break;
+      case StmtKind::Continue:
+        os << "(continuar)\n";
         break;
       case StmtKind::Return:
         os << "(retornar";

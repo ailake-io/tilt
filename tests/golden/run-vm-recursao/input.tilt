@@ -1,0 +1,28 @@
+funcao r n:
+  se n == 0:
+    retornar 0
+  retornar 1 + r(n - 1)
+
+funcao par n:
+  se n == 0:
+    retornar verdadeiro
+  retornar impar(n - 1)
+
+funcao impar n:
+  se n == 0:
+    retornar falso
+  retornar par(n - 1)
+
+funcao soma3 a, b, c:
+  retornar a + b + c
+
+funcao misto x:
+  y = x * 2 + 1
+  z = y / 2
+  retornar z % 3 + (y - 3) * 2
+
+pipeline p:
+  passos:
+    - imprimir r(3000), par(10), impar(7), par(7)
+    - imprimir soma3(1, 2, 3), misto(10), misto(-3), 7 / 0, 7 % 0, 2 * 3.5, 10 / 4, 8 / 2
+    - imprimir 9007199254740993 + 0

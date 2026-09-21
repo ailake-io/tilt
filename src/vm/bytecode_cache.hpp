@@ -16,7 +16,7 @@ namespace tilt::vm {
 // esperado (magia, versao, truncamento, const nao serializavel) invalida
 // a entrada (ou o arquivo todo), nunca executa lixo.
 //
-// Formato (little-endian): "TILTC1" + u32 versao(=1) + sha256(32B do fonte)
+// Formato (little-endian): "TILTC2" + u32 versao(=1) + sha256(32B do fonte)
 // + u32 nentries + entries. Entry: u8 kind (0=pipeline, 1=funcao) + str nome
 // + i32 nparams + i32 num_locals + code[] (u8 op, i32 a, i32 b) + consts[]
 // (u8 tag + payload) + op_names[] + names[]. str = u32 len + bytes.

@@ -1,0 +1,8 @@
+erro[T013]: esperado 'senao' no condicional em linha (`valor se condicao senao outro`)
+  --> input.tilt:3:26
+   |
+ 3 |     - x = 1 se verdadeiro
+   |                          ^
+   |
+
+1 erro(s) em input.tilt

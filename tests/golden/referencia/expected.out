@@ -42,6 +42,17 @@ BUILTINS
   s3_iniciar_upload s3_enviar_parte s3_concluir_upload s3_abortar_upload
   http_get_json http_post_json  (HTTP generico JSON; ver guia 03)
   ler <fonte> carregador
+  matematica: raiz abs exp logaritmo potencia piso teto arredondar seno cosseno tangente pi
+  conversao:  inteiro decimal texto logico tipo_de
+  texto:      maiusculas minusculas aparar substituir comeca_com termina_com juntar
+              regex_casa regex_extrair regex_substituir
+  listas:     ordenar unicos reverso zip enumerar chaves valores
+  tempo:      agora timestamp formatar_data dormir   (UTC)
+  arquivos:   ler_texto escrever_texto anexar_texto listar_arquivos remover_arquivo
+  testes:     afirmar afirmar_igual   (blocos `teste nome:` + `tilt testar`)
+  rag:        reranquear   (indice.buscar ..., modo: "hibrido" so em memoria)
+  ordem sup.: mapear filtrar reduzir qualquer todos   (com `funcao x: expr`)
+  outros:     sha256 base64_codificar base64_decodificar json_texto json_ler
   executar_sql "<url>" "<sql>" [params]   (postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://; "?" vira $N/{pN}; transacao "<url>" [{sql:, params:?}])
   consultar_sql "<url>" "<sql>" [params]   (SELECT com "?", devolve tabela; mesma ligacao do executar_sql)
   spark_sql "<url-livy>" "<sql>" / spark_executar "<url-livy>" "<codigo>"  ([lingua: "scala"|"pyspark", conf: {...}]; sessao Livy reusada, nao fechada)

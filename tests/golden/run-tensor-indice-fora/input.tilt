@@ -1,0 +1,4 @@
+pipeline t:
+  passos:
+    - v = tensor [1, 2]
+    - imprimir v[5]

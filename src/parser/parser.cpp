@@ -1,12 +1,14 @@
 #include "parser/parser.hpp"
 
+#include <cerrno>
+#include <cstdlib>
 #include <initializer_list>
 #include <string>
 #include <utility>
 
 namespace tilt {
 
-using namespace ast;
+using namespace ast;  // NOLINT(build/namespaces)
 
 namespace {
 
@@ -18,9 +20,9 @@ bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
 }
 
 bool is_decl_keyword(std::string_view w) {
-  return word_in(w, {"tipo", "fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa",
-                     "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente",
-                     "equipe", "servico"});
+  return word_in(w, {"tipo", "fonte", "pipeline", "verificar", "modelo", "treino", "busca",
+                     "tarefa", "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta",
+                     "agente", "equipe", "servico", "teste"});
 }
 
 bool is_stmt_keyword(std::string_view w) {
@@ -229,6 +231,13 @@ ItemPtr Parser::parse_funcao_decl() {
       } else {
         p.optional = true;   // sem ':' com tipo => opcional; com '[]' => opcional
       }
+      // Valor padrao: `nome = <expr>` / `nome: tipo = <expr>`. Prefira literais;
+      // um nome como padrao precisa de virgula antes do proximo parametro (a
+      // chamada sem parenteses e gulosa).
+      if (at(TokenKind::Equal)) {
+        advance();
+        p.default_value = parse_or();
+      }
       it->params.push_back(std::move(p));
       continue;
     }
@@ -276,6 +285,11 @@ Block Parser::parse_block() {
   Block block;
   block.span = cur().span;
   if (!expect(TokenKind::Indent, "bloco indentado")) return block;
+  Nivel nivel(*this);
+  if (nivel.estourou()) {
+    (void)recuperar_profundidade();
+    return block;
+  }
 
   while (!at(TokenKind::Dedent) && !at(TokenKind::EndOfFile)) {
     skip_newlines();
@@ -326,6 +340,19 @@ ItemPtr Parser::parse_item() {
 }
 
 ItemPtr Parser::parse_line_content(Span span) {
+  // `parar` / `continuar` sozinhos na linha controlam o laco; com qualquer
+  // outra coisa depois (`parar = 1`, `parar(x)`) continuam sendo nomes comuns.
+  if (at(TokenKind::Identifier) && (cur().lexeme == "parar" || cur().lexeme == "continuar")) {
+    const TokenKind proximo = peek(1).kind;
+    if (proximo == TokenKind::Newline || proximo == TokenKind::Dedent ||
+        proximo == TokenKind::EndOfFile) {
+      auto it = std::make_unique<Item>();
+      it->kind = ItemKind::Stmt;
+      it->span = span;
+      it->stmt = parse_loop_control();
+      return it;
+    }
+  }
   if (at(TokenKind::Identifier) && is_stmt_keyword(cur().lexeme) && cur().lexeme != "senao") {
     auto it = std::make_unique<Item>();
     it->kind = ItemKind::Stmt;
@@ -441,6 +468,22 @@ StmtPtr Parser::parse_for_each() {
     report(DiagCode::ExpectedToken, cur().span, "esperado 'em' na iteracao 'para cada'");
   }
   s->a = parse_expr();
+  // `para cada i em 0..3:` = `intervalo(0, 3)` (fim exclusivo, como o fatiamento).
+  if (at(TokenKind::DotDot)) {
+    auto call = make_expr(ExprKind::Call, s->a->span);
+    auto nome = make_expr(ExprKind::Name, s->a->span);
+    nome->text = "intervalo";
+    call->lhs = std::move(nome);
+    call->paren_call = true;
+    Arg inicio;
+    inicio.value = std::move(s->a);
+    call->args.push_back(std::move(inicio));
+    advance();  // '..'
+    Arg fim;
+    fim.value = parse_expr();
+    call->args.push_back(std::move(fim));
+    s->a = std::move(call);
+  }
   if (expect(TokenKind::Colon, "':' apos o iteravel")) s->body = parse_body();
   return s;
 }
@@ -479,6 +522,14 @@ StmtPtr Parser::parse_return() {
   return s;
 }
 
+StmtPtr Parser::parse_loop_control() {
+  auto s = std::make_unique<Stmt>();
+  s->kind = cur().lexeme == "parar" ? StmtKind::Break : StmtKind::Continue;
+  s->span = advance().span;
+  accept(TokenKind::Newline);
+  return s;
+}
+
 StmtPtr Parser::parse_assign_or_expr_stmt() {
   auto s = std::make_unique<Stmt>();
   s->span = cur().span;
@@ -499,7 +550,54 @@ StmtPtr Parser::parse_assign_or_expr_stmt() {
 
 // ----------------------------------------------------------------- expressions
 
-ExprPtr Parser::parse_expr() { return parse_union(); }
+// `valor se condicao senao outro`: condicional em expressao (baixa precedencia,
+// associa a direita). O `se` de instrucao so aparece no inicio da linha, entao
+// um `se` depois de uma expressao e sempre o deste operador.
+ExprPtr Parser::recuperar_profundidade() {
+  const Span span = cur().span;
+  if (!profundidade_reportada_) {
+    profundidade_reportada_ = true;
+    report(DiagCode::UnexpectedToken, span,
+           "expressao ou bloco aninhado demais (limite de " + std::to_string(kProfundidadeMax) +
+               " niveis de recursao do parser)",
+           {"simplifique a estrutura ou divida em passos/variaveis intermediarias"});
+  }
+  synchronize();  // consome ate a proxima linha: garante progresso do parser
+  return make_expr(ExprKind::NullLit, span);
+}
+
+bool Parser::cadeia_longa(int& contador) {
+  if (++contador <= kCadeiaMax) return false;
+  if (!profundidade_reportada_) {
+    profundidade_reportada_ = true;
+    report(DiagCode::UnexpectedToken, cur().span,
+           "cadeia longa demais (limite de " + std::to_string(kCadeiaMax) +
+               " operadores ou acessos encadeados numa expressao)",
+           {"divida a expressao em variaveis intermediarias"});
+  }
+  synchronize();  // progresso garantido: consome ate a proxima linha
+  return true;
+}
+
+ExprPtr Parser::parse_expr() {
+  Nivel nivel(*this);
+  if (nivel.estourou()) return recuperar_profundidade();
+  ExprPtr valor = parse_union();
+  if (!at_keyword("se")) return valor;
+  auto e = make_expr(ExprKind::Cond, valor->span);
+  advance();  // 'se'
+  e->extra = parse_or();
+  e->lhs = std::move(valor);
+  if (at_keyword("senao")) {
+    advance();
+    e->rhs = parse_expr();
+  } else {
+    report(DiagCode::ExpectedToken, cur().span,
+           "esperado 'senao' no condicional em linha (`valor se condicao senao outro`)");
+    e->rhs = make_expr(ExprKind::NullLit, e->span);  // AST completa apos o erro
+  }
+  return e;
+}
 
 // Lowest precedence: '|' builds union-of-literals types ("a" | "b" | "c").
 ExprPtr Parser::parse_union() {
@@ -517,7 +615,9 @@ ExprPtr Parser::parse_union() {
 
 ExprPtr Parser::parse_or() {
   ExprPtr lhs = parse_and();
+  int cadeia = 0;
   while (at_keyword("ou")) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = std::string(advance().lexeme);
     e->lhs = std::move(lhs);
@@ -529,7 +629,9 @@ ExprPtr Parser::parse_or() {
 
 ExprPtr Parser::parse_and() {
   ExprPtr lhs = parse_equality();
+  int cadeia = 0;
   while (at_keyword("e")) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = std::string(advance().lexeme);
     e->lhs = std::move(lhs);
@@ -541,7 +643,9 @@ ExprPtr Parser::parse_and() {
 
 ExprPtr Parser::parse_equality() {
   ExprPtr lhs = parse_comparison();
+  int cadeia = 0;
   while (at(TokenKind::EqualEqual) || at(TokenKind::BangEqual) || at_keyword("contem")) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::EqualEqual) ? "==" : at(TokenKind::BangEqual) ? "!=" : "contem";
     advance();
@@ -554,8 +658,10 @@ ExprPtr Parser::parse_equality() {
 
 ExprPtr Parser::parse_comparison() {
   ExprPtr lhs = parse_additive();
+  int cadeia = 0;
   while (at(TokenKind::Less) || at(TokenKind::LessEqual) || at(TokenKind::Greater) ||
          at(TokenKind::GreaterEqual)) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::Less)        ? "<"
               : at(TokenKind::LessEqual) ? "<="
@@ -571,7 +677,11 @@ ExprPtr Parser::parse_comparison() {
 
 ExprPtr Parser::parse_additive() {
   ExprPtr lhs = parse_multiplicative();
+  int cadeia = 0;
   while (at(TokenKind::Plus) || at(TokenKind::Dash)) {
+    if (cadeia_longa(cadeia)) break;
+    // `->` (tipo de retorno de `funcao`) nao e subtracao.
+    if (at(TokenKind::Dash) && peek(1).kind == TokenKind::Greater) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::Plus) ? "+" : "-";
     advance();
@@ -584,7 +694,9 @@ ExprPtr Parser::parse_additive() {
 
 ExprPtr Parser::parse_multiplicative() {
   ExprPtr lhs = parse_unary();
+  int cadeia = 0;
   while (at(TokenKind::Star) || at(TokenKind::Slash) || at(TokenKind::Percent)) {
+    if (cadeia_longa(cadeia)) break;
     auto e = make_expr(ExprKind::Binary, lhs->span);
     e->text = at(TokenKind::Star) ? "*" : at(TokenKind::Slash) ? "/" : "%";
     advance();
@@ -596,6 +708,8 @@ ExprPtr Parser::parse_multiplicative() {
 }
 
 ExprPtr Parser::parse_unary() {
+  Nivel nivel(*this);
+  if (nivel.estourou()) return recuperar_profundidade();
   // C3: 'nao' so e operador quando seguido de operando. Seguido de fim de
   // expressao ('=', ',', fim de linha, ']', ')', fim de arquivo) e um nome
   // de variavel — cai no parse_primary abaixo.
@@ -621,12 +735,14 @@ ExprPtr Parser::parse_unary() {
 
 ExprPtr Parser::parse_postfix() {
   ExprPtr e = parse_primary();
+  int cadeia = 0;
 
   while (true) {
-    if (at(TokenKind::LParen) &&
-        (e->kind == ExprKind::Name || e->kind == ExprKind::Member)) {
-      // Parenthesized call: `f(a, b)` / `x.m(a)`. Unambiguous, unlike the
-      // paren-less bare-call form.
+    if (cadeia_longa(cadeia)) break;
+    if (at(TokenKind::LParen) && (e->kind == ExprKind::Name || e->kind == ExprKind::Member ||
+                                  (e->kind == ExprKind::Call && e->paren_call))) {
+      // Parenthesized call: `f(a, b)` / `x.m(a)` / `f(a)(b)` (funcao devolvida).
+      // Unambiguous, unlike the paren-less bare-call form.
       advance();
       auto call = make_expr(ExprKind::Call, e->span);
       call->lhs = std::move(e);
@@ -695,6 +811,11 @@ ExprPtr Parser::parse_postfix() {
                        !at(TokenKind::GreaterEqual) && !at(TokenKind::Plus) &&
                        !at(TokenKind::Dash) && !at(TokenKind::Star) && !at(TokenKind::Slash) &&
                        !at(TokenKind::Percent) && !at(TokenKind::Pipe) && !at(TokenKind::LBracket);
+    // `a se cond senao b`: 'se'/'senao' encerram o nome, nao viram argumento.
+    if (starts_args && at(TokenKind::Identifier) &&
+        (cur().lexeme == "se" || cur().lexeme == "senao")) {
+      starts_args = false;
+    }
     if (starts_args && at(TokenKind::Identifier) && is_operator_word(cur().lexeme)) {
       // C3: palavra operadora como argumento ('f nao', 'f e, 1') — so vale
       // como chamada se a palavra for um argumento completo (seguida de ',',
@@ -784,12 +905,50 @@ bool Parser::attach_trailing_block(Expr* value) {
   return true;
 }
 
+// `funcao` + identificadores/virgulas + ':' + algo na mesma linha. A declaracao
+// de topo (`funcao f a:` + NEWLINE) nunca chega aqui: parse_top_level a consome.
+bool Parser::at_lambda() const {
+  if (!at(TokenKind::Identifier) || cur().lexeme != "funcao") return false;
+  std::size_t k = 1;
+  while (peek(k).kind == TokenKind::Identifier || peek(k).kind == TokenKind::Comma) ++k;
+  return peek(k).kind == TokenKind::Colon && peek(k + 1).kind != TokenKind::Newline;
+}
+
 ExprPtr Parser::parse_primary() {
   Span span = cur().span;
+
+  if (at_lambda()) {
+    auto e = make_expr(ExprKind::Lambda, span);
+    advance();  // 'funcao'
+    while (at(TokenKind::Identifier) || at(TokenKind::Comma)) {
+      if (at(TokenKind::Comma)) {
+        advance();
+        continue;
+      }
+      Arg p;
+      p.name = std::string(advance().lexeme);
+      e->args.push_back(std::move(p));
+    }
+    expect(TokenKind::Colon, "':' apos os parametros da funcao anonima");
+    e->rhs = parse_expr();
+    return e;
+  }
 
   if (at(TokenKind::Integer)) {
     auto e = make_expr(ExprKind::IntLit, span);
     e->text = std::string(advance().lexeme);
+    // O checker e o interpretador convertem o texto com std::stoll, que lanca
+    // em literal fora de 64 bits: reporta aqui e guarda um valor valido.
+    errno = 0;
+    (void)std::strtoll(e->text.c_str(), nullptr, 10);
+    if (errno == ERANGE) {
+      report(DiagCode::UnexpectedToken, span,
+             "inteiro fora do intervalo de 64 bits: " + e->text.substr(0, 24) +
+                 (e->text.size() > 24 ? "..." : ""),
+             {"use um valor entre -9223372036854775808 e 9223372036854775807, ou um decimal (com "
+              "ponto)"});
+      e->text = "0";
+    }
     return e;
   }
   if (at(TokenKind::Decimal)) {

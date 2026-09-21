@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "runtime/compat.hpp"
+#include "runtime/json.hpp"
 #include "runtime/sql_params.hpp"
 #include "runtime/sql_pool.hpp"
 
@@ -26,7 +27,13 @@ constexpr int kDuckdbInteger = 4;
 constexpr int kDuckdbBigint = 5;
 constexpr int kDuckdbFloat = 10;
 constexpr int kDuckdbDouble = 11;
+constexpr int kDuckdbUtinyint = 6;
+constexpr int kDuckdbUsmallint = 7;
+constexpr int kDuckdbUinteger = 8;
+constexpr int kDuckdbUbigint = 9;
+constexpr int kDuckdbHugeint = 16;
 constexpr int kDuckdbVarchar = 17;
+constexpr int kDuckdbDecimal = 19;
 
 // duckdb_result é opaco para nós: struct de 6 ponteiros em que só passamos o
 // endereço para a biblioteca (duckdb_query o preenche; duckdb_destroy_result
@@ -68,6 +75,15 @@ struct DuckdbApi {
   int (*bind_varchar)(void*, std::uint64_t, const char*) = nullptr;
   int (*bind_null)(void*, std::uint64_t) = nullptr;
   int (*execute_prepared)(void*, void*) = nullptr;
+  // Appender (carga em massa de tabelas tilt para o SQL local); opcional.
+  bool appender_ok = false;
+  int (*appender_create)(void*, const char*, const char*, void**) = nullptr;
+  int (*appender_end_row)(void*) = nullptr;
+  int (*appender_destroy)(void**) = nullptr;
+  int (*append_null)(void*) = nullptr;
+  int (*append_int64)(void*, std::int64_t) = nullptr;
+  int (*append_double)(void*, double) = nullptr;
+  int (*append_varchar)(void*, const char*) = nullptr;
 };
 
 template <typename F>
@@ -118,6 +134,13 @@ const DuckdbApi& api() {
                     bind_sym(a.lib, a.bind_varchar, "duckdb_bind_varchar") &&
                     bind_sym(a.lib, a.bind_null, "duckdb_bind_null") &&
                     bind_sym(a.lib, a.execute_prepared, "duckdb_execute_prepared");
+    a.appender_ok = bind_sym(a.lib, a.appender_create, "duckdb_appender_create") &&
+                    bind_sym(a.lib, a.appender_end_row, "duckdb_appender_end_row") &&
+                    bind_sym(a.lib, a.appender_destroy, "duckdb_appender_destroy") &&
+                    bind_sym(a.lib, a.append_null, "duckdb_append_null") &&
+                    bind_sym(a.lib, a.append_int64, "duckdb_append_int64") &&
+                    bind_sym(a.lib, a.append_double, "duckdb_append_double") &&
+                    bind_sym(a.lib, a.append_varchar, "duckdb_append_varchar");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = DuckdbApi{};
@@ -292,9 +315,15 @@ ValueList materializa_duckdb(const DuckdbApi& db, DuckdbResult* result) {
         case kDuckdbSmallint:
         case kDuckdbInteger:
         case kDuckdbBigint:
+        case kDuckdbUtinyint:
+        case kDuckdbUsmallint:
+        case kDuckdbUinteger:
+        case kDuckdbUbigint:
+        case kDuckdbHugeint:  // sum(bigint) e count(*) em versoes novas
           row.map->set(col, Value::inteiro(db.value_int64(result, c, r)));
           break;
         case kDuckdbFloat:
+        case kDuckdbDecimal:
         case kDuckdbDouble:
           row.map->set(col, Value::decimal(db.value_double(result, c, r)));
           break;
@@ -521,6 +550,190 @@ void duckdb_transact(const std::string& db_path,
     }
   }
   simples(conn.connection, "COMMIT");
+}
+
+namespace {
+
+std::string ident_duck(const std::string& nome) {
+  std::string out = "\"";
+  for (const char c : nome) {
+    if (c == '"') out += '"';
+    out += c;
+  }
+  return out + "\"";
+}
+
+struct ColunaDuck {
+  std::string nome;
+  bool viu_int = false;
+  bool viu_real = false;
+  bool viu_outro = false;
+  const char* tipo() const {
+    if (viu_outro) return "VARCHAR";
+    if (viu_real) return "DOUBLE";
+    return viu_int ? "BIGINT" : "VARCHAR";
+  }
+};
+
+void exec_simples(const DuckdbApi& db, void* conn, const std::string& sql) {
+  DuckdbResult r;
+  if (db.query(conn, sql.c_str(), &r) != kDuckdbSuccess) {
+    const std::string msg = result_error(db, &r);
+    db.destroy_result(&r);
+    die("falha ao executar comando: " + msg);
+  }
+  db.destroy_result(&r);
+}
+
+}  // namespace
+
+Value duckdb_consulta_tabelas(const std::string& sql,
+                              const std::vector<std::pair<std::string, Value>>& tabelas,
+                              const std::vector<SqlParam>& params) {
+  const DuckdbApi& db = api();
+  if (!db.lib) {
+#if defined(_WIN32)
+    die("libduckdb nao encontrada: instale o pacote duckdb (duckdb.dll no PATH)");
+#else
+    die("libduckdb nao encontrada: instale o pacote duckdb (libduckdb.so no LD_LIBRARY_PATH)");
+#endif
+  }
+  if (!tabelas.empty() && !db.appender_ok) {
+    die("libduckdb sem a API de appender; atualize o DuckDB (>= 0.9)");
+  }
+  DbConn* h = abre_banco(db, ":memory:");
+  try {
+    for (const auto& [nome, tabela] : tabelas) {
+      if ((tabela.kind != ValueKind::Tabela && tabela.kind != ValueKind::Lista) || !tabela.list) {
+        die("'" + nome + "' deve ser uma tabela (lista de mapas)");
+      }
+      const ValueList& linhas = *tabela.list;
+      std::vector<ColunaDuck> colunas;
+      for (const Value& linha : linhas) {
+        if (linha.kind != ValueKind::Mapa || !linha.map) {
+          die("'" + nome + "' deve ser uma tabela (lista de mapas)");
+        }
+        for (const auto& [chave, v] : linha.map->items) {
+          ColunaDuck* c = nullptr;
+          for (ColunaDuck& e : colunas) {
+            if (e.nome == chave) {
+              c = &e;
+              break;
+            }
+          }
+          if (c == nullptr) {
+            colunas.push_back(ColunaDuck{chave});
+            c = &colunas.back();
+          }
+          switch (v.kind) {
+            case ValueKind::Nulo:
+              break;
+            case ValueKind::Logico:
+            case ValueKind::Inteiro:
+              c->viu_int = true;
+              break;
+            case ValueKind::Decimal:
+              c->viu_real = true;
+              break;
+            default:
+              c->viu_outro = true;
+              break;
+          }
+        }
+      }
+      if (colunas.empty()) die("a tabela '" + nome + "' esta vazia: sem colunas para criar");
+      std::string ddl = "CREATE TABLE " + ident_duck(nome) + " (";
+      for (std::size_t k = 0; k < colunas.size(); ++k) {
+        ddl += (k ? ", " : "") + ident_duck(colunas[k].nome) + " " + colunas[k].tipo();
+      }
+      exec_simples(db, h->connection, ddl + ")");
+      void* app = nullptr;
+      if (db.appender_create(h->connection, nullptr, nome.c_str(), &app) != kDuckdbSuccess) {
+        die("falha ao abrir a carga de '" + nome + "'");
+      }
+      for (const Value& linha : linhas) {
+        for (const ColunaDuck& col : colunas) {
+          const Value* v = linha.map->find(col.nome);
+          if (v == nullptr || v->kind == ValueKind::Nulo) {
+            db.append_null(app);
+          } else if (v->kind == ValueKind::Logico) {
+            db.append_int64(app, v->b ? 1 : 0);
+          } else if (v->kind == ValueKind::Inteiro && !col.viu_outro) {
+            col.viu_real ? db.append_double(app, static_cast<double>(v->i))
+                         : db.append_int64(app, v->i);
+          } else if (v->kind == ValueKind::Decimal && !col.viu_outro) {
+            db.append_double(app, v->d);
+          } else {
+            const std::string txt = v->kind == ValueKind::Texto ? v->s : json_dump_compacto(*v);
+            db.append_varchar(app, txt.c_str());
+          }
+        }
+        db.appender_end_row(app);
+      }
+      db.appender_destroy(&app);  // descarrega o que faltava
+    }
+
+    DuckdbResult result;
+    if (params.empty()) {
+      if (db.query(h->connection, sql.c_str(), &result) != kDuckdbSuccess) {
+        const std::string msg = result_error(db, &result);
+        db.destroy_result(&result);
+        die("falha ao executar consulta: " + msg);
+      }
+    } else {
+      if (!db.prepared_ok) die("libduckdb sem statements preparados; atualize o DuckDB");
+      void* stmt = nullptr;
+      if (db.prepare(h->connection, sql.c_str(), &stmt) != kDuckdbSuccess) {
+        const std::string msg = db.prepare_error(stmt) ? db.prepare_error(stmt) : "erro";
+        db.destroy_prepare(&stmt);
+        die("falha ao preparar consulta: " + msg);
+      }
+      if (db.nparams(stmt) != params.size()) {
+        db.destroy_prepare(&stmt);
+        die("esperava " + std::to_string(params.size()) + " parametro(s), mas o SQL tem " +
+            std::to_string(db.nparams(stmt)) + " '?'");
+      }
+      for (std::size_t k = 0; k < params.size(); ++k) {
+        const std::uint64_t idx = k + 1;
+        const SqlParam& p = params[k];
+        switch (p.tipo) {
+          case SqlParam::Tipo::Nulo:
+            db.bind_null(stmt, idx);
+            break;
+          case SqlParam::Tipo::Inteiro:
+            db.bind_int64(stmt, idx, p.i);
+            break;
+          case SqlParam::Tipo::Decimal:
+            db.bind_double(stmt, idx, p.d);
+            break;
+          case SqlParam::Tipo::Texto:
+            db.bind_varchar(stmt, idx, p.s.c_str());
+            break;
+          case SqlParam::Tipo::Logico:
+            db.bind_int64(stmt, idx, p.b ? 1 : 0);
+            break;
+        }
+      }
+      const int rc = db.execute_prepared(stmt, &result);
+      db.destroy_prepare(&stmt);
+      if (rc != kDuckdbSuccess) {
+        const std::string msg = result_error(db, &result);
+        db.destroy_result(&result);
+        die("falha ao executar consulta: " + msg);
+      }
+    }
+    if (db.column_count(&result) == 0) {
+      db.destroy_result(&result);
+      die("sql espera uma consulta que devolva linhas (SELECT/WITH)");
+    }
+    ValueList rows = materializa_duckdb(db, &result);
+    db.destroy_result(&result);
+    fecha_banco(db, h);
+    return Value::tabela(std::move(rows));
+  } catch (...) {
+    fecha_banco(db, h);
+    throw;
+  }
 }
 
 }  // namespace tilt::rt

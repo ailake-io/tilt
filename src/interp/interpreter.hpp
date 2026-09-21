@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <ctime>
+#include <functional>
 #include <iosfwd>
 #include <map>
 #include <memory>
@@ -23,6 +24,19 @@
 #include "vm/bytecode.hpp"
 #include "vm/bytecode_cache.hpp"
 #include "vm/jit.hpp"
+
+namespace tilt::rt {
+
+// Funcao anonima (`funcao x: x * 2`): o corpo (no AST, que vive mais que o valor)
+// e as variaveis visiveis na criacao, capturadas por valor.
+struct Closure {
+  const ast::Expr* lambda = nullptr;
+  std::unordered_map<std::string, Value> capturadas;
+  // Tabela de funcoes do modulo onde a lambda nasceu (nullptr fora de modulo).
+  const std::unordered_map<std::string, const ast::Item*>* funcs = nullptr;
+};
+
+}  // namespace tilt::rt
 
 namespace tilt {
 
@@ -110,6 +124,47 @@ class Interpreter {
   // Returns 0 on success, 1 if a runtime error was reported.
   int run();
 
+  // Resultado de um bloco `teste nome:` (ver run_testes).
+  struct ResultadoTeste {
+    std::string nome;
+    bool ok = true;
+    std::string mensagem;  // erro T901 (com linha) quando !ok
+  };
+  // `tilt repl`: executa instrucoes (passos) num ambiente que persiste entre as
+  // chamadas. Com `eco`, o valor de uma expressao solta e impresso (se nao for
+  // nulo). Devolve false com a mensagem em `erro` (T901 com a linha). O `Program`
+  // dos passos e das declaracoes deve viver ate o fim da sessao.
+  bool repl_executar(const ast::Block& passos, bool eco, std::string& erro);
+  // Registra declaracoes de topo (funcao, tipo, llm, importar, seja...) de um
+  // Program novo; lanca std::runtime_error com a mensagem se falhar.
+  void repl_registrar(const ast::Program& programa);
+
+  // `tilt rpc`: expoe funcoes e pipelines do programa a outros processos.
+  // preparar_chamadas registra as declaracoes (uma vez); false + `erro` se falhar.
+  bool preparar_chamadas(std::string& erro);
+  struct FuncaoPublica {
+    std::string nome;
+    std::vector<std::string> params;
+  };
+  // Funcoes de topo (sem prefixo `_`) e nomes de pipelines, ordenados.
+  std::vector<FuncaoPublica> funcoes_publicas() const;
+  std::vector<std::string> pipelines_publicos() const;
+  // Chama `nome` com args posicionais e depois nomeados (mapeados pelo nome do
+  // parametro). false + `erro` (com a linha) em falha.
+  bool chamar_por_nome(const std::string& nome, std::vector<rt::Value> args,
+                       const std::vector<std::pair<std::string, rt::Value>>& nomeados,
+                       rt::Value& resultado, std::string& erro);
+  bool rodar_pipeline_por_nome(const std::string& nome, std::string& erro);
+
+  // `tilt testar`: roda os blocos `teste` do programa (na ordem do arquivo) cujo
+  // nome contem `filtro` (vazio = todos). Cada teste roda isolado: uma falha
+  // (afirmar, erro de execucao) nao interrompe os demais. Registra funcoes e
+  // declaracoes antes; nao roda pipelines nem treinos.
+  // `apos_cada` (opcional) e chamado logo depois de cada teste, para o chamador
+  // recolher a saida produzida por ele.
+  std::vector<ResultadoTeste> run_testes(
+      const std::string& filtro, const std::function<void(const ResultadoTeste&)>& apos_cada = {});
+
   // `tilt executar --agendar`: loop forever (or TILT_AGENDAR_MAX runs with the
   // TILT_AGORA fake clock) firing each pipeline at its `agenda:` cron.
   int run_scheduled();
@@ -168,6 +223,10 @@ class Interpreter {
   struct ReturnSignal {
     rt::Value value;
   };
+  // `parar` / `continuar`: lancados por exec_stmt e consumidos pelo laco mais
+  // interno (o checker garante que so aparecem dentro de um).
+  struct BreakSignal {};
+  struct ContinueSignal {};
   struct RuntimeAbort {
     Span span;
     std::string message;
@@ -179,6 +238,8 @@ class Interpreter {
                          DiagCode code = DiagCode::RuntimeError);
 
   void register_decls();
+  void register_decls_de(const ast::Program& programa);
+  Env repl_env_;  // ambiente persistente do REPL (pai = root_ no primeiro uso)
   // Carrega o modulo `name` procurando `<from_dir>/name.tilt` e depois os
   // diretorios da stdlib (TILT_STDLIB_PATH, stdlib/ ao lado do binario,
   // <exe>/../share/tilt/stdlib). Falha com a lista de caminhos tentados.
@@ -218,13 +279,28 @@ class Interpreter {
                           Env* module_scope = nullptr);
 
   std::vector<rt::Value> eval_args(const ast::Expr& call, Env& env);
+  rt::Value call_closure(const rt::Closure& fn, std::vector<rt::Value> args, Span span);
+  // Chunk de bytecode da funcao (compila/le do cache na 1a vez); nullptr se ela nao esta
+  // no subconjunto da VM. O ponteiro vive tanto quanto o interpretador (vm_chunks_).
+  std::shared_ptr<vm::Chunk> chunk_de_funcao(const ast::Item& fn);
+  // Resolvedor para chamadas VM -> VM diretas (nome -> Chunk), ou nullptr.
+  const vm::Chunk* resolver_chunk(const std::string& nome);
   rt::ValueMap eval_kwargs(const ast::Expr& call, Env& env);
   // `particionar_por:` como texto ou lista de textos (particao composta).
   std::vector<std::string> parse_particionar_por(const rt::ValueMap& kw, const char* builtin,
                                                  const Span& span);
   std::string interpolate(const std::string& text, Env& env);
 
-  rt::Value read_csv_file(const std::string& path, Span span);
+  // Opcoes de leitura de CSV (`ler_csv "x.csv", separador: ";", nulos: ["NA"], ...`).
+  struct CsvOpcoes {
+    char separador = ',';
+    bool detectar_separador = false;   // separador: "auto"
+    bool cabecalho = true;             // sem_cabecalho: verdadeiro -> false
+    std::vector<std::string> colunas;  // nomes das colunas (substituem/definem o cabecalho)
+    std::size_t pular = 0;             // linhas ignoradas no inicio
+    std::vector<std::string> nulos;    // textos lidos como nulo (ex.: "NA", "-")
+  };
+  rt::Value read_csv_file(const std::string& path, Span span, const CsvOpcoes* opcoes = nullptr);
   rt::Value read_fonte(const std::string& name, Span span);
 
   // Deep learning.
@@ -269,6 +345,10 @@ class Interpreter {
     std::int64_t plano = 0;
     // NormaLote: nome identificador
     std::string nome_norma_lote;
+    // Dropout (`abandono: p`): probabilidade de zerar um valor no treino
+    // (inverted dropout: os mantidos sao escalados por 1/(1-p)); identidade na
+    // inferencia.
+    float taxa_abandono = 0.5F;
   };
   rt::Tensor value_to_tensor(const rt::Value& v, Span span);
   void set_device(const ast::Item& decl);  // reads `dispositivo:` -> gpu on/off

@@ -1,0 +1,10 @@
+pipeline t:
+  passos:
+    - soma = 0
+    - para cada i em 0..4:
+        soma = soma + i
+        imprimir i
+    - imprimir soma
+    - n = 3
+    - para cada j em 1..n + 1:
+        imprimir "j", j

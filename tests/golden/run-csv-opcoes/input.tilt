@@ -1,0 +1,41 @@
+pipeline csv_opcoes:
+  passos:
+    # CSV brasileiro: ';' e virgula decimal, com titulo antes do cabecalho e marcadores de nulo
+    - conteudo = """relatorio de vendas
+nome;valor;obs
+ana;1,5;ok
+bruno;NA;-
+"silva; jr";3,25;"diz ""oi"" ok"
+"""
+    - escrever_texto "br.csv", conteudo
+    - t = ler_csv "br.csv", separador: ";", pular: 1, nulos: ["NA", "-"], tipos: { valor: "decimal" }
+    - imprimir tamanho(t), t[0].nome, t[0].valor, tipo_de(t[1].valor), t[1].obs, t[2].nome, t[2].valor, t[2].obs
+    # separador detectado
+    - tabulado = """a	b
+1	2
+"""
+    - escrever_texto "tab.csv", tabulado
+    - u = ler_csv "tab.csv", separador: "auto"
+    - imprimir u[0].a, u[0].b
+    # sem cabecalho, com nomes
+    - simples = """1,x
+2,y
+"""
+    - escrever_texto "sem.csv", simples
+    - v = ler_csv "sem.csv", sem_cabecalho: verdadeiro, colunas: ["id", "letra"]
+    - imprimir tamanho(v), v[0].id, v[1].letra
+    - w = ler_csv "sem.csv", sem_cabecalho: verdadeiro
+    - imprimir w[0].coluna1, w[0].coluna2
+    # ida e volta com aspas, separador e nulo
+    - dados = [{ n: "a,b", m: "a;b", z: nulo, q: 1.5 }, { n: "x", m: "y", z: 2, q: 3 }]
+    - escrever_csv dados, "rt.csv"
+    - r = ler_csv "rt.csv"
+    - imprimir r[0].n, r[0].m, r[1].n, r[0].q
+    - escrever_csv dados, "rt2.csv", separador: ";"
+    - r2 = ler_csv "rt2.csv", separador: ";", nulos: [""]
+    - imprimir r2[0].n, tipo_de(r2[0].z), r2[1].z
+    - remover_arquivo "br.csv"
+    - remover_arquivo "tab.csv"
+    - remover_arquivo "sem.csv"
+    - remover_arquivo "rt.csv"
+    - remover_arquivo "rt2.csv"

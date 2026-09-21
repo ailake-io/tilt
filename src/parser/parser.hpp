@@ -48,6 +48,7 @@ class Parser {
   ast::StmtPtr parse_while();
   ast::StmtPtr parse_try();
   ast::StmtPtr parse_return();
+  ast::StmtPtr parse_loop_control();  // `parar` / `continuar`
   ast::StmtPtr parse_assign_or_expr_stmt();
 
   // expressions
@@ -64,6 +65,7 @@ class Parser {
   ast::ExprPtr parse_primary();
   std::vector<ast::Arg> parse_bare_args();
   bool attach_trailing_block(ast::Expr* value);
+  bool at_lambda() const;  // `funcao a, b: <expr>` em posicao de expressao
 
   // line classification helpers (scan the current logical line)
   struct LineScan {
@@ -81,6 +83,32 @@ class Parser {
   const std::vector<Token>& toks_;
   DiagnosticEngine& diag_;
   std::size_t pos_ = 0;
+  // Profundidade de recursao (expressoes e blocos): entrada hostil como 20 mil
+  // `[` seguidos estouraria a pilha (segfault) em vez de virar diagnostico.
+  int profundidade_ = 0;
+  // Cada nivel de expressao passa por ~11 funcoes do parser (e conta 2: parse_expr e
+  // parse_unary); 64 fica folgado para a pilha de 1 MB do Windows/MSVC em Debug.
+  // Contagem, nao bytes de pilha: medir enderecos nao vale sob ASan (pilhas falsas).
+  static constexpr int kProfundidadeMax = 64;
+  struct Nivel {
+    explicit Nivel(Parser& p) : p_(p), estourou_(++p.profundidade_ > kProfundidadeMax) {}
+    ~Nivel() { --p_.profundidade_; }
+    Nivel(const Nivel&) = delete;
+    Nivel& operator=(const Nivel&) = delete;
+    bool estourou() const { return estourou_; }
+
+   private:
+    Parser& p_;
+    bool estourou_;
+  };
+  // Cadeias montadas em laco (`a.b.c.d...`, `a + b + c...`) nao recursam no parser,
+  // mas a AST fica tao profunda quanto a cadeia e o checker/destrutor recursam nela:
+  // uma cadeia de milhares de itens estoura a pilha de 1 MB do Windows.
+  static constexpr int kCadeiaMax = 128;
+  bool cadeia_longa(int& contador);
+  // Reporta (uma vez por arquivo) o aninhamento excessivo e pula o resto da linha.
+  ast::ExprPtr recuperar_profundidade();
+  bool profundidade_reportada_ = false;
   int map_depth_ = 0;  // inside a `{ ... }` literal: `ident:` is a key, not a named arg
 };
 

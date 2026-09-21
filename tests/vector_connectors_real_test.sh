@@ -51,6 +51,11 @@ check_common() {
     echo "vector_connectors_real: busca nao retornou 2 hits: $output"
     return 1
   }
+  # o texto guardado no `inserir` volta no `buscar` (todos os backends)
+  echo "$output" | grep -q '^texto1: gato' || {
+    echo "vector_connectors_real: hit sem o texto inserido: $output"
+    return 1
+  }
 }
 
 qdrant_out=$(run_fixture "$FIXTURES/qdrant_rag.tilt")

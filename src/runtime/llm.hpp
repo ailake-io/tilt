@@ -3,6 +3,8 @@
 #include <string>
 #include <vector>
 
+#include "runtime/value.hpp"
+
 namespace tilt::rt {
 
 struct LlmConfig {
@@ -44,6 +46,46 @@ RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::str
 // Streaming SSE: solicita stream=true, materializa os deltas e aplica o mesmo retry/fallback.
 RespostaLLM llm_chat_fluxo_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
                                   const std::string& user);
+
+// --- Tool-calling nativo (Anthropic `tool_use` / OpenAI `tool_calls`) -------
+
+// Ferramenta oferecida ao modelo: nome, descricao e JSON Schema dos argumentos.
+struct FerramentaLLM {
+  std::string nome;
+  std::string descricao;
+  Value schema;  // {"type":"object","properties":{...},"required":[...]}
+};
+
+struct ChamadaFerramenta {
+  std::string id;
+  std::string nome;
+  Value argumentos;  // mapa
+};
+
+// Turno da conversa: "user", "assistant" (texto e/ou chamadas) ou "tool"
+// (resultado de `chamada_id`).
+struct MensagemLLM {
+  std::string papel;
+  std::string texto;
+  std::vector<ChamadaFerramenta> chamadas;
+  std::string chamada_id;
+};
+
+struct RespostaFerramentas {
+  std::string texto;                        // vazio quando so ha chamadas
+  std::vector<ChamadaFerramenta> chamadas;  // vazio => resposta final
+  long long tok_entrada = 0;
+  long long tok_saida = 0;
+  std::string modelo;
+};
+
+// Um turno de conversa com ferramentas nativas, com o mesmo retry/fallback/
+// teto_tokens de llm_chat_cadeia. Em mock, chama cada ferramenta uma vez (na
+// ordem) com argumentos vazios e depois responde texto fixo.
+RespostaFerramentas llm_chat_ferramentas(const std::vector<LlmConfig>& cadeia,
+                                         const std::string& system,
+                                         const std::vector<MensagemLLM>& mensagens,
+                                         const std::vector<FerramentaLLM>& ferramentas);
 
 // Deterministic in mock mode; real embeddings via `curl` otherwise.
 std::vector<float> llm_embed(const std::string& model, const std::string& text);

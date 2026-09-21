@@ -1,0 +1,6 @@
+funcao f a, b = 1:
+  retornar a
+pipeline t:
+  passos:
+    - imprimir f()
+    - imprimir f(1, 2, 3)

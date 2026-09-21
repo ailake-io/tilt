@@ -297,9 +297,15 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   chave: "segredo"` grava `PARE` com AES-GCM-256 (`AES_GCM_V1`), cifrando
   headers/payloads de páginas e o footer. A leitura exige a mesma chave em
   `TILT_PARQUET_KEY`; a chave não é persistida no arquivo e a autenticação
-  rejeita arquivo adulterado ou segredo incorreto. O resolvedor AWS KMS ainda
-  é uma etapa separada (o formato já preserva `FileCryptoMetaData` e
-  `ColumnCryptoMetaData` padrão);
+  rejeita arquivo adulterado ou segredo incorreto. AWS KMS também pode ser
+  usado com `chave_kms: "arn:aws:kms:REGIAO:CONTA:key/ID"`: o tilt chama
+  `GenerateDataKey(AES_256)` ao gravar e `Decrypt` ao ler. O footer persiste
+  somente o `KeyId` resolvido e o `CiphertextBlob`; a data key em claro não
+  é persistida. Configure `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_REGION` (padrão `us-east-1`) e, opcionalmente, `AWS_SESSION_TOKEN`;
+  a identidade precisa de `kms:GenerateDataKey` e `kms:Decrypt` na chave.
+  `KMS_ENDPOINT` permite apontar para um endpoint compatível/local.
+  `chave` e `chave_kms` são mutuamente exclusivas;
 - escrita: encoding **PLAIN** ou **DICTIONARY** (acima), um row group por arquivo;
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;
@@ -368,9 +374,12 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   de partição nos dados (padrão Delta — os valores vivem no diretório e no
   `partitionValues` de cada `add`; o `metaData` registra `partitionColumns` e o
   `schemaString` continua listando as colunas). Valor nulo em coluna de partição
-  ou texto com `/` → erro claro (sem `__HIVE_DEFAULT_PARTITION__` nem
-  escaping). `anexar_delta` herda a partição da tabela existente (chamar sem a
-  opção ou com o mesmo valor, na mesma ordem); `particionar_por` explícito e
+  usa `__HIVE_DEFAULT_PARTITION__` no caminho Hive e `null` no `partitionValues`;
+  `ler_delta` reidrata e permite poda com `nulo`. O marcador literal é reservado
+  (não pode ser usado como valor textual). Colunas passam a `nullable` no schema
+  ao anexar linhas nulas. Texto com `/` continua sendo erro claro, sem escaping.
+  `anexar_delta` herda a partição da tabela existente (chamar sem a opção ou
+  com o mesmo valor, na mesma ordem); `particionar_por` explícito e
   divergente, ou opção em tabela não particionada → erro claro. Na leitura as
   colunas são reidratadas a partir de `partitionValues`, convertidas para o tipo
   declarado no schema (falha de conversão mantém texto). Tabelas particionadas
@@ -470,9 +479,12 @@ pipeline iceberg_demo:
   cada `data_file` do manifest ganha um record `partition` com um campo por
   coluna, no tipo da coluna (string/long/double/boolean). `ler_iceberg`
   resolve o spec do metadata e reidrata as colunas a partir dos manifests,
-  convertendo pelo tipo do schema. Valor nulo em coluna de partição, texto
-  com `/` e coluna repetida ou inexistente falham com erro claro (sem
-  `__HIVE_DEFAULT_PARTITION__` nem escaping);
+  convertendo pelo tipo do schema. Nulo usa `__HIVE_DEFAULT_PARTITION__` no
+  caminho e permanece tipado como null no record `partition`; os summaries
+  marcam `contains_null`, e leitura/pruning aceitam `nulo`. Campos opcionais
+  continuam com tipo definido pelo schema Iceberg mesmo quando um data file
+  contém apenas nulos. O marcador literal é reservado. Texto com `/`, coluna
+  repetida ou inexistente seguem falhando com erro claro (sem escaping);
 - **partição bucket (Fase 12-5a)**: `particionar_por: ["bucket[4](id)"]`
   (coluna inteira/texto/lógica) cria o campo `id_bucket_4` com transform
   `bucket[4]` (murmur3_x86_32 da spec, validado contra referência e
@@ -659,6 +671,190 @@ urllib exercendo o subconjunto + traversal + read-only) e validado com
 **Spark 3.5 real** via catálogo REST em `tests/spark_catalog_test.sh` (container
 `apache/spark:3.5.3` + `iceberg-spark-runtime`, `--network host` e o dir montado
 no mesmo path absoluto — manifests/data continuam `file://` absolutos).
+
+## Limpeza e preparação de dados
+
+Métodos de `tabela` que cobrem o dia a dia de limpeza sem escrever `derivar` linha a
+linha. Todos devolvem uma tabela **nova** (a original não muda) e têm nome em inglês
+equivalente (`drop_nulls`, `fill_nulls`, `rename`, `drop_columns`, `cast`, `deduplicate`,
+`join`, `stack`, `describe`, `sample`, `value_counts`, `clean_text`; guia 18).
+
+Uma célula é **nula** quando é `nulo`, a chave não existe ou é um texto vazio/só de
+espaços (o que `ler_csv` devolve para célula vazia).
+
+```tilt run
+pipeline limpeza:
+  passos:
+    - bruto = [
+        { id: 1, nome: "  Ana   Silva ", idade: "30", cidade: "sp", nascimento: "31/01/1994" },
+        { id: 2, nome: "bruno", idade: "", cidade: "rj", nascimento: "1990-02-30" },
+        { id: 2, nome: "bruno", idade: "", cidade: "rj", nascimento: "1990-02-30" },
+        { id: 3, nome: "", idade: "1,5", cidade: nulo, nascimento: "2001/12/05" }
+      ]
+    # 1. conhecer os dados: tipo, nulos e distintos por coluna
+    - para cada p em bruto.descrever:
+        imprimir p.coluna, p.tipo, p.nulos, p.distintos
+    # 2. limpar
+    - a = bruto.deduplicar
+    - b = a.limpar_texto "nome", caixa: "minusculas"
+    - c = b.converter { idade: "inteiro", nascimento: "data" }
+    - d = c.preencher_nulos { cidade: "desconhecida", idade: 0 }
+    - e = d.remover_nulos "nome"
+    - imprimir tamanho(e), e[0].nome, e[0].idade, e[0].nascimento, e[1].nascimento
+    # 3. juntar com outra tabela e contar
+    - ufs = [{ cidade: "sp", estado: "Sao Paulo" }, { cidade: "rj", estado: "Rio de Janeiro" }]
+    - j = e.juntar ufs, por: "cidade", tipo: "esquerda"
+    - imprimir j[0].estado, j[1].estado
+    - cv = e.contar_valores "cidade"
+    - imprimir cv[0].valor, cv[0].contagem
+```
+
+| Método | O que faz |
+|---|---|
+| `remover_nulos ["a", "b"]` | tira as linhas com nulo nessas colunas (todas, sem argumento) |
+| `preencher_nulos { a: 0 }` / `preencher_nulos 0` | preenche nulos por coluna (cria a coluna se faltar) ou em todas |
+| `renomear { antigo: "novo" }` | renomeia mantendo a ordem; coluna inexistente é erro |
+| `remover_colunas "a", "b"` | tira colunas; nome inexistente é erro (pega typo) |
+| `converter { c: "inteiro" }` | `inteiro`, `decimal` (aceita `1,5`), `texto`, `logico` (sim/não/true/false/1/0), `data` (→ `AAAA-MM-DD`). O que não converte vira `nulo`; fração em `inteiro` também (use `arredondar`) |
+| `deduplicar ["a"]` | mantém a 1ª ocorrência por chave (linha inteira sem argumento); `distinto` é o mesmo |
+| `juntar outra, por: "id", tipo: "esquerda"` | `interna` (padrão), `esquerda`, `direita`, `completa`; `por:` é nome, lista ou `{ esq: dir }`; colunas repetidas da direita ganham `_direita`; chave nula nunca casa |
+| `empilhar(outra)` | concatena; o esquema vira a união das colunas |
+| `descrever` | uma linha por coluna: `coluna, tipo, total, nulos, distintos, minimo, maximo, media` |
+| `amostra 100, semente: 7` / `amostra 0.1` | amostra sem reposição, reproduzível, na ordem original |
+| `contar_valores "col"` | `{ valor, contagem }` do mais ao menos frequente |
+| `limpar_texto ["nome"], caixa: "minusculas"` | tira espaços das pontas e repetidos (e muda a caixa) |
+| `ordenar_por "a", "b", desc: verdadeiro` | várias colunas, estável |
+
+### Pivô, janelas, divisão de coluna e fusos
+
+```tilt run
+pipeline avancada:
+  passos:
+    - vendas = [
+        { regiao: "sul", produto: "a", mes: 1, valor: 10 },
+        { regiao: "sul", produto: "b", mes: 1, valor: 5 },
+        { regiao: "sul", produto: "a", mes: 2, valor: 20 },
+        { regiao: "norte", produto: "a", mes: 1, valor: 7 }
+      ]
+    # linhas -> colunas (e de volta)
+    - p = vendas.pivotar indice: "regiao", colunas: "produto", valores: "valor", agregacao: "soma"
+    - imprimir p[0].regiao, p[0].a, p[0].b, p[1].a, p[1].b
+    - d = p.despivotar id: "regiao", nome: "produto", valor: "total"
+    - imprimir tamanho(d)
+    # janela: acumulado por regiao, na ordem dos meses
+    - k = vendas.janela "acum", "soma_acumulada", "valor", por: "regiao", ordem: "mes"
+    - imprimir k[0].acum, k[1].acum, k[2].acum, k[3].acum
+    # dividir uma coluna de texto
+    - pessoas = [{ nome: "ana maria silva" }, { nome: "bruno" }]
+    - dv = pessoas.dividir_coluna "nome", " ", nomes: ["primeiro", "resto"]
+    - imprimir dv[0].primeiro, dv[0].resto, dv[1].resto
+    # fusos horarios
+    - imprimir converter_fuso("2024-01-31T12:00:00", "UTC", "-03:00")
+```
+
+| Método | O que faz |
+|---|---|
+| `pivotar indice: "a", colunas: "b", valores: "v", agregacao: "soma"` | linhas → colunas: uma linha por `indice` (nome ou lista), uma coluna por valor distinto de `colunas`; `agregacao`: `soma` (padrão), `media`, `contar`, `min`, `max`, `primeiro`; combinação sem dados é `nulo` (0 em `contar`) |
+| `despivotar id: "a", colunas: [...], nome: "variavel", valor: "valor"` | colunas → linhas; sem `colunas:` usa todas fora de `id`; células nulas saem, exceto com `manter_nulos: verdadeiro` |
+| `janela "nome", "funcao", "coluna", por: ..., ordem: ...` | acrescenta uma coluna calculada sem mudar a ordem das linhas (abaixo) |
+| `dividir_coluna "col", ",", nomes: [...], remover: verdadeiro` | divide o texto em colunas novas (o resto vai na última; sem `nomes:` são `col_1..N`); nulo gera nulos |
+| `converter_fuso "col", origem: "UTC", destino: "America/Sao_Paulo"` | converte datas e horas de uma coluna; o que não é data vira `nulo` |
+
+**Funções de janela** (`por:` particiona, `ordem:` ordena dentro da partição, `desc: verdadeiro`
+inverte): `numero_linha`, `ranking` (empates repetem e deixam salto), `ranking_denso`,
+`soma_acumulada`, `contagem_acumulada`, `media_acumulada`, `soma_movel` e `media_movel`
+(`tamanho: n`, inclui a linha atual), `anterior` e `proximo` (`deslocamento: n`, `padrao: v`),
+`diferenca` (valor menos o da linha anterior), `primeiro` e `ultimo`. Nulos são ignorados
+nas somas e médias. Sem `por:` a tabela toda é uma partição.
+
+**Fusos.** `converter_fuso(texto, origem, destino)` (função) e o método aceitam `UTC`,
+deslocamento fixo (`-03:00`, `+0530`) ou nome IANA (`America/Sao_Paulo`, `Europe/London`),
+que usa o *tzdata* do sistema (horário de verão incluído; no Windows só `UTC` e
+deslocamentos). Um sufixo no próprio texto (`...Z`, `...-03:00`) vale mais que `origem`. O
+resultado é `AAAA-MM-DDTHH:MM:SS` no fuso de destino. Horário que não existe ou é ambíguo
+na virada do horário de verão segue a regra da libc do sistema.
+
+### Ler e gravar CSV de verdade
+
+`ler_csv` aceita opções (todas opcionais; sem opção o comportamento é o de sempre):
+
+```tilt skip
+t = ler_csv "vendas.csv", separador: ";", pular: 2, nulos: ["NA", "-", ""],
+      tipos: { valor: "decimal", data: "data" }
+u = ler_csv "x.txt", separador: "auto"                      # detecta , ; tab |
+v = ler_csv "sem_titulo.csv", sem_cabecalho: verdadeiro, colunas: ["id", "nome"]
+```
+
+- `separador:` um caractere, `"tab"` ou `"auto"`; `fonte tipo: csv` também aceita `separador:`.
+- `pular: n` descarta as n primeiras linhas (títulos); `sem_cabecalho: verdadeiro` lê a
+  primeira linha como dado (colunas `coluna1..N`, ou os nomes de `colunas:`).
+- `nulos: [...]` lê esses textos como `nulo`; `tipos: { coluna: tipo }` converte na leitura
+  (os mesmos tipos de `converter`, inclusive `"1,5"` como decimal e `31/01/2024` como data).
+- `escrever_csv tabela, "x.csv", separador: ";"` coloca entre aspas o campo que tiver o
+  separador, aspas ou quebra de linha (RFC 4180) e grava `nulo` como campo vazio.
+
+### Datas e nulos
+
+| Função | O que faz |
+|---|---|
+| `converter_data("31/01/2024")` | `2024-01-31` (aceita `AAAA-MM-DD`, `AAAA/MM/DD`, `DD/MM/AAAA` e hora opcional); `nulo` se inválida |
+| `ano(d)`, `mes(d)`, `dia(d)` | partes de uma data ISO (`nulo` se inválida) |
+| `adicionar_dias(d, n)` | soma (ou subtrai, com `n` negativo) dias |
+| `dias_entre(a, b)` | dias de `a` até `b` (negativo se `b` < `a`) |
+| `coalescer(a, b, ...)` | o primeiro valor que não é nulo nem texto vazio |
+
+
+Métodos sem argumentos (`descrever`, `deduplicar`, `remover_nulos`, `limpar_texto`) podem
+ser escritos sem parênteses; um argumento que seja lista literal exige parênteses
+(`a.empilhar([...])`, pois `a.empilhar [...]` é lido como índice). Em 1 M de linhas,
+`deduplicar`, `juntar` (600 mil linhas de resultado), `descrever`, `contar_valores` e
+`converter` juntos levam ~2,4 s além da leitura. Para junções e agregações muito grandes,
+`sql` com DuckDB (seção abaixo) é mais rápido.
+
+## SQL sobre tabelas Tilt: `sql`
+
+SQL é cidadão de primeira classe: `sql` roda uma consulta sobre tabelas que já estão
+na memória do programa, sem servidor e sem `fonte`. O resultado é uma `tabela` normal
+(`.filtrar`, `escrever_parquet`, outro `sql`...).
+
+```tilt run
+pipeline sql_local:
+  passos:
+    - vendas = [
+        { regiao: "sul", valor: 30 },
+        { regiao: "norte", valor: 120 },
+        { regiao: "sul", valor: 5 }
+      ]
+    - clientes = [{ regiao: "sul", nome: "ana" }, { regiao: "norte", nome: "bia" }]
+    # variaveis-tabela citadas no SQL entram sozinhas
+    - resumo = sql "select regiao, sum(valor) as total from vendas group by regiao order by regiao"
+    - imprimir resumo[0].regiao, resumo[0].total
+    # join, parametros com ? e nome explicito
+    - j = sql "select c.nome, sum(v.valor) as total from vendas v join clientes c on c.regiao = v.regiao group by c.nome order by c.nome"
+    - imprimir j[0].nome, j[0].total
+    - altos = sql "select * from vendas where valor >= ?", [30]
+    - imprimir tamanho(altos)
+    - n = sql "select count(*) as n from t", t: vendas
+    - imprimir n[0].n
+    # metodo: a propria tabela e `t`
+    - m = vendas.sql "select max(valor) as maior from t"
+    - imprimir m[0].maior
+```
+
+- **Tabelas**: variáveis-tabela citadas no SQL entram sozinhas; `nome: valor` registra
+  explicitamente; `tabela.sql "... from t"` usa a própria tabela como `t`.
+- **Parâmetros**: `sql "... where x >= ?", [30]` (o `?` é ligado por tipo, sem interpolar texto).
+- **Colunas**: as chaves das linhas; o tipo (`INTEGER`, `REAL`, `TEXT`) vem dos valores.
+  `logico` vira 0/1; lista/mapa viram texto JSON. Uma tabela vazia não tem colunas e dá erro.
+- **Motor** (`motor: "sqlite" | "duckdb" | "auto"`, padrão `auto`): SQLite em memória
+  para tabelas (sempre disponível com `libsqlite3`). Se a consulta lê arquivos
+  (`from 'vendas.csv'`, `'x.parquet'`, `read_csv(...)`) o `auto` usa o **DuckDB**
+  (`libduckdb.so` no `LD_LIBRARY_PATH`), que lê CSV/Parquet direto e é muito mais
+  rápido em agregações grandes (1 M de linhas em ~0,2 s contra ~1,1 s do
+  `ler_csv` + `agrupar_por`). Os dialetos diferem em detalhes (ex.: `7/2` é `3` no
+  SQLite e `3.5` no DuckDB); fixe o `motor:` quando isso importar.
+- Para bancos de verdade (Postgres, MySQL, SQLite em arquivo) use `fonte`, `consultar_sql`
+  e `executar_sql` (seção abaixo).
 
 ## Bancos relacionais (SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse)
 

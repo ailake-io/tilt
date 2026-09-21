@@ -141,11 +141,21 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
   }
   tilt_close_file(fd_headers);
 
-  std::string cmd = "curl -sS -X POST -H 'content-type: application/json'";
-  for (const std::string& h : headers) cmd += " -H " + tilt_shell_quote(h);
+  // Chave de API e URL num arquivo -K 0600, nunca no argv (visivel em ps//proc).
+  std::vector<std::string> todos_headers = {"content-type: application/json"};
+  todos_headers.insert(todos_headers.end(), headers.begin(), headers.end());
+  std::string config_file;
+  if (!tilt_curl_config(url, todos_headers, config_file)) {
+    std::remove(body_file.c_str());
+    std::remove(header_file.c_str());
+    throw std::runtime_error(
+        "nao foi possivel montar a configuracao do curl (URL ou header invalido)");
+  }
+
+  std::string cmd = "curl -sS -X POST";
   if (timeout_s > 0) cmd += " --max-time " + std::to_string(timeout_s);
-  cmd += " -D " + tilt_shell_quote(header_file) + " --data @" + tilt_shell_quote(body_file) +
-         " -w " + tilt_shell_quote("\n%{http_code}") + " " + tilt_shell_quote(url);
+  cmd += " -K " + tilt_shell_quote(config_file) + " -D " + tilt_shell_quote(header_file) +
+         " --data @" + tilt_shell_quote(body_file) + " -w " + tilt_shell_quote("\n%{http_code}");
 
   std::string resp;
   try {
@@ -153,9 +163,11 @@ HttpResult http_post_status(const std::string& url, const std::vector<std::strin
   } catch (const std::exception& e) {
     std::remove(body_file.c_str());
     std::remove(header_file.c_str());
+    std::remove(config_file.c_str());
     throw std::runtime_error(std::string("falha de transporte: ") + e.what());
   }
   std::remove(body_file.c_str());
+  std::remove(config_file.c_str());
   std::ifstream header_in(header_file);
   std::ostringstream header_text;
   header_text << header_in.rdbuf();
@@ -508,6 +520,266 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
   throw std::runtime_error(ultimo_erro);
 }
 
+// --- ferramentas nativas ---------------------------------------------------
+
+Value mensagens_anthropic(const std::vector<MensagemLLM>& mensagens) {
+  Value out = Value::lista();
+  Value* resultados = nullptr;  // user com tool_result consecutivos (mesmo turno)
+  for (const MensagemLLM& m : mensagens) {
+    if (m.papel == "tool") {
+      if (!resultados) {
+        Value turno = Value::mapa();
+        turno.map->set("role", Value::texto("user"));
+        turno.map->set("content", Value::lista());
+        out.list->push_back(std::move(turno));
+        resultados = out.list->back().map->find("content");
+      }
+      Value bloco = Value::mapa();
+      bloco.map->set("type", Value::texto("tool_result"));
+      bloco.map->set("tool_use_id", Value::texto(m.chamada_id));
+      bloco.map->set("content", Value::texto(m.texto));
+      resultados->list->push_back(std::move(bloco));
+      continue;
+    }
+    resultados = nullptr;
+    Value turno = Value::mapa();
+    turno.map->set("role", Value::texto(m.papel));
+    if (m.papel == "assistant" && !m.chamadas.empty()) {
+      Value blocos = Value::lista();
+      if (!m.texto.empty()) {
+        Value t = Value::mapa();
+        t.map->set("type", Value::texto("text"));
+        t.map->set("text", Value::texto(m.texto));
+        blocos.list->push_back(std::move(t));
+      }
+      for (const ChamadaFerramenta& c : m.chamadas) {
+        Value u = Value::mapa();
+        u.map->set("type", Value::texto("tool_use"));
+        u.map->set("id", Value::texto(c.id));
+        u.map->set("name", Value::texto(c.nome));
+        u.map->set("input", c.argumentos.kind == ValueKind::Mapa ? c.argumentos : Value::mapa());
+        blocos.list->push_back(std::move(u));
+      }
+      turno.map->set("content", std::move(blocos));
+    } else {
+      turno.map->set("content", Value::texto(m.texto));
+    }
+    out.list->push_back(std::move(turno));
+  }
+  return out;
+}
+
+Value mensagens_openai(const std::string& system, const std::vector<MensagemLLM>& mensagens) {
+  Value out = Value::lista();
+  if (!system.empty()) {
+    Value s = Value::mapa();
+    s.map->set("role", Value::texto("system"));
+    s.map->set("content", Value::texto(system));
+    out.list->push_back(std::move(s));
+  }
+  for (const MensagemLLM& m : mensagens) {
+    Value turno = Value::mapa();
+    if (m.papel == "tool") {
+      turno.map->set("role", Value::texto("tool"));
+      turno.map->set("tool_call_id", Value::texto(m.chamada_id));
+      turno.map->set("content", Value::texto(m.texto));
+    } else {
+      turno.map->set("role", Value::texto(m.papel));
+      turno.map->set("content", m.texto.empty() && !m.chamadas.empty() ? Value::nulo()
+                                                                       : Value::texto(m.texto));
+      if (!m.chamadas.empty()) {
+        Value chamadas = Value::lista();
+        for (const ChamadaFerramenta& c : m.chamadas) {
+          Value fn = Value::mapa();
+          fn.map->set("name", Value::texto(c.nome));
+          fn.map->set("arguments", Value::texto(json_dump(c.argumentos)));
+          Value item = Value::mapa();
+          item.map->set("id", Value::texto(c.id));
+          item.map->set("type", Value::texto("function"));
+          item.map->set("function", std::move(fn));
+          chamadas.list->push_back(std::move(item));
+        }
+        turno.map->set("tool_calls", std::move(chamadas));
+      }
+    }
+    out.list->push_back(std::move(turno));
+  }
+  return out;
+}
+
+PedidoLLM monta_ferramentas(const LlmConfig& cfg, const std::string& system,
+                            const std::vector<MensagemLLM>& mensagens,
+                            const std::vector<FerramentaLLM>& ferramentas) {
+  PedidoLLM p;
+  Value body = Value::mapa();
+  body.map->set("model", Value::texto(cfg.model));
+  body.map->set("temperature", Value::decimal(cfg.temperature));
+  Value tools = Value::lista();
+  if (cfg.provider == "anthropic") {
+    p.url = cfg.base_url.empty() ? "https://api.anthropic.com/v1/messages"
+                                 : cfg.base_url + "/v1/messages";
+    p.headers = {"x-api-key: " + cfg.api_key, "anthropic-version: 2023-06-01"};
+    body.map->set("max_tokens", Value::inteiro(cfg.max_tokens));
+    if (!system.empty()) body.map->set("system", Value::texto(system));
+    for (const FerramentaLLM& f : ferramentas) {
+      Value t = Value::mapa();
+      t.map->set("name", Value::texto(f.nome));
+      t.map->set("description", Value::texto(f.descricao));
+      t.map->set("input_schema", f.schema);
+      tools.list->push_back(std::move(t));
+    }
+    body.map->set("tools", std::move(tools));
+    body.map->set("messages", mensagens_anthropic(mensagens));
+  } else {
+    p.url = cfg.base_url.empty() ? "https://api.openai.com/v1/chat/completions"
+                                 : cfg.base_url + "/chat/completions";
+    p.headers = {"Authorization: Bearer " + cfg.api_key};
+    for (const FerramentaLLM& f : ferramentas) {
+      Value fn = Value::mapa();
+      fn.map->set("name", Value::texto(f.nome));
+      fn.map->set("description", Value::texto(f.descricao));
+      fn.map->set("parameters", f.schema);
+      Value t = Value::mapa();
+      t.map->set("type", Value::texto("function"));
+      t.map->set("function", std::move(fn));
+      tools.list->push_back(std::move(t));
+    }
+    body.map->set("tools", std::move(tools));
+    body.map->set("messages", mensagens_openai(system, mensagens));
+  }
+  p.corpo = json_dump(body);
+  return p;
+}
+
+// Extrai texto, chamadas e tokens da resposta de cada provedor.
+RespostaFerramentas resposta_ferramentas(const LlmConfig& cfg, const Value& resp) {
+  RespostaFerramentas out;
+  out.modelo = cfg.model;
+  auto inteiro = [&](std::initializer_list<const char*> caminho) -> long long {
+    const Value* v = dig(resp, caminho);
+    return v && v->kind == ValueKind::Inteiro ? v->i : 0;
+  };
+  if (cfg.provider == "anthropic") {
+    out.tok_entrada = inteiro({"usage", "input_tokens"});
+    out.tok_saida = inteiro({"usage", "output_tokens"});
+    const Value* blocos = resp.map ? resp.map->find("content") : nullptr;
+    if (blocos && blocos->kind == ValueKind::Lista && blocos->list) {
+      for (const Value& b : *blocos->list) {
+        const Value* tipo = b.map ? b.map->find("type") : nullptr;
+        if (!tipo || tipo->kind != ValueKind::Texto) continue;
+        if (tipo->s == "text") {
+          if (const Value* t = b.map->find("text"); t && t->kind == ValueKind::Texto) {
+            out.texto += t->s;
+          }
+        } else if (tipo->s == "tool_use") {
+          ChamadaFerramenta c;
+          if (const Value* v = b.map->find("id"); v && v->kind == ValueKind::Texto) c.id = v->s;
+          if (const Value* v = b.map->find("name"); v && v->kind == ValueKind::Texto) c.nome = v->s;
+          const Value* in = b.map->find("input");
+          c.argumentos = in && in->kind == ValueKind::Mapa ? *in : Value::mapa();
+          out.chamadas.push_back(std::move(c));
+        }
+      }
+    }
+  } else {
+    out.tok_entrada = inteiro({"usage", "prompt_tokens"});
+    out.tok_saida = inteiro({"usage", "completion_tokens"});
+    if (const Value* c = dig(resp, {"choices", "0", "message", "content"});
+        c && c->kind == ValueKind::Texto) {
+      out.texto = c->s;
+    }
+    if (const Value* tc = dig(resp, {"choices", "0", "message", "tool_calls"});
+        tc && tc->kind == ValueKind::Lista && tc->list) {
+      for (const Value& item : *tc->list) {
+        ChamadaFerramenta c;
+        if (const Value* v = item.map ? item.map->find("id") : nullptr;
+            v && v->kind == ValueKind::Texto) {
+          c.id = v->s;
+        }
+        const Value* fn = item.map ? item.map->find("function") : nullptr;
+        if (!fn || fn->kind != ValueKind::Mapa || !fn->map) continue;
+        if (const Value* v = fn->map->find("name"); v && v->kind == ValueKind::Texto) c.nome = v->s;
+        c.argumentos = Value::mapa();
+        if (const Value* a = fn->map->find("arguments"); a && a->kind == ValueKind::Texto) {
+          try {
+            Value parsed = json_parse(a->s);
+            if (parsed.kind == ValueKind::Mapa) c.argumentos = std::move(parsed);
+          } catch (const std::exception&) {
+            // argumentos malformados: o interpretador completa com best-effort
+          }
+        }
+        out.chamadas.push_back(std::move(c));
+      }
+    }
+  }
+  return out;
+}
+
+RespostaFerramentas ferramentas_uma(const LlmConfig& cfg, const std::string& system,
+                                    const std::vector<MensagemLLM>& mensagens,
+                                    const std::vector<FerramentaLLM>& ferramentas) {
+  if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+    throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
+                             cfg.nome + "'");
+  }
+  if (llm_is_mock()) {
+    // Planner deterministico: uma chamada por ferramenta, na ordem declarada.
+    std::size_t resultados = 0;
+    for (const MensagemLLM& m : mensagens) resultados += m.papel == "tool" ? 1 : 0;
+    RespostaFerramentas out;
+    out.modelo = cfg.model;
+    if (resultados < ferramentas.size()) {
+      ChamadaFerramenta c;
+      c.id = "mock_call_" + std::to_string(resultados + 1);
+      c.nome = ferramentas[resultados].nome;
+      c.argumentos = Value::mapa();
+      out.chamadas.push_back(std::move(c));
+    } else {
+      out.texto = "[mock] resposta final apos " + std::to_string(resultados) + " ferramenta(s)";
+    }
+    std::string entrada = system;
+    for (const MensagemLLM& m : mensagens) entrada += m.texto;
+    out.tok_entrada = mock_tokens(entrada);
+    out.tok_saida = mock_tokens(out.texto);
+    soma_uso(cfg.nome, out.tok_entrada, out.tok_saida);
+    return out;
+  }
+  const PedidoLLM ped = monta_ferramentas(cfg, system, mensagens, ferramentas);
+  const int tents = cfg.tentativas < 1 ? 1 : cfg.tentativas;
+  std::string ultimo_erro;
+  for (int t = 1; t <= tents; ++t) {
+    HttpResult r;
+    try {
+      r = http_post_status(ped.url, ped.headers, ped.corpo, cfg.tempo_limite);
+    } catch (const std::exception& e) {
+      ultimo_erro = e.what();
+      if (t < tents) {
+        espera_retry(t, r.retry_after);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
+                               " tentativa(s) (ajuste tempo_limite:/tentativas: em '" + cfg.nome +
+                               "')");
+    }
+    if (r.status >= 200 && r.status < 300) {
+      RespostaFerramentas out = resposta_ferramentas(cfg, json_parse(r.body));
+      soma_uso(cfg.nome, out.tok_entrada, out.tok_saida);
+      return out;
+    }
+    if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
+      ultimo_erro = "HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 200);
+      if (t < tents) {
+        espera_retry(t, r.retry_after);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
+                               " tentativa(s) (ajuste tentativas:/reserva: em '" + cfg.nome + "')");
+    }
+    throw std::runtime_error("HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 300));
+  }
+  throw std::runtime_error(ultimo_erro);
+}
+
 RespostaLLM chat_fluxo_uma(const LlmConfig& cfg, const std::string& system,
                            const std::string& user) {
   const std::string cache_key = cfg.cache ? llm_cache_key(cfg, system, user) : std::string();
@@ -573,6 +845,23 @@ RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::str
   for (std::size_t k = 0; k < cadeia.size(); ++k) {
     try {
       return chat_uma(cadeia[k], system, user);
+    } catch (const std::exception& e) {
+      if (!erros.empty()) erros += "; ";
+      erros += "'" + cadeia[k].nome + "': " + e.what();
+    }
+  }
+  throw std::runtime_error(erros);
+}
+
+RespostaFerramentas llm_chat_ferramentas(const std::vector<LlmConfig>& cadeia,
+                                         const std::string& system,
+                                         const std::vector<MensagemLLM>& mensagens,
+                                         const std::vector<FerramentaLLM>& ferramentas) {
+  if (cadeia.empty()) throw std::runtime_error("cadeia de LLMs vazia");
+  std::string erros;
+  for (std::size_t k = 0; k < cadeia.size(); ++k) {
+    try {
+      return ferramentas_uma(cadeia[k], system, mensagens, ferramentas);
     } catch (const std::exception& e) {
       if (!erros.empty()) erros += "; ";
       erros += "'" + cadeia[k].nome + "': " + e.what();

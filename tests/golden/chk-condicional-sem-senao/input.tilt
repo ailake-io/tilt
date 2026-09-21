@@ -1,0 +1,3 @@
+pipeline t:
+  passos:
+    - x = 1 se verdadeiro

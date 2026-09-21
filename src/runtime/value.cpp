@@ -79,6 +79,13 @@ Value Value::tensor_de(Tensor t) {
   return x;
 }
 
+Value Value::funcao(std::shared_ptr<Closure> c) {
+  Value x;
+  x.kind = ValueKind::Funcao;
+  x.closure = std::move(c);
+  return x;
+}
+
 bool Value::truthy() const {
   switch (kind) {
     case ValueKind::Nulo:
@@ -98,6 +105,8 @@ bool Value::truthy() const {
       return map && !map->items.empty();
     case ValueKind::Tensor:
       return tensor && tensor->size() > 0;
+    case ValueKind::Funcao:
+      return closure != nullptr;
   }
   return false;
 }
@@ -129,6 +138,8 @@ const char* Value::type_name() const {
       return "tabela";
     case ValueKind::Tensor:
       return "tensor";
+    case ValueKind::Funcao:
+      return "funcao";
   }
   return "?";
 }
@@ -184,6 +195,8 @@ std::string to_display(const Value& v) {
     }
     case ValueKind::Tensor:
       return v.tensor ? "tensor[" + v.tensor->shape_str() + "]" : "tensor[]";
+    case ValueKind::Funcao:
+      return "<funcao>";
   }
   return "?";
 }
@@ -258,6 +271,8 @@ bool equals(const Value& a, const Value& b) {
       return a.b == b.b;
     case ValueKind::Texto:
       return a.s == b.s;
+    case ValueKind::Funcao:
+      return a.closure == b.closure;
     case ValueKind::Lista:
     case ValueKind::Tabela: {
       if (!a.list || !b.list || a.list->size() != b.list->size()) return false;

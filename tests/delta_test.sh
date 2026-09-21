@@ -235,5 +235,61 @@ printf '%s\n' "$out_dv"
 echo "$out_dv" | grep -qE "dv_total: +3" || { echo "DV: snapshot errado"; fail=1; }
 echo "$out_dv" | grep -qE "dv_cdf: +3" || { echo "DV: CDF errado"; fail=1; }
 
+# --- 7. particoes null: Hive path, log, append, pruning e checkpoint ----------
+cat > "$tmp/null_part.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - base = [{ id: 1, estado: "sp", valor: "base" }]
+    - escrever_delta base, "null_part", particionar_por: "estado"
+    - novos = [{ id: 2, estado: nulo, valor: "nulo" },
+               { id: 3, estado: "rj", valor: "rj" }]
+    - anexar_delta novos, "null_part"
+    - para cada i em [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
+        - extra = [{ id: i + 3, estado: "rj", valor: "extra" }]
+        - anexar_delta extra, "null_part"
+    - tudo = ler_delta "null_part"
+    - imprimir "null_total: ", tamanho tudo
+    - nulos = ler_delta "null_part", onde: { estado: nulo }
+    - imprimir "null_match: ", tamanho nulos
+    - sp = ler_delta "null_part", onde: { estado: "sp" }
+    - imprimir "sp_match: ", tamanho sp
+TILTEOF
+out_null=$(cd "$tmp" && "$BIN" executar null_part.tilt)
+printf '%s\n' "$out_null"
+echo "$out_null" | grep -qE "null_total: +13" || { echo "null Delta: total errado"; fail=1; }
+echo "$out_null" | grep -qE "null_match: +1" || { echo "null Delta: pruning null errado"; fail=1; }
+echo "$out_null" | grep -qE "sp_match: +1" || { echo "null Delta: pruning texto errado"; fail=1; }
+[ -f "$tmp/null_part/_delta_log/00000000000000000010.checkpoint.parquet" ] || {
+  echo "null Delta: checkpoint v10 nao materializado"; fail=1;
+}
+python3 - "$tmp/null_part" <<'PYEOF'
+import glob
+import json
+import os
+import sys
+import pyarrow.dataset as ds
+
+table = sys.argv[1]
+root = os.path.join(table, "_delta_log")
+found_null = False
+schema = None
+for path in sorted(glob.glob(os.path.join(root, "*.json"))):
+    for line in open(path):
+        action = json.loads(line)
+        if "metaData" in action:
+            schema = json.loads(action["metaData"]["schemaString"])
+        add = action.get("add")
+        if add and add.get("partitionValues", {}).get("estado", "missing") is None:
+            found_null = True
+            assert add["path"].startswith("estado=__HIVE_DEFAULT_PARTITION__/"), add
+assert found_null, "partitionValues do not contain JSON null"
+field = next(f for f in schema["fields"] if f["name"] == "estado")
+assert field["type"] == "string" and field["nullable"] is True, field
+data = ds.dataset(table, partitioning="hive").to_table()
+states = data.column("estado").to_pylist()
+assert len(states) == 13 and states.count(None) == 1, states
+print("pyarrow: Hive null partition and Delta schema validated")
+PYEOF
+
 [ "$fail" = 0 ] && echo "delta_test ok"
 exit "$fail"

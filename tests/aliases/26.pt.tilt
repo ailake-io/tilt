@@ -1,0 +1,26 @@
+# 'executar' devolve tensor: a rota extrai '.argmax' (serviço real sob
+# 'tilt servir'; aqui só checamos).
+modelo Mini:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 2
+    - softmax
+
+tipo PedidoVetor:
+  vetor: tensor[f32, 2]
+
+servico ApiPredicao:
+  porta: 8080
+  dispositivo: "cuda:0"
+  meio:                         # middleware
+    - registro_requisicoes
+    - limite_taxa: { por_minuto: 120 }
+
+  rota post "/v1/predizer":
+    entrada: PedidoVetor
+    passos:
+      - probs = modelo Mini.executar entrada.vetor
+      - responder:
+          status: 200
+          dados:
+            classe: probs.argmax

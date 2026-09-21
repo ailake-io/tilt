@@ -25,4 +25,6 @@ exec python3 "${0%/*}/docs_check.py" "$BIN" \
   "$DIR/docs/guia-12-limitacoes.md" \
   "$DIR/docs/guia-13-instalacao.md" \
   "$DIR/docs/guia-14-roteiro.md" \
-  "$DIR/docs/guia-15-troubleshooting.md"
+  "$DIR/docs/guia-15-troubleshooting.md" \
+  "$DIR/docs/guia-17-interoperabilidade.md" \
+  "$DIR/docs/guia-18-palavras-em-ingles.md"

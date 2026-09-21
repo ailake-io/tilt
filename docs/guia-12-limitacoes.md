@@ -85,7 +85,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
   gzip/deflate (zlib via `dlopen`), **snappy** (codec próprio) e **ZSTD**
   (libzstd via `dlopen`). Ainda fora do subconjunto: 4+ níveis de lista e
-  criptografia Parquet.
+  provedores de chaves além de AWS KMS e chave local. Modular Encryption
+  `AES_GCM_V1` cobre páginas/footer; a chave local usa `TILT_PARQUET_KEY`,
+  e AWS KMS usa `chave_kms` com permissões `GenerateDataKey`/`Decrypt`.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
@@ -94,9 +96,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `particionar_por: ["c1", "c2"]`, layout `<c1>=<v1>/<c2>=<valor>/part-NNNNN.parquet`,
   colunas reidratadas na leitura) e há **pruning** de partições em
   `ler_delta ... onde: {...}` (igualdade; predicados em coluna de partição pulam
-  arquivos inteiros pelo log, o resto filtra linhas). Ainda assim: valor nulo
-  em coluna de partição e valores com `/` não são suportados (erro claro, sem
-  `__HIVE_DEFAULT_PARTITION__` nem escaping) e checkpoint tilt-native a cada
+  arquivos inteiros pelo log, o resto filtra linhas). Partição nula é suportada
+  com `__HIVE_DEFAULT_PARTITION__` no caminho, `null` no log e leitura/poda
+  null-safe; valores com `/` seguem sem suporte (erro claro, sem escaping). Há checkpoint tilt-native a cada
   10 versões (`<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` em
   _delta_log, ignorados por leitores externos) mais leitura do checkpoint
   padrão (`_last_checkpoint` + `<v>.checkpoint*.parquet` no schema oficial,
@@ -159,7 +161,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
    Os manifest lists carregam `partitions` com `contains_null`, `lower_bound` e
    `upper_bound` por campo, além de `sequence_number`/`min_sequence_number`;
    snapshots e entradas de manifest também recebem sequence numbers reais da
-   spec v2 (validado com pyiceberg). Mas: valor nulo em coluna de partição,
+   spec v2 (validado com pyiceberg). Partições null são suportadas com marcador
+   Hive, valor null no manifest, summaries `contains_null` e pruning null-safe;
    valores com `/` e coluna repetida não são suportados (erro claro, sem
    escaping). A estrutura escrita (metadata, manifest list, manifest e
    parquet com field-ids) carrega no **pyiceberg**.
@@ -186,15 +189,18 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   Qualquer outro endpoint (indexação, `_delete_by_query`, `_cat`, settings)
   é via `es_executar`, que devolve o JSON parseado ou `texto` cru quando a
   resposta não é JSON. Auth só Basic (userinfo da URL ou env
-  `ELASTIC_USER`/`ELASTIC_PASSWORD`), sem API keys/SASL/SSO, e HTTP apenas —
-  esquema `https://` ainda não é configurável na URL (use o `es_executar`
-  com reverse proxy local ou a rede interna).
+  `ELASTIC_USER`/`ELASTIC_PASSWORD`), sem API keys/SASL/SSO. HTTPS com os
+  esquemas `elasticsearch+https://` e `opensearch+https://` (o `curl` valida o
+  certificado; para uma CA própria ou autoassinada use `CURL_CA_BUNDLE`; certificado
+  não confiável é recusado — coberto por `tests/es_https_test.sh`).
 - MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
   `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
-  básico completo — restam: `mongo_agregar` lê só o `firstBatch` do cursor
-  (sem `getMore`; use `$limit`/`$skip` para caber no primeiro batch) e não
-  valida as etapas (erro de pipeline vira erro claro do servidor), update só
-  com `$set`/`$inc` (sem `$unset` e demais operadores), projeção de
+  básico completo, validado contra um `mongod` 7 real (`tests/mongo_real_test.sh`):
+  `mongo_buscar` e `mongo_agregar` seguem o cursor com `getMore` até o fim
+  (o `cursor.id` é int64), `mongo_agregar` não valida as etapas (erro de
+  pipeline vira erro claro do servidor) e o update aceita `$set`, `$inc`,
+  `$unset`, `$push`, `$addToSet`, `$pull`, `$mul`, `$min`, `$max`, `$rename` e
+  `$currentDate` — restam: projeção de
   `mongo_buscar` só whitelist (`somente:`; sem exclusões tipo `{campo: 0}`),
   sem índices de texto/TTL, filtro de `mongo_buscar` só por igualdade exata
   top-level (combinado por E), `mongo_deletar` remove sempre todos que casam
@@ -256,11 +262,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   auth por userinfo da URL ou env `CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD`.
 - Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, timeout fixo de 5s.
   AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT
-  via path numérico (`redis://host:6379/2`) ou opção `banco:`. Sem
-  pub/sub, streams, scripts Lua nem conexões persistentes/reconnect —
-  `redis_executar` cobre comandos avulsos e `redis_lote` roda um pipeline
-  de até 10 mil comandos numa única conexão; `ler_redis`/`escrever_redis`/
-  `redis_executar` abrem uma conexão por chamada.
+  via path numérico (`redis://host:6379/2`) ou opção `banco:`. Validado contra
+  um Redis 7 real (`tests/redis_real_test.sh`): `redis_executar` roda qualquer
+  comando de resposta única — inclusive streams (`XADD`/`XLEN`/`XRANGE`), hashes,
+  listas e `PUBLISH` — e `redis_lote` um pipeline de até 10 mil comandos numa
+  única conexão. Sem `SUBSCRIBE`/pub-sub assinante, `XREAD BLOCK` longo, scripts
+  Lua interativos nem conexões persistentes/reconnect: `ler_redis`/
+  `escrever_redis`/`redis_executar` abrem uma conexão por chamada.
 - TLS (redis/mongo/kafka): camada mínima em `src/runtime/tls.*` — OpenSSL
   carregado em runtime via `dlopen` (`libssl.so.3`, fallback `libssl.so`, e
   libcrypto correspondente), zero dependência de link. Verificação de
@@ -273,12 +281,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   hora com a CLI `openssl`). Quando OpenSSL ou uma DLL/SO estiver ausente, o erro
   preserva os nomes tentados e o detalhe do carregador para orientar a instalação.
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
-  id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
-  `texto`, que fica no payload do ponto).
+  id tilt; `buscar` contra Qdrant devolve `id`, `texto` e `score` (ambos vêm do
+  payload do ponto; pontos de versões antigas, sem `tilt_id`, devolvem o UUID).
 - Weaviate: a classe é criada com `vectorizer: "none"` (o vetor vem pronto do
   `embeddings:`) e o nome deve ser de GraphQL (`[A-Z][_a-zA-Z0-9]*`); a busca
-  é GraphQL `nearVector` (cosseno, `score = 1 - distance`) e devolve `id` e
-  `score` (sem o `texto`, que fica na propriedade `texto` do objeto); no
+  é GraphQL `nearVector` (cosseno, `score = 1 - distance`) e devolve `id`,
+  `texto` (propriedade `texto` do objeto) e `score`; a gravação faz GET e depois
+  PUT (existe) ou POST (novo), pois o PUT de um id novo falha; no
   Weaviate real o `id` do objeto deve ser UUID; auth só por env
   `WEAVIATE_API_KEY` (Bearer), sem usuário/senha nem TLS dedicado (HTTP puro).
 - Pinecone: data plane apenas — o índice deve já existir na conta (criar
@@ -286,13 +295,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   é obrigatória (header `Api-Key`), com erro claro antes da rede quando
   ausente; o score já é similaridade de cosseno (maior = melhor, sem conversão
   como no Weaviate); `ensure` consulta `describe_index_stats` e valida o namespace antes de buscar; o upsert continua criando-o implicitamente;
-  `buscar` devolve `id` e `score`, sem o `texto` (que vai no `metadata.texto`).
+  `buscar` devolve `id`, `texto` (de `metadata.texto`) e `score`.
 - Chroma: HTTP puro, sem auth (Chroma open-source padrão; Chroma Cloud com
   auth/tls fica fora de escopo); a coleção é get-or-create (`POST
   /api/v1/collections` com o nome) e o `id` devolvido endereça add/query;
   a query devolve `distances` (`distance = 1 - cosseno` com `hnsw:space
   cosine`), então o score tilt é `1 - distance`; `buscar` devolve `id` e
-  `score`, sem o `texto` (que fica em `metadatas[].texto`/`documents[]`).
+  `texto` (de `documents[]`) e `score`.
 - pgvector: exige a extensão `vector` instalada no banco (o Tilt tenta
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
@@ -312,9 +321,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   Kafka, Mongo etc. sem `grupo:` nao têm checkpoint local; sem `grupo:` na fonte Kafka ela é relida do início por
   inteiro a cada tick, o que não escala para tópicos grandes (com `grupo:` o
   checkpoint é o offset commitado no broker).
-- `--agendar` entra em loop real de agenda, mas o parser cron é numérico
-  (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
-  E (não pelo OU do cron clássico). Janelas sobre arquivos persistem offset,
+- `--agendar` entra em loop real de agenda. O cron aceita 5 campos com números
+  ou nomes (`jan`..`dec`, `sun`..`sat`, sem diferenciar maiúsculas), listas,
+  faixas e passos, os atalhos `@hourly`, `@daily`/`@midnight`, `@weekly`,
+  `@monthly` e `@yearly`/`@annually`, e a semântica clássica: com dia-do-mês **e**
+  dia-da-semana restritos vale um **ou** o outro (coberto por
+  `tests/cron_nomes_test.sh`). Fuso: sempre o local da máquina. Janelas sobre arquivos persistem offset,
   buffer pendente e `last_run` entre disparos; conectores sem checkpoint de
   grupo continuam sujeitos às limitações descritas nas seções próprias.
 
@@ -365,6 +377,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 ## LLM / RAG
 
 - Sem `TILT_LLM`, a chamada real depende do `curl` no `PATH`.
+- Segredos (chave de API do LLM, headers de qualquer `http_*`/S3/Elasticsearch/
+  Pinecone, userinfo da URL) vão para o `curl` por um arquivo de configuração
+  `-K` temporário (0600, removido ao fim da chamada), nunca pelo argv — que
+  outros usuários da máquina leem em `ps`/`/proc`. O `curl` ainda é iniciado
+  por shell (`popen`); só caminhos de arquivos temporários passam pela linha
+  de comando. Coberto por `tests/curl_secrets_test.sh`.
 - Robustez do cliente (guia 05): `tempo_limite:` (segundos por tentativa,
   default 60, via `--max-time`), `tentativas:` (default 3, retry com backoff
   1s/2s/4s… teto 15s em erro de transporte, 429 e 5xx; 4xx falha rápido),
@@ -377,14 +395,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
   `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
-  `buscar` devolve `{ id, score }`, sem o texto), `"weaviate://host:porta/classe"`
-  (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, score }`, sem
-  o texto; auth por env `WEAVIATE_API_KEY`),
+  `buscar` devolve `{ id, texto, score }`), `"weaviate://host:porta/classe"`
+  (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, texto, score }`; auth por env `WEAVIATE_API_KEY`),
   `"pinecone://host-do-indice/namespace"` (REST via `curl`, sempre HTTPS,
-  `POST /query`; `buscar` devolve `{ id, score }`, sem o texto; exige env
+  `POST /query`; `buscar` devolve `{ id, texto, score }`; exige env
   `PINECONE_API_KEY` e índice já criado na conta) e
   `"chroma://host[:porta]/colecao"` (REST via `curl`, HTTP puro, sem auth;
-  coleção get-or-create; `buscar` devolve `{ id, score }`, sem o texto; o
+  coleção get-or-create; `buscar` devolve `{ id, texto, score }`; o
   score é `1 - distance` da query do Chroma).
 - Os embeddings do modo `mock` mantêm 16 dimensões e combinam tokens hasheados com trigrams
   com padding de borda e normalização L2; continuam sendo apenas um mock determinístico, não relevância real.
@@ -446,6 +463,21 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   é ELF-only. O JIT (`tilt executar --jit`) emite x86-64 diretamente em memória para o subconjunto inteiro (constantes, locais, aritmética, comparações, condicionais, laços e `imprimir`); decimal, texto, listas, membros e chamadas caem automaticamente para a VM. Arquiteturas sem backend JIT usam o mesmo fallback.
 
 ## Stdlib
+
+**Funções embutidas** (`src/runtime/stdlib.cpp`, sem `importar`): matemática
+(`raiz`, `abs`, `exp`, `logaritmo`, `potencia`, `piso`, `teto`, `arredondar`,
+`seno`, `cosseno`, `tangente`, `pi`), conversões (`inteiro`, `decimal`, `texto`,
+`logico`, `tipo_de`), texto (`maiusculas`, `minusculas`, `aparar`, `substituir`,
+`comeca_com`, `termina_com`, `juntar`, `regex_casa`, `regex_extrair`,
+`regex_substituir` — ECMAScript), listas e mapas (`ordenar`, `unicos`, `reverso`,
+`zip`, `enumerar`, `chaves`, `valores`), tempo em UTC (`agora`, `timestamp`,
+`formatar_data`, `dormir`), arquivos de texto (`ler_texto`, `escrever_texto`,
+`anexar_texto`, `listar_arquivos`, `remover_arquivo`) e `sha256`,
+`base64_codificar`/`base64_decodificar`, `json_texto`/`json_ler`. Função do
+usuário com o mesmo nome tem prioridade. Limites: `maiusculas`/`minusculas`
+só ASCII; datas só UTC (sem fuso); `ordenar` compara só números com números ou
+textos com textos.
+
 
 A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
 "Importar" no guia 01) cobre em 1ª passada:

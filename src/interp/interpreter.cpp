@@ -1,5 +1,9 @@
 #include "interp/interpreter.hpp"
 
+#if !defined(_WIN32)
+#include <unistd.h>  // isatty (aprovacao de ferramentas)
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -8,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <exception>
 #include <filesystem>
@@ -19,6 +24,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <ostream>
 #include <random>
 #include <regex>
@@ -29,6 +35,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "lexer/aliases_en.hpp"
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
 #include "runtime/avro.hpp"
@@ -57,12 +64,16 @@
 #include "runtime/pgvector.hpp"
 #include "runtime/pinecone.hpp"
 #include "runtime/postgres.hpp"
+#include "runtime/python_interop.hpp"
 #include "runtime/qdrant.hpp"
 #include "runtime/redis.hpp"
 #include "runtime/s3.hpp"
 #include "runtime/safetensors.hpp"
 #include "runtime/sorteio.hpp"
+#include "runtime/sql_tabelas.hpp"
 #include "runtime/sqlite.hpp"
+#include "runtime/stdlib.hpp"
+#include "runtime/tabela_ops.hpp"
 #include "runtime/vectorstore.hpp"
 #include "runtime/weaviate.hpp"
 #include "semantic/checker.hpp"
@@ -91,6 +102,13 @@ using rt::ValueKind;
 namespace {
 
 constexpr std::int64_t kLoopGuard = 5'000'000;
+
+// Funcao com parametro de valor padrao: fora do subconjunto da VM (que exige o
+// numero exato de argumentos); chamadas a ela tambem nao compilam para a VM.
+bool funcao_tem_padrao(const Item& fn) {
+  return std::any_of(fn.params.begin(), fn.params.end(),
+                     [](const ast::Arg& p) { return p.default_value != nullptr; });
+}
 
 bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
   for (std::string_view s : set) {
@@ -141,6 +159,11 @@ const Item* find_field(const ast::Block& block, std::string_view key) {
 
 Value parse_scalar(const std::string& cell) {
   if (!cell.empty()) {
+    // Texto obvio (letra que nao inicia nan/inf) nao vira numero: evita 2 strtol/strtod.
+    const unsigned char c0 = static_cast<unsigned char>(cell[0]);
+    if (std::isalpha(c0) != 0 && c0 != 'i' && c0 != 'I' && c0 != 'n' && c0 != 'N') {
+      return Value::texto(cell);
+    }
     char* end = nullptr;
     long long asi = std::strtoll(cell.c_str(), &end, 10);
     if (end && *end == '\0') return Value::inteiro(asi);
@@ -399,7 +422,12 @@ void Interpreter::fail(Span span, std::string message, DiagCode code) {
 }
 
 void Interpreter::register_decls() {
-  for (const auto& item : program_.items) {
+  register_decls_de(program_);
+  tiltc_load();
+}
+
+void Interpreter::register_decls_de(const ast::Program& programa) {
+  for (const auto& item : programa.items) {
     if (!item || item->kind != ItemKind::Decl) continue;
     const std::string& kw = item->key;
     const std::string name = decl_name(*item);
@@ -408,33 +436,33 @@ void Interpreter::register_decls() {
     } else if (kw == "funcao") {
       if (!name.empty()) functions_[name] = item.get();
     } else if (kw == "importar") {
-      for (const auto& h : item->header) {
-        if (h && h->kind == ExprKind::Name && h->text != "importar") {
-          load_module(h->text, entry_dir_.empty() ? "." : entry_dir_, item->span);
-        }
+      // `importar a, b como c`: cada modulo fica visivel pelo apelido, se houver.
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
+        auto mod = load_module(imp.nome, entry_dir_.empty() ? "." : entry_dir_, item->span);
+        if (imp.alias != imp.nome) modules_[imp.alias] = mod;
       }
     } else if (kw == "de") {
-      // `de <modulo> importar <nome>...`: primeiro nome e o modulo, os
-      // demais (exceto a palavra 'importar') entram no escopo principal.
+      // `de <modulo> importar <nome> [como apelido]...`: primeiro nome e o
+      // modulo, os demais entram no escopo principal (pelo apelido, se houver).
       std::string module_name;
-      std::vector<std::string> imported;
-      for (const auto& h : item->header) {
-        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+      std::vector<ast::ImportName> imported;
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
         if (module_name.empty()) {
-          module_name = h->text;
+          module_name = imp.nome;
         } else {
-          imported.push_back(h->text);
+          imported.push_back(imp);
         }
       }
       if (module_name.empty()) continue;
       const std::string from = entry_dir_.empty() ? "." : entry_dir_;
       std::shared_ptr<Module> mod = load_module(module_name, from, item->span);
-      for (const std::string& n : imported) {
+      for (const ast::ImportName& imp : imported) {
+        const std::string& n = imp.nome;
         if (auto f = mod->funcs.find(n); f != mod->funcs.end()) {
-          functions_[n] = f->second;
+          functions_[imp.alias] = f->second;
           func_module_[f->second] = mod;
         } else if (auto v = mod->scope.vars.find(n); v != mod->scope.vars.end()) {
-          root_.vars[n] = v->second;
+          root_.vars[imp.alias] = v->second;
         } else {
           std::string exports;
           for (const auto& kv : mod->funcs) exports += (exports.empty() ? "" : ", ") + kv.first;
@@ -452,7 +480,143 @@ void Interpreter::register_decls() {
       entities_[name] = item.get();
     }
   }
-  tiltc_load();
+}
+
+void Interpreter::repl_registrar(const ast::Program& programa) {
+  try {
+    register_decls_de(programa);
+  } catch (const RuntimeAbort& a) {
+    throw std::runtime_error("linha " + std::to_string(a.span.line) + ": " + a.message);
+  }
+}
+
+bool Interpreter::repl_executar(const ast::Block& passos, bool eco, std::string& erro) {
+  if (!repl_env_.parent) repl_env_.parent = &root_;
+  try {
+    for (const auto& item : passos.items) {
+      if (!item) continue;
+      const Item* conteudo = item.get();
+      while (conteudo && conteudo->kind == ItemKind::ListEntry) {
+        conteudo = conteudo->child ? conteudo->child.get()
+                                   : (conteudo->block && !conteudo->block->items.empty()
+                                          ? conteudo->block->items[0].get()
+                                          : nullptr);
+      }
+      if (eco && conteudo && conteudo->kind == ItemKind::Stmt && conteudo->stmt &&
+          conteudo->stmt->kind == StmtKind::Expr && conteudo->stmt->a) {
+        const Value v = eval(*conteudo->stmt->a, repl_env_);
+        if (v.kind != ValueKind::Nulo) out_ << to_display(v) << "\n";
+        continue;
+      }
+      exec_item(*item, repl_env_);
+    }
+    return true;
+  } catch (const RuntimeAbort& a) {
+    erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+  } catch (const ReturnSignal&) {
+    return true;
+  } catch (const BreakSignal&) {
+    erro = "'parar' fora de um laco";
+  } catch (const ContinueSignal&) {
+    erro = "'continuar' fora de um laco";
+  }
+  return false;
+}
+
+// -------------------------------------------------------------------- rpc
+
+bool Interpreter::preparar_chamadas(std::string& erro) {
+  try {
+    register_decls();
+    return true;
+  } catch (const RuntimeAbort& a) {
+    erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+  }
+  return false;
+}
+
+std::vector<Interpreter::FuncaoPublica> Interpreter::funcoes_publicas() const {
+  std::vector<FuncaoPublica> lista;
+  for (const auto& [nome, fn] : functions_) {
+    if (nome.empty() || nome[0] == '_') continue;
+    FuncaoPublica f;
+    f.nome = nome;
+    for (const ast::Arg& p : fn->params) f.params.push_back(p.name);
+    lista.push_back(std::move(f));
+  }
+  std::sort(lista.begin(), lista.end(),
+            [](const FuncaoPublica& a, const FuncaoPublica& b) { return a.nome < b.nome; });
+  return lista;
+}
+
+std::vector<std::string> Interpreter::pipelines_publicos() const {
+  std::vector<std::string> nomes;
+  for (const Item* p : pipelines_) nomes.push_back(decl_name(*p));
+  std::sort(nomes.begin(), nomes.end());
+  return nomes;
+}
+
+bool Interpreter::chamar_por_nome(const std::string& nome, std::vector<Value> args,
+                                  const std::vector<std::pair<std::string, Value>>& nomeados,
+                                  Value& resultado, std::string& erro) {
+  const auto it = functions_.find(nome);
+  if (it == functions_.end() || nome.empty() || nome[0] == '_') {
+    erro = "funcao '" + nome + "' nao existe";
+    return false;
+  }
+  const Item& fn = *it->second;
+  if (args.size() > fn.params.size()) {
+    erro = "'" + nome + "' aceita " + std::to_string(fn.params.size()) + " argumento(s), recebeu " +
+           std::to_string(args.size());
+    return false;
+  }
+  // Nomeados entram na posicao do parametro; buracos ate ele ficam nulos e os
+  // parametros depois do ultimo nomeado mantem o valor padrao.
+  for (const auto& [chave, valor] : nomeados) {
+    std::size_t pos = fn.params.size();
+    for (std::size_t k = 0; k < fn.params.size(); ++k) {
+      if (fn.params[k].name == chave) pos = k;
+    }
+    if (pos == fn.params.size()) {
+      erro = "'" + nome + "' nao tem o parametro '" + chave + "'";
+      return false;
+    }
+    if (args.size() <= pos) args.resize(pos + 1, Value::nulo());
+    args[pos] = valor;
+  }
+  try {
+    resultado = call_function(fn, std::move(args), fn.span);
+    return true;
+  } catch (const RuntimeAbort& a) {
+    erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+  } catch (const ReturnSignal& r) {
+    resultado = r.value;
+    return true;
+  } catch (const BreakSignal&) {
+    erro = "'parar' fora de um laco";
+  } catch (const ContinueSignal&) {
+    erro = "'continuar' fora de um laco";
+  } catch (const std::exception& e) {
+    erro = e.what();
+  }
+  return false;
+}
+
+bool Interpreter::rodar_pipeline_por_nome(const std::string& nome, std::string& erro) {
+  for (const Item* p : pipelines_) {
+    if (decl_name(*p) != nome) continue;
+    try {
+      run_pipeline(*p);
+      return true;
+    } catch (const RuntimeAbort& a) {
+      erro = "linha " + std::to_string(a.span.line) + ": " + a.message;
+    } catch (const std::exception& e) {
+      erro = e.what();
+    }
+    return false;
+  }
+  erro = "pipeline '" + nome + "' nao existe";
+  return false;
 }
 
 // ------------------------------------------------------------------ tiltc
@@ -574,29 +738,28 @@ std::shared_ptr<Interpreter::Module> Interpreter::load_module(const std::string&
         mod->scope.vars[iname] = item->value ? eval(*item->value, mod->scope) : Value::nulo();
       }
     } else if (item->key == "importar") {
-      for (const auto& h : item->header) {
-        if (h && h->kind == ExprKind::Name && h->text != "importar") {
-          load_module(h->text, mod_dir, item->span);
-        }
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
+        auto dep = load_module(imp.nome, mod_dir, item->span);
+        if (imp.alias != imp.nome) modules_[imp.alias] = dep;
       }
     } else if (item->key == "de") {
       std::string module_name;
-      std::vector<std::string> imported;
-      for (const auto& h : item->header) {
-        if (!h || h->kind != ExprKind::Name || h->text == "importar") continue;
+      std::vector<ast::ImportName> imported;
+      for (const ast::ImportName& imp : ast::nomes_importados(*item)) {
         if (module_name.empty()) {
-          module_name = h->text;
+          module_name = imp.nome;
         } else {
-          imported.push_back(h->text);
+          imported.push_back(imp);
         }
       }
       if (module_name.empty()) continue;
       std::shared_ptr<Module> dep = load_module(module_name, mod_dir, item->span);
-      for (const std::string& n : imported) {
+      for (const ast::ImportName& imp : imported) {
+        const std::string& n = imp.nome;
         if (auto f = dep->funcs.find(n); f != dep->funcs.end()) {
-          mod->funcs[n] = f->second;  // chamavel sem prefixo dentro do modulo
+          mod->funcs[imp.alias] = f->second;  // chamavel sem prefixo dentro do modulo
         } else if (auto v = dep->scope.vars.find(n); v != dep->scope.vars.end()) {
-          mod->scope.vars[n] = v->second;
+          mod->scope.vars[imp.alias] = v->second;
         } else {
           fail(item->span, "modulo '" + module_name + "' nao exporta '" + n + "'");
         }
@@ -786,7 +949,35 @@ struct CronField {
   }
 };
 
-bool parse_cron_field(const std::string& s, int lo, int hi, bool is_dow, CronField& out) {
+// Valor de um item de cron: numero ou nome (jan..dec nos meses; sun..sat nos
+// dias da semana, sem diferenciar maiusculas). -1 = invalido.
+int cron_valor(const std::string& tok, bool is_mon, bool is_dow) {
+  if (tok.empty()) return -1;
+  if (std::isdigit(static_cast<unsigned char>(tok[0]))) {
+    for (char c : tok) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) return -1;
+    }
+    return std::atoi(tok.c_str());
+  }
+  std::string nome = tok;
+  for (char& c : nome) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (is_mon) {
+    static const char* const kMeses[] = {"jan", "feb", "mar", "apr", "may", "jun",
+                                         "jul", "aug", "sep", "oct", "nov", "dec"};
+    for (int i = 0; i < 12; ++i) {
+      if (nome == kMeses[i]) return i + 1;
+    }
+  } else if (is_dow) {
+    static const char* const kDias[] = {"sun", "mon", "tue", "wed", "thu", "fri", "sat"};
+    for (int i = 0; i < 7; ++i) {
+      if (nome == kDias[i]) return i;
+    }
+  }
+  return -1;
+}
+
+bool parse_cron_field(const std::string& s, int lo, int hi, bool is_dow, CronField& out,
+                      bool is_mon = false) {
   out = CronField{};
   out.is_dow = is_dow;
   if (s == "*") {
@@ -810,10 +1001,10 @@ bool parse_cron_field(const std::string& s, int lo, int hi, bool is_dow, CronFie
       a = lo;
       b = hi;
     } else if (const std::size_t dash = range.find('-'); dash != std::string::npos) {
-      a = std::atoi(range.substr(0, dash).c_str());
-      b = std::atoi(range.substr(dash + 1).c_str());
+      a = cron_valor(range.substr(0, dash), is_mon, is_dow);
+      b = cron_valor(range.substr(dash + 1), is_mon, is_dow);
     } else {
-      a = b = std::atoi(range.c_str());
+      a = b = cron_valor(range, is_mon, is_dow);
     }
     if (step < 1 || a < lo || a > b || b > hi) return false;
     out.ranges.push_back({a, b, step});
@@ -828,8 +1019,27 @@ struct CronSpec {
   bool valid = false;
 };
 
-CronSpec parse_cron(const std::string& expr) {
+CronSpec parse_cron(std::string expr) {
   CronSpec c;
+  // Atalhos: @hourly @daily/@midnight @weekly @monthly @yearly/@annually.
+  {
+    std::string macro = expr;
+    while (!macro.empty() && std::isspace(static_cast<unsigned char>(macro.back())))
+      macro.pop_back();
+    while (!macro.empty() && std::isspace(static_cast<unsigned char>(macro.front())))
+      macro.erase(0, 1);
+    for (char& ch : macro) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    if (macro == "@hourly")
+      expr = "0 * * * *";
+    else if (macro == "@daily" || macro == "@midnight")
+      expr = "0 0 * * *";
+    else if (macro == "@weekly")
+      expr = "0 0 * * 0";
+    else if (macro == "@monthly")
+      expr = "0 0 1 * *";
+    else if (macro == "@yearly" || macro == "@annually")
+      expr = "0 0 1 1 *";
+  }
   std::vector<std::string> parts;
   std::size_t pos = 0;
   while (pos <= expr.size()) {
@@ -842,7 +1052,7 @@ CronSpec parse_cron(const std::string& expr) {
   c.valid = parts.size() == 5 && parse_cron_field(parts[0], 0, 59, false, c.min) &&
             parse_cron_field(parts[1], 0, 23, false, c.hour) &&
             parse_cron_field(parts[2], 1, 31, false, c.dom) &&
-            parse_cron_field(parts[3], 1, 12, false, c.mon) &&
+            parse_cron_field(parts[3], 1, 12, false, c.mon, true) &&
             parse_cron_field(parts[4], 0, 7, true, c.dow);
   return c;
 }
@@ -856,8 +1066,12 @@ std::time_t next_cron_fire(const CronSpec& c, std::time_t after) {
   for (int i = 0; i < 366 * 24 * 60; ++i, t += 60) {
     std::tm cur = rt::tilt_localtime(t);
     const int dow = cur.tm_wday;
-    if (c.min.matches(cur.tm_min) && c.hour.matches(cur.tm_hour) &&
-        c.dom.matches(cur.tm_mday) && c.mon.matches(cur.tm_mon + 1) && c.dow.matches(dow)) {
+    // Cron classico: com dia-do-mes E dia-da-semana restritos, vale um OU o outro.
+    const bool dia_ok = (!c.dom.any && !c.dow.any)
+                            ? (c.dom.matches(cur.tm_mday) || c.dow.matches(dow))
+                            : (c.dom.matches(cur.tm_mday) && c.dow.matches(dow));
+    if (c.min.matches(cur.tm_min) && c.hour.matches(cur.tm_hour) && dia_ok &&
+        c.mon.matches(cur.tm_mon + 1)) {
       return t;
     }
   }
@@ -941,6 +1155,54 @@ int Interpreter::run() {
   }
 }
 
+std::vector<Interpreter::ResultadoTeste> Interpreter::run_testes(
+    const std::string& filtro, const std::function<void(const ResultadoTeste&)>& apos_cada) {
+  std::vector<ResultadoTeste> resultados;
+  try {
+    register_decls();
+  } catch (const RuntimeAbort& a) {
+    ResultadoTeste r;
+    r.nome = "(preparacao)";
+    r.ok = false;
+    r.mensagem = "linha " + std::to_string(a.span.line) + ": " + a.message;
+    if (apos_cada) apos_cada(r);
+    resultados.push_back(std::move(r));
+    return resultados;
+  }
+  for (const auto& item : program_.items) {
+    if (!item || item->kind != ItemKind::Decl || item->key != "teste") continue;
+    ResultadoTeste r;
+    r.nome = decl_name(*item);
+    if (r.nome.empty()) r.nome = "(sem nome)";
+    if (!filtro.empty() && r.nome.find(filtro) == std::string::npos) continue;
+    const Item* passos = item->block ? find_field(*item->block, "passos") : nullptr;
+    if (!passos || !passos->block) {
+      r.ok = false;
+      r.mensagem = "linha " + std::to_string(item->span.line) +
+                   ": o teste precisa de um bloco 'passos:' (ex.: passos: / - afirmar 1 == 1)";
+      if (apos_cada) apos_cada(r);
+      resultados.push_back(std::move(r));
+      continue;
+    }
+    try {
+      Env env;
+      env.parent = &root_;
+      env.vars["teste"] = Value::texto(r.nome);
+      exec_block(*passos->block, env);
+    } catch (const RuntimeAbort& a) {
+      r.ok = false;
+      r.mensagem = "linha " + std::to_string(a.span.line) + ": " + a.message;
+    } catch (const ReturnSignal&) {
+      // `retornar` encerra o teste sem falha
+    } catch (const BreakSignal&) {
+    } catch (const ContinueSignal&) {
+    }
+    if (apos_cada) apos_cada(r);
+    resultados.push_back(std::move(r));
+  }
+  return resultados;
+}
+
 Value Interpreter::vm_call_hook(const std::string& name, std::vector<Value>& args, bool* handled) {
   // `ler_csv "arq"` compilado pela VM: tabela do runtime, como no interpretador.
   if (name == "ler_csv") {
@@ -990,7 +1252,9 @@ int Interpreter::run_vm() {
 
     if (!pipelines_.empty()) {
       std::unordered_set<std::string> names;
-      for (const auto& kv : functions_) names.insert(kv.first);
+      for (const auto& kv : functions_) {
+        if (!funcao_tem_padrao(*kv.second)) names.insert(kv.first);
+      }
       for (const Item* p : pipelines_) {
         // Pipeline no subconjunto -> bytecode VM (.tiltc, senao compila);
         // fora dele -> arvore.
@@ -1036,9 +1300,12 @@ int Interpreter::run_vm() {
             std::cerr << "[jit fallback] pipeline " << decl_name(*p) << ": " << why << "\n";
           }
         }
-        vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
-          return vm_call_hook(name, a, handled);
-        });
+        vm::Vm machine(
+            out_,
+            [this](const std::string& name, std::vector<Value>& a, bool* handled) {
+              return vm_call_hook(name, a, handled);
+            },
+            [this](const std::string& nome) { return resolver_chunk(nome); });
         try {
           machine.run(*chunk, {});
         } catch (const std::exception& e) {
@@ -1797,26 +2064,212 @@ void Interpreter::janela_offset_save(WindowState& st, const std::string& pipelin
   st.persisted_offset = st.offset;
 }
 
-Value Interpreter::read_csv_file(const std::string& path, Span span) {
-  std::ifstream in(path);
-  if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
-  std::string line;
-  std::vector<std::string> headers;
-  rt::ValueList rows;
-  bool first = true;
-  while (std::getline(in, line)) {
-    if (line.empty()) continue;
-    auto cells = split_csv_line(line);
-    if (first) {
-      headers = cells;
-      first = false;
+namespace {
+
+// Divide a linha [pos, fim) de `buf` em celulas (aspas, `""` e `\r` como em
+// split_csv_line); `cells` e reaproveitado entre linhas. Devolve o numero de celulas.
+std::size_t csv_celulas(const char* buf, std::size_t pos, std::size_t fim, char sep,
+                        std::vector<std::string>& cells) {
+  std::size_t ncell = 0;
+  auto nova_celula = [&]() -> std::string* {
+    if (ncell == cells.size()) {
+      cells.emplace_back();
+    } else {
+      cells[ncell].clear();
+    }
+    return &cells[ncell++];
+  };
+  std::string* campo = nova_celula();
+  bool quoted = false;
+  for (std::size_t k = pos; k < fim; ++k) {
+    const char c = buf[k];
+    if (quoted) {
+      if (c == '"' && k + 1 < fim && buf[k + 1] == '"') {
+        campo->push_back('"');
+        ++k;
+      } else if (c == '"') {
+        quoted = false;
+      } else {
+        campo->push_back(c);
+      }
+    } else if (c == '"') {
+      quoted = true;
+    } else if (c == sep) {
+      campo = nova_celula();
+    } else if (c != '\r') {
+      campo->push_back(c);
+    }
+  }
+  return ncell;
+}
+
+// Linhas de dados [ini, fim) do buffer viram mapas (uma por linha nao vazia).
+void csv_linhas(const char* buf, std::size_t ini, std::size_t fim, char sep,
+                const std::vector<std::string>& headers, bool cabecalhos_unicos,
+                const std::vector<std::string>& nulos, rt::ValueList& rows) {
+  std::vector<std::string> cells;
+  std::vector<char> eh_nulo;
+  std::size_t pos = ini;
+  while (pos < fim) {
+    const void* nl = std::memchr(buf + pos, '\n', fim - pos);
+    const std::size_t fim_linha =
+        nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - buf) : fim;
+    if (fim_linha == pos) {  // linha vazia
+      pos = fim_linha + 1;
       continue;
     }
+    const std::size_t ncell = csv_celulas(buf, pos, fim_linha, sep, cells);
+    pos = fim_linha + 1;
+    // `nulos:` — marca fora da celula (uma celula com qualquer texto nunca vira nulo sozinha).
+    eh_nulo.assign(ncell, 0);
+    if (!nulos.empty()) {
+      for (std::size_t k = 0; k < ncell; ++k) {
+        eh_nulo[k] = std::find(nulos.begin(), nulos.end(), cells[k]) != nulos.end() ? 1 : 0;
+      }
+    }
     Value row = Value::mapa();
-    for (std::size_t k = 0; k < headers.size(); ++k) {
-      row.map->set(headers[k], k < cells.size() ? parse_scalar(cells[k]) : Value::nulo());
+    if (cabecalhos_unicos) {
+      row.map->items.reserve(headers.size());
+      for (std::size_t k = 0; k < headers.size(); ++k) {
+        row.map->items.emplace_back(
+            headers[k],
+            k < ncell ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k])) : Value::nulo());
+      }
+    } else {  // cabecalho repetido: o ultimo valor vence (ValueMap::set)
+      for (std::size_t k = 0; k < headers.size(); ++k) {
+        row.map->set(headers[k], k < ncell
+                                     ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k]))
+                                     : Value::nulo());
+      }
     }
     rows.push_back(std::move(row));
+  }
+}
+
+}  // namespace
+
+Value Interpreter::read_csv_file(const std::string& path, Span span, const CsvOpcoes* opcoes) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
+  // Arquivo inteiro num buffer e varredura sem alocar por linha/celula. Mesma regra de
+  // aspas/`""`/`\r` de split_csv_line. Arquivos grandes sao lidos em varias threads.
+  in.seekg(0, std::ios::end);
+  const std::streamoff tamanho = in.tellg();
+  in.seekg(0, std::ios::beg);
+  // Arquivo vazio, ou "arquivo" que nao e regular (diretorio: o ifstream abre e tellg
+  // devolve um valor absurdo): tabela vazia, como antes (io.existe_arquivo depende disso).
+  if (tamanho <= 0 || tamanho > (std::streamoff{1} << 44)) return Value::tabela({});
+  std::string buf(static_cast<std::size_t>(tamanho), '\0');
+  in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+  const std::size_t n = static_cast<std::size_t>(in.gcount());
+  const char* dados = buf.data();
+
+  const CsvOpcoes padrao;
+  const CsvOpcoes& op = opcoes ? *opcoes : padrao;
+  std::size_t pos = 0;
+  // `pular: n`: descarta as n primeiras linhas (titulos, comentarios).
+  for (std::size_t k = 0; k < op.pular && pos < n; ++k) {
+    const void* nl = std::memchr(dados + pos, '\n', n - pos);
+    pos = nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - dados) + 1 : n;
+  }
+  auto primeira_linha_util = [&](std::size_t& de, std::size_t& ate) {
+    while (de < n) {
+      const void* nl = std::memchr(dados + de, '\n', n - de);
+      ate = nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - dados) : n;
+      if (ate != de) return true;
+      de = ate + 1;
+    }
+    return false;
+  };
+  std::size_t fim_cab = 0;
+  if (!primeira_linha_util(pos, fim_cab)) return Value::tabela({});
+  char sep = op.separador;
+  if (op.detectar_separador) {  // o mais frequente fora de aspas na primeira linha
+    std::size_t contagem[4] = {0, 0, 0, 0};
+    const char candidatos[4] = {',', ';', '\t', '|'};
+    bool aspas = false;
+    for (std::size_t k = pos; k < fim_cab; ++k) {
+      if (dados[k] == '"') aspas = !aspas;
+      if (aspas) continue;
+      for (int c = 0; c < 4; ++c) contagem[c] += dados[k] == candidatos[c] ? 1 : 0;
+    }
+    int melhor = 0;
+    for (int c = 1; c < 4; ++c) {
+      if (contagem[c] > contagem[melhor]) melhor = c;
+    }
+    sep = candidatos[melhor];
+  }
+  std::vector<std::string> headers;
+  {
+    std::vector<std::string> cells;
+    const std::size_t ncell = csv_celulas(dados, pos, fim_cab, sep, cells);
+    if (op.cabecalho) {
+      headers.assign(cells.begin(), cells.begin() + static_cast<std::ptrdiff_t>(ncell));
+      pos = fim_cab + 1;
+    } else {  // sem cabecalho: a 1a linha ja e dado; colunas dadas ou coluna1..N
+      for (std::size_t k = 0; k < ncell; ++k) headers.push_back("coluna" + std::to_string(k + 1));
+    }
+    if (!op.colunas.empty()) {
+      for (std::size_t k = 0; k < op.colunas.size() && k < headers.size(); ++k) {
+        headers[k] = op.colunas[k];
+      }
+      for (std::size_t k = headers.size(); k < op.colunas.size(); ++k)
+        headers.push_back(op.colunas[k]);
+    }
+  }
+  bool cabecalhos_unicos = true;
+  for (std::size_t a = 0; a < headers.size() && cabecalhos_unicos; ++a) {
+    for (std::size_t b = a + 1; b < headers.size(); ++b) {
+      if (headers[a] == headers[b]) {
+        cabecalhos_unicos = false;
+        break;
+      }
+    }
+  }
+  if (pos >= n) return Value::tabela({});
+
+  // Faixas alinhadas a '\n': uma por thread (arquivo pequeno = uma faixa so).
+  constexpr std::size_t kBytesPorThread = std::size_t{2} << 20;  // 2 MB
+  const std::size_t util = n - pos;
+  std::size_t nthreads =
+      std::min<std::size_t>(std::max(1u, std::thread::hardware_concurrency()), 8);
+  nthreads = std::min(nthreads, std::max<std::size_t>(1, util / kBytesPorThread));
+  std::vector<std::size_t> corte = {pos};
+  for (std::size_t k = 1; k < nthreads; ++k) {
+    std::size_t alvo = pos + util * k / nthreads;
+    if (alvo <= corte.back()) continue;
+    const void* nl = std::memchr(dados + alvo, '\n', n - alvo);
+    if (nl == nullptr) break;
+    alvo = static_cast<std::size_t>(static_cast<const char*>(nl) - dados) + 1;
+    if (alvo > corte.back() && alvo < n) corte.push_back(alvo);
+  }
+  corte.push_back(n);
+  const std::size_t nfaixas = corte.size() - 1;
+
+  std::vector<rt::ValueList> partes(nfaixas);
+  if (nfaixas == 1) {
+    partes[0].reserve(static_cast<std::size_t>(std::count(dados + pos, dados + n, '\n')) + 1);
+    csv_linhas(dados, pos, n, sep, headers, cabecalhos_unicos, op.nulos, partes[0]);
+  } else {
+    std::vector<std::thread> threads;
+    for (std::size_t f = 0; f < nfaixas; ++f) {
+      threads.emplace_back([&, f] {
+        partes[f].reserve(
+            static_cast<std::size_t>(std::count(dados + corte[f], dados + corte[f + 1], '\n')) + 1);
+        csv_linhas(dados, corte[f], corte[f + 1], sep, headers, cabecalhos_unicos, op.nulos,
+                   partes[f]);
+      });
+    }
+    for (std::thread& t : threads) t.join();
+  }
+  if (nfaixas == 1) return Value::tabela(std::move(partes[0]));
+  std::size_t total = 0;
+  for (const auto& p : partes) total += p.size();
+  rt::ValueList rows;
+  rows.reserve(total);
+  for (auto& p : partes) {
+    for (Value& v : p) rows.push_back(std::move(v));
+    rt::ValueList().swap(p);
   }
   return Value::tabela(std::move(rows));
 }
@@ -1836,7 +2289,19 @@ Value Interpreter::read_fonte(const std::string& name, Span span) {
   if (tipo == "sqlite" && path.rfind("sqlite://", 0) == 0) path = path.substr(9);
   if (tipo == "csv") {
     if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
-    return read_csv_file(path, span);
+    const std::string sep = field_text("separador");
+    if (sep.empty()) return read_csv_file(path, span);
+    CsvOpcoes op;
+    if (sep == "auto") {
+      op.detectar_separador = true;
+    } else if (sep == "tab") {
+      op.separador = '\t';
+    } else if (sep.size() == 1) {
+      op.separador = sep[0];
+    } else {
+      fail(span, "fonte '" + name + "': 'separador' deve ser um caractere (ou \"auto\", \"tab\")");
+    }
+    return read_csv_file(path, span, &op);
   }
   if (tipo == "json") {
     if (path.empty()) fail(span, "fonte '" + name + "': falta 'caminho:'");
@@ -2337,6 +2802,14 @@ std::vector<Interpreter::Layer> Interpreter::build_layers(const Item& decl, std:
         } else if (key == "abandono" || key == "dropout") {
           Layer l;
           l.kind = Layer::Dropout;
+          if (value && (value->kind == ExprKind::DecimalLit || value->kind == ExprKind::IntLit)) {
+            const double p = std::strtod(value->text.c_str(), nullptr);
+            if (p < 0.0 || p >= 1.0) {
+              fail(decl.span,
+                   "modelo '" + name + "': abandono deve estar em [0, 1), recebeu " + value->text);
+            }
+            l.taxa_abandono = static_cast<float>(p);
+          }
           layers.push_back(std::move(l));
         } else if (key == "norma_camada") {
           Layer l;
@@ -4043,9 +4516,25 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
     doc.map->set("otimizador", Value::texto(cfg.otim));
     doc.map->set("taxa", Value::decimal(cfg.lr));
     doc.map->set("camadas", std::move(cl));
-    std::ofstream out(caminho, std::ios::trunc);
-    if (!out) fail(span, ctx + ": nao foi possivel gravar '" + caminho + "'");
-    out << rt::json_dump(doc) << "\n";
+    // Grava em arquivo temporario e renomeia: outros ranks do cluster (e um
+    // crash no meio da escrita) nunca veem um checkpoint pela metade.
+    const std::string tmp = caminho + ".tmp";
+    {
+      std::ofstream out(tmp, std::ios::trunc);
+      if (!out) fail(span, ctx + ": nao foi possivel gravar '" + caminho + "'");
+      out << rt::json_dump(doc) << "\n";
+      out.flush();
+      if (!out) {
+        std::remove(tmp.c_str());
+        fail(span, ctx + ": falha ao gravar '" + caminho + "'");
+      }
+    }
+    std::error_code ec_rename;
+    std::filesystem::rename(tmp, caminho, ec_rename);
+    if (ec_rename) {
+      std::remove(tmp.c_str());
+      fail(span, ctx + ": nao foi possivel publicar '" + caminho + "': " + ec_rename.message());
+    }
   };
 
   int adam_t = 0;
@@ -4437,6 +4926,11 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       std::vector<rt::Tensor> ins;
       ins.reserve(layers.size() + 1);
       std::vector<rt::RecurrentCache> recorrentes(layers.size());
+      // Mascaras de dropout do lote (vazias = camada sem efeito); o gerador so
+      // depende de (semente, epoca, lote), entao retomar == treino continuo.
+      std::vector<rt::Tensor> mascaras(layers.size());
+      std::mt19937_64 rng_abandono(cfg.seed_mistura * 0x9E3779B97F4A7C15ULL +
+                                   seed_sufixo * 1000003ULL + static_cast<std::uint64_t>(b0) + 1);
       rt::Tensor cur = xb;
       for (std::size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
         Layer& l = layers[layer_idx];
@@ -4466,7 +4960,21 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
             break;
           case Layer::Softmax: cur = rt::softmax_last(cur); break;
           case Layer::LayerNorm: cur = rt::layer_norm_last(cur); break;
-          case Layer::Dropout: break;
+          case Layer::Dropout: {
+            if (l.taxa_abandono > 0.0F) {
+              rt::Tensor mascara = cur;
+              const float mantem = 1.0F / (1.0F - l.taxa_abandono);
+              for (std::size_t k = 0; k < mascara.data.size(); ++k) {
+                // uniforme em [0, 1) sem std::uniform_real_distribution (varia entre bibliotecas)
+                const double u =
+                    static_cast<double>(rng_abandono() >> 11) * (1.0 / 9007199254740992.0);
+                mascara.data[k] = u >= static_cast<double>(l.taxa_abandono) ? mantem : 0.0F;
+                cur.data[k] *= mascara.data[k];
+              }
+              mascaras[layer_idx] = std::move(mascara);
+            }
+            break;
+          }
           case Layer::Conv2d:
             cur = rt::adicionar_vies_conv(rt::conv2d(cur, l.w, l.passo, l.padding, l.dilatacao), l.b);
             break;
@@ -4560,7 +5068,14 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       for (std::int64_t li = static_cast<std::int64_t>(layers.size()) - 1; li >= 0; --li) {
         Layer& l = layers[static_cast<std::size_t>(li)];
         const rt::Tensor& in = ins[static_cast<std::size_t>(li)];
-        if (l.kind == Layer::Softmax || l.kind == Layer::Dropout) continue;
+        if (l.kind == Layer::Softmax) continue;
+        if (l.kind == Layer::Dropout) {
+          const rt::Tensor& mascara = mascaras[static_cast<std::size_t>(li)];
+          for (std::size_t k = 0; k < mascara.data.size() && k < grad.data.size(); ++k) {
+            grad.data[k] *= mascara.data[k];
+          }
+          continue;
+        }
         if (l.kind == Layer::LayerNorm) {
           // Saida normalizada do forward: entrada da proxima camada, ou a
           // propria saida final (probs) quando norma_camada e a ultima camada.
@@ -5026,8 +5541,45 @@ void Interpreter::run_busca(const Item& decl) {
   }
   std::size_t total = 1;
   for (const Dimensao& d : grade) total *= d.valores.size();
-  if (total > 64) {
-    fail(decl.span, ctx + ": grade grande demais (" + std::to_string(total) + " > 64 combinacoes)");
+  // Estrategia: `grade` (todas as combinacoes, ate 64) ou `aleatoria`
+  // (`tentativas:` combinacoes sorteadas sem repeticao da grade, ate 64, sobre
+  // grades de ate 1 milhao; deterministica pela `semente:` da busca).
+  std::string estrategia = "grade";
+  if (const Item* fe = find_field(cfg, "estrategia"); fe && fe->value) {
+    if (fe->value->kind != ExprKind::Name ||
+        (fe->value->text != "grade" && fe->value->text != "aleatoria")) {
+      fail(decl.span, ctx + ": 'estrategia' deve ser grade | aleatoria");
+    }
+    estrategia = fe->value->text;
+  }
+  const bool aleatoria = estrategia == "aleatoria";
+  std::vector<std::size_t> escolhidas;  // indices (mista-base) das combinacoes a treinar
+  if (aleatoria) {
+    if (total > 1000000) {
+      fail(decl.span, ctx + ": grade grande demais para sortear (" + std::to_string(total) +
+                          " > 1000000 combinacoes)");
+    }
+    const int pedidas = field_int(cfg, "tentativas", 8);
+    if (pedidas < 1 || pedidas > 64) {
+      fail(decl.span, ctx + ": 'tentativas' deve estar entre 1 e 64");
+    }
+    const std::size_t n_sorteio = std::min<std::size_t>(static_cast<std::size_t>(pedidas), total);
+    std::vector<std::size_t> todas(total);
+    for (std::size_t i = 0; i < total; ++i) todas[i] = i;
+    std::mt19937_64 rng_busca(base.seed_mistura * 0x9E3779B97F4A7C15ULL + 0xB05CA);
+    // Fisher-Yates parcial: as n_sorteio primeiras posicoes sao a amostra.
+    for (std::size_t i = 0; i < n_sorteio; ++i) {
+      const std::size_t j = i + static_cast<std::size_t>(sortear_indice(rng_busca, total - i));
+      std::swap(todas[i], todas[j]);
+    }
+    escolhidas.assign(todas.begin(), todas.begin() + static_cast<std::ptrdiff_t>(n_sorteio));
+  } else {
+    if (total > 64) {
+      fail(decl.span, ctx + ": grade grande demais (" + std::to_string(total) +
+                          " > 64 combinacoes; use 'estrategia: aleatoria' com 'tentativas: N')");
+    }
+    escolhidas.resize(total);
+    for (std::size_t i = 0; i < total; ++i) escolhidas[i] = i;
   }
 
   auto rotulo_valor = [&](const std::string& chave, const ast::Expr* v) {
@@ -5039,14 +5591,28 @@ void Interpreter::run_busca(const Item& decl) {
     }
     return v->text;
   };
-  out_ << "busca " << name << ": " << total << " combinacoes\n";
+  if (aleatoria) {
+    out_ << "busca " << name << ": " << escolhidas.size() << " de " << total
+         << " combinacoes (aleatoria)\n";
+  } else {
+    out_ << "busca " << name << ": " << total << " combinacoes\n";
+  }
   double melhor_nota = 0.0;
   bool tem_melhor = false;
   std::size_t melhor_i = 0;
   std::string melhor_rotulo;
   TreinoRelato melhor_relato;
   std::vector<std::size_t> pos(grade.size(), 0);
-  for (std::size_t comb = 0; comb < total; ++comb) {
+  for (std::size_t comb = 0; comb < escolhidas.size(); ++comb) {
+    // Decodifica o indice em posicoes por dimensao (a ultima varia mais rapido,
+    // como na grade completa).
+    {
+      std::size_t resto = escolhidas[comb];
+      for (std::size_t k = grade.size(); k-- > 0;) {
+        pos[k] = resto % grade[k].valores.size();
+        resto /= grade[k].valores.size();
+      }
+    }
     TreinoCfg tentativa = base;
     std::string rotulo;
     for (std::size_t k = 0; k < grade.size(); ++k) {
@@ -5088,10 +5654,6 @@ void Interpreter::run_busca(const Item& decl) {
       melhor_nota = criterio == "perda" ? r.ultima : nota;
       melhor_rotulo = rotulo;
       melhor_relato = std::move(r);
-    }
-    for (std::size_t k = grade.size(); k-- > 0;) {
-      if (++pos[k] < grade[k].valores.size()) break;
-      pos[k] = 0;
     }
   }
   {
@@ -7572,6 +8134,13 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
     Value out = Value::lista();
     if (qdrant || pgvector || weaviate || pinecone || chroma) {
+      if (const Value* mb = kw.find("modo");
+          mb && mb->kind == ValueKind::Texto && mb->s == "hibrido") {
+        fail(
+            call.span,
+            "buscar: modo \"hibrido\" so vale para armazenamento \"memoria\"; com backend "
+            "externo busque mais candidatos (top_k maior) e use reranquear(consulta, hits, top_k)");
+      }
       if (pinecone) {
         try {
           rt::pinecone_ensure_namespace(pinecone_base, pinecone_ns);
@@ -7579,7 +8148,7 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
           fail(call.span, std::string(e.what()));
         }
       }
-      std::vector<std::pair<std::string, double>> hits;
+      std::vector<rt::VectorHit> hits;
       try {
         if (qdrant) {
           hits = rt::qdrant_search(qdrant_base, qdrant_col, rt::llm_embed(emb_model, qt), k);
@@ -7599,13 +8168,21 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
       }
       for (const auto& h : hits) {
         Value row = Value::mapa();
-        row.map->set("id", Value::texto(h.first));
-        row.map->set("score", Value::decimal(h.second));
+        row.map->set("id", Value::texto(h.id));
+        row.map->set("texto", Value::texto(h.texto));
+        row.map->set("score", Value::decimal(h.score));
         out.list->push_back(std::move(row));
       }
       return out;
     }
-    auto hits = store.search(rt::llm_embed(emb_model, qt), k);
+    std::string modo_busca = "vetorial";
+    if (const Value* mb = kw.find("modo"); mb && mb->kind == ValueKind::Texto) modo_busca = mb->s;
+    if (modo_busca != "vetorial" && modo_busca != "hibrido") {
+      fail(call.span,
+           "buscar: modo '" + modo_busca + "' invalido (use \"vetorial\" ou \"hibrido\")");
+    }
+    auto hits = modo_busca == "hibrido" ? store.search_hibrido(qt, rt::llm_embed(emb_model, qt), k)
+                                        : store.search(rt::llm_embed(emb_model, qt), k);
     for (const auto& h : hits) {
       Value row = Value::mapa();
       row.map->set("id", Value::texto(h.id));
@@ -7754,6 +8331,81 @@ rt::ValueMap best_effort_args(const Item& tool_decl, const std::string& message)
   return targs;
 }
 
+// JSON Schema dos argumentos de uma `ferramenta` (campos de `entrada:`), para o
+// tool-calling nativo. Tipos desconhecidos viram string.
+Value tool_json_schema(const Item& tool_decl) {
+  Value props = Value::mapa();
+  Value required = Value::lista();
+  if (tool_decl.block) {
+    if (const Item* entrada = find_field(*tool_decl.block, "entrada"); entrada && entrada->block) {
+      for (const auto& f : entrada->block->items) {
+        if (!f || f->kind != ItemKind::Field) continue;
+        std::string base = "texto";
+        if (f->value && f->value->kind == ExprKind::Name) {
+          base = f->value->text;
+        } else if (f->value && f->value->kind == ExprKind::Index && f->value->lhs &&
+                   f->value->lhs->kind == ExprKind::Name) {
+          base = f->value->lhs->text;
+        }
+        const char* tipo = "string";
+        if (base == "inteiro")
+          tipo = "integer";
+        else if (base == "decimal")
+          tipo = "number";
+        else if (base == "logico")
+          tipo = "boolean";
+        else if (base == "lista")
+          tipo = "array";
+        else if (base == "mapa")
+          tipo = "object";
+        Value p = Value::mapa();
+        p.map->set("type", Value::texto(tipo));
+        props.map->set(f->key, std::move(p));
+        required.list->push_back(Value::texto(f->key));
+      }
+    }
+  }
+  Value schema = Value::mapa();
+  schema.map->set("type", Value::texto("object"));
+  schema.map->set("properties", std::move(props));
+  schema.map->set("required", std::move(required));
+  return schema;
+}
+
+bool field_bool(const ast::Block& block, std::string_view key, bool fallback) {
+  const Item* f = find_field(block, key);
+  if (f && f->value && f->value->kind == ExprKind::BoolLit) return f->value->boolean;
+  return fallback;
+}
+
+// Aprovacao humana antes de uma `ferramenta` com `requer_aprovacao: verdadeiro`
+// ser executada por um agente. TILT_APROVAR=sim|todas aprova, =nao nega; sem a
+// variavel, pergunta no terminal (stdin e stderr interativos) ou nega.
+bool aprovar_execucao(const std::string& nome, const rt::ValueMap& args, std::string& motivo) {
+  const char* v = std::getenv("TILT_APROVAR");
+  const std::string modo = v ? v : "";
+  if (modo == "sim" || modo == "todas") return true;
+  if (modo == "nao") {
+    motivo = "TILT_APROVAR=nao";
+    return false;
+  }
+#if !defined(_WIN32)
+  if (isatty(STDIN_FILENO) != 0 && isatty(STDERR_FILENO) != 0) {
+    std::cerr << "[aprovacao] o agente quer executar a ferramenta '" << nome << "' com "
+              << to_display(args_to_value(args)) << ". Executar? [s/N] " << std::flush;
+    std::string linha;
+    if (std::getline(std::cin, linha)) {
+      for (char& c : linha) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (linha == "s" || linha == "sim" || linha == "y" || linha == "yes") return true;
+    }
+    motivo = "negada pelo usuario";
+    return false;
+  }
+#endif
+  motivo = "requer aprovacao (defina TILT_APROVAR=sim ou rode em um terminal interativo)";
+  return false;
+}
+
 std::string tool_params_desc(const Item& tool_decl) {
   std::string out;
   if (tool_decl.block) {
@@ -7853,6 +8505,26 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   Value rastro = Value::lista();
   std::string answer;
 
+  // Guardrails: `max_tokens_sessao` (entrada + saida acumuladas nesta chamada
+  // de .responder) e `requer_aprovacao: verdadeiro` nas ferramentas.
+  const long long teto_tokens_sessao = field_int(cfg, "max_tokens_sessao", 0);
+  long long tokens_usados = 0;
+  bool teto_estourado = false;
+  const std::string msg_teto =
+      "[agente] limite de tokens da sessao (" + std::to_string(teto_tokens_sessao) + ") atingido";
+  auto executar_ferramenta = [&](const Item& decl, const std::string& nome, const rt::ValueMap& a,
+                                 bool& negada) -> Value {
+    negada = false;
+    if (decl.block && field_bool(*decl.block, "requer_aprovacao", false)) {
+      std::string motivo;
+      if (!aprovar_execucao(nome, a, motivo)) {
+        negada = true;
+        return Value::texto("[negada] " + motivo);
+      }
+    }
+    return run_tool(decl, a, call.span);
+  };
+
   if (llm_name.empty()) {
     // Sem LLM: cada ferramenta roda uma vez com entradas best-effort e a
     // resposta e' local.
@@ -7860,13 +8532,15 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
     for (const auto& [tname, tdecl] : tools) {
       if (step >= max_passos) break;
       rt::ValueMap targs = best_effort_args(*tdecl, prompt);
-      Value obs = run_tool(*tdecl, targs, call.span);
+      bool negada = false;
+      Value obs = executar_ferramenta(*tdecl, tname, targs, negada);
       ++step;
       Value entry = Value::mapa();
       entry.map->set("passo", Value::inteiro(step));
       entry.map->set("ferramenta", Value::texto(tname));
       entry.map->set("argumentos", args_to_value(targs));
       entry.map->set("observacao", Value::texto(to_display(obs)));
+      if (negada) entry.map->set("negada", Value::logico(true));
       rastro.list->push_back(std::move(entry));
     }
     answer = "[sem llm] " + message;
@@ -7879,6 +8553,80 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         answer = rt::llm_chat_cadeia(cadeia, system, prompt).texto;
       } catch (const std::exception& e) {
         fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+      }
+    } else if (field_word(cfg, "protocolo", "texto") == "nativo") {
+      // Tool-calling nativo do provedor (Anthropic tool_use / OpenAI tool_calls):
+      // o modelo devolve chamadas estruturadas, sem depender do protocolo de
+      // texto. Cada turno: chamadas -> observacoes (tool_result) -> proximo turno.
+      std::vector<rt::FerramentaLLM> defs;
+      for (const auto& [tname, tdecl] : tools) {
+        rt::FerramentaLLM d;
+        d.nome = tname;
+        d.descricao = field_str(*tdecl->block, "descricao");
+        d.schema = tool_json_schema(*tdecl);
+        defs.push_back(std::move(d));
+      }
+      std::vector<rt::MensagemLLM> conversa;
+      conversa.push_back({"user", prompt, {}, ""});
+      std::string observations;
+      for (int step = 1; step <= max_passos && answer.empty(); ++step) {
+        if (teto_tokens_sessao > 0 && tokens_usados >= teto_tokens_sessao) {
+          teto_estourado = true;
+          break;
+        }
+        rt::RespostaFerramentas resp;
+        try {
+          resp = rt::llm_chat_ferramentas(cadeia, system, conversa, defs);
+        } catch (const std::exception& e) {
+          fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
+        }
+        tokens_usados += resp.tok_entrada + resp.tok_saida;
+        if (resp.chamadas.empty()) {
+          answer = resp.texto;
+          if (answer.empty()) answer = "[agente] o LLM nao devolveu texto nem chamadas";
+          break;
+        }
+        conversa.push_back({"assistant", resp.texto, resp.chamadas, ""});
+        for (const rt::ChamadaFerramenta& chamada : resp.chamadas) {
+          auto tit = entities_.find(chamada.nome);
+          const bool declarada = tit != entities_.end() && tit->second->key == "ferramenta" &&
+                                 std::any_of(tools.begin(), tools.end(), [&](const auto& t) {
+                                   return t.first == chamada.nome;
+                                 });
+          if (!declarada) {
+            fail(call.span, "agente '" + agent_name + "': o LLM pediu a ferramenta '" +
+                                chamada.nome + "', que nao esta declarada");
+          }
+          rt::ValueMap targs = best_effort_args(*tit->second, prompt);
+          if (chamada.argumentos.kind == ValueKind::Mapa && chamada.argumentos.map) {
+            for (const auto& [k, v] : chamada.argumentos.map->items) targs.set(k, v);
+          }
+          bool negada = false;
+          Value obs = executar_ferramenta(*tit->second, chamada.nome, targs, negada);
+          Value entry = Value::mapa();
+          entry.map->set("passo", Value::inteiro(step));
+          entry.map->set("ferramenta", Value::texto(chamada.nome));
+          entry.map->set("argumentos", args_to_value(targs));
+          entry.map->set("observacao", Value::texto(to_display(obs)));
+          if (negada) entry.map->set("negada", Value::logico(true));
+          rastro.list->push_back(std::move(entry));
+          observations += "- " + chamada.nome + ": " + to_display(obs) + "\n";
+          conversa.push_back({"tool", to_display(obs), {}, chamada.id});
+        }
+      }
+      if (answer.empty() && teto_estourado) answer = msg_teto;
+      if (answer.empty()) {
+        try {
+          answer = rt::llm_chat_cadeia(cadeia,
+                                       system +
+                                           "\n\nLimite de passos atingido. Responda agora "
+                                           "com uma sintese do que foi observado.",
+                                       "Pedido do usuario: " + prompt +
+                                           "\n\nObservacoes ate agora:\n" + observations)
+                       .texto;
+        } catch (...) {
+          answer = "[agente] limite de passos atingido sem resposta final";
+        }
       }
     } else {
       // Planner iterativo (M9.2): a cada passo o LLM escolhe a proxima acao
@@ -7898,11 +8646,17 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
 
       std::string observations;
       for (int step = 1; step <= max_passos && answer.empty(); ++step) {
+        if (teto_tokens_sessao > 0 && tokens_usados >= teto_tokens_sessao) {
+          teto_estourado = true;
+          break;
+        }
         std::string user = "Pedido do usuario: " + prompt + "\n";
         if (!observations.empty()) user += "\nObservacoes ate agora:\n" + observations;
         std::string raw;
         try {
-          raw = rt::llm_chat_cadeia(cadeia, system, user).texto;
+          const rt::RespostaLLM resp = rt::llm_chat_cadeia(cadeia, system, user);
+          raw = resp.texto;
+          tokens_usados += resp.tok_entrada + resp.tok_saida;
         } catch (const std::exception& e) {
           fail(call.span, std::string("agente '") + agent_name + "': LLM: " + e.what());
         }
@@ -7918,17 +8672,20 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         }
         rt::ValueMap targs = best_effort_args(*tit->second, prompt);
         for (const auto& [k, v] : action.args.items) targs.set(k, v);  // JSON sobrescreve
-        Value obs = run_tool(*tit->second, targs, call.span);
+        bool negada = false;
+        Value obs = executar_ferramenta(*tit->second, action.tool, targs, negada);
 
         Value entry = Value::mapa();
         entry.map->set("passo", Value::inteiro(step));
         entry.map->set("ferramenta", Value::texto(action.tool));
         entry.map->set("argumentos", args_to_value(targs));
         entry.map->set("observacao", Value::texto(to_display(obs)));
+        if (negada) entry.map->set("negada", Value::logico(true));
         rastro.list->push_back(std::move(entry));
         observations += "- " + action.tool + ": " + to_display(obs) + "\n";
       }
 
+      if (answer.empty() && teto_estourado) answer = msg_teto;
       if (answer.empty()) {
         // Estourou max_passos sem resposta final: uma ultima chamada pede a
         // sintese com o que foi observado.
@@ -8092,6 +8849,54 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
   Value rastro = Value::lista();
   std::string current = message;
   std::string combined;
+
+  // `paralelo`: todos os agentes recebem a mesma mensagem e rodam ao mesmo
+  // tempo (o tempo e dominado por chamadas de rede ao LLM). Os resultados
+  // entram na ordem declarada; o 1o erro (na ordem) aborta depois de todos
+  // terminarem.
+  if (estrategia == "paralelo" && members.size() > 1) {
+    auto rodar = [&](const std::string& agente) {
+      Expr fake;
+      fake.kind = ExprKind::Call;
+      fake.span = call.span;
+      ast::Arg arg;
+      arg.value = std::make_unique<Expr>();
+      arg.value->kind = ExprKind::TextLit;
+      arg.value->text = message;
+      fake.args.push_back(std::move(arg));
+      return eval_agente_responder(agente, fake, env);
+    };
+    std::vector<std::future<Value>> futuros;
+    futuros.reserve(members.size());
+    for (const auto& membro : members) {
+      futuros.push_back(std::async(std::launch::async, rodar, membro.second));
+    }
+    std::vector<Value> respostas(members.size());
+    std::exception_ptr primeiro_erro;
+    for (std::size_t k = 0; k < futuros.size(); ++k) {
+      try {
+        respostas[k] = futuros[k].get();
+      } catch (...) {
+        if (!primeiro_erro) primeiro_erro = std::current_exception();
+      }
+    }
+    if (primeiro_erro) std::rethrow_exception(primeiro_erro);
+    for (std::size_t k = 0; k < members.size(); ++k) {
+      const Value& r = respostas[k];
+      const std::string texto = (r.kind == ValueKind::Mapa && r.map && r.map->find("texto"))
+                                    ? r.map->find("texto")->s
+                                    : "";
+      Value entry = Value::mapa();
+      entry.map->set("agente", Value::texto(members[k].first));
+      entry.map->set("texto", Value::texto(texto));
+      rastro.list->push_back(std::move(entry));
+      combined += members[k].first + ": " + texto + "\n";
+    }
+    Value out = Value::mapa();
+    out.map->set("texto", Value::texto(combined));
+    out.map->set("rastro", std::move(rastro));
+    return out;
+  }
 
   for (const auto& [rotulo, agente] : members) {
     Expr fake;  // synthesize a `<agente>.responder <texto>` call
@@ -8705,6 +9510,10 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
       }
       return;
     }
+    case StmtKind::Break:
+      throw BreakSignal{};
+    case StmtKind::Continue:
+      throw ContinueSignal{};
     case StmtKind::ForEach: {
       Value seq = stmt.a ? eval(*stmt.a, env) : Value::nulo();
       if (seq.kind != ValueKind::Lista && seq.kind != ValueKind::Tabela) {
@@ -8719,17 +9528,27 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
           break;
         }
       }
+      // Corpo do laco; false = `parar`. `continuar` so encerra a iteracao.
+      auto rodar_corpo = [&](Env& inner) {
+        try {
+          exec_block(stmt.body, inner);
+        } catch (const ContinueSignal&) {
+        } catch (const BreakSignal&) {
+          return false;
+        }
+        return true;
+      };
       if (seq.list) {
         for (const Value& element : *seq.list) {
           Env inner;
           inner.parent = &env;
           inner.vars[stmt.name] = element;
           if (!qst) {
-            exec_block(stmt.body, inner);
+            if (!rodar_corpo(inner)) break;
             continue;
           }
           try {
-            exec_block(stmt.body, inner);
+            if (!rodar_corpo(inner)) break;
           } catch (const RuntimeAbort& a) {
             Value doc = Value::mapa();
             doc.map->set("linha", element);
@@ -8749,7 +9568,12 @@ void Interpreter::exec_stmt(const Stmt& stmt, Env& env) {
         if (++guard > kLoopGuard) fail(stmt.span, "laco 'enquanto' excedeu o limite de iteracoes");
         Env inner;
         inner.parent = &env;
-        exec_block(stmt.body, inner);
+        try {
+          exec_block(stmt.body, inner);
+        } catch (const ContinueSignal&) {
+        } catch (const BreakSignal&) {
+          break;
+        }
       }
       return;
     }
@@ -8842,7 +9666,13 @@ std::string Interpreter::interpolate(const std::string& text, Env& env) {
         std::string name = text.substr(k + 2, end - (k + 2));
         while (!name.empty() && name.front() == ' ') name.erase(name.begin());
         while (!name.empty() && name.back() == ' ') name.pop_back();
-        if (Value* v = env.lookup(name)) {
+        Value* v = env.lookup(name);
+        if (v == nullptr) {
+          // `{{row}}` num programa em ingles: o lexer traduziu o nome no codigo.
+          const std::string_view pt = alias_en_para_pt(name);
+          if (!pt.empty()) v = env.lookup(std::string(pt));
+        }
+        if (v != nullptr) {
           out += to_display(*v);
         } else {
           out += "{{" + name + "}}";
@@ -8854,6 +9684,40 @@ std::string Interpreter::interpolate(const std::string& text, Env& env) {
     out += text[k++];
   }
   return out;
+}
+
+// Identificadores de um SQL (fora de literais 'x'/"x" e comentarios), sem repeticao.
+std::vector<std::string> identificadores_sql(const std::string& sql) {
+  std::vector<std::string> ids;
+  std::size_t i = 0;
+  while (i < sql.size()) {
+    const char c = sql[i];
+    if (c == '\'' || c == '"') {
+      const char fim = c;
+      for (++i; i < sql.size() && sql[i] != fim; ++i) {
+      }
+      ++i;
+    } else if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+      while (i < sql.size() && sql[i] != '\n') ++i;
+    } else if (std::isalpha(static_cast<unsigned char>(c)) != 0 || c == '_') {
+      std::size_t j = i;
+      while (j < sql.size() &&
+             (std::isalnum(static_cast<unsigned char>(sql[j])) != 0 || sql[j] == '_'))
+        ++j;
+      std::string id = sql.substr(i, j - i);
+      if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(std::move(id));
+      i = j;
+    } else {
+      ++i;
+    }
+  }
+  return ids;
+}
+
+bool parece_tabela(const Value& v) {
+  if (v.kind == ValueKind::Tabela) return true;
+  return v.kind == ValueKind::Lista && v.list && !v.list->empty() &&
+         (*v.list)[0].kind == ValueKind::Mapa;
 }
 
 Value Interpreter::eval(const Expr& expr, Env& env) {
@@ -8922,6 +9786,14 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
       if (base.kind == ValueKind::Mapa && base.map) {
         if (Value* f = base.map->find(expr.text)) return *f;
       }
+      // Programa em ingles: campos que o runtime devolve em portugues (`r.text` ->
+      // `texto`, `r.trace` -> `rastro`) — so quando a chave do usuario nao existe.
+      if ((base.kind == ValueKind::Mapa || base.kind == ValueKind::Tabela) && base.map) {
+        const std::string_view pt = alias_en_para_pt(expr.text);
+        if (!pt.empty()) {
+          if (Value* f = base.map->find(std::string(pt))) return *f;
+        }
+      }
       if (expr.text == "tamanho") {
         if (base.kind == ValueKind::Lista || base.kind == ValueKind::Tabela) {
           return Value::inteiro(base.list ? static_cast<std::int64_t>(base.list->size()) : 0);
@@ -8929,6 +9801,15 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
         if (base.kind == ValueKind::Texto) {
           return Value::inteiro(static_cast<std::int64_t>(base.s.size()));
         }
+      }
+      // `t.descrever` / `t.deduplicar` / `t.remover_nulos` / `t.limpar_texto`: metodo de tabela
+      // sem argumentos escrito como campo.
+      if ((base.kind == ValueKind::Tabela || base.kind == ValueKind::Lista) &&
+          word_in(expr.text, {"descrever", "deduplicar", "remover_nulos", "limpar_texto"})) {
+        Expr chamada;
+        chamada.kind = ExprKind::Call;
+        chamada.span = expr.span;
+        return eval_method(expr.text, base, chamada, env);
       }
       if (expr.optional) return Value::nulo();
       fail(expr.span, std::string("'") + base.type_name() + "' nao tem o campo '" + expr.text + "'");
@@ -8964,6 +9845,40 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
       if (base.kind == ValueKind::Mapa && base.map) {
         Value* f = base.map->find(idx.kind == ValueKind::Texto ? idx.s : to_display(idx));
         return f ? *f : Value::nulo();
+      }
+      if (base.kind == ValueKind::Tensor && base.tensor) {
+        // `t[i]` / `t[i, j]`: cada indice fixa um eixo (negativo conta do fim). Com
+        // todos os eixos fixos devolve o escalar (decimal); senao o sub-tensor.
+        const rt::Tensor& t = *base.tensor;
+        if (t.shape.empty() || expr.elems.size() > t.shape.size()) {
+          fail(expr.span, "tensor de rank " + std::to_string(t.shape.size()) + " nao aceita " +
+                              std::to_string(expr.elems.size()) + " indice(s)");
+        }
+        std::int64_t deslocamento = 0;
+        for (std::size_t eixo = 0; eixo < expr.elems.size(); ++eixo) {
+          const Value iv = eixo == 0 ? idx : eval(*expr.elems[eixo], env);
+          if (!iv.is_number()) fail(expr.span, "indice de tensor deve ser numero");
+          std::int64_t i = static_cast<std::int64_t>(iv.as_number());
+          const std::int64_t dim = t.shape[eixo];
+          if (i < 0) i += dim;
+          if (i < 0 || i >= dim) {
+            fail(expr.span, "indice " + std::to_string(static_cast<std::int64_t>(iv.as_number())) +
+                                " fora dos limites do eixo " + std::to_string(eixo) + " (tamanho " +
+                                std::to_string(dim) + ")");
+          }
+          deslocamento = deslocamento * dim + i;
+        }
+        std::vector<std::int64_t> resto(
+            t.shape.begin() + static_cast<std::ptrdiff_t>(expr.elems.size()), t.shape.end());
+        std::int64_t bloco = 1;
+        for (std::int64_t d : resto) bloco *= d;
+        const std::size_t ini = static_cast<std::size_t>(deslocamento * bloco);
+        if (resto.empty()) return Value::decimal(static_cast<double>(t.data[ini]));
+        rt::Tensor sub = rt::Tensor::zeros(resto);
+        for (std::int64_t k = 0; k < bloco; ++k) {
+          sub.data[static_cast<std::size_t>(k)] = t.data[ini + static_cast<std::size_t>(k)];
+        }
+        return Value::tensor_de(std::move(sub));
       }
       fail(expr.span, std::string("nao e possivel indexar '") + base.type_name() + "'");
     }
@@ -9009,6 +9924,19 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
     }
     case ExprKind::Device:
       return eval(*expr.lhs, env);
+    case ExprKind::Lambda: {
+      auto fn = std::make_shared<rt::Closure>();
+      fn->lambda = &expr;
+      // Snapshot das variaveis visiveis (as mais internas vencem); o escopo
+      // global (root_) e resolvido na chamada.
+      for (Env* e = &env; e && e != &root_; e = e->parent) {
+        for (const auto& kv : e->vars) fn->capturadas.emplace(kv.first, kv.second);
+        if (!fn->funcs) fn->funcs = e->funcs;  // lambda criada em modulo enxerga as funcoes dele
+      }
+      return Value::funcao(std::move(fn));
+    }
+    case ExprKind::Cond:
+      return eval(*expr.extra, env).truthy() ? eval(*expr.lhs, env) : eval(*expr.rhs, env);
     case ExprKind::Call:
       return eval_call(expr, env);
   }
@@ -9236,6 +10164,11 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
 
   if (callee.kind == ExprKind::Name) {
     const std::string& name = callee.text;
+    // Variavel que guarda uma funcao anonima: `f = funcao x: x * 2` / `f(3)`.
+    if (Value* v = env.lookup(name); v && v->kind == ValueKind::Funcao && v->closure) {
+      const std::shared_ptr<rt::Closure> fn = v->closure;
+      return call_closure(*fn, eval_args(expr, env), expr.span);
+    }
     // Funcao de modulo visivel no escopo (irma ou `de ... importar` aninhado):
     // anda na cadeia de envs procurando uma tabela de funcoes de modulo.
     for (Env* e = &env; e; e = e->parent) {
@@ -9255,6 +10188,16 @@ Value Interpreter::eval_call(const Expr& expr, Env& env) {
     return eval_builtin(name, expr, env);
   }
 
+  // `f(a)(b)`: o resultado da 1a chamada precisa ser uma funcao anonima.
+  if (callee.kind == ExprKind::Call) {
+    const Value f = eval(callee, env);
+    if (f.kind != ValueKind::Funcao || !f.closure) {
+      fail(expr.span,
+           std::string("o resultado da chamada e ") + f.type_name() + ", nao uma funcao");
+    }
+    return call_closure(*f.closure, eval_args(expr, env), expr.span);
+  }
+
   fail(expr.span, "chamada invalida");
 }
 
@@ -9263,14 +10206,32 @@ int Interpreter::run_jit() {
   return run_vm();
 }
 
-Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span,
-                                 Env* module_scope) {
-  // Funcoes de modulo rodam pela arvore: o subconjunto da VM resolve chamadas
-  // por nome apenas contra 'functions_', sem a tabela do modulo (scope.funcs).
-  if (module_scope == nullptr) {
-  // Try the bytecode VM for functions in its pure subset; fall back otherwise.
-  // A compilacao e lazy e cacheada: o mutex so cobre o mapa; o Chunk em si
-  // e imutavel durante a execucao e pode ser rodado por varias threads.
+Value Interpreter::call_closure(const rt::Closure& fn, std::vector<Value> args, Span span) {
+  const Expr& lambda = *fn.lambda;
+  if (args.size() != lambda.args.size()) {
+    fail(span, "funcao anonima espera " + std::to_string(lambda.args.size()) +
+                   " argumento(s), recebeu " + std::to_string(args.size()));
+  }
+  Env env;
+  env.parent = &root_;
+  env.funcs = fn.funcs;
+  env.vars = fn.capturadas;
+  for (std::size_t k = 0; k < lambda.args.size(); ++k) {
+    env.vars[lambda.args[k].name] = std::move(args[k]);
+  }
+  return eval(*lambda.rhs, env);
+}
+
+const vm::Chunk* Interpreter::resolver_chunk(const std::string& nome) {
+  if (jit_mode_) return nullptr;  // o JIT decide sozinho; chamadas nao entram nele
+  const auto f = functions_.find(nome);
+  if (f == functions_.end()) return nullptr;
+  if (func_module_.find(f->second) != func_module_.end()) return nullptr;  // modulo: arvore
+  if (funcao_tem_padrao(*f->second)) return nullptr;
+  return chunk_de_funcao(*f->second).get();
+}
+
+std::shared_ptr<vm::Chunk> Interpreter::chunk_de_funcao(const Item& fn) {
   std::shared_ptr<vm::Chunk> chunk;
   {
     std::lock_guard<std::mutex> lk(vm_chunks_mutex_);
@@ -9286,7 +10247,9 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
       } else {
         try {
           std::unordered_set<std::string> names;
-          for (const auto& kv : functions_) names.insert(kv.first);
+          for (const auto& kv : functions_) {
+            if (!funcao_tem_padrao(*kv.second)) names.insert(kv.first);
+          }
           chunk = std::make_shared<vm::Chunk>(vm::compile_function(fn, names));
         } catch (const vm::NotCompilable&) {
           chunk = nullptr;
@@ -9313,41 +10276,65 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
     }
     chunk = cit->second;
   }
-  if (chunk) {
-    if (jit_mode_) {
-      bool integer_args = true;
-      for (const Value& arg : args) {
-        if (arg.kind != ValueKind::Inteiro) {
-          integer_args = false;
-          break;
+  return chunk;
+}
+
+Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span span,
+                                 Env* module_scope) {
+  // Funcoes de modulo rodam pela arvore: o subconjunto da VM resolve chamadas
+  // por nome apenas contra 'functions_', sem a tabela do modulo (scope.funcs).
+  // Funcao com valor padrao: so a arvore sabe preencher os argumentos faltantes.
+  if (module_scope == nullptr && !funcao_tem_padrao(fn)) {
+    // Try the bytecode VM for functions in its pure subset; fall back otherwise.
+    // A compilacao e lazy e cacheada: o mutex so cobre o mapa; o Chunk em si
+    // e imutavel durante a execucao e pode ser rodado por varias threads.
+    std::shared_ptr<vm::Chunk> chunk = chunk_de_funcao(fn);
+    if (chunk) {
+      if (jit_mode_) {
+        bool integer_args = true;
+        for (const Value& arg : args) {
+          if (arg.kind != ValueKind::Inteiro) {
+            integer_args = false;
+            break;
+          }
+        }
+        vm::Jit jit(out_);
+        std::string why;
+        if (integer_args && jit.can_compile(*chunk, &why)) {
+          try {
+            return jit.run(*chunk, std::move(args));
+          } catch (const std::exception& e) {
+            fail(fn.span, std::string("JIT: ") + e.what());
+            return Value::nulo();
+          }
         }
       }
-      vm::Jit jit(out_);
-      std::string why;
-      if (integer_args && jit.can_compile(*chunk, &why)) {
-        try {
-          return jit.run(*chunk, std::move(args));
-        } catch (const std::exception& e) {
-          fail(fn.span, std::string("JIT: ") + e.what());
-          return Value::nulo();
-        }
+      vm::Vm machine(
+          out_,
+          [this](const std::string& name, std::vector<Value>& a, bool* handled) {
+            return vm_call_hook(name, a, handled);
+          },
+          [this](const std::string& nome) { return resolver_chunk(nome); });
+      try {
+        return machine.run(*chunk, std::move(args));
+      } catch (const std::exception& e) {
+        fail(fn.span, std::string("VM: ") + e.what());
       }
     }
-    vm::Vm machine(out_, [this](const std::string& name, std::vector<Value>& a, bool* handled) {
-      return vm_call_hook(name, a, handled);
-    });
-    try {
-      return machine.run(*chunk, std::move(args));
-    } catch (const std::exception& e) {
-      fail(fn.span, std::string("VM: ") + e.what());
-    }
-  }
   }
 
   Env env;
   env.parent = module_scope ? module_scope : &root_;
   for (std::size_t k = 0; k < fn.params.size(); ++k) {
-    env.vars[fn.params[k].name] = k < args.size() ? args[k] : Value::nulo();
+    const ast::Arg& p = fn.params[k];
+    if (k < args.size()) {
+      env.vars[p.name] = args[k];
+    } else if (p.default_value) {
+      // Padrao avaliado a cada chamada, vendo os parametros anteriores.
+      env.vars[p.name] = eval(*p.default_value, env);
+    } else {
+      env.vars[p.name] = Value::nulo();
+    }
   }
   if (!fn.block) return Value::nulo();
   try {
@@ -9363,6 +10350,57 @@ Value Interpreter::call_function(const Item& fn, std::vector<Value> args, Span s
 
 Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& env) {
   auto args = [&] { return eval_args(call, env); };
+
+  // Ordem superior: recebem uma funcao anonima e a aplicam a cada elemento.
+  if (word_in(name, {"mapear", "filtrar", "reduzir", "qualquer", "todos"})) {
+    std::vector<Value> a = args();
+    const bool reduz = name == "reduzir";
+    if (a.size() < 2 || a.size() > (reduz ? 3u : 2u) ||
+        (a[0].kind != ValueKind::Lista && a[0].kind != ValueKind::Tabela) ||
+        a[1].kind != ValueKind::Funcao || !a[1].closure) {
+      fail(call.span, name + " espera (lista, funcao" + (reduz ? ", inicial?)" : ")") +
+                          ", ex.: " + name + "(xs, funcao x: x * 2)");
+    }
+    const std::shared_ptr<rt::Closure> fn = a[1].closure;
+    const rt::ValueList itens = a[0].list ? *a[0].list : rt::ValueList{};
+    if (name == "reduzir") {
+      // funcao acc, x: ...; sem inicial, parte do 1o elemento.
+      std::size_t inicio = 0;
+      Value acc = a.size() == 3 ? a[2] : Value::nulo();
+      if (a.size() < 3 && !itens.empty()) acc = itens[inicio++];
+      for (; inicio < itens.size(); ++inicio) {
+        acc = call_closure(*fn, {acc, itens[inicio]}, call.span);
+      }
+      return acc;
+    }
+    rt::ValueList out;
+    for (const Value& item : itens) {
+      Value r = call_closure(*fn, {item}, call.span);
+      if (name == "mapear") {
+        out.push_back(std::move(r));
+      } else if (name == "filtrar") {
+        if (r.truthy()) out.push_back(item);
+      } else if (name == "qualquer") {
+        if (r.truthy()) return Value::logico(true);
+      } else if (!r.truthy()) {  // todos
+        return Value::logico(false);
+      }
+    }
+    if (name == "qualquer") return Value::logico(false);
+    if (name == "todos") return Value::logico(true);
+    return Value::lista(std::move(out));
+  }
+
+  // Biblioteca padrao pura (matematica, texto, listas, datas...). Funcoes do
+  // usuario e de modulos ja foram resolvidas antes e, por isso, a sombreiam.
+  if (rt::stdlib_existe(name)) {
+    const std::vector<Value> a = args();
+    try {
+      return rt::stdlib_chamar(name, a);
+    } catch (const std::exception& e) {
+      fail(call.span, e.what());
+    }
+  }
 
   if (name == "imprimir" || name == "imprima" || name == "print") {
     auto a = args();
@@ -9480,7 +10518,43 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   if (name == "ler_csv") {
     auto a = args();
     if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ler_csv espera um caminho");
-    return read_csv_file(a[0].s, call.span);
+    const rt::ValueMap kw = eval_kwargs(call, env);
+    if (kw.items.empty()) return read_csv_file(a[0].s, call.span);
+    CsvOpcoes op;
+    const auto nomes = [&](const char* chave, std::vector<std::string>& destino) {
+      const Value* v = kw.find(chave);
+      if (v == nullptr) return;
+      if (v->kind != ValueKind::Lista || !v->list) {
+        fail(call.span, std::string("ler_csv: '") + chave + "' deve ser uma lista de textos");
+      }
+      for (const Value& e : *v->list)
+        destino.push_back(e.kind == ValueKind::Texto ? e.s : to_display(e));
+    };
+    if (const Value* v = kw.find("separador")) {
+      if (v->kind != ValueKind::Texto) fail(call.span, "ler_csv: 'separador' deve ser texto");
+      if (v->s == "auto") {
+        op.detectar_separador = true;
+      } else if (v->s == "tab" || v->s == "\\t") {
+        op.separador = '\t';
+      } else if (v->s.size() == 1) {
+        op.separador = v->s[0];
+      } else {
+        fail(call.span, "ler_csv: 'separador' deve ser um caractere (ou \"auto\", \"tab\")");
+      }
+    }
+    if (const Value* v = kw.find("sem_cabecalho")) op.cabecalho = !v->truthy();
+    if (const Value* v = kw.find("pular")) op.pular = static_cast<std::size_t>(v->as_number());
+    nomes("colunas", op.colunas);
+    nomes("nulos", op.nulos);
+    Value t = read_csv_file(a[0].s, call.span, &op);
+    if (const Value* tipos = kw.find("tipos")) {
+      try {
+        t = rt::tabela_converter(t, *tipos);
+      } catch (const std::exception& e) {
+        fail(call.span, std::string("ler_csv: ") + e.what());
+      }
+    }
+    return t;
   }
   if (name == "ler_parquet") {
     auto a = args();
@@ -9651,20 +10725,40 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
   if (name == "escrever_csv") {
     auto a = args();
+    const rt::ValueMap kw = eval_kwargs(call, env);
     if (a.size() < 2 || (a[0].kind != ValueKind::Tabela && a[0].kind != ValueKind::Lista)) {
       fail(call.span, "escrever espera (tabela, caminho)");
     }
+    char sep = ',';
+    if (const Value* v = kw.find("separador")) {
+      if (v->kind != ValueKind::Texto || !(v->s.size() == 1 || v->s == "tab")) {
+        fail(call.span, "escrever_csv: 'separador' deve ser um caractere (ou \"tab\")");
+      }
+      sep = v->s == "tab" ? '\t' : v->s[0];
+    }
     std::ofstream outf(a[1].s);
     if (!outf) fail(call.span, "nao foi possivel escrever '" + a[1].s + "'");
+    // Campo com separador, aspas ou quebra de linha vai entre aspas (RFC 4180); nulo = vazio.
+    const auto campo = [&](const std::string& txt) {
+      if (txt.find_first_of(std::string("\"\n\r") + sep) == std::string::npos) return txt;
+      std::string q = "\"";
+      for (const char c : txt) {
+        if (c == '"') q += '"';
+        q += c;
+      }
+      return q + "\"";
+    };
     const auto& rows = *a[0].list;
     if (!rows.empty() && rows[0].kind == ValueKind::Mapa && rows[0].map) {
       const auto& hdr = rows[0].map->items;
-      for (std::size_t k = 0; k < hdr.size(); ++k) outf << (k ? "," : "") << hdr[k].first;
+      for (std::size_t k = 0; k < hdr.size(); ++k)
+        outf << (k ? std::string(1, sep) : "") << campo(hdr[k].first);
       outf << '\n';
       for (const Value& r : rows) {
         for (std::size_t k = 0; k < hdr.size(); ++k) {
           const Value* c = r.map ? r.map->find(hdr[k].first) : nullptr;
-          outf << (k ? "," : "") << (c ? to_display(*c) : "");
+          outf << (k ? std::string(1, sep) : "")
+               << campo(c && c->kind != ValueKind::Nulo ? to_display(*c) : "");
         }
         outf << '\n';
       }
@@ -9735,6 +10829,12 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         fail(call.span, "escrever_parquet: 'chave' deve ser texto nao vazio");
       }
       opts.chave = chave->s;
+    }
+    if (const Value* chave_kms = kw.find("chave_kms")) {
+      if (chave_kms->kind != ValueKind::Texto || chave_kms->s.empty()) {
+        fail(call.span, "escrever_parquet: 'chave_kms' deve ser texto nao vazio");
+      }
+      opts.chave_kms = chave_kms->s;
     }
     try {
       rt::parquet_write(a[1].s, a[0], nullptr, opts);
@@ -9962,13 +11062,19 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     if (const Value* t = kw.find("tamanho")) win = static_cast<std::size_t>(t->as_number());
     if (const Value* o = kw.find("sobreposicao")) overlap = static_cast<std::size_t>(o->as_number());
     if (win == 0) win = 1;
-    const std::size_t step = win > overlap ? win - overlap : 1;
+    std::string modo = "tamanho";
+    if (const Value* m = kw.find("modo"); m && m->kind == ValueKind::Texto) modo = m->s;
+    // A sobreposicao padrao (100) e da janela fixa; nos modos por unidade
+    // (sentenca/paragrafo/linha) so vale se pedida.
+    if (modo != "tamanho" && !kw.find("sobreposicao")) overlap = 0;
     rt::ValueList chunks;
-    for (std::size_t start = 0; start < src.size(); start += step) {
-      chunks.push_back(Value::texto(src.substr(start, win)));
-      if (start + win >= src.size()) break;
+    try {
+      for (std::string& pedaco : rt::dividir_texto_em_pedacos(src, win, overlap, modo)) {
+        chunks.push_back(Value::texto(std::move(pedaco)));
+      }
+    } catch (const std::exception& e) {
+      fail(call.span, e.what());
     }
-    if (chunks.empty()) chunks.push_back(Value::texto(src));
     return Value::lista(std::move(chunks));
   }
   if (name == "ler") {
@@ -10813,6 +11919,83 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       fail(call.span, std::string(e.what()));
     }
   }
+  if (name == "sql") {
+    // sql "select ... from vendas", [params]?, nome: tabela, ... -> tabela
+    // Sem nome explicito, as variaveis-tabela citadas no SQL entram sozinhas.
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "sql espera (consulta [, params], tabela: valor...), ex.: sql \"select regiao, "
+           "sum(valor) as total from vendas group by regiao\", vendas: tabela");
+    }
+    std::vector<rt::SqlParam> params;
+    if (a.size() >= 2) {
+      if (a[1].kind != ValueKind::Lista || !a[1].list) {
+        fail(call.span, "sql: 'params' deve ser uma lista [v1, v2, ...] (use '?' no SQL)");
+      }
+      for (const Value& v : *a[1].list) {
+        try {
+          params.push_back(rt::param_de_valor(v, "sql"));
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
+    }
+    std::string motor = "auto";
+    std::vector<std::pair<std::string, Value>> tabelas;
+    for (const auto& [chave, v] : kw.items) {
+      if (chave == "motor") {
+        if (v.kind != ValueKind::Texto) fail(call.span, "sql: 'motor' deve ser texto");
+        motor = v.s;
+      } else {
+        tabelas.emplace_back(chave, v);
+      }
+    }
+    for (const std::string& id : identificadores_sql(a[0].s)) {
+      bool ja = false;
+      for (const auto& t : tabelas) ja = ja || t.first == id;
+      if (ja) continue;
+      if (Value* v = env.lookup(id); v != nullptr && parece_tabela(*v))
+        tabelas.emplace_back(id, *v);
+    }
+    try {
+      return rt::sql_tabelas(motor, a[0].s, tabelas, params);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
+  if (name == "chamar_python") {
+    auto a = args();
+    rt::ValueMap kw = eval_kwargs(call, env);
+    if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+      fail(call.span,
+           "chamar_python espera (modulo, funcao, args...), ex.: chamar_python \"math\", "
+           "\"sqrt\", 16  ou  chamar_python \"limpeza.py\", \"normalizar\", tabela, escala: 2");
+    }
+    std::string modulo = a[0].s;
+    // Caminho relativo de .py: procura ao lado do programa antes do diretorio atual.
+    if (modulo.size() > 3 && modulo.compare(modulo.size() - 3, 3, ".py") == 0 &&
+        !std::filesystem::path(modulo).is_absolute()) {
+      const std::filesystem::path ao_lado = std::filesystem::path(entry_dir_) / modulo;
+      std::error_code ec;
+      if (!entry_dir_.empty() && std::filesystem::exists(ao_lado, ec)) modulo = ao_lado.string();
+    }
+    std::string python;
+    if (const Value* p = kw.find("python"); p != nullptr) {
+      if (p->kind != ValueKind::Texto) fail(call.span, "chamar_python: 'python' deve ser texto");
+      python = p->s;
+      kw.items.erase(std::remove_if(kw.items.begin(), kw.items.end(),
+                                    [](const auto& kv) { return kv.first == "python"; }),
+                     kw.items.end());
+    }
+    try {
+      return rt::chamar_python(modulo, a[1].s, std::vector<Value>(a.begin() + 2, a.end()), kw,
+                               python);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (name == "es_buscar") {
     auto a = args();
     if (a.size() < 2 || a[0].kind != ValueKind::Texto) {
@@ -11091,11 +12274,15 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
   if (is_table && method == "filtrar") {
     if (call.args.empty()) fail(call.span, "filtrar espera uma condicao");
     rt::ValueList kept;
-    for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      Env inner;
-      inner.parent = &env;
-      inner.vars["linha"] = row;
-      if (eval(*call.args[0].value, inner).truthy()) kept.push_back(row);
+    // Um unico Env para todas as linhas: so `linha` muda (antes: unordered_map novo por linha).
+    Env inner;
+    inner.parent = &env;
+    Value& var_linha = inner.vars["linha"];
+    if (receiver.list) {
+      for (const Value& row : *receiver.list) {
+        var_linha = row;
+        if (eval(*call.args[0].value, inner).truthy()) kept.push_back(row);
+      }
     }
     return Value::tabela(std::move(kept));
   }
@@ -11105,13 +12292,17 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     }
     const Expr& spec = *call.args[0].value;
     rt::ValueList out;
+    if (receiver.list) out.reserve(receiver.list->size());
+    Env inner;  // reaproveitado entre as linhas: so `linha` muda
+    inner.parent = &env;
+    Value& var_linha = inner.vars["linha"];
     for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      Env inner;
-      inner.parent = &env;
-      inner.vars["linha"] = row;
+      var_linha = row;
       Value nr = Value::mapa();
       if (row.map) {
-        for (const auto& kv : row.map->items) nr.map->set(kv.first, kv.second);
+        // Colunas da linha original sem chaves repetidas: copia direta (set() buscaria a chave).
+        nr.map->items.reserve(row.map->items.size() + spec.entries.size());
+        nr.map->items.assign(row.map->items.begin(), row.map->items.end());
       }
       for (const auto& en : spec.entries) nr.map->set(en.key, eval(*en.value, inner));
       out.push_back(std::move(nr));
@@ -11125,13 +12316,20 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     const Expr& aggs = *call.args[1].value;
     if (aggs.kind != ExprKind::MapLit) fail(call.span, "agregacoes devem ser um mapa");
 
+    // Grupos guardam ponteiros para as linhas (sem copiar Values) e 1 busca por linha.
     std::vector<std::string> order;
-    std::unordered_map<std::string, rt::ValueList> groups;
-    for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      const Value* k = row.map ? row.map->find(key_col) : nullptr;
-      std::string gk = k ? to_display(*k) : "";
-      if (!groups.count(gk)) order.push_back(gk);
-      groups[gk].push_back(row);
+    std::unordered_map<std::string, std::vector<const Value*>> groups;
+    if (receiver.list) {
+      for (const Value& row : *receiver.list) {
+        const Value* k = row.map ? row.map->find(key_col) : nullptr;
+        std::string gk = k ? to_display(*k) : "";
+        auto it = groups.find(gk);
+        if (it == groups.end()) {
+          order.push_back(gk);
+          it = groups.emplace(std::move(gk), std::vector<const Value*>{}).first;
+        }
+        it->second.push_back(&row);
+      }
     }
 
     rt::ValueList out;
@@ -11156,8 +12354,8 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           acc = static_cast<double>(rows.size());
         } else {
           bool init = false;
-          for (const Value& rr : rows) {
-            const Value* c = rr.map ? rr.map->find(col) : nullptr;
+          for (const Value* rp : rows) {
+            const Value* c = rp->map ? rp->map->find(col) : nullptr;
             double n = c ? c->as_number() : 0;
             if (!init) {
               acc = n;
@@ -11182,6 +12380,35 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     }
     return Value::tabela(std::move(out));
   }
+  if (is_table && method == "sql") {
+    // tabela.sql "select ... from t where ..." — a propria tabela e `t`.
+    auto a = eval_args(call, env);
+    if (a.empty() || a[0].kind != ValueKind::Texto) {
+      fail(call.span,
+           "sql espera o texto da consulta, ex.: tabela.sql \"select count(*) as n from t\"");
+    }
+    std::vector<rt::SqlParam> params;
+    if (a.size() >= 2 && a[1].kind == ValueKind::Lista && a[1].list) {
+      for (const Value& v : *a[1].list) {
+        try {
+          params.push_back(rt::param_de_valor(v, "sql"));
+        } catch (const std::exception& e) {
+          fail(call.span, std::string(e.what()));
+        }
+      }
+    }
+    std::vector<std::pair<std::string, Value>> tabelas = {{"t", receiver}};
+    for (const std::string& id : identificadores_sql(a[0].s)) {
+      if (id == "t") continue;
+      if (Value* v = env.lookup(id); v != nullptr && parece_tabela(*v))
+        tabelas.emplace_back(id, *v);
+    }
+    try {
+      return rt::sql_tabelas("auto", a[0].s, tabelas, params);
+    } catch (const std::exception& e) {
+      fail(call.span, std::string(e.what()));
+    }
+  }
   if (is_table && method == "selecionar") {
     auto cols = eval_args(call, env);
     rt::ValueList out;
@@ -11196,27 +12423,6 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     }
     return Value::tabela(std::move(out));
   }
-  if (is_table && method == "ordenar_por") {
-    auto a = eval_args(call, env);
-    rt::ValueMap kw = eval_kwargs(call, env);
-    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ordenar_por espera uma coluna");
-    const std::string col = a[0].s;
-    const Value* desc = kw.find("desc");
-    const bool descending = desc && desc->truthy();
-    rt::ValueList out = receiver.list ? *receiver.list : rt::ValueList{};
-    std::stable_sort(out.begin(), out.end(), [&](const Value& x, const Value& y) {
-      const Value* xa = x.map ? x.map->find(col) : nullptr;
-      const Value* ya = y.map ? y.map->find(col) : nullptr;
-      bool less;
-      if (xa && ya && xa->is_number() && ya->is_number()) {
-        less = xa->as_number() < ya->as_number();
-      } else {
-        less = (xa ? to_display(*xa) : "") < (ya ? to_display(*ya) : "");
-      }
-      return descending ? !less : less;
-    });
-    return Value::tabela(std::move(out));
-  }
   if (is_table && (method == "limite" || method == "primeiros")) {
     auto a = eval_args(call, env);
     std::int64_t n = a.empty() ? 0 : static_cast<std::int64_t>(a[0].as_number());
@@ -11229,25 +12435,187 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     }
     return Value::tabela(std::move(out));
   }
-  if (is_table && method == "distinto") {
+  // Limpeza e preparacao de dados (runtime/tabela_ops): cada metodo devolve uma tabela nova.
+  if (is_table &&
+      word_in(method, {"remover_nulos", "preencher_nulos", "renomear", "remover_colunas",
+                       "converter", "deduplicar", "distinto", "juntar", "empilhar", "descrever",
+                       "amostra", "contar_valores", "limpar_texto", "ordenar_por", "pivotar",
+                       "despivotar", "janela", "dividir_coluna", "converter_fuso"})) {
     auto a = eval_args(call, env);
-    const std::string col = (!a.empty() && a[0].kind == ValueKind::Texto) ? a[0].s : "";
-    rt::ValueList out;
-    std::vector<std::string> seen;
-    for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      std::string key;
-      if (col.empty()) {
-        key = to_display(row);
-      } else {
-        const Value* c = row.map ? row.map->find(col) : nullptr;
-        key = c ? to_display(*c) : "";
+    const rt::ValueMap kw = eval_kwargs(call, env);
+    // Nomes de coluna: textos soltos ou listas de textos, a partir do argumento `desde`.
+    const auto nomes = [&](std::size_t desde) {
+      std::vector<std::string> out;
+      for (std::size_t k = desde; k < a.size(); ++k) {
+        if (a[k].kind == ValueKind::Texto) {
+          out.push_back(a[k].s);
+        } else if (a[k].kind == ValueKind::Lista && a[k].list) {
+          for (const Value& v : *a[k].list) {
+            if (v.kind != ValueKind::Texto) {
+              throw std::runtime_error(method + ": os nomes de coluna devem ser texto");
+            }
+            out.push_back(v.s);
+          }
+        } else {
+          throw std::runtime_error(method +
+                                   ": esperado o nome de uma coluna (texto) ou lista de nomes");
+        }
       }
-      if (std::find(seen.begin(), seen.end(), key) == seen.end()) {
-        seen.push_back(key);
-        out.push_back(row);
+      return out;
+    };
+    const auto exige_arg = [&](const char* uso) {
+      if (a.empty()) throw std::runtime_error(method + " espera argumentos, ex.: " + uso);
+    };
+    try {
+      if (method == "remover_nulos") return rt::tabela_remover_nulos(receiver, nomes(0));
+      if (method == "preencher_nulos") {
+        exige_arg("t.preencher_nulos { idade: 0, cidade: \"?\" }");
+        return rt::tabela_preencher_nulos(receiver, a[0]);
       }
+      if (method == "renomear") {
+        exige_arg("t.renomear { antigo: \"novo\" }");
+        return rt::tabela_renomear(receiver, a[0]);
+      }
+      if (method == "remover_colunas") {
+        exige_arg("t.remover_colunas \"a\", \"b\"");
+        return rt::tabela_remover_colunas(receiver, nomes(0));
+      }
+      if (method == "converter") {
+        exige_arg("t.converter { idade: \"inteiro\", nascimento: \"data\" }");
+        return rt::tabela_converter(receiver, a[0]);
+      }
+      if (method == "deduplicar" || method == "distinto") {
+        return rt::tabela_deduplicar(receiver, nomes(0));
+      }
+      if (method == "juntar") {
+        exige_arg("a.juntar b, por: \"id\", tipo: \"esquerda\"");
+        Value por = a.size() > 1 ? a[1] : Value::nulo();
+        if (const Value* v = kw.find("por")) por = *v;
+        std::string tipo = "interna";
+        if (const Value* v = kw.find("tipo")) {
+          if (v->kind != ValueKind::Texto)
+            throw std::runtime_error("juntar: 'tipo' deve ser texto");
+          tipo = v->s;
+        }
+        return rt::tabela_juntar(receiver, a[0], por, tipo);
+      }
+      if (method == "empilhar") {
+        exige_arg("a.empilhar b");
+        std::vector<Value> todas = {receiver};
+        for (const Value& v : a) todas.push_back(v);
+        return rt::tabela_empilhar(todas);
+      }
+      if (method == "descrever") return rt::tabela_descrever(receiver);
+      if (method == "amostra") {
+        exige_arg("t.amostra 100, semente: 7  ou  t.amostra 0.1");
+        if (!a[0].is_number())
+          throw std::runtime_error("amostra espera um numero (linhas ou fracao)");
+        std::uint64_t semente = 42;
+        if (const Value* v = kw.find("semente")) {
+          semente = static_cast<std::uint64_t>(v->as_number());
+        }
+        return rt::tabela_amostra(receiver, a[0].as_number(), semente);
+      }
+      if (method == "contar_valores") {
+        exige_arg("t.contar_valores \"cidade\"");
+        if (a[0].kind != ValueKind::Texto)
+          throw std::runtime_error("contar_valores espera o nome de uma coluna");
+        return rt::tabela_contar_valores(receiver, a[0].s);
+      }
+      if (method == "limpar_texto") {
+        std::string caixa;
+        if (const Value* v = kw.find("caixa")) {
+          if (v->kind != ValueKind::Texto)
+            throw std::runtime_error("limpar_texto: 'caixa' deve ser texto");
+          caixa = v->s;
+        }
+        return rt::tabela_limpar_texto(receiver, nomes(0), caixa);
+      }
+      // Opcao nomeada que aceita um nome de coluna ou uma lista de nomes.
+      const auto nomes_kw = [&](const char* chave) {
+        std::vector<std::string> out;
+        const Value* v = kw.find(chave);
+        if (v == nullptr) return out;
+        if (v->kind == ValueKind::Texto) {
+          out.push_back(v->s);
+        } else if (v->kind == ValueKind::Lista && v->list) {
+          for (const Value& e : *v->list) {
+            if (e.kind != ValueKind::Texto) {
+              throw std::runtime_error(method + ": '" + chave +
+                                       "' deve ser nome(s) de coluna (texto)");
+            }
+            out.push_back(e.s);
+          }
+        } else {
+          throw std::runtime_error(method + ": '" + chave + "' deve ser nome(s) de coluna (texto)");
+        }
+        return out;
+      };
+      const auto texto_kw = [&](const char* chave, const std::string& padrao) {
+        const Value* v = kw.find(chave);
+        if (v == nullptr) return padrao;
+        if (v->kind != ValueKind::Texto)
+          throw std::runtime_error(method + ": '" + chave + "' deve ser texto");
+        return v->s;
+      };
+      if (method == "pivotar") {
+        const std::vector<std::string> col = nomes_kw("colunas");
+        const std::vector<std::string> val = nomes_kw("valores");
+        if (col.size() != 1 || val.size() != 1) {
+          throw std::runtime_error(
+              "pivotar: 'colunas:' e 'valores:' devem ser um nome de coluna cada");
+        }
+        return rt::tabela_pivotar(receiver, nomes_kw("indice"), col[0], val[0],
+                                  texto_kw("agregacao", "soma"));
+      }
+      if (method == "despivotar") {
+        const Value* manter = kw.find("manter_nulos");
+        return rt::tabela_despivotar(receiver, nomes_kw("id"), nomes_kw("colunas"),
+                                     texto_kw("nome", "variavel"), texto_kw("valor", "valor"),
+                                     manter != nullptr && manter->truthy());
+      }
+      if (method == "janela") {
+        exige_arg(
+            "t.janela \"acumulado\", \"soma_acumulada\", \"valor\", por: \"regiao\", ordem: "
+            "\"data\"");
+        rt::JanelaOpcoes op;
+        std::vector<std::string> pos = nomes(0);  // nome, funcao, [coluna]
+        if (pos.size() < 2) throw std::runtime_error("janela espera (nome, funcao [, coluna])");
+        op.nome = pos[0];
+        op.funcao = pos[1];
+        if (pos.size() > 2) op.coluna = pos[2];
+        op.por = nomes_kw("por");
+        op.ordem = nomes_kw("ordem");
+        if (const Value* v = kw.find("desc")) op.decrescente = v->truthy();
+        if (const Value* v = kw.find("tamanho"))
+          op.tamanho = static_cast<std::size_t>(v->as_number());
+        if (const Value* v = kw.find("deslocamento"))
+          op.deslocamento = static_cast<std::size_t>(v->as_number());
+        if (const Value* v = kw.find("padrao")) op.padrao = *v;
+        return rt::tabela_janela(receiver, op);
+      }
+      if (method == "dividir_coluna") {
+        exige_arg("t.dividir_coluna \"nome\", \" \", nomes: [\"primeiro\", \"resto\"]");
+        if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+          throw std::runtime_error("dividir_coluna espera (coluna, separador)");
+        }
+        const Value* rem = kw.find("remover");
+        return rt::tabela_dividir_coluna(receiver, a[0].s, a[1].s, nomes_kw("nomes"),
+                                         rem != nullptr && rem->truthy());
+      }
+      if (method == "converter_fuso") {
+        exige_arg("t.converter_fuso \"quando\", origem: \"UTC\", destino: \"America/Sao_Paulo\"");
+        if (a[0].kind != ValueKind::Texto)
+          throw std::runtime_error("converter_fuso espera o nome de uma coluna");
+        return rt::tabela_converter_fuso(receiver, a[0].s, texto_kw("origem", "UTC"),
+                                         texto_kw("destino", "UTC"));
+      }
+      // ordenar_por
+      const Value* desc = kw.find("desc");
+      return rt::tabela_ordenar(receiver, nomes(0), desc != nullptr && desc->truthy());
+    } catch (const std::exception& e) {
+      fail(call.span, e.what());
     }
-    return Value::tabela(std::move(out));
   }
 
   if (receiver.kind == ValueKind::Tensor && receiver.tensor) {

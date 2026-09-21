@@ -94,6 +94,10 @@ pipeline tensores:
     - imprimir t.soma         # 6
 ```
 
+Indexação de tensor: `t[i]` fixa o primeiro eixo, `t[i, j]` os dois primeiros
+(índices negativos contam do fim). Com todos os eixos fixos devolve um `decimal`;
+com menos, o sub-tensor. Índice fora dos limites é erro `T901`.
+
 Sufixo de dispositivo: `tensor[f32, 64, 1536] no dispositivo gpu`.
 
 Em valores, tensores vêm de builtins (`tensor`, `zeros`, `uns`, `aleatorio`),

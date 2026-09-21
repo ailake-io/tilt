@@ -57,6 +57,7 @@ class SemanticChecker {
   }
 
  private:
+  int loop_depth_ = 0;  // > 0 dentro de `para cada` / `enquanto` (valida parar/continuar)
 
   void collect();
   void resolve_types();

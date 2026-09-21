@@ -1,0 +1,11 @@
+== pipeline demo ==
+0.002
+-2
+tabela(2 linhas)
+medium
+south
+north
+south
+3 verdadeiro nulo
+1
+failed: nao foi possivel abrir 'does_not_exist_zzz.csv'

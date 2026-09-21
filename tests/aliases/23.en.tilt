@@ -1,0 +1,25 @@
+llm gpt:
+  provider: "anthropic"
+  model: "claude-sonnet-5"
+  key: env "ANTHROPIC_API_KEY"
+
+tool eco:
+  description: "Repete o texto de volta."
+  input:
+    text: text
+  execute:
+    return text
+
+agent AssistenteTecnico:
+  llm: gpt
+  role: "Especialista em análise preditiva e dados estruturados."
+  tools: [eco]
+  memory: conversation
+  max_steps: 8
+  on_step:
+    - register { step: step.index, tool: step.tool }
+
+pipeline pergunta:
+  steps:
+    - r = AssistenteTecnico.respond "resuma tilt"
+    - print r.text

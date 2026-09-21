@@ -40,6 +40,14 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 - **Qualidade de dados**: `verificar` valida e `quarentena:` já desvia linhas
   ruins em iterações; ainda faltam perfilagem/estatísticas e contrato de
   schema versionado na entrada.
+- **Limpeza de dados**: feito — `remover_nulos`, `preencher_nulos`, `renomear`,
+  `remover_colunas`, `converter` (inclui `data`), `deduplicar`, `juntar`, `empilhar`,
+  `descrever`, `amostra`, `contar_valores`, `limpar_texto` e `ordenar_por` com várias
+  colunas, `ler_csv` com `separador:`/`pular:`/`nulos:`/`tipos:`/`sem_cabecalho:`,
+  `escrever_csv` com aspas RFC 4180, `converter_data`/`ano`/`mes`/`dia`/`adicionar_dias`/
+  `dias_entre` e `coalescer`, mais `pivotar`, `despivotar`, funções de janela
+  (`janela`), `dividir_coluna` e `converter_fuso` (guia 03). O que resta é
+  detecção de tipos por amostragem no `ler_csv` e datas com fuso na leitura.
 - **Escrita analítica**: Delta/Iceberg particionam, compactam com
   `otimizar_delta`/`otimizar_iceberg`, z-order determinístico via `z_order:` e
   `vacuum_*` conservador para Parquet órfão; `ordenar_por` continua disponível
@@ -54,7 +62,7 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `validacao_cruzada:`, `imputar:`, métricas (acurácia, f1 ponderado, auc,
   matriz_confusao, rmse, r2, inércia) e `registrar_em: mlflow://` via
   Tracking REST. Detalhes e limites no guia 04 e no guia 12.
-- Restam busca aleatória/bayesiana e outras estratégias além da grade.
+- Busca aleatória existe (`estrategia: aleatoria`); resta a bayesiana.
 
 ## Deep learning — treino real, mas de brinquedo
 
@@ -66,7 +74,7 @@ cruzada/quadrática, autograd manual.
 - **CNN de brinquedo**: `conv2d` (com viés), `norma_lote` (gama/beta +
   média/variância correntes), `agrupamento_max` e `achatar` treinam de
   verdade (mini-lotes em CPU). `incorporacao` também treina a tabela por SGD/Adam;
-  com recorrência RNN/LSTM/GRU e BPTT; abandono ainda é identidade no treino.
+  com recorrência RNN/LSTM/GRU e BPTT; `abandono` (dropout) atua no treino com máscara determinística pela semente.
 - **GPU não validada** (`TILT_GPU=fake` em CPU; CUDA nunca rodou em
   hardware real) + sem AMP real.
 - **Exportação**: `modelo <Nome>.exportar_onnx "modelo.onnx"` existe no
@@ -79,7 +87,7 @@ cruzada/quadrática, autograd manual.
   de taxa (`cosseno`/`degrau`), `validacao:` + `parar_cedo:` (restaura
   melhores pesos), `busca` em grade com `criterio:`, dataloader streaming de CSV e Parquet (`carregador ..., fluxo: verdadeiro` + `bloco:`)
   e exportação `gguf` (v3, só escrita), Safetensors F32 e exportação ONNX das recorrentes e residuais.
-- **Faltam**: busca de hiperparâmetros além de grade (random/bayesiana),
+- **Faltam**: busca bayesiana de hiperparâmetros (grade e aleatória existem),
   `gguf` com quantização (hoje só F32).
 
 ## LLM / RAG — funcional, falta engenharia de produção
@@ -161,6 +169,14 @@ Também foi concluído o query pushdown das fontes SQL: `pushdown.colunas`,
 `pushdown.onde` (igualdade parametrizada, inclusive nulo) e `pushdown.limite`
 são aplicados em SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse, com
 teste CTest local e sem interpolar valores no SQL.
+
+## Desempenho
+
+Medições, causas e o plano para acelerar lógica e dados estão no
+[guia 16](guia-16-desempenho.md): `Value` compacto, variáveis por slot, chamadas
+baratas, tabela colunar, leitura paralela e delegação ao DuckDB. Já entregues: leitura de
+CSV/Parquet em paralelo, `ordenar_por` por índices, chamadas VM → VM diretas e `sql` com
+DuckDB (ver "O que já foi feito" no guia 16).
 
 ## Priorizacao sugerida
 

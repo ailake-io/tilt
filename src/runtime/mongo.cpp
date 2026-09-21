@@ -115,6 +115,7 @@ void bson_encode_doc(std::string& out, const ValueMap& map, const std::string* o
       }
       case ValueKind::Tabela:
       case ValueKind::Tensor:
+      case ValueKind::Funcao:
         die(std::string("nao e possivel gravar ") + v.type_name() + " no MongoDB (campo '" + k +
             "')");
     }
@@ -281,7 +282,7 @@ std::string novo_object_id() {
     for (auto& c : b) c = static_cast<unsigned char>(rd() & 0xFF);
     return b;
   }();
-  static std::uint32_t contador = std::random_device{}() & 0xFFFFFFu;
+  static std::uint32_t contador = std::random_device()() & 0xFFFFFFu;
   contador = (contador + 1) & 0xFFFFFFu;
 
   const auto agora = std::chrono::duration_cast<std::chrono::seconds>(
@@ -436,7 +437,8 @@ std::int64_t inteiro_de(const Value& resp, const std::string& campo, const std::
   if (!resp.map) die(ctx + ": resposta sem documento");
   const Value* v = resp.map->find(campo);
   if (!v || !v->is_number()) die(ctx + ": resposta sem '" + campo + "'");
-  return static_cast<std::int64_t>(v->as_number());
+  // Inteiro exato: passar por double perde precisao acima de 2^53 (ids de cursor).
+  return v->kind == ValueKind::Inteiro ? v->i : static_cast<std::int64_t>(v->as_number());
 }
 
 // Campo inteiro opcional (ex.: cursor.id); ausente ou nao numerico vira o
@@ -444,7 +446,8 @@ std::int64_t inteiro_de(const Value& resp, const std::string& campo, const std::
 std::int64_t inteiro_opcional(const ValueMap& mapa, const std::string& campo, std::int64_t padrao) {
   const Value* v = mapa.find(campo);
   if (!v || !v->is_number()) return padrao;
-  return static_cast<std::int64_t>(v->as_number());
+  // cursor.id e int64 (Long): nunca converter por double.
+  return v->kind == ValueKind::Inteiro ? v->i : static_cast<std::int64_t>(v->as_number());
 }
 
 // Cursor de uma resposta de find/getMore: extrai o id e o batch (firstBatch
@@ -477,6 +480,8 @@ class Sessao {
 
     Value handshake = Value::mapa();
     handshake.map->set("isMaster", Value::inteiro(1));
+    handshake.map->set("$db",
+                       Value::texto("admin"));  // mongod real exige $db em todo comando OP_MSG
     const Value resp = comando(handshake);
     if (!ok_de(resp)) die("handshake isMaster falhou (ok != 1)");
   }
@@ -607,6 +612,38 @@ void mongo_inserir(const std::string& colecao, const Value& doc, const std::stri
   if (!ok_de(resp)) die("insert em '" + colecao + "': " + errmsg_de(resp));
 }
 
+namespace {
+
+// Junta o firstBatch de `c0` com os nextBatch de getMore ate o servidor fechar o
+// cursor (id == 0). Limite de seguranca contra cursores que nunca terminam.
+Value coletar_cursor(Sessao& sessao, const std::string& db, const std::string& colecao,
+                     const PartesCursor& c0, std::int64_t lote, const std::string& ctx) {
+  Value resultado = Value::lista();
+  for (const Value& doc : *c0.batch->list) resultado.list->push_back(doc);
+  constexpr int kMaxGetMore = 10000;
+  std::int64_t id = c0.id;
+  int rodadas = 0;
+  while (id != 0) {
+    if (++rodadas > kMaxGetMore) {
+      die(ctx + " em '" + colecao + "': cursor nao terminou apos " + std::to_string(kMaxGetMore) +
+          " getMore");
+    }
+    Value gm = Value::mapa();
+    gm.map->set("getMore", Value::inteiro(id));
+    gm.map->set("$db", Value::texto(db));
+    gm.map->set("collection", Value::texto(colecao));
+    if (lote > 0) gm.map->set("batchSize", Value::inteiro(lote));
+    const Value r2 = sessao.comando(gm);
+    if (!ok_de(r2)) die("getMore em '" + colecao + "': " + errmsg_de(r2));
+    const PartesCursor c2 = cursor_de(r2, "nextBatch", "getMore");
+    for (const Value& doc : *c2.batch->list) resultado.list->push_back(doc);
+    id = c2.id;
+  }
+  return resultado;
+}
+
+}  // namespace
+
 Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t max,
                    const std::string& banco, const Value& somente, std::int64_t lote) {
   if (filtro.kind != ValueKind::Mapa || !filtro.map) die("buscar espera um mapa como filtro");
@@ -642,32 +679,7 @@ Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t
   if (!ok_de(resp)) die("find em '" + colecao + "': " + errmsg_de(resp));
 
   const PartesCursor c0 = cursor_de(resp, "firstBatch", "find");
-  Value resultado = Value::lista();
-  for (const Value& doc : *c0.batch->list) resultado.list->push_back(doc);
-
-  // Cursor aberto (cursor.id != 0): itera getMore acumulando nextBatch ate o
-  // servidor fechar o cursor (id == 0). Limite de seguranca contra cursores
-  // que nunca terminam.
-  constexpr int kMaxGetMore = 10000;
-  std::int64_t id = c0.id;
-  int rodadas = 0;
-  while (id != 0) {
-    if (++rodadas > kMaxGetMore) {
-      die("find em '" + colecao + "': cursor nao terminou apos " + std::to_string(kMaxGetMore) +
-          " getMore");
-    }
-    Value gm = Value::mapa();
-    gm.map->set("getMore", Value::inteiro(id));
-    gm.map->set("$db", Value::texto(db));
-    gm.map->set("collection", Value::texto(colecao));
-    if (lote > 0) gm.map->set("batchSize", Value::inteiro(lote));
-    const Value r2 = sessao.comando(gm);
-    if (!ok_de(r2)) die("getMore em '" + colecao + "': " + errmsg_de(r2));
-    const PartesCursor c2 = cursor_de(r2, "nextBatch", "getMore");
-    for (const Value& doc : *c2.batch->list) resultado.list->push_back(doc);
-    id = c2.id;
-  }
-  return resultado;
+  return coletar_cursor(sessao, db, colecao, c0, lote, "find");
 }
 
 std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
@@ -677,9 +689,15 @@ std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
     die("atualizar espera um mapa de mudancas, ex.: {$set: {valor: 999}, $inc: {acessos: 1}}");
   }
   for (const auto& [op, v] : mudancas.map->items) {
-    if (op != "$set" && op != "$inc") {
+    static const char* const kOperadores[] = {"$set",      "$inc",    "$unset",      "$push",
+                                              "$addToSet", "$pull",   "$mul",        "$min",
+                                              "$max",      "$rename", "$currentDate"};
+    bool conhecido = false;
+    for (const char* o : kOperadores) conhecido = conhecido || op == o;
+    if (!conhecido) {
       die("atualizar: operador '" + op +
-          "' nao suportado (fase atual: $set e $inc podem ser combinados)");
+          "' nao suportado (use $set, $inc, $unset, $push, $addToSet, $pull, $mul, $min, "
+          "$max, $rename ou $currentDate)");
     }
     if (v.kind != ValueKind::Mapa || !v.map) {
       die("atualizar: '" + op + "' deve ser um mapa {campo: valor}");
@@ -792,18 +810,9 @@ Value mongo_agregar(const std::string& colecao, const Value& etapas,
   if (!ok_de(resp)) die("aggregate em '" + colecao + "': " + errmsg_de(resp));
   if (!resp.map) die("resposta de aggregate sem documento");
 
-  const Value* cursor = resp.map->find("cursor");
-  if (!cursor || cursor->kind != ValueKind::Mapa || !cursor->map) {
-    die("resposta de aggregate sem 'cursor'");
-  }
-  const Value* batch = cursor->map->find("firstBatch");
-  if (!batch || batch->kind != ValueKind::Lista || !batch->list) {
-    die("resposta de aggregate sem 'cursor.firstBatch'");
-  }
-  // Sem getMore nesta fase: cursor.id != 0 e ignorado e so o firstBatch e
-  // devolvido. Servidores reais podem paginar com batchSize default (101
-  // docs) — use $limit/$skip para resultados maiores.
-  return *batch;
+  // O servidor pagina (batchSize default 101): itera getMore ate fechar o cursor.
+  const PartesCursor c0 = cursor_de(resp, "firstBatch", "aggregate");
+  return coletar_cursor(sessao, db, colecao, c0, 0, "aggregate");
 }
 
 }  // namespace tilt::rt

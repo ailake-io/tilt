@@ -1,0 +1,7 @@
+erro[T901]: indice 5 fora dos limites do eixo 0 (tamanho 2)
+  --> input.tilt:4:16
+   |
+ 4 |     - imprimir v[5]
+   |                ^
+   |
+

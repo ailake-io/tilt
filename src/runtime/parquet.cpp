@@ -2,18 +2,24 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "runtime/aws_kms.hpp"
 #include "runtime/compat.hpp"
+#include "runtime/json.hpp"
 #include "runtime/sha256.hpp"
 #include "runtime/snappy_codec.hpp"
 
@@ -256,6 +262,11 @@ constexpr int CRYPTO_CTRL_GCM_SET_TAG = 0x11;
 struct ParquetCrypto {
   std::array<std::uint8_t, 32> key{};
   std::string file_unique;
+  std::string key_metadata;
+  ~ParquetCrypto() {
+    volatile std::uint8_t* p = key.data();
+    for (std::size_t i = 0; i < key.size(); ++i) p[i] = 0;
+  }
 };
 
 AesGcmApi& aes_gcm() {
@@ -1592,6 +1603,9 @@ constexpr int kZNoFlush = 0;
 constexpr int kZFinish = 4;
 constexpr int kZStreamEnd = 1;
 constexpr int kZDefaultCompression = -1;
+// Nivel 1: 3-5x mais rapido que o padrao (6) na escrita, com arquivos ~10-20% maiores;
+// leitores de Parquet nao dependem do nivel usado.
+constexpr int kZBestSpeed = 1;
 constexpr int kZDeflated = 8;
 constexpr int kWindowBitsAuto = 15 + 32;      // aceita zlib (RFC1950) e gzip (RFC1952)
 constexpr int kWindowBitsGzip = 15 + 16;      // emite container gzip (RFC1952)
@@ -1638,7 +1652,7 @@ std::string gzip_payload(const std::string& in, const std::string& col) {
     die(zlib_ausente(col));
   }
   ZStream s{};
-  if (z.deflate_init2(&s, kZDefaultCompression, kZDeflated, kWindowBitsGzip, 8, 0, z.version(),
+  if (z.deflate_init2(&s, kZBestSpeed, kZDeflated, kWindowBitsGzip, 8, 0, z.version(),
                       static_cast<int>(sizeof(ZStream))) != 0) {
     die("falha ao inicializar a zlib (deflateInit2)");
   }
@@ -2011,6 +2025,7 @@ struct ColMeta {
 struct ParsedParquetCrypto {
   bool encrypted = false;
   ParquetCrypto material;
+  std::string key_metadata;
 };
 
 // Descritor de coluna extraido da arvore de schema: nome exposto (grupo
@@ -2333,7 +2348,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       for (std::int64_t k = 0; k < page_values; ++k) {
         const int def = static_cast<int>(defs[static_cast<std::size_t>(k)]);
         if (def == max_def) {
-          out.push_back(vals[vi++]);
+          out.push_back(std::move(vals[vi++]));
         } else {
           out.push_back(Value::nulo());
         }
@@ -2413,7 +2428,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
             cur.list->push_back(Value::lista());
             tags_open = true;
           }
-          cur.list->back().list->push_back(vals[vi++]);
+          cur.list->back().list->push_back(std::move(vals[vi++]));
           ++k;
           continue;
         }
@@ -2500,7 +2515,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
             if (primeira || reps[k] == 1) {
               row.list->push_back(Value::lista());
             }
-            row.list->back().list->push_back(vals[vi++]);
+            row.list->back().list->push_back(std::move(vals[vi++]));
             primeira = false;
             ++k;
             continue;
@@ -2640,7 +2655,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
             if (rep == 0 || rep == 1 || mid < 0) abre_mid();
             if (rep == 0 || rep == 1 || rep == 2 || inr < 0) abre_inr();
             (*(*row.list)[static_cast<std::size_t>(mid)].list)[static_cast<std::size_t>(inr)]
-                .list->push_back(vals[vi++]);
+                .list->push_back(std::move(vals[vi++]));
             primeira = false;
             ++k;
             continue;
@@ -2687,7 +2702,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
         cur_maxdef = static_cast<int>(def);
       }
       if (static_cast<int>(def) == max_def) {
-        cur.list->push_back(vals[vi++]);
+        cur.list->push_back(std::move(vals[vi++]));
       } else if (cd.elem_null_level >= 0 && static_cast<int>(def) == cd.elem_null_level) {
         cur.list->push_back(Value::nulo());  // marcador de elemento Nulo (B2b)
       } else if (cd.elem_nullable && static_cast<int>(def) == max_def - 1) {
@@ -3044,19 +3059,20 @@ std::optional<DictBuild> build_dict(const Column& c, bool permitido) {
   const std::size_t definidos = texto ? c.strings.size() : c.nums.size();
   if (definidos < 8) return std::nullopt;
   DictBuild db;
-  std::vector<std::string> chaves;  // PLAIN de cada distinto
+  // PLAIN de cada distinto -> indice (ordem de 1a aparicao). Busca por hash: a varredura
+  // linear anterior custava O(linhas x distintos) (ate 1024 comparacoes por valor).
+  std::unordered_map<std::string, std::uint32_t> chaves;
   chaves.reserve(64);
   auto indice_de = [&](const std::string& raw, bool& novo) -> std::uint32_t {
-    for (std::uint32_t k = 0; k < chaves.size(); ++k) {
-      if (chaves[k] == raw) {
-        novo = false;
-        return k;
-      }
+    if (const auto it = chaves.find(raw); it != chaves.end()) {
+      novo = false;
+      return it->second;
     }
     if (chaves.size() >= 1024) return 0xFFFFFFFFu;  // teto: desiste
-    chaves.push_back(raw);
+    const auto indice = static_cast<std::uint32_t>(chaves.size());
+    chaves.emplace(raw, indice);
     novo = true;
-    return static_cast<std::uint32_t>(chaves.size() - 1);
+    return indice;
   };
   if (texto) {
     for (const std::string& s : c.strings) {
@@ -3098,9 +3114,26 @@ void parquet_write(const std::string& path, const Value& tabela,
   }
 
   ParquetCrypto crypto;
-  const bool encrypted = !opts.chave.empty();
+  if (!opts.chave.empty() && !opts.chave_kms.empty()) {
+    die("use 'chave' ou 'chave_kms', nao ambos");
+  }
+  const bool local_key = !opts.chave.empty();
+  const bool kms_key = !opts.chave_kms.empty();
+  const bool encrypted = local_key || kms_key;
   if (encrypted) {
-    crypto.key = parquet_key(opts.chave);
+    if (local_key) {
+      crypto.key = parquet_key(opts.chave);
+      crypto.key_metadata = "tilt-local-key-v1";
+    } else {
+      std::string ciphertext_blob;
+      std::string resolved_key_id;
+      aws_kms_generate_data_key(opts.chave_kms, crypto.key, ciphertext_blob, resolved_key_id);
+      Value metadata = Value::mapa();
+      metadata.map->set("provider", Value::texto("aws-kms-v1"));
+      metadata.map->set("key_id", Value::texto(resolved_key_id));
+      metadata.map->set("ciphertext_blob", Value::texto(ciphertext_blob));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    }
     crypto.file_unique = random_bytes(16);
   }
   std::string body = encrypted ? "PARE" : "PAR1";
@@ -3127,7 +3160,12 @@ void parquet_write(const std::string& path, const Value& tabela,
   std::deque<Column> owned;  // folhas sinteticas (refs estaveis)
   const std::vector<FlatLeaf> leaves = flatten_columns(cols, owned);
 
-  for (std::size_t leaf_index = 0; leaf_index < leaves.size(); ++leaf_index) {
+  // Cada folha vira um pedaco de bytes independente (offsets relativos ao pedaco); o
+  // arquivo e montado na ordem, somando o deslocamento. Com muitas colunas grandes e sem
+  // criptografia (nonce aleatorio compartilhado) os pedacos sao gerados em threads.
+  using FolhaGerada = std::pair<std::string, ChunkInfo>;
+  const auto gerar_folha = [&](std::size_t leaf_index) -> FolhaGerada {
+    std::string corpo;
     const FlatLeaf& fl = leaves[leaf_index];
     const Column& c = *fl.leaf;
     const ColumnLevels& lv = fl.lv;
@@ -3194,7 +3232,7 @@ void parquet_write(const std::string& path, const Value& tabela,
 
     // Dictionary page antes da data page (valores do dicionario em PLAIN).
     if (dict) {
-      ci.dict_page_offset = static_cast<std::int64_t>(body.size());
+      ci.dict_page_offset = static_cast<std::int64_t>(corpo.size());
       const std::string dict_comp = compress_payload(values_plain, codec, c.name);
       std::string dict_header;
       Tw dw{dict_header};
@@ -3213,18 +3251,18 @@ void parquet_write(const std::string& path, const Value& tabela,
                                             static_cast<std::uint32_t>(leaf_index));
         const std::string ep = encrypt_page(dict_comp, 3, crypto,
                                             static_cast<std::uint32_t>(leaf_index));
-        body += eh;
-        body += ep;
+        corpo += eh;
+        corpo += ep;
         ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
         ci.dict_compressed = static_cast<std::int64_t>(eh.size() + ep.size());
       } else {
-        body += dict_header;
-        body += dict_comp;
+        corpo += dict_header;
+        corpo += dict_comp;
         ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
         ci.dict_compressed = static_cast<std::int64_t>(dict_header.size() + dict_comp.size());
       }
     }
-    ci.data_page_offset = static_cast<std::int64_t>(body.size());
+    ci.data_page_offset = static_cast<std::int64_t>(corpo.size());
 
     std::string data_header;
     Tw hw{data_header};
@@ -3268,21 +3306,56 @@ void parquet_write(const std::string& path, const Value& tabela,
                                           dict ? 1u : 0u);
       ci.uncompressed_size = static_cast<std::int64_t>(data_header.size() + payload_uncompressed);
       ci.compressed_size = static_cast<std::int64_t>(eh.size() + ep.size());
-      body += eh;
-      body += ep;
+      corpo += eh;
+      corpo += ep;
     } else {
       ci.uncompressed_size = static_cast<std::int64_t>(data_header.size()) + payload_uncompressed;
       ci.compressed_size = static_cast<std::int64_t>(data_header.size()) +
                            static_cast<std::int64_t>(payload.size());
-      body += data_header;
-      body += payload;
+      corpo += data_header;
+      corpo += payload;
     }
     if (ci.dict) {
       // Tamanhos cobrem dictionary + data page (mesmo ColumnChunk).
       ci.uncompressed_size += ci.dict_uncompressed;
       ci.compressed_size += ci.dict_compressed;
     }
-    infos.push_back(ci);
+    return {std::move(corpo), std::move(ci)};
+  };
+  std::vector<FolhaGerada> geradas(leaves.size());
+  std::size_t linhas_grandes = nrows;
+  const std::size_t nthreads_folhas =
+      std::min<std::size_t>(std::max(1u, std::thread::hardware_concurrency()), leaves.size());
+  if (!encrypted && leaves.size() > 1 && linhas_grandes >= 50000 && nthreads_folhas > 1) {
+    std::atomic<std::size_t> proxima{0};
+    std::vector<std::exception_ptr> erros(nthreads_folhas);
+    std::vector<std::thread> threads;
+    for (std::size_t t = 0; t < nthreads_folhas; ++t) {
+      threads.emplace_back([&, t] {
+        try {
+          for (std::size_t i = proxima.fetch_add(1); i < leaves.size(); i = proxima.fetch_add(1)) {
+            geradas[i] = gerar_folha(i);
+          }
+        } catch (...) {
+          erros[t] = std::current_exception();
+          proxima = leaves.size();
+        }
+      });
+    }
+    for (std::thread& th : threads) th.join();
+    for (const std::exception_ptr& e : erros) {
+      if (e) std::rethrow_exception(e);
+    }
+  } else {
+    for (std::size_t i = 0; i < leaves.size(); ++i) geradas[i] = gerar_folha(i);
+  }
+  for (FolhaGerada& g : geradas) {
+    const auto base = static_cast<std::int64_t>(body.size());
+    ChunkInfo& ci = g.second;
+    if (ci.dict) ci.dict_page_offset += base;
+    ci.data_page_offset += base;
+    body += g.first;
+    infos.push_back(std::move(ci));
   }
 
   const std::int64_t total_bytes = static_cast<std::int64_t>(body.size()) - 4;
@@ -3381,7 +3454,7 @@ void parquet_write(const std::string& path, const Value& tabela,
   cmw.field_str(2, crypto.file_unique);
   cmw.struct_end();
   cmw.struct_end();
-  cmw.field_str(2, "tilt-local-key-v1");
+  cmw.field_str(2, crypto.key_metadata);
   cmw.struct_end();
   const std::string encrypted_footer = encrypt_footer(footer, crypto);
   out.write(crypto_meta.data(), static_cast<std::streamsize>(crypto_meta.size()));
@@ -3580,15 +3653,38 @@ ParsedParquetCrypto parse_crypto_metadata(const std::string& file, std::size_t s
         }
       }
     } else {
-      tr.skip(tt);
+      if (id == 2 && tt == T_BINARY)
+        out.key_metadata = binary(tr);
+      else
+        tr.skip(tt);
     }
   }
   if (out.material.file_unique.empty()) die("FileCryptoMetaData sem aad_file_unique");
-  const char* secret = std::getenv("TILT_PARQUET_KEY");
-  if (!secret || !*secret) {
-    die("arquivo Parquet criptografado; defina TILT_PARQUET_KEY para ler a chave local");
+  if (out.key_metadata.empty()) die("FileCryptoMetaData sem key metadata");
+  if (out.key_metadata == "tilt-local-key-v1") {
+    const char* secret = std::getenv("TILT_PARQUET_KEY");
+    if (!secret || !*secret) {
+      die("arquivo Parquet criptografado; defina TILT_PARQUET_KEY para ler a chave local");
+    }
+    out.material.key = parquet_key(secret);
+  } else {
+    Value metadata;
+    try {
+      metadata = json_parse(out.key_metadata);
+    } catch (const std::exception&) {
+      die("key metadata Parquet desconhecido ou invalido");
+    }
+    const Value* provider = metadata.map ? metadata.map->find("provider") : nullptr;
+    const Value* key_id = metadata.map ? metadata.map->find("key_id") : nullptr;
+    const Value* blob = metadata.map ? metadata.map->find("ciphertext_blob") : nullptr;
+    if (metadata.kind != ValueKind::Mapa || !metadata.map || !provider ||
+        provider->kind != ValueKind::Texto || provider->s != "aws-kms-v1" || !key_id ||
+        key_id->kind != ValueKind::Texto || key_id->s.empty() || !blob ||
+        blob->kind != ValueKind::Texto || blob->s.empty()) {
+      die("key metadata AWS KMS invalido");
+    }
+    aws_kms_decrypt_data_key(key_id->s, blob->s, out.material.key);
   }
-  out.material.key = parquet_key(secret);
   return out;
 }
 
@@ -4371,10 +4467,32 @@ Value parquet_read(const std::string& path) {
   // Remontagem via montar_no (funcao de arquivo, reutilizada na leitura por grupo).
 
   Value tabela = Value::tabela();
+  tabela.list->reserve(static_cast<std::size_t>(num_rows));
+  // Nomes de topo repetidos exigem ValueMap::set (o ultimo vence); sem repeticao vale o
+  // caminho rapido: folhas simples MOVEM o valor da coluna (cada celula e lida uma vez).
+  bool nomes_unicos = true;
+  for (std::size_t a = 0; a < top.size() && nomes_unicos; ++a) {
+    for (std::size_t b = a + 1; b < top.size(); ++b) {
+      if (top[a].name == top[b].name) nomes_unicos = false;
+    }
+  }
   for (std::int64_t r = 0; r < num_rows; ++r) {
     Value row = Value::mapa();
+    row.map->items.reserve(top.size());
     for (const RField& t : top) {
-      row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+      const bool folha = !t.is_struct && !t.struct_list && !t.is_map;
+      if (nomes_unicos && folha) {
+        auto& col = columns[static_cast<std::size_t>(t.leaf_idx)];
+        if (static_cast<std::size_t>(r) >= col.size()) {
+          die("coluna '" + t.name + "' tem menos valores que 'num_rows'");
+        }
+        row.map->items.emplace_back(t.name, std::move(col[static_cast<std::size_t>(r)]));
+      } else if (nomes_unicos) {
+        row.map->items.emplace_back(t.name,
+                                    montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+      } else {
+        row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+      }
     }
     tabela.list->push_back(std::move(row));
   }

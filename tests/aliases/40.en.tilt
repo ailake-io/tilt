@@ -1,0 +1,16 @@
+pipeline limpeza:
+  steps:
+    - bruto = [{ id: 1, nome: " Ana ", idade: "30" }, { id: 1, nome: " Ana ", idade: "30" }, { id: 2, nome: "", idade: "x" }]
+    - perfil = bruto.describe
+    - a = bruto.deduplicate
+    - b = a.clean_text "nome", case: "minusculas"
+    - c = b.cast { idade: "inteiro" }
+    - d = c.fill_nulls { idade: 0 }
+    - e = d.drop_nulls "nome"
+    - f = e.rename { nome: "cliente" }
+    - g = f.drop_columns "id"
+    - ufs = [{ uf: "sp" }]
+    - j = g.join ufs, by: "uf", how: "esquerda"
+    - s = g.stack(g)
+    - cv = bruto.value_counts "nome"
+    - am = bruto.sample 2, seed: 7

@@ -138,15 +138,13 @@ void chroma_upsert(const std::string& base, const std::string& colecao,
   http_json("POST", base + "/api/v1/collections/" + url_escape(cid) + "/add", body);
 }
 
-std::vector<std::pair<std::string, double>> chroma_search(const std::string& base,
-                                                          const std::string& colecao,
-                                                          const std::vector<float>& vec,
-                                                          std::size_t k) {
+std::vector<VectorHit> chroma_search(const std::string& base, const std::string& colecao,
+                                     const std::vector<float>& vec, std::size_t k) {
   if (vec.empty()) die("vetor de consulta vazio");
   const std::string cid = ensure_colecao(base, colecao);
   const std::string body = "{\"query_embeddings\":[" + vec_json(vec) +
                            "],\"n_results\":" + std::to_string(k) +
-                           ",\"include\":[\"metadatas\",\"distances\"]}";
+                           ",\"include\":[\"documents\",\"metadatas\",\"distances\"]}";
   const std::string resp =
       http_json("POST", base + "/api/v1/collections/" + url_escape(cid) + "/query", body);
   Value parsed;
@@ -155,7 +153,7 @@ std::vector<std::pair<std::string, double>> chroma_search(const std::string& bas
   } catch (const std::exception& e) {
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
-  std::vector<std::pair<std::string, double>> out;
+  std::vector<VectorHit> out;
   if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
   const Value* ids = parsed.map->find("ids");
   const Value* dists = parsed.map->find("distances");
@@ -172,13 +170,23 @@ std::vector<std::pair<std::string, double>> chroma_search(const std::string& bas
   }
   const std::size_t n = ids_q.list->size() < dists_q.list->size() ? ids_q.list->size()
                                                                   : dists_q.list->size();
+  // documents[[...]]: o texto guardado no `inserir` (alinhado a ids).
+  const Value* docs = parsed.map->find("documents");
+  const Value* docs_q = docs && docs->kind == ValueKind::Lista && docs->list && !docs->list->empty()
+                            ? &(*docs->list)[0]
+                            : nullptr;
   for (std::size_t i = 0; i < n; ++i) {
     const Value& id = (*ids_q.list)[i];
     const Value& d = (*dists_q.list)[i];
     const std::string id_s = id.kind == ValueKind::Texto ? id.s : "?";
     // hnsw:space cosine: distance = 1 - cosseno -> score = 1 - distance.
     const double sc = d.is_number() ? 1.0 - d.as_number() : 0.0;
-    out.emplace_back(id_s, sc);
+    std::string texto;
+    if (docs_q && docs_q->kind == ValueKind::Lista && docs_q->list && i < docs_q->list->size() &&
+        (*docs_q->list)[i].kind == ValueKind::Texto) {
+      texto = (*docs_q->list)[i].s;
+    }
+    out.push_back({id_s, sc, texto});
   }
   return out;
 }

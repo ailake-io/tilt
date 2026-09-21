@@ -119,6 +119,20 @@ HttpClientResponse http_request(
     tilt_close_file(fd_hdr);
   }
 
+  // URL (pode ter userinfo) e headers (chaves de API) vao num arquivo -K 0600:
+  // no argv apareceriam em ps//proc para qualquer usuario da maquina.
+  std::vector<std::string> linhas_header;
+  linhas_header.reserve(headers.size());
+  for (const auto& [nome, valor] : headers) linhas_header.push_back(nome + ": " + valor);
+  std::string cfg_path;
+  if (!tilt_curl_config(url, linhas_header, cfg_path)) {
+    if (!body_file.empty()) std::remove(body_file.c_str());
+    std::remove(out_path.c_str());
+    if (!hdr_path.empty()) std::remove(hdr_path.c_str());
+    r.error = "nao foi possivel montar a configuracao do curl (URL ou header invalido)";
+    return r;
+  }
+
   std::string cmd = "curl -s ";
   if (falhar) cmd += "--fail-with-body ";
   if (timeout_s > 0) cmd += "--max-time " + std::to_string(timeout_s) + " ";
@@ -130,11 +144,8 @@ HttpClientResponse http_request(
   } else {
     cmd += "-X " + metodo;
   }
-  for (const auto& [nome, valor] : headers) {
-    cmd += " -H " + tilt_shell_quote(nome + ": " + valor);
-  }
+  cmd += " -K " + tilt_shell_quote(cfg_path);
   if (!body_file.empty()) cmd += " --data @" + tilt_shell_quote(body_file);
-  cmd += " " + tilt_shell_quote(url);
 
   std::string resp;
   int rc = 0;
@@ -151,6 +162,7 @@ HttpClientResponse http_request(
     }
   }
   if (!body_file.empty()) std::remove(body_file.c_str());
+  std::remove(cfg_path.c_str());
 
   {
     std::ifstream in(out_path, std::ios::binary);

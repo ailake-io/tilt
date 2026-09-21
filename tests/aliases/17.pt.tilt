@@ -1,0 +1,12 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+pipeline resumir:
+  passos:
+    # Com TILT_LLM=mock, roda offline (resposta simulada determinística).
+    - resposta = perguntar gpt:
+        sistema: "Você resume textos técnicos em 3 frases."
+        usuario: "Resuma: tilt é uma linguagem declarativa"
+    - imprimir resposta.texto

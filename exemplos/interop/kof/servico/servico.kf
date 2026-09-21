@@ -1,0 +1,12 @@
+// Tilt -> Kof: `kof serve servico.kf --port 8091` e rode chamar_kof.tilt.
+
+record Pedido(String cliente, Int valor) {}
+
+handle(String method, String path, String body, String query, String headers): String {
+    if (path == "/pontuar") {
+        var p = json.decode<Pedido>(body)
+        var pontos = p.valor / 10
+        return "{\"cliente\": " + json.encode(p.cliente) + ", \"pontos\": " + pontos + "}"
+    }
+    return null
+}

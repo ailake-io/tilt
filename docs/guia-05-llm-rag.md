@@ -149,6 +149,21 @@ pipeline textos:
     - imprimir pedacos[0]
 ```
 
+`modo:` escolhe como cortar (o padrão, `"tamanho"`, é a janela fixa, nunca no
+meio de um caractere UTF-8): `"sentenca"` junta sentenças inteiras (termina em
+`.` `!` `?` ou linha em branco), `"paragrafo"` respeita blocos separados por
+linha em branco e `"linha"` respeita linhas inteiras (bom para código). Nos
+modos por unidade, `tamanho` é o teto de bytes do pedaço, uma unidade maior que o
+teto cai na janela fixa e `sobreposicao` só vale se pedida (repete as últimas
+unidades que cabem nela).
+
+```tilt run
+pipeline sentencas:
+  passos:
+    - doc = "Tilt e uma linguagem. Ela e declarativa! Voce gosta? Sim."
+    - imprimir dividir_texto(doc, tamanho: 40, modo: "sentenca")
+```
+
 ## `indice` — RAG
 
 ```tilt run
@@ -216,6 +231,33 @@ pipeline indexar:
   `metadatas[].texto` e `documents[]` do ponto.
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).
+
+
+### Busca híbrida e reranking
+
+Índice `"memoria"`: `buscar "consulta", modo: "hibrido"` funde (RRF, k = 60) o
+ranking por vetor com o de palavras-chave (BM25 sobre o `texto`); o `score` do hit
+passa a ser o score fundido, não um cosseno. Para qualquer backend (inclusive
+Qdrant, pgvector etc.), busque mais candidatos e reordene:
+`reranquear(consulta, hits, top_k)` faz o mesmo BM25 sobre os candidatos, funde com
+a ordem de entrada e devolve os `top_k` melhores (o `score` antigo vira
+`score_original`). Aceita também uma lista de textos. `modo: "hibrido"` em backend
+externo é erro claro.
+
+```tilt run
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+  dimensao: 16
+  metrica: cosseno
+
+pipeline hibrido:
+  passos:
+    - base.inserir([{ id: "a", texto: "o gato dorme no sofa" }, { id: "b", texto: "kafka e streaming" }])
+    - candidatos = base.buscar("gato", top_k: 2)
+    - melhores = reranquear("gato", candidatos, 1)
+    - imprimir tamanho melhores
+```
 
 ## `avaliacao` (evals)
 

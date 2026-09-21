@@ -31,16 +31,16 @@ bool starts_with_ci(std::string_view s, std::string_view prefix) {
   return true;
 }
 
-const std::array<std::string_view, 22> kDeclKeywords = {
+const std::array<std::string_view, 23> kDeclKeywords = {
     "tipo",       "funcao",      "seja",      "constante", "importar", "de",
     "fonte",      "pipeline",    "verificar", "modelo",    "treino",   "busca",
     "tarefa",     "experimento", "avaliacao", "llm",       "indice",   "fluxo",
-    "ferramenta", "agente",      "equipe",    "servico"};
+    "ferramenta", "agente",      "equipe",    "servico",   "teste"};
 
-const std::array<std::string_view, 7> kStmtKeywords = {
-    "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar"};
+const std::array<std::string_view, 9> kStmtKeywords = {
+    "se", "senao", "para cada", "enquanto", "tentar", "capturar", "retornar", "parar", "continuar"};
 
-const std::array<std::string_view, 65> kBuiltins = {"imprimir",
+const std::array<std::string_view, 67> kBuiltins = {"imprimir",
                                                     "registrar",
                                                     "env",
                                                     "tamanho",
@@ -101,14 +101,20 @@ const std::array<std::string_view, 65> kBuiltins = {"imprimir",
                                                     "s3_enviar_parte",
                                                     "s3_concluir_upload",
                                                     "s3_abortar_upload",
+                                                    "chamar_python",
+                                                    "sql",
                                                     "http_get_json",
                                                     "http_post_json",
                                                     "es_buscar",
                                                     "es_executar"};
 
-const std::array<std::string_view, 11> kTableMethods = {
-    "filtrar", "derivar",   "mapear",   "agrupar_por", "selecionar", "ordenar_por",
-    "limite",  "primeiros", "distinto", "tamanho",     "inserir"};
+const std::array<std::string_view, 29> kTableMethods = {
+    "filtrar",         "derivar",   "mapear",         "agrupar_por",     "selecionar",
+    "ordenar_por",     "limite",    "primeiros",      "distinto",        "tamanho",
+    "inserir",         "sql",       "remover_nulos",  "preencher_nulos", "renomear",
+    "remover_colunas", "converter", "deduplicar",     "juntar",          "empilhar",
+    "descrever",       "amostra",   "contar_valores", "limpar_texto",    "pivotar",
+    "despivotar",      "janela",    "dividir_coluna", "converter_fuso"};
 
 const std::array<std::string_view, 17> kTensorMethods = {
     "forma", "dados",    "matmul", "transposta", "reformar", "conv2d", "norma_lote", "relu", "gelu",
@@ -137,8 +143,10 @@ const std::vector<FieldSet>& field_sets() {
         "conf"}},
       {"pipeline", {"passos", "agenda", "ao_falhar"}},
       {"fluxo", {"entrada", "passos"}},
-      {"ferramenta", {"descricao", "entrada", "executar"}},
-      {"agente", {"llm", "papel", "ferramentas", "memoria", "max_passos"}},
+      {"ferramenta", {"descricao", "entrada", "executar", "requer_aprovacao"}},
+      {"agente",
+       {"llm", "papel", "ferramentas", "memoria", "max_passos", "protocolo", "max_tokens_sessao"}},
+      {"teste", {"passos"}},
       {"equipe", {"agentes", "estrategia", "supervisor", "objetivo"}},
       {"servico", {"porta", "dispositivo", "meio", "rota"}},
       {"verificar", {"nao_nulo", "unico", "intervalo", "ao_violar"}},
@@ -326,6 +334,12 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Conclui um upload multipart S3.", nullptr},
       {"s3_abortar_upload", "s3_abortar_upload(id, ...)", "id", "Aborta um upload multipart S3.",
        nullptr},
+      {"sql", "sql(consulta, params?, tabela: valor...)", "consulta",
+       "Roda SQL sobre tabelas tilt (SQLite em memoria); variaveis-tabela citadas entram sozinhas.",
+       "sql \"select regiao, sum(valor) as total from vendas group by regiao\""},
+      {"chamar_python", "chamar_python(modulo, funcao, args...)", "modulo,funcao",
+       "Chama uma funcao Python (python3 em subprocesso; args e resultado em JSON).",
+       "chamar_python \"math\", \"sqrt\", 16"},
       {"http_get_json", "http_get_json(url, cabecalhos?)", "url,cabecalhos",
        "Faz um GET HTTP e retorna o JSON da resposta.", "http_get_json \"https://api/status\""},
       {"http_post_json", "http_post_json(url, corpo, cabecalhos?)", "url,corpo,cabecalhos",
@@ -341,8 +355,107 @@ const std::vector<BuiltinDoc>& builtin_docs() {
   return docs;
 }
 
+// Biblioteca padrao pura (src/runtime/stdlib.cpp): documentacao para hover,
+// signatureHelp e autocomplete.
+const std::vector<BuiltinDoc>& stdlib_docs() {
+  static const std::vector<BuiltinDoc> docs = {
+      {"raiz", "raiz(numero)", "numero", "Raiz quadrada.", "raiz(16)"},
+      {"abs", "abs(numero)", "numero", "Valor absoluto.", nullptr},
+      {"exp", "exp(numero)", "numero", "Exponencial (e elevado ao numero).", nullptr},
+      {"logaritmo", "logaritmo(numero, base?)", "numero,base",
+       "Logaritmo natural, ou na base dada.", "logaritmo(100, 10)"},
+      {"potencia", "potencia(base, expoente)", "base,expoente", "Base elevada ao expoente.",
+       "potencia(2, 10)"},
+      {"piso", "piso(numero)", "numero", "Maior inteiro menor ou igual ao numero.", nullptr},
+      {"teto", "teto(numero)", "numero", "Menor inteiro maior ou igual ao numero.", nullptr},
+      {"arredondar", "arredondar(numero, casas?)", "numero,casas",
+       "Arredonda para inteiro, ou para N casas decimais.", "arredondar(3.14159, 2)"},
+      {"seno", "seno(radianos)", "radianos", "Seno.", nullptr},
+      {"cosseno", "cosseno(radianos)", "radianos", "Cosseno.", nullptr},
+      {"tangente", "tangente(radianos)", "radianos", "Tangente.", nullptr},
+      {"pi", "pi()", "", "Constante pi.", nullptr},
+      {"inteiro", "inteiro(valor)", "valor", "Converte texto, decimal ou logico em inteiro.",
+       "inteiro(\"42\")"},
+      {"decimal", "decimal(valor)", "valor", "Converte texto, inteiro ou logico em decimal.",
+       "decimal(\"2.5\")"},
+      {"texto", "texto(valor)", "valor", "Converte qualquer valor em texto.", "texto(3)"},
+      {"logico", "logico(valor)", "valor", "Converte um valor em logico (verdadeiro/falso).",
+       nullptr},
+      {"tipo_de", "tipo_de(valor)", "valor", "Nome do tipo do valor (inteiro, texto, lista...).",
+       nullptr},
+      {"maiusculas", "maiusculas(texto)", "texto", "Texto em maiusculas (ASCII).", nullptr},
+      {"minusculas", "minusculas(texto)", "texto", "Texto em minusculas (ASCII).", nullptr},
+      {"aparar", "aparar(texto)", "texto", "Remove espacos das pontas do texto.", nullptr},
+      {"substituir", "substituir(texto, de, para)", "texto,de,para",
+       "Substitui todas as ocorrencias de um trecho.", "substituir(\"a-b\", \"-\", \"+\")"},
+      {"comeca_com", "comeca_com(texto, prefixo)", "texto,prefixo",
+       "Verdadeiro se o texto comeca com o prefixo.", nullptr},
+      {"termina_com", "termina_com(texto, sufixo)", "texto,sufixo",
+       "Verdadeiro se o texto termina com o sufixo.", nullptr},
+      {"juntar", "juntar(lista, separador?)", "lista,separador",
+       "Junta os elementos de uma lista em um texto.", "juntar([1, 2, 3], \", \")"},
+      {"regex_casa", "regex_casa(texto, padrao)", "texto,padrao",
+       "Verdadeiro se o texto contem uma ocorrencia da expressao regular.", nullptr},
+      {"regex_extrair", "regex_extrair(texto, padrao)", "texto,padrao",
+       "Lista de todas as ocorrencias (grupo 1, se houver).", nullptr},
+      {"regex_substituir", "regex_substituir(texto, padrao, para)", "texto,padrao,para",
+       "Substitui as ocorrencias da expressao regular ($1 para grupos).", nullptr},
+      {"ordenar", "ordenar(lista, ordem?)", "lista,ordem",
+       "Lista ordenada (ordem: \"crescente\" ou \"decrescente\").", "ordenar([3, 1, 2])"},
+      {"unicos", "unicos(lista)", "lista", "Remove repetidos, mantendo a ordem da 1a ocorrencia.",
+       nullptr},
+      {"reverso", "reverso(lista_ou_texto)", "valor", "Inverte uma lista ou um texto.", nullptr},
+      {"zip", "zip(lista, lista)", "a,b", "Pares [a_i, b_i] ate o fim da menor lista.", nullptr},
+      {"enumerar", "enumerar(lista)", "lista", "Lista de { indice, valor }.", nullptr},
+      {"chaves", "chaves(mapa)", "mapa", "Lista das chaves de um mapa.", nullptr},
+      {"valores", "valores(mapa)", "mapa", "Lista dos valores de um mapa.", nullptr},
+      {"agora", "agora()", "", "Data e hora atuais em UTC (ISO 8601).", nullptr},
+      {"timestamp", "timestamp()", "", "Segundos desde 1970-01-01 (UTC).", nullptr},
+      {"formatar_data", "formatar_data(data, formato?)", "data,formato",
+       "Formata data ISO ou timestamp (UTC) com strftime.", "formatar_data(agora(), \"%d/%m/%Y\")"},
+      {"dormir", "dormir(segundos)", "segundos", "Pausa a execucao.", nullptr},
+      {"ler_texto", "ler_texto(caminho)", "caminho", "Le um arquivo inteiro como texto.", nullptr},
+      {"escrever_texto", "escrever_texto(caminho, texto)", "caminho,texto",
+       "Grava (sobrescreve) um arquivo de texto.", nullptr},
+      {"anexar_texto", "anexar_texto(caminho, texto)", "caminho,texto",
+       "Acrescenta texto ao fim de um arquivo.", nullptr},
+      {"listar_arquivos", "listar_arquivos(diretorio)", "diretorio",
+       "Nomes das entradas de um diretorio, ordenados.", nullptr},
+      {"remover_arquivo", "remover_arquivo(caminho)", "caminho",
+       "Remove um arquivo; devolve se conseguiu.", nullptr},
+      {"sha256", "sha256(texto)", "texto", "Hash SHA-256 em hexadecimal.", nullptr},
+      {"base64_codificar", "base64_codificar(texto)", "texto", "Codifica em Base64.", nullptr},
+      {"base64_decodificar", "base64_decodificar(texto)", "texto", "Decodifica Base64.", nullptr},
+      {"json_texto", "json_texto(valor)", "valor", "Converte um valor em texto JSON.", nullptr},
+      {"afirmar", "afirmar(condicao, mensagem?)", "condicao,mensagem",
+       "Falha o `teste` (T901) se a condicao for falsa.", "afirmar total == 3, \"total errado\""},
+      {"afirmar_igual", "afirmar_igual(obtido, esperado, mensagem?)", "obtido,esperado,mensagem",
+       "Falha o `teste` mostrando esperado e obtido se forem diferentes.",
+       "afirmar_igual(dobro(2), 4)"},
+      {"reranquear", "reranquear(consulta, itens, top_k?)", "consulta,itens,top_k",
+       "Reordena resultados de buscar fundindo o ranking original com BM25 (RRF).",
+       "reranquear(\"gato\", hits, 3)"},
+      {"mapear", "mapear(lista, funcao)", "lista,funcao", "Aplica a funcao a cada elemento.",
+       "mapear([1, 2], funcao x: x * 2)"},
+      {"filtrar", "filtrar(lista, funcao)", "lista,funcao",
+       "Elementos para os quais a funcao devolve verdadeiro.", nullptr},
+      {"reduzir", "reduzir(lista, funcao, inicial?)", "lista,funcao,inicial",
+       "Acumula a lista com funcao(acumulado, elemento).",
+       "reduzir([1, 2], funcao a, x: a + x, 0)"},
+      {"qualquer", "qualquer(lista, funcao)", "lista,funcao",
+       "Verdadeiro se a funcao vale para algum elemento.", nullptr},
+      {"todos", "todos(lista, funcao)", "lista,funcao",
+       "Verdadeiro se a funcao vale para todos os elementos.", nullptr},
+      {"json_ler", "json_ler(texto)", "texto", "Interpreta um texto JSON como valor.", nullptr},
+  };
+  return docs;
+}
+
 const BuiltinDoc* find_builtin_doc(std::string_view name) {
   for (const auto& d : builtin_docs()) {
+    if (name == d.name) return &d;
+  }
+  for (const auto& d : stdlib_docs()) {
     if (name == d.name) return &d;
   }
   return nullptr;
@@ -363,6 +476,7 @@ const std::vector<KeywordDoc>& keyword_docs() {
       {"de", "Acompanha `importar`: `de stdlib.math importar media`."},
       {"fonte", "Declara uma fonte de dados (arquivo, URL, query, broker)."},
       {"pipeline", "Declara um pipeline de dados (bloco com `passos:`, `agenda:`, ...)."},
+      {"teste", "Declara um teste (bloco `passos:` com `afirmar`); rode com `tilt testar`."},
       {"verificar", "Declara regras de verificacao de dados."},
       {"modelo", "Declara um modelo (bloco com `camadas:`, `entrada:`, ...)."},
       {"treino", "Bloco de treino de um modelo (`dados:`, `perda:`, `epocas:`, ...)."},
@@ -859,6 +973,7 @@ std::vector<CompletionItem> complete(const SourceFile& src, std::uint32_t line,
   }
 
   for (auto b : kBuiltins) push(out, prefix, b, "builtin", "funcao embutida");
+  for (const auto& d : stdlib_docs()) push(out, prefix, d.name, "builtin", d.doc);
   for (auto k : kStmtKeywords) push(out, prefix, k, "keyword", "instrucao");
 
   // Names declared in this file.

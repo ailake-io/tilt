@@ -1,0 +1,5 @@
+== pipeline p ==
+texto: 1 ler lido nulo
+texto: 2 apagar_tudo [negada] TILT_APROVAR=nao verdadeiro
+nativo: 1 ler lido nulo
+nativo: 2 apagar_tudo [negada] TILT_APROVAR=nao verdadeiro

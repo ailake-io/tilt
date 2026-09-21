@@ -1,0 +1,3 @@
+pipeline t:
+  passos:
+    - imprimir dividir_texto("x", modo: "xpto")

@@ -1,0 +1,9 @@
+erro[T014]: inteiro fora do intervalo de 64 bits: 123456789012345678901234...
+  --> input.tilt:3:11
+   |
+ 3 |     - x = 123456789012345678901234567890
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = use um valor entre -9223372036854775808 e 9223372036854775807, ou um decimal (com ponto)
+
+1 erro(s) em input.tilt

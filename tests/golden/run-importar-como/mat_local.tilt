@@ -1,0 +1,7 @@
+funcao dobro x:
+  retornar x * 2
+
+funcao triplo x:
+  retornar x * 3
+
+seja base = 10

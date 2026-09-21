@@ -23,6 +23,12 @@ if(TILT_WERROR)
   endif()
 endif()
 
+option(TILT_COVERAGE "Instrument for gcov/gcovr line coverage (GCC/Clang)" OFF)
+if(TILT_COVERAGE AND NOT MSVC)
+  add_compile_options(--coverage -O0 -g)
+  add_link_options(--coverage)
+endif()
+
 option(TILT_SANITIZE "Enable AddressSanitizer + UBSan" OFF)
 if(TILT_SANITIZE AND NOT MSVC)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -38,6 +44,7 @@ add_library(tilt_core STATIC
   src/diagnostics/codes.cpp
   src/diagnostics/diagnostic.cpp
   src/lexer/token.cpp
+  src/lexer/aliases_en.cpp
   src/lexer/lexer.cpp
   src/parser/parser.cpp
   src/parser/ast_dump.cpp
@@ -46,6 +53,10 @@ add_library(tilt_core STATIC
   src/runtime/compat.cpp
   src/runtime/value.cpp
   src/runtime/json.cpp
+  src/runtime/python_interop.cpp
+  src/runtime/sql_tabelas.cpp
+  src/runtime/tabela_ops.cpp
+  src/runtime/fuso.cpp
   src/runtime/tensor.cpp
   src/runtime/safetensors.cpp
   src/runtime/onnx.cpp
@@ -69,8 +80,11 @@ add_library(tilt_core STATIC
   src/runtime/checkpoint.cpp
   src/runtime/mongo.cpp
   src/runtime/tls.cpp
+  src/runtime/aws_sigv4.cpp
+  src/runtime/aws_kms.cpp
   src/runtime/s3.cpp
   src/runtime/sha256.cpp
+  src/runtime/stdlib.cpp
   src/runtime/sqlite.cpp
   src/runtime/sql_pool.cpp
   src/runtime/postgres.cpp
@@ -92,7 +106,9 @@ add_library(tilt_core STATIC
   src/lsp/completion.cpp
   src/lsp/lsp_server.cpp
   src/interp/interpreter.cpp
-  src/cli/cli.cpp)
+  src/cli/cli.cpp
+  src/cli/dev_cmds.cpp
+  src/cli/rpc.cpp)
 target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -104,6 +120,15 @@ endif()
 
 add_executable(tilt src/main.cpp)
 target_link_libraries(tilt PRIVATE tilt_core)
+# Windows: a pilha padrao do executavel e 1 MB (Linux/macOS: 8 MB); o parser e o
+# checker recursam na estrutura do programa e o MSVC usa frames grandes. 16 MB
+# da a mesma folga das outras plataformas (os limites de profundidade do parser
+# continuam valendo como protecao).
+if(MSVC)
+  target_link_options(tilt PRIVATE /STACK:16777216)
+elseif(WIN32)
+  target_link_options(tilt PRIVATE -Wl,--stack,16777216)
+endif()
 set_target_properties(tilt PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 

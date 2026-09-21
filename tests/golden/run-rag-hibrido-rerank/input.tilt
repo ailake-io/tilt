@@ -1,0 +1,20 @@
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+  dimensao: 16
+  metrica: cosseno
+
+pipeline rag:
+  passos:
+    - base.inserir([{ id: "a", texto: "o gato dorme no sofa" }, { id: "b", texto: "kafka e streaming de eventos" }, { id: "c", texto: "engenharia de dados com parquet" }, { id: "d", texto: "gato preto e gato branco" }])
+    - imprimir "vetorial:"
+    - para cada h em base.buscar("gato", top_k: 4):
+        imprimir h.id
+    - imprimir "hibrido:"
+    - para cada h em base.buscar("gato", top_k: 4, modo: "hibrido"):
+        imprimir h.id, arredondar(h.score, 4)
+    - imprimir "rerank:"
+    - cand = base.buscar("gato", top_k: 4)
+    - para cada r em reranquear("gato preto", cand, 3):
+        imprimir r.id, r.score_original != nulo, arredondar(r.score, 4)
+    - imprimir reranquear("sofa", ["um gato", "o sofa azul", "cadeira"])
