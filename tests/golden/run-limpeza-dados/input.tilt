@@ -1,0 +1,56 @@
+pipeline limpeza:
+  passos:
+    - bruto = [
+        { id: 1, nome: "  Ana   Silva ", idade: "30", cidade: "sp", nascimento: "31/01/1994", ativo: "sim" },
+        { id: 2, nome: "bruno", idade: "", cidade: "rj", nascimento: "1990-02-30", ativo: "nao" },
+        { id: 3, nome: "  ", idade: "41", cidade: "sp", nascimento: "2001/12/05", ativo: "talvez" },
+        { id: 3, nome: "  ", idade: "41", cidade: "sp", nascimento: "2001/12/05", ativo: "talvez" },
+        { id: 4, nome: "Caio", idade: "1,5", cidade: nulo, nascimento: "", ativo: "1" }
+      ]
+    # perfil antes de limpar
+    - perfil = bruto.descrever
+    - para cada p em perfil:
+        imprimir p.coluna, p.tipo, p.nulos, p.distintos
+    - imprimir "-- limpeza"
+    - a = bruto.deduplicar
+    - imprimir tamanho(a)
+    - b = a.limpar_texto "nome", caixa: "minusculas"
+    - imprimir b[0].nome, b[2].nome == ""
+    - c = b.converter { idade: "inteiro", nascimento: "data", ativo: "logico", id: "texto" }
+    - imprimir c[0].idade, c[1].idade, c[3].idade, c[0].nascimento, c[1].nascimento, c[2].nascimento
+    - imprimir c[0].ativo, c[1].ativo, c[2].ativo, c[3].ativo
+    - imprimir tipo_de(c[0].id)
+    - d = c.preencher_nulos { cidade: "desconhecida", idade: 0 }
+    - imprimir d[1].idade, d[3].cidade, d[2].nome
+    - e = d.remover_nulos "nome"
+    - imprimir tamanho(e)
+    - r = e.renomear { nome: "cliente", cidade: "uf" }
+    - f = r.remover_colunas "nascimento", "ativo"
+    - imprimir f[0].cliente, f[0].uf, tamanho(chaves(f[0]))
+    - imprimir "-- juntar / empilhar"
+    - ufs = [{ uf: "sp", estado: "Sao Paulo" }, { uf: "rj", estado: "Rio de Janeiro" }]
+    - j = f.juntar ufs, por: "uf"
+    - imprimir tamanho(j), j[0].estado
+    - je = f.juntar ufs, por: "uf", tipo: "esquerda"
+    - imprimir tamanho(je), je[2].estado
+    - jr = ufs.juntar f, por: "uf", tipo: "direita"
+    - imprimir tamanho(jr)
+    - s = f.empilhar([{ id: "9", cliente: "novo", extra: verdadeiro }])
+    - imprimir tamanho(s), s[0].extra, s[3].extra
+    - imprimir "-- contar / amostra / ordenar"
+    - cv = bruto.contar_valores "cidade"
+    - imprimir cv[0].valor, cv[0].contagem, tamanho(cv)
+    - am = bruto.amostra 2, semente: 7
+    - imprimir tamanho(am)
+    - am2 = bruto.amostra 2, semente: 7
+    - imprimir am[0].id == am2[0].id, am[1].id == am2[1].id
+    - o = bruto.ordenar_por "cidade", "id", desc: verdadeiro
+    - imprimir o[0].id, o[1].id, o[2].id
+    - tentar:
+        bruto.renomear { inexistente: "x" }
+    capturar erro:
+      imprimir "erro: {{erro}}"
+    - tentar:
+        bruto.converter { idade: "romano" }
+    capturar erro:
+      imprimir "erro: {{erro}}"

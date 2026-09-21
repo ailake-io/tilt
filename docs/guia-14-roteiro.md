@@ -40,19 +40,12 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 - **Qualidade de dados**: `verificar` valida e `quarentena:` já desvia linhas
   ruins em iterações; ainda faltam perfilagem/estatísticas e contrato de
   schema versionado na entrada.
-- **Limpeza de dados (próximo foco)**: hoje `filtrar`, `derivar`,
-  `agrupar_por`, `ordenar_por`, `selecionar`, `distinto`, `sql` e as funções de texto
-  cobrem o básico. Faltam métodos de tabela simples e nomeados, todos devolvendo uma
-  nova `tabela` e com nome em inglês equivalente:
-  `remover_nulos [colunas]`, `preencher_nulos { coluna: valor }`,
-  `renomear { antigo: "novo" }`, `remover_colunas ...`,
-  `converter { coluna: "inteiro" | "decimal" | "texto" | "logico" | "data" }`,
-  `deduplicar [colunas]`, `juntar outra, por: "chave", tipo: "esquerda"`,
-  `empilhar outra`, `descrever` (nulos, distintos, min/max/média por coluna),
-  `amostra n, semente: s`, `contar_valores coluna`, e funções de data
-  (`data "2024-01-31"`, `formatar_data`) e `coalescer(a, b)`. A perfilagem
-  (`descrever`) alimenta `verificar`. Desempenho de cada uma medido com
-  `bench/comparar.py`.
+- **Limpeza de dados**: feito — `remover_nulos`, `preencher_nulos`, `renomear`,
+  `remover_colunas`, `converter` (inclui `data`), `deduplicar`, `juntar`, `empilhar`,
+  `descrever`, `amostra`, `contar_valores`, `limpar_texto` e `ordenar_por` com várias
+  colunas (guia 03). Faltam: `pivotar`/`despivotar`, funções de janela (`sql` cobre),
+  aritmética de datas (`dias_entre`, `adicionar_dias`), `coalescer(a, b)`, `dividir_coluna`
+  e leitura de CSV com esquema declarado (tipos por coluna e `separador:`).
 - **Escrita analítica**: Delta/Iceberg particionam, compactam com
   `otimizar_delta`/`otimizar_iceberg`, z-order determinístico via `z_order:` e
   `vacuum_*` conservador para Parquet órfão; `ordenar_por` continua disponível

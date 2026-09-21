@@ -59,11 +59,10 @@ Em ordem de prioridade. O critério é o que mais pesa em **limpeza de dados e p
 lógica pura em laços fica por último porque o gargalo dela (o `Value` de 120 bytes) é uma
 mudança grande e isolada.
 
-1. **API de limpeza de dados nativa** (o que falta para não precisar cair em `derivar`
-   linha a linha ou em SQL): `remover_nulos`, `preencher_nulos`, `renomear`,
-   `remover_colunas`, `converter` (tipos), `deduplicar`, `juntar` (join), `empilhar`,
-   `descrever` (perfilagem: nulos, distintos, min/max/média por coluna), `amostra`,
-   `contar_valores` e conversão de datas. Detalhes em [guia 14](guia-14-roteiro.md).
+1. ~~**API de limpeza de dados nativa**~~ feita (guia 03): `remover_nulos`,
+   `preencher_nulos`, `renomear`, `remover_colunas`, `converter`, `deduplicar`, `juntar`,
+   `empilhar`, `descrever`, `amostra`, `contar_valores`, `limpar_texto`. O que ainda falta
+   nessa frente está em [guia 14](guia-14-roteiro.md).
 2. **`ler_parquet` (1,7 s)**: falta o custo de criar cada `Value`; leitura por row group em
    paralelo e materialização direta nos mapas.
 3. **`derivar` (~1 s por 1 M de linhas, 1,5 GB)**: avaliar expressões simples (coluna

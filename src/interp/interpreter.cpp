@@ -73,6 +73,7 @@
 #include "runtime/sql_tabelas.hpp"
 #include "runtime/sqlite.hpp"
 #include "runtime/stdlib.hpp"
+#include "runtime/tabela_ops.hpp"
 #include "runtime/vectorstore.hpp"
 #include "runtime/weaviate.hpp"
 #include "semantic/checker.hpp"
@@ -9742,6 +9743,15 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
           return Value::inteiro(static_cast<std::int64_t>(base.s.size()));
         }
       }
+      // `t.descrever` / `t.deduplicar` / `t.remover_nulos` / `t.limpar_texto`: metodo de tabela
+      // sem argumentos escrito como campo.
+      if ((base.kind == ValueKind::Tabela || base.kind == ValueKind::Lista) &&
+          word_in(expr.text, {"descrever", "deduplicar", "remover_nulos", "limpar_texto"})) {
+        Expr chamada;
+        chamada.kind = ExprKind::Call;
+        chamada.span = expr.span;
+        return eval_method(expr.text, base, chamada, env);
+      }
       if (expr.optional) return Value::nulo();
       fail(expr.span, std::string("'") + base.type_name() + "' nao tem o campo '" + expr.text + "'");
     }
@@ -12292,70 +12302,6 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     }
     return Value::tabela(std::move(out));
   }
-  if (is_table && method == "ordenar_por") {
-    auto a = eval_args(call, env);
-    rt::ValueMap kw = eval_kwargs(call, env);
-    if (a.empty() || a[0].kind != ValueKind::Texto) fail(call.span, "ordenar_por espera uma coluna");
-    const std::string col = a[0].s;
-    const Value* desc = kw.find("desc");
-    const bool descending = desc && desc->truthy();
-    // Ordena indices por chaves extraidas uma vez (antes: copiava a tabela e procurava a
-    // coluna no mapa a cada comparacao). Empates mantem a ordem original (estavel).
-    static const rt::ValueList vazia;
-    const rt::ValueList& linhas = receiver.list ? *receiver.list : vazia;
-    const std::size_t n = linhas.size();
-    std::vector<const Value*> chaves(n);
-    bool todos_num = true;
-    bool todos_txt = true;
-    for (std::size_t i = 0; i < n; ++i) {
-      const Value* k = linhas[i].map ? linhas[i].map->find(col) : nullptr;
-      chaves[i] = k;
-      if (!(k && k->is_number())) todos_num = false;
-      if (!(k && k->kind == ValueKind::Texto)) todos_txt = false;
-    }
-    std::vector<std::uint32_t> ordem(n);
-    std::iota(ordem.begin(), ordem.end(), std::uint32_t{0});
-    if (todos_num) {
-      std::vector<double> num(n);
-      for (std::size_t i = 0; i < n; ++i) num[i] = chaves[i]->as_number();
-      if (descending) {
-        std::stable_sort(ordem.begin(), ordem.end(),
-                         [&](std::uint32_t x, std::uint32_t y) { return num[y] < num[x]; });
-      } else {
-        std::stable_sort(ordem.begin(), ordem.end(),
-                         [&](std::uint32_t x, std::uint32_t y) { return num[x] < num[y]; });
-      }
-    } else if (todos_txt) {
-      if (descending) {
-        std::stable_sort(ordem.begin(), ordem.end(), [&](std::uint32_t x, std::uint32_t y) {
-          return chaves[y]->s < chaves[x]->s;
-        });
-      } else {
-        std::stable_sort(ordem.begin(), ordem.end(), [&](std::uint32_t x, std::uint32_t y) {
-          return chaves[x]->s < chaves[y]->s;
-        });
-      }
-    } else {  // coluna mista/ausente: numero contra numero, senao texto de exibicao
-      std::vector<std::string> texto(n);
-      for (std::size_t i = 0; i < n; ++i) texto[i] = chaves[i] ? to_display(*chaves[i]) : "";
-      const auto menor = [&](std::uint32_t x, std::uint32_t y) {
-        if (chaves[x] && chaves[y] && chaves[x]->is_number() && chaves[y]->is_number()) {
-          return chaves[x]->as_number() < chaves[y]->as_number();
-        }
-        return texto[x] < texto[y];
-      };
-      if (descending) {
-        std::stable_sort(ordem.begin(), ordem.end(),
-                         [&](std::uint32_t x, std::uint32_t y) { return menor(y, x); });
-      } else {
-        std::stable_sort(ordem.begin(), ordem.end(), menor);
-      }
-    }
-    rt::ValueList out;
-    out.reserve(n);
-    for (const std::uint32_t i : ordem) out.push_back(linhas[i]);
-    return Value::tabela(std::move(out));
-  }
   if (is_table && (method == "limite" || method == "primeiros")) {
     auto a = eval_args(call, env);
     std::int64_t n = a.empty() ? 0 : static_cast<std::int64_t>(a[0].as_number());
@@ -12368,25 +12314,107 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     }
     return Value::tabela(std::move(out));
   }
-  if (is_table && method == "distinto") {
+  // Limpeza e preparacao de dados (runtime/tabela_ops): cada metodo devolve uma tabela nova.
+  if (is_table &&
+      word_in(method, {"remover_nulos", "preencher_nulos", "renomear", "remover_colunas",
+                       "converter", "deduplicar", "distinto", "juntar", "empilhar", "descrever",
+                       "amostra", "contar_valores", "limpar_texto", "ordenar_por"})) {
     auto a = eval_args(call, env);
-    const std::string col = (!a.empty() && a[0].kind == ValueKind::Texto) ? a[0].s : "";
-    rt::ValueList out;
-    std::vector<std::string> seen;
-    for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      std::string key;
-      if (col.empty()) {
-        key = to_display(row);
-      } else {
-        const Value* c = row.map ? row.map->find(col) : nullptr;
-        key = c ? to_display(*c) : "";
+    const rt::ValueMap kw = eval_kwargs(call, env);
+    // Nomes de coluna: textos soltos ou listas de textos, a partir do argumento `desde`.
+    const auto nomes = [&](std::size_t desde) {
+      std::vector<std::string> out;
+      for (std::size_t k = desde; k < a.size(); ++k) {
+        if (a[k].kind == ValueKind::Texto) {
+          out.push_back(a[k].s);
+        } else if (a[k].kind == ValueKind::Lista && a[k].list) {
+          for (const Value& v : *a[k].list) {
+            if (v.kind != ValueKind::Texto) {
+              throw std::runtime_error(method + ": os nomes de coluna devem ser texto");
+            }
+            out.push_back(v.s);
+          }
+        } else {
+          throw std::runtime_error(method +
+                                   ": esperado o nome de uma coluna (texto) ou lista de nomes");
+        }
       }
-      if (std::find(seen.begin(), seen.end(), key) == seen.end()) {
-        seen.push_back(key);
-        out.push_back(row);
+      return out;
+    };
+    const auto exige_arg = [&](const char* uso) {
+      if (a.empty()) throw std::runtime_error(method + " espera argumentos, ex.: " + uso);
+    };
+    try {
+      if (method == "remover_nulos") return rt::tabela_remover_nulos(receiver, nomes(0));
+      if (method == "preencher_nulos") {
+        exige_arg("t.preencher_nulos { idade: 0, cidade: \"?\" }");
+        return rt::tabela_preencher_nulos(receiver, a[0]);
       }
+      if (method == "renomear") {
+        exige_arg("t.renomear { antigo: \"novo\" }");
+        return rt::tabela_renomear(receiver, a[0]);
+      }
+      if (method == "remover_colunas") {
+        exige_arg("t.remover_colunas \"a\", \"b\"");
+        return rt::tabela_remover_colunas(receiver, nomes(0));
+      }
+      if (method == "converter") {
+        exige_arg("t.converter { idade: \"inteiro\", nascimento: \"data\" }");
+        return rt::tabela_converter(receiver, a[0]);
+      }
+      if (method == "deduplicar" || method == "distinto") {
+        return rt::tabela_deduplicar(receiver, nomes(0));
+      }
+      if (method == "juntar") {
+        exige_arg("a.juntar b, por: \"id\", tipo: \"esquerda\"");
+        Value por = a.size() > 1 ? a[1] : Value::nulo();
+        if (const Value* v = kw.find("por")) por = *v;
+        std::string tipo = "interna";
+        if (const Value* v = kw.find("tipo")) {
+          if (v->kind != ValueKind::Texto)
+            throw std::runtime_error("juntar: 'tipo' deve ser texto");
+          tipo = v->s;
+        }
+        return rt::tabela_juntar(receiver, a[0], por, tipo);
+      }
+      if (method == "empilhar") {
+        exige_arg("a.empilhar b");
+        std::vector<Value> todas = {receiver};
+        for (const Value& v : a) todas.push_back(v);
+        return rt::tabela_empilhar(todas);
+      }
+      if (method == "descrever") return rt::tabela_descrever(receiver);
+      if (method == "amostra") {
+        exige_arg("t.amostra 100, semente: 7  ou  t.amostra 0.1");
+        if (!a[0].is_number())
+          throw std::runtime_error("amostra espera um numero (linhas ou fracao)");
+        std::uint64_t semente = 42;
+        if (const Value* v = kw.find("semente")) {
+          semente = static_cast<std::uint64_t>(v->as_number());
+        }
+        return rt::tabela_amostra(receiver, a[0].as_number(), semente);
+      }
+      if (method == "contar_valores") {
+        exige_arg("t.contar_valores \"cidade\"");
+        if (a[0].kind != ValueKind::Texto)
+          throw std::runtime_error("contar_valores espera o nome de uma coluna");
+        return rt::tabela_contar_valores(receiver, a[0].s);
+      }
+      if (method == "limpar_texto") {
+        std::string caixa;
+        if (const Value* v = kw.find("caixa")) {
+          if (v->kind != ValueKind::Texto)
+            throw std::runtime_error("limpar_texto: 'caixa' deve ser texto");
+          caixa = v->s;
+        }
+        return rt::tabela_limpar_texto(receiver, nomes(0), caixa);
+      }
+      // ordenar_por
+      const Value* desc = kw.find("desc");
+      return rt::tabela_ordenar(receiver, nomes(0), desc != nullptr && desc->truthy());
+    } catch (const std::exception& e) {
+      fail(call.span, e.what());
     }
-    return Value::tabela(std::move(out));
   }
 
   if (receiver.kind == ValueKind::Tensor && receiver.tensor) {

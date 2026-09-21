@@ -660,6 +660,66 @@ urllib exercendo o subconjunto + traversal + read-only) e validado com
 `apache/spark:3.5.3` + `iceberg-spark-runtime`, `--network host` e o dir montado
 no mesmo path absoluto — manifests/data continuam `file://` absolutos).
 
+## Limpeza e preparação de dados
+
+Métodos de `tabela` que cobrem o dia a dia de limpeza sem escrever `derivar` linha a
+linha. Todos devolvem uma tabela **nova** (a original não muda) e têm nome em inglês
+equivalente (`drop_nulls`, `fill_nulls`, `rename`, `drop_columns`, `cast`, `deduplicate`,
+`join`, `stack`, `describe`, `sample`, `value_counts`, `clean_text`; guia 18).
+
+Uma célula é **nula** quando é `nulo`, a chave não existe ou é um texto vazio/só de
+espaços (o que `ler_csv` devolve para célula vazia).
+
+```tilt run
+pipeline limpeza:
+  passos:
+    - bruto = [
+        { id: 1, nome: "  Ana   Silva ", idade: "30", cidade: "sp", nascimento: "31/01/1994" },
+        { id: 2, nome: "bruno", idade: "", cidade: "rj", nascimento: "1990-02-30" },
+        { id: 2, nome: "bruno", idade: "", cidade: "rj", nascimento: "1990-02-30" },
+        { id: 3, nome: "", idade: "1,5", cidade: nulo, nascimento: "2001/12/05" }
+      ]
+    # 1. conhecer os dados: tipo, nulos e distintos por coluna
+    - para cada p em bruto.descrever:
+        imprimir p.coluna, p.tipo, p.nulos, p.distintos
+    # 2. limpar
+    - a = bruto.deduplicar
+    - b = a.limpar_texto "nome", caixa: "minusculas"
+    - c = b.converter { idade: "inteiro", nascimento: "data" }
+    - d = c.preencher_nulos { cidade: "desconhecida", idade: 0 }
+    - e = d.remover_nulos "nome"
+    - imprimir tamanho(e), e[0].nome, e[0].idade, e[0].nascimento, e[1].nascimento
+    # 3. juntar com outra tabela e contar
+    - ufs = [{ cidade: "sp", estado: "Sao Paulo" }, { cidade: "rj", estado: "Rio de Janeiro" }]
+    - j = e.juntar ufs, por: "cidade", tipo: "esquerda"
+    - imprimir j[0].estado, j[1].estado
+    - cv = e.contar_valores "cidade"
+    - imprimir cv[0].valor, cv[0].contagem
+```
+
+| Método | O que faz |
+|---|---|
+| `remover_nulos ["a", "b"]` | tira as linhas com nulo nessas colunas (todas, sem argumento) |
+| `preencher_nulos { a: 0 }` / `preencher_nulos 0` | preenche nulos por coluna (cria a coluna se faltar) ou em todas |
+| `renomear { antigo: "novo" }` | renomeia mantendo a ordem; coluna inexistente é erro |
+| `remover_colunas "a", "b"` | tira colunas; nome inexistente é erro (pega typo) |
+| `converter { c: "inteiro" }` | `inteiro`, `decimal` (aceita `1,5`), `texto`, `logico` (sim/não/true/false/1/0), `data` (→ `AAAA-MM-DD`). O que não converte vira `nulo`; fração em `inteiro` também (use `arredondar`) |
+| `deduplicar ["a"]` | mantém a 1ª ocorrência por chave (linha inteira sem argumento); `distinto` é o mesmo |
+| `juntar outra, por: "id", tipo: "esquerda"` | `interna` (padrão), `esquerda`, `direita`, `completa`; `por:` é nome, lista ou `{ esq: dir }`; colunas repetidas da direita ganham `_direita`; chave nula nunca casa |
+| `empilhar(outra)` | concatena; o esquema vira a união das colunas |
+| `descrever` | uma linha por coluna: `coluna, tipo, total, nulos, distintos, minimo, maximo, media` |
+| `amostra 100, semente: 7` / `amostra 0.1` | amostra sem reposição, reproduzível, na ordem original |
+| `contar_valores "col"` | `{ valor, contagem }` do mais ao menos frequente |
+| `limpar_texto ["nome"], caixa: "minusculas"` | tira espaços das pontas e repetidos (e muda a caixa) |
+| `ordenar_por "a", "b", desc: verdadeiro` | várias colunas, estável |
+
+Métodos sem argumentos (`descrever`, `deduplicar`, `remover_nulos`, `limpar_texto`) podem
+ser escritos sem parênteses; um argumento que seja lista literal exige parênteses
+(`a.empilhar([...])`, pois `a.empilhar [...]` é lido como índice). Em 1 M de linhas,
+`deduplicar`, `juntar` (600 mil linhas de resultado), `descrever`, `contar_valores` e
+`converter` juntos levam ~2,4 s além da leitura. Para junções e agregações muito grandes,
+`sql` com DuckDB (seção abaixo) é mais rápido.
+
 ## SQL sobre tabelas Tilt: `sql`
 
 SQL é cidadão de primeira classe: `sql` roda uma consulta sobre tabelas que já estão

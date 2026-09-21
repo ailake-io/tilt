@@ -106,7 +106,7 @@ const std::vector<AliasEn> kTabela = {
     {"optimizer", "otimizador", "K"},
     {"epochs", "epocas", "K"},
     {"batch", "lote", "K"},
-    {"seed", "semente", "K"},
+    {"seed", "semente", "KA"},
     {"scheduler", "agendador", "K"},
     {"early_stop", "parar_cedo", "K"},
     {"validation", "validacao", "K"},
@@ -290,6 +290,18 @@ const std::vector<AliasEn> kTabela = {
     {"respond", "responder", "M"},
     {"ask", "perguntar", "M"},
     {"sum", "soma", "M"},
+    {"drop_nulls", "remover_nulos", "M"},
+    {"fill_nulls", "preencher_nulos", "M"},
+    {"rename", "renomear", "M"},
+    {"drop_columns", "remover_colunas", "M"},
+    {"cast", "converter", "M"},
+    {"deduplicate", "deduplicar", "M"},
+    {"join", "juntar", "M"},
+    {"stack", "empilhar", "M"},
+    {"describe", "descrever", "M"},
+    {"sample", "amostra", "M"},
+    {"value_counts", "contar_valores", "M"},
+    {"clean_text", "limpar_texto", "M"},
 
     // ---- metodos sem argumentos (depois de '.'; ver `receptor_de_dados`) ----
     {"shape", "forma", "Z"},
@@ -298,11 +310,18 @@ const std::vector<AliasEn> kTabela = {
     {"upper", "maiusculas", "Z"},
     {"lower", "minusculas", "Z"},
     {"mean", "media", "Z"},
+    {"drop_nulls", "remover_nulos", "Z"},
+    {"deduplicate", "deduplicar", "Z"},
+    {"describe", "descrever", "Z"},
+    {"clean_text", "limpar_texto", "Z"},
 
     // ---- chaves de mapa do vocabulario (`split: { train: .. }`), papel B ----
     // (ver as linhas com papel "B" acima)
 
     // ---- argumentos nomeados (`chave: valor` fora de `{ }`) ----
+    {"by", "por", "A"},
+    {"how", "tipo", "A"},
+    {"case", "caixa", "A"},
     {"top_k", "top_k", "A"},
     {"versions", "versoes", "A"},
 };

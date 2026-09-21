@@ -940,8 +940,12 @@ bool is_tensor_method(std::string_view m) {
                      "argmax", "item", "forma", "dados", "transposta", "tamanho"});
 }
 bool is_table_method(std::string_view m) {
-  return word_in(m, {"filtrar", "derivar", "mapear", "agrupar_por", "selecionar", "ordenar_por",
-                     "limite", "primeiros", "distinto", "tamanho", "sql"});
+  return word_in(
+      m, {"filtrar",     "derivar",        "mapear",          "agrupar_por", "selecionar",
+          "ordenar_por", "limite",         "primeiros",       "distinto",    "tamanho",
+          "sql",         "remover_nulos",  "preencher_nulos", "renomear",    "remover_colunas",
+          "converter",   "deduplicar",     "juntar",          "empilhar",    "descrever",
+          "amostra",     "contar_valores", "limpar_texto"});
 }
 bool is_texto_method(std::string_view m) { return word_in(m, {"maiusculas", "minusculas"}); }
 // Metodos resolvidos dinamicamente sobre texto-nome-de-entidade (agente,
@@ -1577,6 +1581,10 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
         }
       } else if (base == TypeKind::Tabela || base == TypeKind::Lista) {
         if (m == "tamanho") return TypeKind::Inteiro;
+        // Metodos de limpeza sem argumentos podem ser escritos sem parenteses.
+        if (word_in(m, {"descrever", "deduplicar", "remover_nulos", "limpar_texto"})) {
+          return TypeKind::Tabela;
+        }
       } else if (base == TypeKind::Texto) {
         if (m == "tamanho") return TypeKind::Inteiro;
       } else if (base == TypeKind::Mapa || base == TypeKind::Registro) {
@@ -1634,7 +1642,9 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
           report(DiagCode::TypeMismatch, e.span,
                  "'" + type_kind_name(base) + "' nao tem o metodo '" + m + "'",
                  {"metodos de tabela: filtrar, derivar, mapear, agrupar_por, selecionar, "
-                  "ordenar_por, limite, primeiros, distinto, sql"});
+                  "ordenar_por, limite, primeiros, distinto, sql, remover_nulos, preencher_nulos, "
+                  "renomear, remover_colunas, converter, deduplicar, juntar, empilhar, descrever, "
+                  "amostra, contar_valores, limpar_texto"});
           return TypeKind::Unknown;
         }
         if (base == TypeKind::Tensor && !is_tensor_method(m) && !is_entity_method(m)) {
