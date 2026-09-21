@@ -2,3 +2,5 @@
 # terminam com linha em branco; `juntar([])` deixa espaco no fim): sem
 # checagem de whitespace no `git diff --check`.
 tests/golden/**/expected.* -whitespace
+# CSVs de teste com fins de linha CRLF e espacos de proposito (casos de borda do leitor).
+tests/golden/**/*.csv -whitespace

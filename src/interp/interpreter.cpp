@@ -153,6 +153,11 @@ const Item* find_field(const ast::Block& block, std::string_view key) {
 
 Value parse_scalar(const std::string& cell) {
   if (!cell.empty()) {
+    // Texto obvio (letra que nao inicia nan/inf) nao vira numero: evita 2 strtol/strtod.
+    const unsigned char c0 = static_cast<unsigned char>(cell[0]);
+    if (std::isalpha(c0) != 0 && c0 != 'i' && c0 != 'I' && c0 != 'n' && c0 != 'N') {
+      return Value::texto(cell);
+    }
     char* end = nullptr;
     long long asi = std::strtoll(cell.c_str(), &end, 10);
     if (end && *end == '\0') return Value::inteiro(asi);
@@ -1958,23 +1963,92 @@ void Interpreter::janela_offset_save(WindowState& st, const std::string& pipelin
 }
 
 Value Interpreter::read_csv_file(const std::string& path, Span span) {
-  std::ifstream in(path);
+  std::ifstream in(path, std::ios::binary);
   if (!in) fail(span, "nao foi possivel abrir '" + path + "'");
-  std::string line;
+  // Arquivo inteiro num buffer e varredura sem alocar por linha/celula (antes: getline +
+  // vector<string> novo por linha). Mesma regra de aspas/`""`/`\r` de split_csv_line.
+  in.seekg(0, std::ios::end);
+  const std::streamoff tamanho = in.tellg();
+  in.seekg(0, std::ios::beg);
+  // Arquivo vazio, ou "arquivo" que nao e regular (diretorio: o ifstream abre e tellg
+  // devolve um valor absurdo): tabela vazia, como antes (io.existe_arquivo depende disso).
+  if (tamanho <= 0 || tamanho > (std::streamoff{1} << 44)) return Value::tabela({});
+  std::string buf(static_cast<std::size_t>(tamanho > 0 ? tamanho : 0), '\0');
+  if (!buf.empty()) in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+  const std::size_t n = static_cast<std::size_t>(in.gcount());
+
   std::vector<std::string> headers;
+  bool cabecalhos_unicos = true;
   rt::ValueList rows;
+  {
+    std::size_t linhas = 0;
+    for (std::size_t p = 0; p < n; ++p) linhas += buf[p] == '\n' ? 1 : 0;
+    rows.reserve(linhas);
+  }
+  std::vector<std::string> cells;  // reaproveitadas de linha em linha
   bool first = true;
-  while (std::getline(in, line)) {
-    if (line.empty()) continue;
-    auto cells = split_csv_line(line);
+  std::size_t pos = 0;
+  while (pos < n) {
+    std::size_t fim = buf.find('\n', pos);
+    if (fim == std::string::npos || fim > n) fim = n;
+    if (fim == pos) {  // linha vazia
+      pos = fim + 1;
+      continue;
+    }
+    std::size_t ncell = 0;
+    auto nova_celula = [&]() -> std::string* {
+      if (ncell == cells.size()) {
+        cells.emplace_back();
+      } else {
+        cells[ncell].clear();
+      }
+      return &cells[ncell++];
+    };
+    std::string* campo = nova_celula();
+    bool quoted = false;
+    for (std::size_t k = pos; k < fim; ++k) {
+      const char c = buf[k];
+      if (quoted) {
+        if (c == '"' && k + 1 < fim && buf[k + 1] == '"') {
+          campo->push_back('"');
+          ++k;
+        } else if (c == '"') {
+          quoted = false;
+        } else {
+          campo->push_back(c);
+        }
+      } else if (c == '"') {
+        quoted = true;
+      } else if (c == ',') {
+        campo = nova_celula();
+      } else if (c != '\r') {
+        campo->push_back(c);
+      }
+    }
+    pos = fim + 1;
     if (first) {
-      headers = cells;
+      headers.assign(cells.begin(), cells.begin() + static_cast<std::ptrdiff_t>(ncell));
+      for (std::size_t a = 0; a < headers.size() && cabecalhos_unicos; ++a) {
+        for (std::size_t b = a + 1; b < headers.size(); ++b) {
+          if (headers[a] == headers[b]) {
+            cabecalhos_unicos = false;
+            break;
+          }
+        }
+      }
       first = false;
       continue;
     }
     Value row = Value::mapa();
-    for (std::size_t k = 0; k < headers.size(); ++k) {
-      row.map->set(headers[k], k < cells.size() ? parse_scalar(cells[k]) : Value::nulo());
+    if (cabecalhos_unicos) {
+      row.map->items.reserve(headers.size());
+      for (std::size_t k = 0; k < headers.size(); ++k) {
+        row.map->items.emplace_back(headers[k], k < ncell ? parse_scalar(cells[k]) : Value::nulo());
+      }
+    } else {  // cabecalho repetido: o ultimo valor vence (ValueMap::set)
+      for (std::size_t k = 0; k < headers.size(); ++k) {
+        row.map->set(headers[k], k < ncell ? parse_scalar(cells[k]) : Value::nulo());
+      }
     }
     rows.push_back(std::move(row));
   }
@@ -11773,11 +11847,15 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
   if (is_table && method == "filtrar") {
     if (call.args.empty()) fail(call.span, "filtrar espera uma condicao");
     rt::ValueList kept;
-    for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      Env inner;
-      inner.parent = &env;
-      inner.vars["linha"] = row;
-      if (eval(*call.args[0].value, inner).truthy()) kept.push_back(row);
+    // Um unico Env para todas as linhas: so `linha` muda (antes: unordered_map novo por linha).
+    Env inner;
+    inner.parent = &env;
+    Value& var_linha = inner.vars["linha"];
+    if (receiver.list) {
+      for (const Value& row : *receiver.list) {
+        var_linha = row;
+        if (eval(*call.args[0].value, inner).truthy()) kept.push_back(row);
+      }
     }
     return Value::tabela(std::move(kept));
   }
@@ -11787,13 +11865,17 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     }
     const Expr& spec = *call.args[0].value;
     rt::ValueList out;
+    if (receiver.list) out.reserve(receiver.list->size());
+    Env inner;  // reaproveitado entre as linhas: so `linha` muda
+    inner.parent = &env;
+    Value& var_linha = inner.vars["linha"];
     for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      Env inner;
-      inner.parent = &env;
-      inner.vars["linha"] = row;
+      var_linha = row;
       Value nr = Value::mapa();
       if (row.map) {
-        for (const auto& kv : row.map->items) nr.map->set(kv.first, kv.second);
+        // Colunas da linha original sem chaves repetidas: copia direta (set() buscaria a chave).
+        nr.map->items.reserve(row.map->items.size() + spec.entries.size());
+        nr.map->items.assign(row.map->items.begin(), row.map->items.end());
       }
       for (const auto& en : spec.entries) nr.map->set(en.key, eval(*en.value, inner));
       out.push_back(std::move(nr));
@@ -11807,13 +11889,20 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     const Expr& aggs = *call.args[1].value;
     if (aggs.kind != ExprKind::MapLit) fail(call.span, "agregacoes devem ser um mapa");
 
+    // Grupos guardam ponteiros para as linhas (sem copiar Values) e 1 busca por linha.
     std::vector<std::string> order;
-    std::unordered_map<std::string, rt::ValueList> groups;
-    for (const Value& row : (receiver.list ? *receiver.list : rt::ValueList{})) {
-      const Value* k = row.map ? row.map->find(key_col) : nullptr;
-      std::string gk = k ? to_display(*k) : "";
-      if (!groups.count(gk)) order.push_back(gk);
-      groups[gk].push_back(row);
+    std::unordered_map<std::string, std::vector<const Value*>> groups;
+    if (receiver.list) {
+      for (const Value& row : *receiver.list) {
+        const Value* k = row.map ? row.map->find(key_col) : nullptr;
+        std::string gk = k ? to_display(*k) : "";
+        auto it = groups.find(gk);
+        if (it == groups.end()) {
+          order.push_back(gk);
+          it = groups.emplace(std::move(gk), std::vector<const Value*>{}).first;
+        }
+        it->second.push_back(&row);
+      }
     }
 
     rt::ValueList out;
@@ -11838,8 +11927,8 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           acc = static_cast<double>(rows.size());
         } else {
           bool init = false;
-          for (const Value& rr : rows) {
-            const Value* c = rr.map ? rr.map->find(col) : nullptr;
+          for (const Value* rp : rows) {
+            const Value* c = rp->map ? rp->map->find(col) : nullptr;
             double n = c ? c->as_number() : 0;
             if (!init) {
               acc = n;

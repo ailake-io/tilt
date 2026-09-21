@@ -10,6 +10,7 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1592,6 +1593,9 @@ constexpr int kZNoFlush = 0;
 constexpr int kZFinish = 4;
 constexpr int kZStreamEnd = 1;
 constexpr int kZDefaultCompression = -1;
+// Nivel 1: 3-5x mais rapido que o padrao (6) na escrita, com arquivos ~10-20% maiores;
+// leitores de Parquet nao dependem do nivel usado.
+constexpr int kZBestSpeed = 1;
 constexpr int kZDeflated = 8;
 constexpr int kWindowBitsAuto = 15 + 32;      // aceita zlib (RFC1950) e gzip (RFC1952)
 constexpr int kWindowBitsGzip = 15 + 16;      // emite container gzip (RFC1952)
@@ -1638,7 +1642,7 @@ std::string gzip_payload(const std::string& in, const std::string& col) {
     die(zlib_ausente(col));
   }
   ZStream s{};
-  if (z.deflate_init2(&s, kZDefaultCompression, kZDeflated, kWindowBitsGzip, 8, 0, z.version(),
+  if (z.deflate_init2(&s, kZBestSpeed, kZDeflated, kWindowBitsGzip, 8, 0, z.version(),
                       static_cast<int>(sizeof(ZStream))) != 0) {
     die("falha ao inicializar a zlib (deflateInit2)");
   }
@@ -3044,19 +3048,20 @@ std::optional<DictBuild> build_dict(const Column& c, bool permitido) {
   const std::size_t definidos = texto ? c.strings.size() : c.nums.size();
   if (definidos < 8) return std::nullopt;
   DictBuild db;
-  std::vector<std::string> chaves;  // PLAIN de cada distinto
+  // PLAIN de cada distinto -> indice (ordem de 1a aparicao). Busca por hash: a varredura
+  // linear anterior custava O(linhas x distintos) (ate 1024 comparacoes por valor).
+  std::unordered_map<std::string, std::uint32_t> chaves;
   chaves.reserve(64);
   auto indice_de = [&](const std::string& raw, bool& novo) -> std::uint32_t {
-    for (std::uint32_t k = 0; k < chaves.size(); ++k) {
-      if (chaves[k] == raw) {
-        novo = false;
-        return k;
-      }
+    if (const auto it = chaves.find(raw); it != chaves.end()) {
+      novo = false;
+      return it->second;
     }
     if (chaves.size() >= 1024) return 0xFFFFFFFFu;  // teto: desiste
-    chaves.push_back(raw);
+    const auto indice = static_cast<std::uint32_t>(chaves.size());
+    chaves.emplace(raw, indice);
     novo = true;
-    return static_cast<std::uint32_t>(chaves.size() - 1);
+    return indice;
   };
   if (texto) {
     for (const std::string& s : c.strings) {
