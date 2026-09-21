@@ -184,6 +184,31 @@ Conversor conversor_de(const std::string& tipo) {
 void ordenar_indices(const ValueList& linhas, const std::string& coluna, bool desc,
                      std::vector<std::uint32_t>& ordem) {
   const std::size_t n = linhas.size();
+  // Colunas numericas puras dispensam materializar tambem os ponteiros das
+  // celulas: lemos a chave uma vez e mantemos apenas o vetor contiguo usado na
+  // comparacao.
+  if (n > 0) {
+    const Value* primeira = celula(linhas.front(), coluna);
+    if (primeira && primeira->is_number()) {
+      std::vector<double> num(n);
+      num[0] = primeira->as_number();
+      bool todos_num = true;
+      for (std::size_t i = 1; i < n; ++i) {
+        const Value* k = celula(linhas[i], coluna);
+        if (!(k && k->is_number())) {
+          todos_num = false;
+          break;
+        }
+        num[i] = k->as_number();
+      }
+      if (todos_num) {
+        std::stable_sort(ordem.begin(), ordem.end(), [&](std::uint32_t x, std::uint32_t y) {
+          return desc ? num[y] < num[x] : num[x] < num[y];
+        });
+        return;
+      }
+    }
+  }
   std::vector<const Value*> chaves(n);
   bool todos_num = true;
   bool todos_txt = true;
