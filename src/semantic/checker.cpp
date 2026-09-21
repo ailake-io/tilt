@@ -945,7 +945,8 @@ bool is_table_method(std::string_view m) {
           "ordenar_por", "limite",         "primeiros",       "distinto",    "tamanho",
           "sql",         "remover_nulos",  "preencher_nulos", "renomear",    "remover_colunas",
           "converter",   "deduplicar",     "juntar",          "empilhar",    "descrever",
-          "amostra",     "contar_valores", "limpar_texto"});
+          "amostra",     "contar_valores", "limpar_texto",    "pivotar",     "despivotar",
+          "janela",      "dividir_coluna", "converter_fuso"});
 }
 bool is_texto_method(std::string_view m) { return word_in(m, {"maiusculas", "minusculas"}); }
 // Metodos resolvidos dinamicamente sobre texto-nome-de-entidade (agente,
@@ -1644,7 +1645,8 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
                  {"metodos de tabela: filtrar, derivar, mapear, agrupar_por, selecionar, "
                   "ordenar_por, limite, primeiros, distinto, sql, remover_nulos, preencher_nulos, "
                   "renomear, remover_colunas, converter, deduplicar, juntar, empilhar, descrever, "
-                  "amostra, contar_valores, limpar_texto"});
+                  "amostra, contar_valores, limpar_texto, pivotar, despivotar, janela, "
+                  "dividir_coluna, converter_fuso"});
           return TypeKind::Unknown;
         }
         if (base == TypeKind::Tensor && !is_tensor_method(m) && !is_entity_method(m)) {

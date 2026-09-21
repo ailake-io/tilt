@@ -1,0 +1,31 @@
+== pipeline limpeza_avancada ==
+-- pivotar
+2 sul 30 5 7 3
+1
+[regiao, 1, 2, 3]
+7.5 nulo
+-- despivotar
+4 sul a 30 3
+2 a 30
+-- janela
+1 2 3 1
+10 15 35 7 10
+1 1 3
+10 12.5
+0 10 5
+nulo 15
+-- dividir_coluna
+ana maria silva bruno nulo nulo
+ana silva nulo 3
+-- fusos
+2024-01-31T09:00:00
+2024-02-01T02:30:00
+2024-01-31T17:30:00
+2024-01-31T15:00:00
+2024-01-31T01:00:00
+nulo
+2024-06-01T12:00:00
+nulo
+erro: converter_fuso: fuso horario desconhecido 'Marte/Olympus' (use um nome IANA como America/Sao_Paulo, UTC ou um deslocamento como -03:00; instale o tzdata se faltar)
+erro: janela: funcao desconhecida 'voar' (use numero_linha, ranking, ranking_denso, soma_acumulada, contagem_acumulada, media_acumulada, soma_movel, media_movel, anterior, proximo, diferenca, primeiro, ultimo)
+erro: pivotar: 'produto' tem valores nao numericos; use agregacao contar, primeiro, min ou max

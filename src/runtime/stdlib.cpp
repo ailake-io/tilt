@@ -20,6 +20,7 @@
 #include <unordered_set>
 
 #include "runtime/compat.hpp"
+#include "runtime/fuso.hpp"
 #include "runtime/json.hpp"
 #include "runtime/sha256.hpp"
 #include "runtime/tabela_ops.hpp"
@@ -629,6 +630,16 @@ const std::unordered_map<std::string, Handler>& tabela() {
       if (a[0].kind != ValueKind::Texto) return Value::nulo();
       const std::string d = normalizar_data(a[0].s);
       return d.empty() ? Value::nulo() : Value::texto(d);
+    };
+    m["converter_fuso"] = [](const Args& a) {
+      a.aridade(3, 3, "(data_hora, fuso_origem, fuso_destino)");
+      if (a[0].kind != ValueKind::Texto) return Value::nulo();
+      try {
+        const std::string r = converter_fuso(a[0].s, a.txt(1), a.txt(2));
+        return r.empty() ? Value::nulo() : Value::texto(r);
+      } catch (const std::runtime_error& e) {
+        a.falha(e.what());
+      }
     };
     m["dias_entre"] = [](const Args& a) {
       a.aridade(2, 2, "(data_inicial, data_final)");

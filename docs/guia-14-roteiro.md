@@ -45,8 +45,9 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `descrever`, `amostra`, `contar_valores`, `limpar_texto` e `ordenar_por` com várias
   colunas, `ler_csv` com `separador:`/`pular:`/`nulos:`/`tipos:`/`sem_cabecalho:`,
   `escrever_csv` com aspas RFC 4180, `converter_data`/`ano`/`mes`/`dia`/`adicionar_dias`/
-  `dias_entre` e `coalescer` (guia 03). Faltam: `pivotar`/`despivotar`, funções de janela
-  (`sql` cobre), `dividir_coluna` e fusos horários.
+  `dias_entre` e `coalescer`, mais `pivotar`, `despivotar`, funções de janela
+  (`janela`), `dividir_coluna` e `converter_fuso` (guia 03). O que resta é
+  detecção de tipos por amostragem no `ler_csv` e datas com fuso na leitura.
 - **Escrita analítica**: Delta/Iceberg particionam, compactam com
   `otimizar_delta`/`otimizar_iceberg`, z-order determinístico via `z_order:` e
   `vacuum_*` conservador para Parquet órfão; `ordenar_por` continua disponível

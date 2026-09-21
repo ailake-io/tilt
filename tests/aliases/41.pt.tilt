@@ -1,0 +1,9 @@
+pipeline avancada:
+  passos:
+    - vendas = [{ regiao: "sul", produto: "a", mes: 1, valor: 10 }, { regiao: "norte", produto: "b", mes: 2, valor: 3 }]
+    - p = vendas.pivotar indice: "regiao", colunas: "produto", valores: "valor", agregacao: "soma"
+    - d = p.despivotar id: "regiao", nome: "produto", valor: "total"
+    - j = vendas.janela "acum", "soma_acumulada", "valor", por: "regiao", ordem: "mes", tamanho: 2, padrao: 0
+    - dv = vendas.dividir_coluna "regiao", "o", nomes: ["x", "y"], remover: verdadeiro
+    - f = vendas.converter_fuso "mes", origem: "UTC", destino: "-03:00"
+    - g = converter_fuso("2024-01-31T12:00:00", "UTC", "-03:00")

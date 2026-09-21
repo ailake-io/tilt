@@ -56,6 +56,7 @@ add_library(tilt_core STATIC
   src/runtime/python_interop.cpp
   src/runtime/sql_tabelas.cpp
   src/runtime/tabela_ops.cpp
+  src/runtime/fuso.cpp
   src/runtime/tensor.cpp
   src/runtime/safetensors.cpp
   src/runtime/onnx.cpp

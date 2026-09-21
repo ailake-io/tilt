@@ -98,6 +98,10 @@ add_test(
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sql_duckdb_test.sh $<TARGET_FILE:tilt>)
 
 add_test(
+  NAME fuso
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/fuso_test.sh $<TARGET_FILE:tilt>)
+
+add_test(
   NAME rpc
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/rpc_test.sh
           $<TARGET_FILE:tilt> ${CMAKE_SOURCE_DIR}/exemplos/interop)

@@ -725,6 +725,55 @@ pipeline limpeza:
 | `limpar_texto ["nome"], caixa: "minusculas"` | tira espaços das pontas e repetidos (e muda a caixa) |
 | `ordenar_por "a", "b", desc: verdadeiro` | várias colunas, estável |
 
+### Pivô, janelas, divisão de coluna e fusos
+
+```tilt run
+pipeline avancada:
+  passos:
+    - vendas = [
+        { regiao: "sul", produto: "a", mes: 1, valor: 10 },
+        { regiao: "sul", produto: "b", mes: 1, valor: 5 },
+        { regiao: "sul", produto: "a", mes: 2, valor: 20 },
+        { regiao: "norte", produto: "a", mes: 1, valor: 7 }
+      ]
+    # linhas -> colunas (e de volta)
+    - p = vendas.pivotar indice: "regiao", colunas: "produto", valores: "valor", agregacao: "soma"
+    - imprimir p[0].regiao, p[0].a, p[0].b, p[1].a, p[1].b
+    - d = p.despivotar id: "regiao", nome: "produto", valor: "total"
+    - imprimir tamanho(d)
+    # janela: acumulado por regiao, na ordem dos meses
+    - k = vendas.janela "acum", "soma_acumulada", "valor", por: "regiao", ordem: "mes"
+    - imprimir k[0].acum, k[1].acum, k[2].acum, k[3].acum
+    # dividir uma coluna de texto
+    - pessoas = [{ nome: "ana maria silva" }, { nome: "bruno" }]
+    - dv = pessoas.dividir_coluna "nome", " ", nomes: ["primeiro", "resto"]
+    - imprimir dv[0].primeiro, dv[0].resto, dv[1].resto
+    # fusos horarios
+    - imprimir converter_fuso("2024-01-31T12:00:00", "UTC", "-03:00")
+```
+
+| Método | O que faz |
+|---|---|
+| `pivotar indice: "a", colunas: "b", valores: "v", agregacao: "soma"` | linhas → colunas: uma linha por `indice` (nome ou lista), uma coluna por valor distinto de `colunas`; `agregacao`: `soma` (padrão), `media`, `contar`, `min`, `max`, `primeiro`; combinação sem dados é `nulo` (0 em `contar`) |
+| `despivotar id: "a", colunas: [...], nome: "variavel", valor: "valor"` | colunas → linhas; sem `colunas:` usa todas fora de `id`; células nulas saem, exceto com `manter_nulos: verdadeiro` |
+| `janela "nome", "funcao", "coluna", por: ..., ordem: ...` | acrescenta uma coluna calculada sem mudar a ordem das linhas (abaixo) |
+| `dividir_coluna "col", ",", nomes: [...], remover: verdadeiro` | divide o texto em colunas novas (o resto vai na última; sem `nomes:` são `col_1..N`); nulo gera nulos |
+| `converter_fuso "col", origem: "UTC", destino: "America/Sao_Paulo"` | converte datas e horas de uma coluna; o que não é data vira `nulo` |
+
+**Funções de janela** (`por:` particiona, `ordem:` ordena dentro da partição, `desc: verdadeiro`
+inverte): `numero_linha`, `ranking` (empates repetem e deixam salto), `ranking_denso`,
+`soma_acumulada`, `contagem_acumulada`, `media_acumulada`, `soma_movel` e `media_movel`
+(`tamanho: n`, inclui a linha atual), `anterior` e `proximo` (`deslocamento: n`, `padrao: v`),
+`diferenca` (valor menos o da linha anterior), `primeiro` e `ultimo`. Nulos são ignorados
+nas somas e médias. Sem `por:` a tabela toda é uma partição.
+
+**Fusos.** `converter_fuso(texto, origem, destino)` (função) e o método aceitam `UTC`,
+deslocamento fixo (`-03:00`, `+0530`) ou nome IANA (`America/Sao_Paulo`, `Europe/London`),
+que usa o *tzdata* do sistema (horário de verão incluído; no Windows só `UTC` e
+deslocamentos). Um sufixo no próprio texto (`...Z`, `...-03:00`) vale mais que `origem`. O
+resultado é `AAAA-MM-DDTHH:MM:SS` no fuso de destino. Horário que não existe ou é ambíguo
+na virada do horário de verão segue a regra da libc do sistema.
+
 ### Ler e gravar CSV de verdade
 
 `ler_csv` aceita opções (todas opcionais; sem opção o comportamento é o de sempre):

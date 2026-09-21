@@ -12439,7 +12439,8 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
   if (is_table &&
       word_in(method, {"remover_nulos", "preencher_nulos", "renomear", "remover_colunas",
                        "converter", "deduplicar", "distinto", "juntar", "empilhar", "descrever",
-                       "amostra", "contar_valores", "limpar_texto", "ordenar_por"})) {
+                       "amostra", "contar_valores", "limpar_texto", "ordenar_por", "pivotar",
+                       "despivotar", "janela", "dividir_coluna", "converter_fuso"})) {
     auto a = eval_args(call, env);
     const rt::ValueMap kw = eval_kwargs(call, env);
     // Nomes de coluna: textos soltos ou listas de textos, a partir do argumento `desde`.
@@ -12529,6 +12530,85 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           caixa = v->s;
         }
         return rt::tabela_limpar_texto(receiver, nomes(0), caixa);
+      }
+      // Opcao nomeada que aceita um nome de coluna ou uma lista de nomes.
+      const auto nomes_kw = [&](const char* chave) {
+        std::vector<std::string> out;
+        const Value* v = kw.find(chave);
+        if (v == nullptr) return out;
+        if (v->kind == ValueKind::Texto) {
+          out.push_back(v->s);
+        } else if (v->kind == ValueKind::Lista && v->list) {
+          for (const Value& e : *v->list) {
+            if (e.kind != ValueKind::Texto) {
+              throw std::runtime_error(method + ": '" + chave +
+                                       "' deve ser nome(s) de coluna (texto)");
+            }
+            out.push_back(e.s);
+          }
+        } else {
+          throw std::runtime_error(method + ": '" + chave + "' deve ser nome(s) de coluna (texto)");
+        }
+        return out;
+      };
+      const auto texto_kw = [&](const char* chave, const std::string& padrao) {
+        const Value* v = kw.find(chave);
+        if (v == nullptr) return padrao;
+        if (v->kind != ValueKind::Texto)
+          throw std::runtime_error(method + ": '" + chave + "' deve ser texto");
+        return v->s;
+      };
+      if (method == "pivotar") {
+        const std::vector<std::string> col = nomes_kw("colunas");
+        const std::vector<std::string> val = nomes_kw("valores");
+        if (col.size() != 1 || val.size() != 1) {
+          throw std::runtime_error(
+              "pivotar: 'colunas:' e 'valores:' devem ser um nome de coluna cada");
+        }
+        return rt::tabela_pivotar(receiver, nomes_kw("indice"), col[0], val[0],
+                                  texto_kw("agregacao", "soma"));
+      }
+      if (method == "despivotar") {
+        const Value* manter = kw.find("manter_nulos");
+        return rt::tabela_despivotar(receiver, nomes_kw("id"), nomes_kw("colunas"),
+                                     texto_kw("nome", "variavel"), texto_kw("valor", "valor"),
+                                     manter != nullptr && manter->truthy());
+      }
+      if (method == "janela") {
+        exige_arg(
+            "t.janela \"acumulado\", \"soma_acumulada\", \"valor\", por: \"regiao\", ordem: "
+            "\"data\"");
+        rt::JanelaOpcoes op;
+        std::vector<std::string> pos = nomes(0);  // nome, funcao, [coluna]
+        if (pos.size() < 2) throw std::runtime_error("janela espera (nome, funcao [, coluna])");
+        op.nome = pos[0];
+        op.funcao = pos[1];
+        if (pos.size() > 2) op.coluna = pos[2];
+        op.por = nomes_kw("por");
+        op.ordem = nomes_kw("ordem");
+        if (const Value* v = kw.find("desc")) op.decrescente = v->truthy();
+        if (const Value* v = kw.find("tamanho"))
+          op.tamanho = static_cast<std::size_t>(v->as_number());
+        if (const Value* v = kw.find("deslocamento"))
+          op.deslocamento = static_cast<std::size_t>(v->as_number());
+        if (const Value* v = kw.find("padrao")) op.padrao = *v;
+        return rt::tabela_janela(receiver, op);
+      }
+      if (method == "dividir_coluna") {
+        exige_arg("t.dividir_coluna \"nome\", \" \", nomes: [\"primeiro\", \"resto\"]");
+        if (a.size() < 2 || a[0].kind != ValueKind::Texto || a[1].kind != ValueKind::Texto) {
+          throw std::runtime_error("dividir_coluna espera (coluna, separador)");
+        }
+        const Value* rem = kw.find("remover");
+        return rt::tabela_dividir_coluna(receiver, a[0].s, a[1].s, nomes_kw("nomes"),
+                                         rem != nullptr && rem->truthy());
+      }
+      if (method == "converter_fuso") {
+        exige_arg("t.converter_fuso \"quando\", origem: \"UTC\", destino: \"America/Sao_Paulo\"");
+        if (a[0].kind != ValueKind::Texto)
+          throw std::runtime_error("converter_fuso espera o nome de uma coluna");
+        return rt::tabela_converter_fuso(receiver, a[0].s, texto_kw("origem", "UTC"),
+                                         texto_kw("destino", "UTC"));
       }
       // ordenar_por
       const Value* desc = kw.find("desc");

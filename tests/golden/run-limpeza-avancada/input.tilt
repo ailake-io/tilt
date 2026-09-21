@@ -1,0 +1,65 @@
+pipeline limpeza_avancada:
+  passos:
+    - vendas = [
+        { regiao: "sul", produto: "a", mes: 1, valor: 10 },
+        { regiao: "sul", produto: "b", mes: 1, valor: 5 },
+        { regiao: "sul", produto: "a", mes: 2, valor: 20 },
+        { regiao: "norte", produto: "a", mes: 1, valor: 7 },
+        { regiao: "norte", produto: "b", mes: 2, valor: 3 },
+        { regiao: "norte", produto: "b", mes: 3, valor: nulo }
+      ]
+    - imprimir "-- pivotar"
+    - p = vendas.pivotar indice: "regiao", colunas: "produto", valores: "valor", agregacao: "soma"
+    - imprimir tamanho(p), p[0].regiao, p[0].a, p[0].b, p[1].a, p[1].b
+    - pc = vendas.pivotar indice: "regiao", colunas: "produto", valores: "valor", agregacao: "contar"
+    - imprimir pc[1].b
+    - pm = vendas.pivotar indice: ["regiao"], colunas: "mes", valores: "valor", agregacao: "media"
+    - imprimir chaves(pm[0])
+    - imprimir pm[0]["1"], pm[1]["3"]
+    - imprimir "-- despivotar"
+    - d = p.despivotar id: "regiao", nome: "produto", valor: "total"
+    - imprimir tamanho(d), d[0].regiao, d[0].produto, d[0].total, d[3].total
+    - dn = p.despivotar id: ["regiao"], colunas: ["a"], manter_nulos: verdadeiro
+    - imprimir tamanho(dn), dn[0].variavel, dn[0].valor
+    - imprimir "-- janela"
+    - j = vendas.janela "n", "numero_linha", por: "regiao", ordem: "mes"
+    - imprimir j[0].n, j[1].n, j[2].n, j[3].n
+    - k = vendas.janela "acum", "soma_acumulada", "valor", por: "regiao", ordem: "mes"
+    - imprimir k[0].acum, k[1].acum, k[2].acum, k[3].acum, k[5].acum
+    - r = vendas.janela "r", "ranking", por: "regiao", ordem: "mes"
+    - imprimir r[0].r, r[1].r, r[2].r
+    - m = vendas.janela "mm", "media_movel", "valor", tamanho: 2, por: "regiao", ordem: "mes"
+    - imprimir m[0].mm, m[2].mm
+    - a = vendas.janela "ant", "anterior", "valor", por: "regiao", ordem: "mes", padrao: 0
+    - imprimir a[0].ant, a[1].ant, a[2].ant
+    - df = vendas.janela "delta", "diferenca", "valor", por: "regiao", ordem: "mes"
+    - imprimir df[0].delta, df[2].delta
+    - imprimir "-- dividir_coluna"
+    - nomes = [{ completo: "ana maria silva" }, { completo: "bruno" }, { completo: nulo }]
+    - dv = nomes.dividir_coluna "completo", " ", nomes: ["primeiro", "resto"]
+    - imprimir dv[0].primeiro, dv[0].resto, dv[1].primeiro, dv[1].resto, dv[2].primeiro
+    - dt = nomes.dividir_coluna "completo", " ", remover: verdadeiro
+    - imprimir dt[0].completo_1, dt[0].completo_3, dt[1].completo_2, tamanho(chaves(dt[0]))
+    - imprimir "-- fusos"
+    - imprimir converter_fuso("2024-01-31T12:00:00", "UTC", "-03:00")
+    - imprimir converter_fuso("2024-01-31 23:30", "-03:00", "UTC")
+    - imprimir converter_fuso("2024-01-31T12:00:00Z", "UTC", "+05:30")
+    - imprimir converter_fuso("2024-01-31T12:00:00-03:00", "UTC", "UTC")
+    - imprimir converter_fuso("31/01/2024", "UTC", "+01:00")
+    - imprimir converter_fuso("lixo", "UTC", "UTC")
+    - eventos = [{ quando: "2024-06-01T15:00:00" }, { quando: "invalida" }]
+    - ev = eventos.converter_fuso "quando", origem: "UTC", destino: "-03:00"
+    - imprimir ev[0].quando
+    - imprimir ev[1].quando
+    - tentar:
+        converter_fuso("2024-01-31", "Marte/Olympus", "UTC")
+    capturar erro:
+      imprimir "erro: {{erro}}"
+    - tentar:
+        vendas.janela "x", "voar", "valor"
+    capturar erro:
+      imprimir "erro: {{erro}}"
+    - tentar:
+        vendas.pivotar indice: "regiao", colunas: "produto", valores: "produto"
+    capturar erro:
+      imprimir "erro: {{erro}}"

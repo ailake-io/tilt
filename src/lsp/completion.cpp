@@ -108,12 +108,13 @@ const std::array<std::string_view, 67> kBuiltins = {"imprimir",
                                                     "es_buscar",
                                                     "es_executar"};
 
-const std::array<std::string_view, 24> kTableMethods = {
+const std::array<std::string_view, 29> kTableMethods = {
     "filtrar",         "derivar",   "mapear",         "agrupar_por",     "selecionar",
     "ordenar_por",     "limite",    "primeiros",      "distinto",        "tamanho",
     "inserir",         "sql",       "remover_nulos",  "preencher_nulos", "renomear",
     "remover_colunas", "converter", "deduplicar",     "juntar",          "empilhar",
-    "descrever",       "amostra",   "contar_valores", "limpar_texto"};
+    "descrever",       "amostra",   "contar_valores", "limpar_texto",    "pivotar",
+    "despivotar",      "janela",    "dividir_coluna", "converter_fuso"};
 
 const std::array<std::string_view, 17> kTensorMethods = {
     "forma", "dados",    "matmul", "transposta", "reformar", "conv2d", "norma_lote", "relu", "gelu",
