@@ -2103,17 +2103,12 @@ std::size_t csv_celulas(const char* buf, std::size_t pos, std::size_t fim, char 
   return ncell;
 }
 
-// Celula -> valor (o marcador vira nulo; ver `nulos:`).
-Value csv_valor(const std::string& cell) {
-  if (cell.size() == 5 && cell[0] == '\x01' && cell == "\x01NULO") return Value::nulo();
-  return parse_scalar(cell);
-}
-
 // Linhas de dados [ini, fim) do buffer viram mapas (uma por linha nao vazia).
 void csv_linhas(const char* buf, std::size_t ini, std::size_t fim, char sep,
                 const std::vector<std::string>& headers, bool cabecalhos_unicos,
                 const std::vector<std::string>& nulos, rt::ValueList& rows) {
   std::vector<std::string> cells;
+  std::vector<char> eh_nulo;
   std::size_t pos = ini;
   while (pos < fim) {
     const void* nl = std::memchr(buf + pos, '\n', fim - pos);
@@ -2125,25 +2120,22 @@ void csv_linhas(const char* buf, std::size_t ini, std::size_t fim, char sep,
     }
     const std::size_t ncell = csv_celulas(buf, pos, fim_linha, sep, cells);
     pos = fim_linha + 1;
+    // `nulos:` — marca fora da celula (uma celula com qualquer texto nunca vira nulo sozinha).
+    eh_nulo.assign(ncell, 0);
     if (!nulos.empty()) {
       for (std::size_t k = 0; k < ncell; ++k) {
-        for (const std::string& n : nulos) {
-          if (cells[k] == n) {
-            cells[k] = "\x01NULO";
-            break;
-          }
-        }
+        eh_nulo[k] = std::find(nulos.begin(), nulos.end(), cells[k]) != nulos.end() ? 1 : 0;
       }
     }
     Value row = Value::mapa();
     if (cabecalhos_unicos) {
       row.map->items.reserve(headers.size());
       for (std::size_t k = 0; k < headers.size(); ++k) {
-        row.map->items.emplace_back(headers[k], k < ncell ? csv_valor(cells[k]) : Value::nulo());
+        row.map->items.emplace_back(headers[k], k < ncell ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k])) : Value::nulo());
       }
     } else {  // cabecalho repetido: o ultimo valor vence (ValueMap::set)
       for (std::size_t k = 0; k < headers.size(); ++k) {
-        row.map->set(headers[k], k < ncell ? csv_valor(cells[k]) : Value::nulo());
+        row.map->set(headers[k], k < ncell ? (eh_nulo[k] != 0 ? Value::nulo() : parse_scalar(cells[k])) : Value::nulo());
       }
     }
     rows.push_back(std::move(row));
