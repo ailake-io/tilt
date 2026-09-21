@@ -1,0 +1,7 @@
+erro[T901]: VM: recursao profunda demais (mais de 4000 niveis)
+  --> input.tilt:1:1
+   |
+ 1 | funcao r n:
+   | ^^^^^^
+   |
+

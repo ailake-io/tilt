@@ -9,7 +9,7 @@ namespace tilt::vm {
 
 namespace {
 
-constexpr char kMagic[] = "TILTC1";
+constexpr char kMagic[] = "TILTC2";  // v2: Instr::b de Binop carrega o BinOp
 
 void put_u8(std::string& o, std::uint8_t v) { o.push_back(static_cast<char>(v)); }
 

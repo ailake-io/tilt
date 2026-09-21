@@ -125,7 +125,7 @@ struct Builder {
           } else {
             emit(Op::Const, const_idx(rt::Value::texto(p.text)));
           }
-          if (!first) emit(Op::Binop, op_idx("+"));
+          if (!first) emit(Op::Binop, op_idx("+"), static_cast<int>(BinOp::Soma));
           first = false;
         }
         return;
@@ -190,7 +190,7 @@ struct Builder {
         }
         expr(*e.lhs);
         expr(*e.rhs);
-        emit(Op::Binop, op_idx(e.text));
+        emit(Op::Binop, op_idx(e.text), static_cast<int>(binop_de(e.text)));
         return;
       }
       case ExprKind::Member: {
@@ -363,7 +363,7 @@ struct Builder {
         emit(Op::LoadLocal, i_slot);
         emit(Op::LoadLocal, it_slot);
         emit(Op::Len);
-        emit(Op::Binop, op_idx("<"));
+        emit(Op::Binop, op_idx("<"), static_cast<int>(BinOp::Lt));
         const int j_end = emit(Op::JumpIfFalse);
         emit(Op::LoadLocal, it_slot);
         emit(Op::LoadLocal, i_slot);
@@ -372,7 +372,7 @@ struct Builder {
         block(s.body);
         emit(Op::LoadLocal, i_slot);
         emit(Op::Const, const_idx(rt::Value::inteiro(1)));
-        emit(Op::Binop, op_idx("+"));
+        emit(Op::Binop, op_idx("+"), static_cast<int>(BinOp::Soma));
         emit(Op::StoreLocal, i_slot);
         emit(Op::Jump, start);
         chunk.code[static_cast<std::size_t>(j_end)].a = static_cast<std::int32_t>(chunk.code.size());

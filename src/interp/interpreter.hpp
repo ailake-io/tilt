@@ -263,6 +263,11 @@ class Interpreter {
 
   std::vector<rt::Value> eval_args(const ast::Expr& call, Env& env);
   rt::Value call_closure(const rt::Closure& fn, std::vector<rt::Value> args, Span span);
+  // Chunk de bytecode da funcao (compila/le do cache na 1a vez); nullptr se ela nao esta
+  // no subconjunto da VM. O ponteiro vive tanto quanto o interpretador (vm_chunks_).
+  std::shared_ptr<vm::Chunk> chunk_de_funcao(const ast::Item& fn);
+  // Resolvedor para chamadas VM -> VM diretas (nome -> Chunk), ou nullptr.
+  const vm::Chunk* resolver_chunk(const std::string& nome);
   rt::ValueMap eval_kwargs(const ast::Expr& call, Env& env);
   // `particionar_por:` como texto ou lista de textos (particao composta).
   std::vector<std::string> parse_particionar_por(const rt::ValueMap& kw, const char* builtin,

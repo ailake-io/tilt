@@ -1,0 +1,8 @@
+funcao r n:
+  se n == 0:
+    retornar 0
+  retornar 1 + r(n - 1)
+
+pipeline p:
+  passos:
+    - imprimir r(200000)
