@@ -34,6 +34,28 @@ pipeline etl:
 `tilt executar` roda **todo** `pipeline` de topo, na ordem do arquivo. Sem
 pipeline, roda uma `funcao principal` se existir.
 
+Para arquivos locais, `ler_csv`, `ler_parquet` e `ler_delta` aceitam
+`lazy: verdadeiro` (também `preguicoso: verdadeiro`). A chamada cria um plano
+colunar sem ler as linhas; a leitura acontece quando uma operação consulta o
+resultado. `colunar: verdadeiro`, `selecionar`, `onde` e `tipos` continuam
+valendo dentro do carregamento adiado.
+
+Um pipeline pode declarar `paralelo: verdadeiro` para executar em conjunto
+atribuições simples que não dependem umas das outras:
+
+```tilt skip
+pipeline preparar:
+  paralelo: verdadeiro
+  passos:
+    - vendas = ler_parquet "vendas.parquet", colunar: verdadeiro, lazy: verdadeiro
+    - clientes = ler_csv "clientes.csv", colunar: verdadeiro, lazy: verdadeiro
+    - imprimir tamanho(vendas), tamanho(clientes)
+```
+
+O runtime mantém sequenciais as etapas que leem uma variável produzida por
+outra, escrevem arquivos ou produzem saída textual. A variável `TILT_PIPELINE_PARALLEL=1`
+habilita o mesmo comportamento globalmente.
+
 `tilt executar --agendar` entra em **loop real de agenda**: pipelines sem
 `agenda:` rodam uma vez na entrada; os demais disparam no próximo minuto que
 casa com o cron (suporta `*`, `*/n`, `a-b`, `a-b/n` e listas `a,b`; 0 e 7 =
@@ -306,7 +328,11 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   a identidade precisa de `kms:GenerateDataKey` e `kms:Decrypt` na chave.
   `KMS_ENDPOINT` permite apontar para um endpoint compatível/local.
   `chave` e `chave_kms` são mutuamente exclusivas;
-- escrita: encoding **PLAIN** ou **DICTIONARY** (acima), um row group por arquivo;
+- escrita: encoding **PLAIN** ou **DICTIONARY** (acima). Por padrão há um row
+  group; use `row_group: 100_000` (ou `grupo:`) em `escrever_parquet` para
+  particionar uma tabela grande em vários grupos no mesmo arquivo. A opção
+  recua para um único grupo se a inferência local produzir schemas
+  incompatíveis;
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;
 - leitura: **todos os row groups** (concatenados), campos REQUIRED, OPTIONAL
@@ -715,15 +741,37 @@ pipeline limpeza:
 | `preencher_nulos { a: 0 }` / `preencher_nulos 0` | preenche nulos por coluna (cria a coluna se faltar) ou em todas |
 | `renomear { antigo: "novo" }` | renomeia mantendo a ordem; coluna inexistente é erro |
 | `remover_colunas "a", "b"` | tira colunas; nome inexistente é erro (pega typo) |
-| `converter { c: "inteiro" }` | `inteiro`, `decimal` (aceita `1,5`), `texto`, `logico` (sim/não/true/false/1/0), `data` (→ `AAAA-MM-DD`). O que não converte vira `nulo`; fração em `inteiro` também (use `arredondar`) |
+| `converter { c: "inteiro" }` | `inteiro`, `decimal` (aceita `1,5`), `texto`, `logico` (sim/não/true/false/1/0), `data` (→ `AAAA-MM-DD`) e `data_hora` (→ UTC ISO). O que não converte vira `nulo`; fração em `inteiro` também (use `arredondar`) |
 | `deduplicar ["a"]` | mantém a 1ª ocorrência por chave (linha inteira sem argumento); `distinto` é o mesmo |
 | `juntar outra, por: "id", tipo: "esquerda"` | `interna` (padrão), `esquerda`, `direita`, `completa`; `por:` é nome, lista ou `{ esq: dir }`; colunas repetidas da direita ganham `_direita`; chave nula nunca casa |
 | `empilhar(outra)` | concatena; o esquema vira a união das colunas |
 | `descrever` | uma linha por coluna: `coluna, tipo, total, nulos, distintos, minimo, maximo, media` |
+| `perfil tabela, amostra: 10000` / `t.perfil` | perfil automático com total, tamanho da amostra, schema inferido e estatísticas das colunas |
+| `inferir_schema tabela, amostra: 1000` / `t.inferir_schema` | contrato versionado `{ formato: "tilt.schema", versao: 1, campos: [...] }` |
+| `validar_schema tabela, schema` / `t.validar_schema schema` | devolve `{ ok, versao, erros }`, sem interromper o pipeline |
+| `evoluir_schema schema, tabela` / `t.evoluir_schema schema` | cria nova versão, preservando campos e adicionando colunas novas como anuláveis |
 | `amostra 100, semente: 7` / `amostra 0.1` | amostra sem reposição, reproduzível, na ordem original |
 | `contar_valores "col"` | `{ valor, contagem }` do mais ao menos frequente |
 | `limpar_texto ["nome"], caixa: "minusculas"` | tira espaços das pontas e repetidos (e muda a caixa) |
 | `ordenar_por "a", "b", desc: verdadeiro` | várias colunas, estável |
+
+Com `colunar: verdadeiro`, joins internos e à esquerda detectam automaticamente
+quando os dois lados já estão ordenados pelas chaves e usam uma intercalação
+linear; entradas sem essa ordem continuam usando o índice hash reutilizável.
+
+Contratos podem ser guardados como JSON e versionados no repositório de dados:
+
+```tilt skip
+schema = inferir_schema vendas, amostra: 10000
+escrever_json schema, "schemas/vendas-v1.json"
+resultado = validar_schema vendas, ler_json "schemas/vendas-v1.json"
+schema2 = evoluir_schema schema, vendas_novas   # incrementa versao se mudar
+```
+
+`validar_schema` devolve todos os erros encontrados em `erros`, permitindo
+decidir no pipeline se a carga vai para quarentena. `evoluir_schema` preserva
+campos existentes, promove `inteiro` para `decimal` quando necessário e adiciona
+colunas novas como anuláveis.
 
 ### Pivô, janelas, divisão de coluna e fusos
 
@@ -781,8 +829,22 @@ na virada do horário de verão segue a regra da libc do sistema.
 ```tilt skip
 t = ler_csv "vendas.csv", separador: ";", pular: 2, nulos: ["NA", "-", ""],
       tipos: { valor: "decimal", data: "data" }
+ti = ler_csv "eventos.csv", inferir: verdadeiro, amostra: 2000,
+       fuso: "America/Sao_Paulo", destino_fuso: "UTC"
 u = ler_csv "x.txt", separador: "auto"                      # detecta , ; tab |
 v = ler_csv "sem_titulo.csv", sem_cabecalho: verdadeiro, colunas: ["id", "nome"]
+w = ler_csv "vendas.csv", selecionar: ["regiao", "valor"] # evita materializar as demais colunas
+c = ler_csv "vendas.csv", selecionar: ["regiao", "valor"], colunar: verdadeiro
+r = c.agrupar_por "regiao", { total: somar "valor", n: contar }
+r2 = c.agrupar_por "regiao", { dispersao: variancia "valor", unicos: distintos "valor" }
+r3 = c.agrupar_por "regiao", { mediana: mediana "valor", p90: quantil "valor", 0.9 }
+r4 = c.agrupar_por "regiao", { p90_aprox: quantil_aproximado "valor", 0.9 }
+f = c.filtrar linha.valor >= 100
+p = ler_parquet "vendas.parquet", selecionar: ["regiao", "valor"]
+pc = ler_parquet "vendas.parquet", selecionar: ["regiao", "valor"], colunar: verdadeiro
+pn = ler_parquet "clientes.parquet", selecionar: ["cliente.id"], colunar: verdadeiro
+pf = ler_parquet "vendas.parquet", onde: { regiao: "sul" }, colunar: verdadeiro
+pcf = ler_parquet "vendas.parquet", onde: { ou: [{ total: { ">": 100 } }, { regiao: "sul" }] }, colunar: verdadeiro
 ```
 
 - `separador:` um caractere, `"tab"` ou `"auto"`; `fonte tipo: csv` também aceita `separador:`.
@@ -790,6 +852,32 @@ v = ler_csv "sem_titulo.csv", sem_cabecalho: verdadeiro, colunas: ["id", "nome"]
   primeira linha como dado (colunas `coluna1..N`, ou os nomes de `colunas:`).
 - `nulos: [...]` lê esses textos como `nulo`; `tipos: { coluna: tipo }` converte na leitura
   (os mesmos tipos de `converter`, inclusive `"1,5"` como decimal e `31/01/2024` como data).
+- `inferir: verdadeiro` (alias `inferir_tipos`) examina até `amostra:`/`amostra_tipos:` linhas
+  antes de ler o arquivo inteiro e fixa o tipo por coluna (`logico`, `inteiro`, `decimal`,
+  `data`, `data_hora` ou `texto`). Inteiro + decimal promove para decimal; valores
+  incompatíveis fora da amostra recuam para texto daquela célula. A inferência também
+  funciona com `colunar: verdadeiro`.
+- `fuso:`/`fuso_origem:` define o fuso de textos sem offset e `destino_fuso:` normaliza
+  colunas `data_hora` para `AAAA-MM-DDTHH:MM:SS`, usando tzdata IANA, UTC ou deslocamentos
+  fixos. Um sufixo `Z`/`+HH:MM` no valor tem precedência. Essas opções ativam a inferência.
+- `selecionar: ["coluna", ...]` mantém apenas os campos pedidos, nessa ordem;
+  no Parquet, folhas fora da projeção nem são decodificadas. Para structs, use
+  caminhos pontilhados como `"cliente.id"`; o resultado preserva `cliente` e
+  contém somente o campo projetado. `colunas:` no CSV
+  continua servindo para nomear o cabeçalho, antes da seleção.
+- `onde: { coluna: valor }` aplica igualdade diretamente nos vetores colunares
+  após a leitura e combina várias colunas com AND. Comparadores podem ser escritos
+  como `{ coluna: { ">=": valor } }`; predicados compostos usam
+  `{ e: [{...}, {...}] }` ou `{ ou: [{...}, {...}] }`. O Parquet usa min/max
+  do row group para descartar grupos incompatíveis antes de decodificar. Se
+  `selecionar:` for usado, inclua nele todas as colunas referenciadas por `onde:`.
+- `colunar: verdadeiro` guarda CSV ou Parquet em vetores tipados, com textos repetidos
+  codificados por dicionário, listas por offsets e estruturas por campo quando
+  mantêm o mesmo formato. `tamanho`, `agrupar_por` e `filtrar` com comparação
+  simples `linha.coluna <operador> literal` operam sem criar um mapa por linha.
+  `escrever_parquet` também evita criar mapas por linha. Acesso por índice
+  e outros métodos materializam as linhas quando necessários.
+  É opcional e funciona integralmente em CPU, sem GPU ou BLAS.
 - `escrever_csv tabela, "x.csv", separador: ";"` coloca entre aspas o campo que tiver o
   separador, aspas ou quebra de linha (RFC 4180) e grava `nulo` como campo vazio.
 
@@ -979,6 +1067,12 @@ texto e é convertido), demais tipos (VARCHAR, TEXT, DATE, DATETIME, JSON,
 ENUM...)→`texto`. O conector MySQL carrega `libmariadb.so.3` ou
 `libmysqlclient.so*` via `dlopen` (MariaDB e MySQL usam a mesma C API);
 serve tanto contra MySQL quanto contra MariaDB.
+
+Fontes SQL remotas também aceitam `lazy: verdadeiro`: a conexão e a consulta
+só são executadas quando a tabela é materializada, conservando o `pushdown`
+parametrizado até esse momento. Elasticsearch/OpenSearch aceita a mesma opção;
+`pushdown: {colunas: [...], onde: {...}, limite: N}` vira `_source`, filtros
+`term` e `size`, respectivamente.
 
 ### ClickHouse (HTTP nativo)
 
@@ -1505,7 +1599,7 @@ Operam sobre `tabela` e `lista` de mapas. `linha` é a variável implícita da l
 | `.derivar { col: <expr> }` | adiciona/atualiza colunas por linha |
 | `.mapear { col: <expr> }` | idem `.derivar` |
 | `.selecionar "a", "b"` | mantém só as colunas nomeadas |
-| `.agrupar_por "col", { nome: <agg> }` | agrupa; `<agg>` ∈ `contar`, `somar "c"`, `media "c"`, `min "c"`, `max "c"` |
+| `.agrupar_por "col", { nome: <agg> }` | agrupa; `<agg>` ∈ `contar`, `somar "c"`, `media "c"`, `variancia "c"` (populacional), `distintos "c"`, `mediana "c"`, `quantil "c", q` (q entre 0 e 1), `mediana_aproximada "c"`, `quantil_aproximado "c", q`, `min "c"`, `max "c"` |
 | `.ordenar_por "col", desc: verdadeiro` | ordena (numérico ou lexicográfico) |
 | `.limite N` / `.primeiros N` | primeiras N linhas |
 | `.distinto` / `.distinto "col"` | remove duplicatas |

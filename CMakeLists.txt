@@ -35,9 +35,54 @@ if(TILT_SANITIZE AND NOT MSVC)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
+# Build optimizations are opt-in: default binaries remain portable and do not
+# require a training profile. GCC profile files are tied to object paths, so
+# GENERATE and USE must reconfigure the same build tree.
+option(TILT_LTO "Enable link-time optimization in Release builds" OFF)
+set(TILT_PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, GENERATE or USE")
+set_property(CACHE TILT_PGO PROPERTY STRINGS OFF GENERATE USE)
+set(TILT_PGO_PROFILE_DIR "" CACHE PATH "Directory shared by PGO training and use builds")
+if(TILT_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT tilt_ipo_ok OUTPUT tilt_ipo_error)
+  if(NOT tilt_ipo_ok)
+    message(FATAL_ERROR "TILT_LTO is unavailable: ${tilt_ipo_error}")
+  endif()
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+if(NOT TILT_PGO STREQUAL "OFF")
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(FATAL_ERROR "TILT_PGO currently supports GCC only")
+  endif()
+  if(NOT TILT_PGO STREQUAL "GENERATE" AND NOT TILT_PGO STREQUAL "USE")
+    message(FATAL_ERROR "TILT_PGO must be OFF, GENERATE or USE")
+  endif()
+  if(TILT_PGO_PROFILE_DIR STREQUAL "")
+    message(FATAL_ERROR "TILT_PGO_PROFILE_DIR must point to a shared profile directory")
+  endif()
+  if(TILT_PGO STREQUAL "GENERATE")
+    add_compile_options(-fprofile-generate=${TILT_PGO_PROFILE_DIR})
+    add_link_options(-fprofile-generate=${TILT_PGO_PROFILE_DIR})
+  else()
+    # Some optional connector translation units may not run during training.
+    add_compile_options(-fprofile-use=${TILT_PGO_PROFILE_DIR} -fprofile-correction
+                        -Wno-error=missing-profile)
+    add_link_options(-fprofile-use=${TILT_PGO_PROFILE_DIR})
+  endif()
+endif()
+
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/common/version.hpp.in
   ${CMAKE_CURRENT_BINARY_DIR}/generated/tilt/version.hpp @ONLY)
+
+# Metal é opcional e só entra no binário macOS. Nas outras plataformas o stub
+# mantém o runtime compilável sem SDK ou frameworks Apple.
+if(APPLE)
+  enable_language(OBJCXX)
+  set(TILT_METAL_SOURCE src/runtime/metal_runtime.mm)
+else()
+  set(TILT_METAL_SOURCE src/runtime/metal_runtime.cpp)
+endif()
 
 add_library(tilt_core STATIC
   src/common/source.cpp
@@ -52,6 +97,7 @@ add_library(tilt_core STATIC
   src/semantic/checker.cpp
   src/runtime/compat.cpp
   src/runtime/value.cpp
+  src/runtime/columnar.cpp
   src/runtime/json.cpp
   src/runtime/python_interop.cpp
   src/runtime/sql_tabelas.cpp
@@ -66,6 +112,7 @@ add_library(tilt_core STATIC
   src/runtime/http_server.cpp
   src/runtime/http_client.cpp
   src/runtime/gpu_runtime.cpp
+  ${TILT_METAL_SOURCE}
   src/runtime/parquet.cpp
   # Avro OCF/Confluent vive no mesmo TU do Iceberg para reutilizar o codec
   # binario e os codecs de bloco sem duplicar a implementacao.
@@ -113,6 +160,16 @@ target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/generated)
 target_link_libraries(tilt_core PUBLIC ${CMAKE_DL_LIBS})
+if(APPLE)
+  target_link_libraries(tilt_core PUBLIC "-framework Metal" "-framework Foundation")
+endif()
+# O cliente HTTP nativo usa o header de libcurl quando disponivel, mas carrega
+# a biblioteca em runtime; instalacoes sem libcurl continuam com o curl CLI.
+find_path(TILT_CURL_INCLUDE_DIR curl/curl.h HINTS "$ENV{CONDA_PREFIX}/include")
+if(TILT_CURL_INCLUDE_DIR)
+  target_include_directories(tilt_core PRIVATE ${TILT_CURL_INCLUDE_DIR})
+  target_compile_definitions(tilt_core PRIVATE TILT_HAS_CURL_HEADER=1)
+endif()
 if(WIN32)
   # Camada de compat: sockets (Winsock2) no runtime kafka/mongo/redis/http.
   target_link_libraries(tilt_core PUBLIC ws2_32)
@@ -132,12 +189,13 @@ endif()
 set_target_properties(tilt PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# stdlib ao lado do binario no build tree: o interpretador resolve modulos em
-# <exe>/../share/tilt/stdlib, mesmo layout da instalacao (install/CPack).
-add_custom_command(TARGET tilt POST_BUILD
+# stdlib ao lado do binario no build tree: copie tambem em builds incrementais
+# quando apenas um modulo .tilt mudar.
+add_custom_target(tilt_stdlib ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_CURRENT_SOURCE_DIR}/stdlib
           ${CMAKE_BINARY_DIR}/share/tilt/stdlib)
+add_dependencies(tilt tilt_stdlib)
 
 option(TILT_STATIC_LIBSTDCXX "Link libstdc++/libgcc statically (portable Linux binary)" ON)
 if(TILT_STATIC_LIBSTDCXX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

@@ -1,0 +1,20 @@
+modelo M:
+  dispositivo: gpu
+  entrada: tensor[f32, 1]
+  camadas:
+    - linear: [1, 8]
+    - ativacao: relu
+    - linear: [8, 1]
+
+treino M:
+  dados: { x: [[0.0], [1.0], [2.0], [3.0]], y: [1.0, 3.0, 5.0, 7.0] }
+  perda: quadratica
+  precisao: mista
+  otimizador: adam
+  taxa: 0.01
+  epocas: 20
+
+pipeline p:
+  passos:
+    - y = modelo M.executar tensor([2.0])
+    - imprimir "forma:", y.forma

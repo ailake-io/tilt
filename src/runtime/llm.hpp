@@ -21,6 +21,12 @@ struct LlmConfig {
   long long teto_tokens = 0;        // 0 = sem teto; >0 = falha antes de estourar
   bool cache = false;               // reutiliza respostas idempotentes no processo
   std::vector<std::string> reserva;  // nomes de outros `llm` (fallback em ordem)
+  // Governanca: valores em moeda por mil tokens e arquivos JSONL opcionais.
+  double custo_entrada_mil = 0.0;
+  double custo_saida_mil = 0.0;
+  std::string contabilidade;        // ledger persistente de uso/custo
+  std::string observabilidade;       // eventos de prompt/resposta
+  bool registrar_prompts = false;    // opt-in para nao vazar dados sensiveis
 };
 
 // Resposta com contabilidade: texto + tokens + modelo que respondeu.
@@ -29,6 +35,7 @@ struct RespostaLLM {
   long long tok_entrada = 0;
   long long tok_saida = 0;
   std::string modelo;
+  double custo = 0.0;
 };
 
 // Backend selected by the TILT_LLM environment variable:
@@ -77,6 +84,7 @@ struct RespostaFerramentas {
   long long tok_entrada = 0;
   long long tok_saida = 0;
   std::string modelo;
+  double custo = 0.0;
 };
 
 // Um turno de conversa com ferramentas nativas, com o mesmo retry/fallback/
@@ -89,6 +97,27 @@ RespostaFerramentas llm_chat_ferramentas(const std::vector<LlmConfig>& cadeia,
 
 // Deterministic in mock mode; real embeddings via `curl` otherwise.
 std::vector<float> llm_embed(const std::string& model, const std::string& text);
+std::vector<float> llm_embed(const LlmConfig& cfg, const std::string& text);
+
+// Consulta a contabilidade em memoria e, quando configurado, o ledger JSONL
+// persistente. O mapa devolvido e estavel para uso em Tilt:
+// {entrada, saida, total, custo, chamadas}.
+Value llm_metricas(const LlmConfig& cfg);
+long long llm_uso_total(const LlmConfig& cfg);
+
+// Contexto de rastreamento por thread. O interpretador usa este escopo para
+// associar eventos a agente, sessão e trace_id sem alterar a API do provedor.
+class LlmContextoGuard {
+ public:
+  LlmContextoGuard(std::string agente, std::string sessao, std::string trace_id = {});
+  ~LlmContextoGuard();
+  LlmContextoGuard(const LlmContextoGuard&) = delete;
+  LlmContextoGuard& operator=(const LlmContextoGuard&) = delete;
+  const std::string& trace_id() const { return trace_id_; }
+ private:
+  bool ativo_ = false;
+  std::string trace_id_;
+};
 
 bool llm_is_mock();
 

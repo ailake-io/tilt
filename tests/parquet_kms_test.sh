@@ -10,6 +10,21 @@ command -v curl >/dev/null 2>&1 || {
   echo "curl ausente; pulando o teste parquet_kms"
   exit 0
 }
+# Alguns runners restritos (incluindo sandboxes sem rede) não permitem sequer
+# abrir um socket loopback. Nesse caso não há mock HTTP que possa ser iniciado;
+# pule com diagnóstico, preservando o teste completo em ambientes normais.
+if ! python3 - <<'PY' >/dev/null 2>&1
+import socket
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", 0))
+finally:
+    s.close()
+PY
+then
+  echo "loopback indisponivel; pulando o teste parquet_kms (execute fora do sandbox)"
+  exit 0
+fi
 
 tmp=$(mktemp -d)
 mock_pid=

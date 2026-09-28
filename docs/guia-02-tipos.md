@@ -58,6 +58,21 @@ Regras de valor: `inteiro + inteiro → inteiro`; qualquer operação com `decim
 → `decimal`; `/` sempre produz `decimal` no interpretador; `inteiro` amplia para
 `decimal` numa atribuição anotada.
 
+Chamadas de `funcao` aceitam argumentos posicionais e nomeados. Os nomeados
+vêm depois dos posicionais e podem aparecer em qualquer ordem. Um parâmetro
+sem valor padrão e sem `[]` é obrigatório; nomes desconhecidos, repetições e
+argumentos excedentes são erro em `checar` para funções locais e sempre na
+execução (inclusive para funções importadas).
+
+```tilt run
+funcao somar a, b = 2:
+  retornar a + b
+
+pipeline argumentos:
+  passos:
+    - imprimir somar(3), somar(b: 4, a: 3), somar(3, b: 4)
+```
+
 ```tilt run
 pipeline escalares:
   passos:
@@ -105,9 +120,11 @@ de `incorporar`, ou de `modelo X.executar` — ver [guia 04](guia-04-ml-dl.md).
 
 ## `tabela`
 
-DataFrame colunar em memória: uma lista de mapas (linhas). Produzida por
-`ler_csv`, `ler_json`, `carregador`, `ler <fonte>`, ou pelos métodos de tabela
-(`filtrar`, `agrupar_por`, ...). Ver [guia 03](guia-03-dados.md).
+`tabela` é uma coleção tabular em memória. Quando possível, os dados são
+mantidos em colunas tipadas (inteiros, decimais, lógicos e texto dicionário),
+mas a interface também aceita e produz linhas como mapas. Ela pode ser
+produzida por `ler_csv`, `ler_json`, `carregador`, `ler <fonte>`, ou pelos
+métodos de tabela (`filtrar`, `agrupar_por`, ...). Ver [guia 03](guia-03-dados.md).
 
 ```tilt run
 pipeline tabela:

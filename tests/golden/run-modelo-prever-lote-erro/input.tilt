@@ -1,0 +1,8 @@
+modelo M:
+  camadas:
+    - linear: [2, 1]
+
+pipeline p:
+  passos:
+    - linhas = [{ a: 1, b: 2 }, { a: 3 }]
+    - imprimir modelo M.prever_lote(linhas, colunas: ["a", "b"])

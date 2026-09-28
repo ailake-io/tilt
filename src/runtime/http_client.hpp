@@ -8,11 +8,10 @@
 
 namespace tilt::rt {
 
-// Cliente HTTP generico do runtime. Mesmo padrao dos conectores
-// (s3/llm/qdrant/iceberg): subprocesso `curl`, sem sockets proprios. O corpo
-// da resposta vai para arquivo temporario (-o), o status vem no stdout via
-// -w '%{http_code}' e, quando solicitado, os headers da resposta para outro
-// arquivo temporario (-D), no formato "Nome: valor" por linha.
+// Cliente HTTP generico do runtime. Usa libcurl opcionalmente quando o header
+// estava disponivel no build e a biblioteca esta instalada em runtime; handles
+// por thread reutilizam conexoes. Sem libcurl, cai no subprocesso curl. Defina
+// TILT_HTTP_BACKEND=cli para forcar o caminho antigo.
 
 struct HttpClientResponse {
   int status = 0;      // codigo HTTP; 0 = falha de transporte/execucao

@@ -1,0 +1,4 @@
+== pipeline p ==
+[gpu] fake (kernels de CPU pelo caminho de dispatch da GPU)
+conv: [1, 2]
+residual: [2]

@@ -79,6 +79,8 @@ Tensor div(const Tensor& a, const Tensor& b);
 Tensor scalar_op(const Tensor& a, float s, char op);  // op in {+,-,*,/}
 
 Tensor matmul(const Tensor& a, const Tensor& b);
+// True when an optimized CBLAS provider was loaded for large CPU GEMM.
+bool cpu_blas_available();
 Tensor transpose2d(const Tensor& a);
 Tensor reshape(const Tensor& a, std::vector<std::int64_t> shape);
 

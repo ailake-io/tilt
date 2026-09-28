@@ -112,7 +112,7 @@ class SemanticChecker {
   // acusam (runtime preenche com nulo em silencio); sobrantes so na forma
   // com parenteses — bare-call (`f x, y`) e guloso por desenho e o runtime
   // ignora o excedente. So chamadas 100% posicionais; o resto pula.
-  void check_funcao_arity(const std::string& name, const std::vector<ast::Arg>& args, bool paren,
+  void check_funcao_arity(const std::string& name, const std::vector<ast::Arg>& args,
                           Span span);
 
   // Anotacoes de tipo ja resolvidas na passada 2 (params/retorno de

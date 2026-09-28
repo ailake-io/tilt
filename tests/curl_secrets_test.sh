@@ -26,7 +26,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -n "$out" ]; then
-  printf '{"ok":1}' >"$out"
+  if grep -qi 'x-api-key:' "$LOG/cfg"; then
+    printf '{"content":[{"type":"text","text":"ola"}],"usage":{"input_tokens":1,"output_tokens":1}}' >"$out"
+  else
+    printf '{"ok":1}' >"$out"
+  fi
   printf '200'
 else
   printf '{"content":[{"type":"text","text":"ola"}],"usage":{"input_tokens":1,"output_tokens":1}}\n200'
@@ -49,7 +53,7 @@ pipeline p:
 EOF2
 
 export LOG="$tmp"
-out=$(cd "$tmp" && PATH="$tmp/bin:$PATH" SEGREDO_LLM="SEGREDO_LLM_XYZ" "$BIN" executar prog.tilt 2>&1) || {
+out=$(cd "$tmp" && PATH="$tmp/bin:$PATH" TILT_HTTP_BACKEND=cli SEGREDO_LLM="SEGREDO_LLM_XYZ" "$BIN" executar prog.tilt 2>&1) || {
   echo "execucao falhou: $out"; exit 1; }
 printf '%s\n' "$out"
 
@@ -83,7 +87,7 @@ pipeline p:
     - imprimir r.texto
 EOF2
 rm -f "$tmp/argv" "$tmp/cfg"
-(cd "$tmp" && PATH="$tmp/bin:$PATH" SEGREDO_LLM="SEGREDO_LLM_XYZ" "$BIN" executar llm.tilt >/dev/null 2>&1) || true
+(cd "$tmp" && PATH="$tmp/bin:$PATH" TILT_HTTP_BACKEND=cli SEGREDO_LLM="SEGREDO_LLM_XYZ" "$BIN" executar llm.tilt >/dev/null 2>&1) || true
 grep -qi 'x-api-key: SEGREDO_LLM_XYZ' "$tmp/cfg" || {
   echo "x-api-key ausente do arquivo -K"; fail=1; }
 grep -q "SEGREDO_LLM_XYZ" "$tmp/argv" && { echo "chave do LLM no argv"; fail=1; }

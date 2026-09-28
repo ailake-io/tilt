@@ -1,0 +1,4 @@
+[gpu] fake (kernels de CPU pelo caminho de dispatch da GPU)
+treino M: perda caiu sim | mse 9.0143
+== pipeline p ==
+forma: [1]

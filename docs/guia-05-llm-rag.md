@@ -15,6 +15,11 @@ llm gpt:
   teto_tokens: 0                    # 0 = sem teto; >0 barra antes de estourar
   cache: verdadeiro               # cache de respostas idênticas no processo (opt-in)
   reserva: [gpt_barato]             # fallback: outro 'llm' se este falhar
+  custo_entrada_mil: 0.0            # moeda por 1.000 tokens
+  custo_saida_mil: 0.0
+  contabilidade: "var/llm.jsonl"   # ledger persistente (opcional)
+  observabilidade: "var/llm.obs.jsonl" # eventos (opcional)
+  registrar_prompts: falso          # prompt/resposta somente com opt-in
 
 pipeline declara:
   passos:
@@ -35,7 +40,16 @@ pipeline declara:
 - `cache: verdadeiro` habilita cache em memória por processo para chamadas idênticas
   (provedor, modelo, endpoint, parâmetros e prompt); cache hits devolvem também a
   contabilidade original e não fazem nova chamada nem somam tokens. O padrão é falso.
-- `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` —
+- `contabilidade:` grava um evento JSONL por chamada, com tokens, custo, modelo e
+  operação. `teto_tokens:` consulta esse arquivo antes da chamada, preservando o
+  limite entre reinícios. `custo_*_mil` são valores em moeda por 1.000 tokens.
+  Quando um `indice` ou agente informa `llm:`, chamadas de embeddings entram no
+  mesmo ledger como `operacao: "embedding"` e participam de `llm_metricas`.
+- `observabilidade:` grava eventos de prompt/resposta. O conteúdo é omitido por
+  padrão; `registrar_prompts: verdadeiro` é opt-in para ambientes autorizados.
+  Quando omitido, o evento mantém hashes SHA-256 e `trace_id` para correlação
+  sem expor o texto.
+- `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}, custo, contabilidade}` —
   `modelo` é o que respondeu (útil com `reserva:`), tokens vêm do `usage`
   da API (Anthropic `input/output_tokens`, OpenAI `prompt/completion_tokens`;
   no mock, heurística chars/4 por lado).
@@ -55,6 +69,7 @@ pipeline robusto:
     - imprimir r.texto
     - imprimir r.tokens.entrada, r.tokens.saida
     - imprimir r.modelo
+    - imprimir llm_metricas "gpt"  # totais persistentes, custo e chamadas
 ```
 
 Cobertura com HTTP de verdade em `tests/llm_retry_test.sh` (mock local com
@@ -149,13 +164,15 @@ pipeline textos:
     - imprimir pedacos[0]
 ```
 
-`modo:` escolhe como cortar (o padrão, `"tamanho"`, é a janela fixa, nunca no
-meio de um caractere UTF-8): `"sentenca"` junta sentenças inteiras (termina em
-`.` `!` `?` ou linha em branco), `"paragrafo"` respeita blocos separados por
-linha em branco e `"linha"` respeita linhas inteiras (bom para código). Nos
-modos por unidade, `tamanho` é o teto de bytes do pedaço, uma unidade maior que o
-teto cai na janela fixa e `sobreposicao` só vale se pedida (repete as últimas
-unidades que cabem nela).
+`modo:` escolhe como cortar (o padrão de `dividir_texto` é `"sentenca"`; use
+`"tamanho"` para janela fixa, nunca no meio de um caractere UTF-8):
+`"sentenca"` junta sentenças inteiras (termina em `.` `!` `?` ou linha em
+branco), `"codigo"` preserva blocos e fecha em linhas de declaração,
+`"paragrafo"` respeita blocos separados por linha em branco e `"linha"`
+respeita linhas inteiras. `fragmentar`/`chunk` devolvem mapas
+`{texto, indice, inicio, fim, tokens, modo}`; `dividir_texto` mantém a forma
+legada de lista de textos. `tamanho` é o teto de bytes do pedaço e
+`sobreposicao` repete unidades quando pedida.
 
 ```tilt run
 pipeline sentencas:
@@ -164,11 +181,38 @@ pipeline sentencas:
     - imprimir dividir_texto(doc, tamanho: 40, modo: "sentenca")
 ```
 
+## Avaliação de recuperação
+
+Índices em memória e backends externos (Qdrant, pgvector, Weaviate, Pinecone e
+Chroma) aceitam `.avaliar`/`.avaliar_recuperacao`. Cada caso informa a consulta
+e os IDs relevantes (ou mapas `{id, grau}` para relevância graduada); a busca
+real do backend calcula `recall`, `precisao`, `mrr`, `ndcg`,
+`latencia_media_ms` e `detalhes` por consulta:
+
+```tilt run
+llm gpt:
+  provedor: local
+  modelo: "text-embedding-3-small"
+
+indice base:
+  armazenamento: "memoria"
+
+pipeline avaliar:
+  passos:
+    - metricas = base.avaliar([{ consulta: "fatura", relevantes: ["a1"] }], top_k: 5)
+    - imprimir metricas.recall, metricas.mrr
+```
+
 ## `indice` — RAG
 
 ```tilt run
+llm gpt:
+  provedor: local
+  modelo: "text-embedding-3-small"
+
 indice base:
   embeddings: "text-embedding-3-small"
+  llm: gpt                         # opcional: contabiliza embeddings neste llm
   armazenamento: "memoria"          # ou qdrant://host:porta/colecao (REST via curl)
                                      # ou pgvector://colecao (Postgres + extensão pgvector)
                                      # ou weaviate://host:porta/classe (REST via curl)

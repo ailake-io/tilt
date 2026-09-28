@@ -48,20 +48,20 @@ std::string motivo_erro(const std::string& body) {
   if (body.empty()) return "erro desconhecido (resposta vazia)";
   try {
     const Value j = json_parse(body);
-    if (j.kind == ValueKind::Mapa && j.map) {
-      if (const Value* msg = j.map->find("message");
+    if (j.kind == ValueKind::Mapa && j.map_ref()) {
+      if (const Value* msg = j.map_ref()->find("message");
           msg && msg->kind == ValueKind::Texto && !msg->s.empty()) {
         return msg->s;
       }
       for (const char* chave_campo : {"error", "errors"}) {
-        const Value* err = j.map->find(chave_campo);
+        const Value* err = j.map_ref()->find(chave_campo);
         if (!err) continue;
         const Value* primeiro = err;
-        if (err->kind == ValueKind::Lista && err->list && !err->list->empty()) {
-          primeiro = &(*err->list)[0];
+        if (err->kind == ValueKind::Lista && err->list_ref() && !err->list_ref()->empty()) {
+          primeiro = &(*err->list_ref())[0];
         }
-        if (primeiro->kind == ValueKind::Mapa && primeiro->map) {
-          const Value* msg = primeiro->map->find("message");
+        if (primeiro->kind == ValueKind::Mapa && primeiro->map_ref()) {
+          const Value* msg = primeiro->map_ref()->find("message");
           if (msg && msg->kind == ValueKind::Texto && !msg->s.empty()) return msg->s;
         }
         if (primeiro->kind == ValueKind::Texto && !primeiro->s.empty()) return primeiro->s;
@@ -115,9 +115,9 @@ void pinecone_ensure_namespace(const std::string& base, const std::string& ns) {
     die(std::string("nao foi possivel verificar namespace ") + ns + ": " + e.what());
   }
   const Value* namespaces =
-      parsed.kind == ValueKind::Mapa && parsed.map ? parsed.map->find("namespaces") : nullptr;
-  if (!namespaces || namespaces->kind != ValueKind::Mapa || !namespaces->map ||
-      !namespaces->map->find(ns)) {
+      parsed.kind == ValueKind::Mapa && parsed.map_ref() ? parsed.map_ref()->find("namespaces") : nullptr;
+  if (!namespaces || namespaces->kind != ValueKind::Mapa || !namespaces->map_ref() ||
+      !namespaces->map_ref()->find(ns)) {
     die("namespace nao encontrado: " + ns);
   }
 }
@@ -147,20 +147,20 @@ std::vector<VectorHit> pinecone_search(const std::string& base, const std::strin
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
   std::vector<VectorHit> out;
-  if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
-  const Value* matches = parsed.map->find("matches");
-  if (!matches || matches->kind != ValueKind::Lista || !matches->list) return out;
-  for (const Value& hit : *matches->list) {
-    if (hit.kind != ValueKind::Mapa || !hit.map) continue;
-    const Value* id = hit.map->find("id");
-    const Value* score = hit.map->find("score");
+  if (parsed.kind != ValueKind::Mapa || !parsed.map_ref()) return out;
+  const Value* matches = parsed.map_ref()->find("matches");
+  if (!matches || matches->kind != ValueKind::Lista || !matches->list_ref()) return out;
+  for (const Value& hit : *matches->list_ref()) {
+    if (hit.kind != ValueKind::Mapa || !hit.map_ref()) continue;
+    const Value* id = hit.map_ref()->find("id");
+    const Value* score = hit.map_ref()->find("score");
     const std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
     // score do Pinecone ja e similaridade de cosseno (maior = melhor).
     const double sc = score && score->is_number() ? score->as_number() : 0.0;
     std::string texto;
-    if (const Value* meta = hit.map->find("metadata");
-        meta && meta->kind == ValueKind::Mapa && meta->map) {
-      if (const Value* t = meta->map->find("texto"); t && t->kind == ValueKind::Texto) {
+    if (const Value* meta = hit.map_ref()->find("metadata");
+        meta && meta->kind == ValueKind::Mapa && meta->map_ref()) {
+      if (const Value* t = meta->map_ref()->find("texto"); t && t->kind == ValueKind::Texto) {
         texto = t->s;
       }
     }

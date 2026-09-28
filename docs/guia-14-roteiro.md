@@ -3,7 +3,8 @@
 Levantamento do estado real (parser × checker × interpretador × runtime) e
 dos gaps por domínio para a Tilt ficar excelente em engenharia de dados,
 machine learning, deep learning, LLM, LLMOps e MLOps. Estado: Fases 12-5a,
-12-6 e 12-8 concluídas; GPU real/AMP permanecem deferidos para hardware CUDA.
+12-6, 12-7 e 12-8 concluídas no escopo atual; kernels CUDA adicionais ainda
+podem ampliar a cobertura de operadores.
 
 ## Fase 12-5a — formatos e formas de tensor
 
@@ -20,7 +21,7 @@ checker semântico e seus goldens. O estado consolidado é:
 - A .7 foi concluída com golden de regressão, documentação revisada e commit
   isolado das alterações da fase.
 
-## Engenharia de dados — base sólida, faltam compactação e escala
+## Engenharia de dados — base sólida, com compactação e escala em evolução
 
 Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
 `verificar`, `janela`, `--agendar` com checkpoint e eleição de líder.
@@ -38,16 +39,17 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `backfill: { desde: valor, ate: valor }` permite reprocessar um intervalo
   inclusivo sem avançar o cursor.
 - **Qualidade de dados**: `verificar` valida e `quarentena:` já desvia linhas
-  ruins em iterações; ainda faltam perfilagem/estatísticas e contrato de
-  schema versionado na entrada.
+  ruins em iterações; `perfil`, inferência amostrada e contratos versionados
+  (`inferir_schema`, `validar_schema`, `evoluir_schema`) agora cobrem a entrada.
 - **Limpeza de dados**: feito — `remover_nulos`, `preencher_nulos`, `renomear`,
   `remover_colunas`, `converter` (inclui `data`), `deduplicar`, `juntar`, `empilhar`,
   `descrever`, `amostra`, `contar_valores`, `limpar_texto` e `ordenar_por` com várias
-  colunas, `ler_csv` com `separador:`/`pular:`/`nulos:`/`tipos:`/`sem_cabecalho:`,
+  colunas, `ler_csv` com `separador:`/`pular:`/`nulos:`/`tipos:`/`inferir:`/`fuso:`/
+  `sem_cabecalho:`,
   `escrever_csv` com aspas RFC 4180, `converter_data`/`ano`/`mes`/`dia`/`adicionar_dias`/
   `dias_entre` e `coalescer`, mais `pivotar`, `despivotar`, funções de janela
-  (`janela`), `dividir_coluna` e `converter_fuso` (guia 03). O que resta é
-  detecção de tipos por amostragem no `ler_csv` e datas com fuso na leitura.
+  (`janela`), `dividir_coluna` e `converter_fuso` (guia 03). A validação entre
+  serviços externos ainda depende de publicar e distribuir o JSON do contrato.
 - **Escrita analítica**: Delta/Iceberg particionam, compactam com
   `otimizar_delta`/`otimizar_iceberg`, z-order determinístico via `z_order:` e
   `vacuum_*` conservador para Parquet órfão; `ordenar_por` continua disponível
@@ -62,7 +64,8 @@ Funciona: CSV/JSON/Parquet/Delta/Iceberg, 20+ conectores, `pipeline`,
   `validacao_cruzada:`, `imputar:`, métricas (acurácia, f1 ponderado, auc,
   matriz_confusao, rmse, r2, inércia) e `registrar_em: mlflow://` via
   Tracking REST. Detalhes e limites no guia 04 e no guia 12.
-- Busca aleatória existe (`estrategia: aleatoria`); resta a bayesiana.
+- Busca em grade, aleatória e bayesiana existe (`estrategia: bayesiana` usa
+  aquisição adaptativa sobre a grade finita).
 
 ## Deep learning — treino real, mas de brinquedo
 
@@ -75,22 +78,27 @@ cruzada/quadrática, autograd manual.
   média/variância correntes), `agrupamento_max` e `achatar` treinam de
   verdade (mini-lotes em CPU). `incorporacao` também treina a tabela por SGD/Adam;
   com recorrência RNN/LSTM/GRU e BPTT; `abandono` (dropout) atua no treino com máscara determinística pela semente.
-- **GPU não validada** (`TILT_GPU=fake` em CPU; CUDA nunca rodou em
-  hardware real) + sem AMP real.
+- **GPU CUDA validada** em RTX 5050 para GEMM FP32, GEMM com operandos FP16,
+  `conv2d`, ReLU, GELU e soma. O runtime também expõe residência f32,
+  GEMM em lote, backward denso, convolução, recorrência e embeddings,
+  normalização, pooling e redução; o treino escolhe CUDA quando elegível e
+  mantém fallback CPU. `precisao: mista` usa GEMM FP16 com acumulação FP32.
 - **Exportação**: `modelo <Nome>.exportar_onnx "modelo.onnx"` existe no
   interpretador (ONNX opset 20, sem dependências; ver guia 04) — o modelo
   treinado sai da Tilt para qualquer runtime ONNX. `salvar_pesos`/`carregar_pesos` também aceitam `.onnx` para persistir e restaurar inicializadores FLOAT32, incluindo recorrentes. `exportar_gguf` também grava
-  GGUF v3 em F32; quantização e importação ainda não existem.
+  GGUF v3 em F32 ou Q8_0 (`quantizacao:`), e `carregar_pesos` importa e
+  desquantiza esses tensores.
 - **Feito (treino utilizável)**: mini-lotes (`lote:`) com embaralhamento,
   `semente:` reproduzível (init + embaralhamento), checkpoint com retomada
   (`checkpoint:`/`a_cada:`/`retomar:`, bit-idêntico ao contínuo), agendador
   de taxa (`cosseno`/`degrau`), `validacao:` + `parar_cedo:` (restaura
   melhores pesos), `busca` em grade com `criterio:`, dataloader streaming de CSV e Parquet (`carregador ..., fluxo: verdadeiro` + `bloco:`)
-  e exportação `gguf` (v3, só escrita), Safetensors F32 e exportação ONNX das recorrentes e residuais.
-- **Faltam**: busca bayesiana de hiperparâmetros (grade e aleatória existem),
-  `gguf` com quantização (hoje só F32).
+  e exportação `gguf` (v3 F32/Q8_0), Safetensors F32 e exportação ONNX das
+  recorrentes, residuais e da incorporação inicial.
+- **Busca**: `estrategia: bayesiana` usa aquisição adaptativa sobre uma grade
+  finita; grade e amostragem aleatória continuam disponíveis.
 
-## LLM / RAG — funcional, falta engenharia de produção
+## LLM / RAG — funcional com contabilidade e avaliação
 
 Funciona: cliente real anthropic/openai via curl, saída estruturada via
 JSON Schema derivado de `tipo`, streaming SSE, embeddings, 6 backends
@@ -98,26 +106,26 @@ vetoriais. Robustez entregue: `tempo_limite`, `tentativas` com backoff (incluind
 `Retry-After` em 429), `reserva:`, `teto_tokens:` e `tokens:` na resposta.
 
 - **Robustez**: timeout configurável, fallback entre modelos, cache opt-in e teto de
-  custo/tokens por período. `Retry-After` em 429 e retry no streaming SSE já são
-  respeitados.
-- **RAG**: sem reranking, chunking só de tamanho fixo (sem respeito a
-  sentença/código), sem busca híbrida (vetor + keyword/BM25), sem
-  avaliação de recuperação.
+  tokens acumulado por `llm`. `contabilidade:` persiste tokens/custos em JSONL e
+  `observabilidade:` registra eventos com prompts opt-in; `llm_metricas` consulta
+  os totais mesmo depois de reiniciar.
+- **RAG**: `dividir_texto`/`fragmentar` oferecem modos de sentença e código;
+  `.avaliar` executa a busca no backend selecionado e calcula recall, precisão,
+  MRR e nDCG.
 - **Evals**: bloco `avaliacao` em 1ª passada (dataset em `dados:`, métricas
   `exata`/`contem`/`regex`/`tolerancia`/`juiz`, gate no `limiar:`,
   `amostra:` + `semente:`, `registrar_em:` local ou via MLflow REST; ver guia 05 e
-  guia 12). Restam juiz com voto e amostra por fração.
-- **Observabilidade LLM**: sem log de prompts/respostas nem contagem de
-  tokens e custo por chamada/fluxo.
+  guia 12). Voto multi-juiz e amostra estratificada existem; os detalhes de
+  cada caso são publicados no artefato `detalhes.json` do MLflow.
 
-## Agentes — loop existe, falta controle
+## Agentes — loop com políticas compartilháveis
 
 Funciona: ciclo pensar→agir→observar, `max_passos`, memórias, equipe com
 supervisor.
 
-- **Sem guardrails**: sem limite de custo/tokens por sessão, sem aprovação
-  humana antes de ferramenta destrutiva, sem allowlist de ferramentas por
-  ambiente com enforcement.
+- **Guardrails**: `max_tokens_sessao`, orçamento monetário, `requer_aprovacao` e
+  `ferramentas_permitidas` podem ser definidos em `politica Nome:` e reutilizados
+  por vários agentes; o menor limite local/política vence.
 - **Sem traço estruturado**: `rastro` existe, mas sem spans/tempo por passo
   exportáveis (OpenTelemetry).
 - **Contexto**: memória vetorial plugada, mas sem compactação/resumo —
@@ -128,13 +136,20 @@ supervisor.
 Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 O despacho concorrente reutiliza `tilt::rt::ThreadPool`, com fila protegida, rejeição opcional por limite e desligamento gracioso; o smoke test `thread_pool` cobre submissão, drenagem e shutdown.
 
-- `/saude`, `/metricas` (com latência por rota) e graceful shutdown existem;
-  faltam limite de payload/concorrência por rota e versionamento de modelo
-  servido (A/B, canário, rollback).
-- Sem registro de modelos: `pesos:` é arquivo solto — sem registry
-  (nome/versão/stage, lineage experimento→modelo→serviço).
-- Sem inferência em lote (rodar o modelo sobre uma tabela inteira,
-  offline) como primitiva — só rota online.
+- `/saude`, `/metricas` (com latência por rota), graceful shutdown, limite
+  global de requisição de 1 MiB e até 256 conexões existem; faltam limites
+  configuráveis por rota e versionamento de modelo servido (A/B, canário,
+  rollback).
+- O treino pode registrar métricas, parâmetros e o vínculo do modelo em
+  `registrar_em: mlflow://...`. O CLI também oferece um registry local
+  (`registrar-modelo`/`listar-modelos`/`promover-modelo`/`resolver-modelo`) com
+  versões, stages e SHA-256; `servir --pesos` permite conectar uma versão
+  resolvida ao serviço. Ainda faltam lineage completo e rollout A/B, canário ou
+  rollback automático no `servico`.
+- `experimento Nome.prever_lote` faz inferência offline em tabela/lista,
+  preservando a ordem e reutilizando o modelo ajustado. `modelo
+  Nome.prever_lote(tabela, colunas: [...])` executa redes de entrada vetorial
+  em um só lote e devolve uma tabela de saídas.
 
 ## Fundação SQL (em andamento)
 
@@ -164,6 +179,14 @@ os ranks devem usar o mesmo modelo, hiperparâmetros e diretório compartilhado;
 o `timeout` evita espera infinita. Os momentos do Adam e as estatísticas de
 normalização permanecem locais nesta primeira versão, portanto o modo é uma
 sincronização de parâmetros por época (não um all-reduce de gradientes).
+No fluxo Parquet com pelo menos um row group por rank, o cluster atribui
+grupos inteiros em round-robin e pula os grupos alheios durante as épocas.
+Com menos grupos que ranks, usa a divisão por linha. A primeira passada ainda
+percorre os grupos para ler os rótulos, mas projeta apenas a coluna alvo;
+durante as épocas, lê apenas os atributos necessários. `num_shards`/`shard_id`
+sem `cluster` preservam a divisão por linha.
+Para diagnosticar o custo de leitura e sincronização, `TILT_CLUSTER_PROFILE=1`
+registra no stderr os tempos `labels_ms` e `sync_epoch_ms` de cada rank.
 
 Também foi concluído o query pushdown das fontes SQL: `pushdown.colunas`,
 `pushdown.onde` (igualdade parametrizada, inclusive nulo) e `pushdown.limite`
@@ -188,5 +211,18 @@ DuckDB (ver "O que já foi feito" no guia 16).
    `/metricas`, logs estruturados, cursor/backfill e `vacuum_*`).
 4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
 5. ~~`avaliacao` (evals — fundação de LLMOps)~~ feito em 1ª passada (ver guia 05).
-6. Próximo foco: melhorias de conectores e ferramentas; depois as
-   melhorias de conectores e ferramentas.
+6. Fechar os contratos de linguagem (tipos, formas e módulos) e eliminar
+   divergências entre checker e runtime. O LSP já navega importações explícitas
+   locais; índice de workspace, referências e rename entre arquivos faltam.
+7. Reduzir materialização de tabelas e custo de `Value`; medir com
+   `bench/comparar.py` antes de alterar a representação.
+8. Completar MLOps: stages, lineage e rollout de serviço sobre o registry local
+   e a integração MLflow.
+9. Melhorar GPU com residência persistente de tensores e kernels CUDA para
+   normalização/treino. O backward denso, de convolução, recorrência e
+   embeddings já tem despacho CUDA; Metal e ambientes sem CUDA continuam com
+   fallback CPU. O próximo ganho é reduzir cópias mantendo ativações residentes.
+10. CI/CD: o workflow `ci` executa lint, build e CTest em pushes para `main`/
+    `master`, pull requests e disparo manual. O job `performance` roda
+    `bench/comparar.py` para detectar regressões relativas ao baseline da mesma
+    máquina; publicação e deploy continuam fora deste escopo.

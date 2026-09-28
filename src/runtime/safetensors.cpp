@@ -131,33 +131,33 @@ bool safetensors_carregar(const std::string& path, std::map<std::string, Tensor>
     if (header_size > bytes.size() - 8) throw std::runtime_error("cabecalho fora do arquivo");
     const std::string header = bytes.substr(8, static_cast<std::size_t>(header_size));
     const Value doc = json_parse(header);
-    if (doc.kind != ValueKind::Mapa || !doc.map)
+    if (doc.kind != ValueKind::Mapa || !doc.map_ref())
       throw std::runtime_error("cabecalho JSON invalido");
-    if (const Value* mv = doc.map->find("__metadata__");
-        mv && mv->kind == ValueKind::Mapa && mv->map) {
-      for (const auto& [k, v] : mv->map->items)
+    if (const Value* mv = doc.map_ref()->find("__metadata__");
+        mv && mv->kind == ValueKind::Mapa && mv->map_ref()) {
+      for (const auto& [k, v] : mv->map_ref()->items)
         if (v.kind == ValueKind::Texto) metadata[k] = v.s;
     }
     const std::size_t data_begin = 8 + static_cast<std::size_t>(header_size);
-    for (const auto& [name, spec] : doc.map->items) {
+    for (const auto& [name, spec] : doc.map_ref()->items) {
       if (name == "__metadata__") continue;
-      if (spec.kind != ValueKind::Mapa || !spec.map)
+      if (spec.kind != ValueKind::Mapa || !spec.map_ref())
         throw std::runtime_error("tensor '" + name + "' invalido");
-      const Value* dtype = spec.map->find("dtype");
-      const Value* shape = spec.map->find("shape");
-      const Value* offsets = spec.map->find("data_offsets");
+      const Value* dtype = spec.map_ref()->find("dtype");
+      const Value* shape = spec.map_ref()->find("shape");
+      const Value* offsets = spec.map_ref()->find("data_offsets");
       if (!dtype || dtype->kind != ValueKind::Texto || dtype->s != "F32" || !shape ||
-          shape->kind != ValueKind::Lista || !shape->list || !offsets ||
-          offsets->kind != ValueKind::Lista || !offsets->list || offsets->list->size() != 2)
+          shape->kind != ValueKind::Lista || !shape->list_ref() || !offsets ||
+          offsets->kind != ValueKind::Lista || !offsets->list_ref() || offsets->list_ref()->size() != 2)
         throw std::runtime_error("tensor '" + name + "' precisa ser F32 com shape/data_offsets");
       Tensor tensor;
-      for (const Value& d : *shape->list) {
+      for (const Value& d : *shape->list_ref()) {
         const std::int64_t dim = number(d);
         if (dim <= 0) throw std::runtime_error("dimensao invalida em '" + name + "'");
         tensor.shape.push_back(dim);
       }
-      const std::uint64_t begin = static_cast<std::uint64_t>(number((*offsets->list)[0]));
-      const std::uint64_t end = static_cast<std::uint64_t>(number((*offsets->list)[1]));
+      const std::uint64_t begin = static_cast<std::uint64_t>(number((*offsets->list_ref())[0]));
+      const std::uint64_t end = static_cast<std::uint64_t>(number((*offsets->list_ref())[1]));
       if (end < begin || end - begin != static_cast<std::uint64_t>(tensor.size()) * 4ULL ||
           end > bytes.size() - data_begin)
         throw std::runtime_error("offsets invalidos em '" + name + "'");

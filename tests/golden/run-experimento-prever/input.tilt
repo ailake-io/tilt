@@ -15,3 +15,5 @@ pipeline usa:
   passos:
     - v = experimento prever.prever { m2: 25, quartos: 2 }
     - imprimir "preco:", v.valor
+    - lote = experimento prever.prever_lote([{ m2: 25, quartos: 2 }, { m2: 20, quartos: 1 }])
+    - imprimir "lote:", lote.tamanho, lote[0].valor, lote[1].valor

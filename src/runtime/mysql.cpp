@@ -340,16 +340,16 @@ Value executa_select(const MysqlApi& db, void* conn, const std::string& final_sq
     for (unsigned int c = 0; c < ncols; ++c) {
       const std::string& col = names[c];
       if (!raw[c]) {
-        row.map->set(col, Value::nulo());
+        row.map_ref()->set(col, Value::nulo());
         continue;
       }
       const char* val = raw[c];
       if (is_integer_type(types[c])) {
-        row.map->set(col, Value::inteiro(std::strtoll(val, nullptr, 10)));
+        row.map_ref()->set(col, Value::inteiro(std::strtoll(val, nullptr, 10)));
       } else if (is_decimal_type(types[c])) {
-        row.map->set(col, Value::decimal(std::strtod(val, nullptr)));
+        row.map_ref()->set(col, Value::decimal(std::strtod(val, nullptr)));
       } else {
-        row.map->set(col, Value::texto(std::string(val, lens ? lens[c] : std::strlen(val))));
+        row.map_ref()->set(col, Value::texto(std::string(val, lens ? lens[c] : std::strlen(val))));
       }
     }
     rows.push_back(std::move(row));
@@ -599,18 +599,18 @@ Value mysql_query_params(const std::string& url, const std::string& sql,
     for (unsigned int c = 0; c < ncols; ++c) {
       const std::string& col = names[c];
       if (cols[c].nulo) {
-        row.map->set(col, Value::nulo());
+        row.map_ref()->set(col, Value::nulo());
         continue;
       }
       const char* val = cols[c].buf.data();
       const std::size_t n = static_cast<std::size_t>(cols[c].len);
       if (is_integer_type(types[c])) {
         // Buffer BLOB nao e NUL-terminado: copia antes de converter.
-        row.map->set(col, Value::inteiro(std::strtoll(std::string(val, n).c_str(), nullptr, 10)));
+        row.map_ref()->set(col, Value::inteiro(std::strtoll(std::string(val, n).c_str(), nullptr, 10)));
       } else if (is_decimal_type(types[c])) {
-        row.map->set(col, Value::decimal(std::strtod(std::string(val, n).c_str(), nullptr)));
+        row.map_ref()->set(col, Value::decimal(std::strtod(std::string(val, n).c_str(), nullptr)));
       } else {
-        row.map->set(col, Value::texto(std::string(val, n)));
+        row.map_ref()->set(col, Value::texto(std::string(val, n)));
       }
     }
     return row;

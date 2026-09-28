@@ -9,41 +9,90 @@ retorno, com como medir cada passo.
 
 ## Medições de referência
 
-Build Release, uma máquina Linux x86-64 (8 núcleos), melhor de 3 execuções, Python 3.14
-como referência. Reproduza com `bench/rodar.sh` (tabela legível) ou
-`bench/comparar.py` (normaliza pela velocidade da máquina e falha em regressão). O que
-importa é comparar *antes/depois na mesma máquina*, não os números absolutos.
+O [relatório de 24/09/2026](../benchmarks/relatorio-2026-09-24.md) registra
+máquina, comandos, resultados atuais e comparação com CPython, pandas, NumPy
+e CPU/GPU. Nesta máquina, o JIT executa o laço numérico em 117 ms contra 298 ms
+do CPython, mas a recursão `fib(30)` ainda custa 265 ms contra 88 ms. O pipeline
+CSV→agregação→Parquet de 1 milhão de linhas leva 804 ms no Tilt e 181 ms no
+pandas. Em GEMM 1024², CUDA leva 3,19 ms (incluindo transferência) contra
+9,33 ms na CPU com oneMKL; em 256² a CPU é mais rápida.
 
-| Caso | Antes | Agora | Referência |
-|---|---|---|---|
-| Laço de 3 milhões de iterações, interpretador | 1,16 s | **0,56 s** | CPython 0,36 s |
-| Laço de 3 milhões, VM (`--vm`) | 1,18 s | **0,55 s** | |
-| Laço de 3 milhões, JIT (`--jit`) | 0,12 s | 0,12 s | |
-| `fib(30)`, 1,6 milhão de chamadas, interpretador/VM | 1,50 / 1,54 s | **0,41 s** | CPython 0,18 s |
-| `fib(30)`, JIT | 2,03 s | 1,60 s | (cai para a VM a cada chamada) |
-| CSV 1 M linhas: `ler_csv` + `agrupar_por` + `escrever_parquet` | 1,71 s | **0,73 s** | Python `csv` 2,85 s |
-| `ler_csv` de 1 M linhas | 1,21 s | **0,53 s** | |
-| `ordenar_por` em 1 M linhas (com a leitura) | 4,6 s | **1,0 s** | |
-| `ler_parquet` de 1 M linhas | 2,5 s | **1,7 s** | |
-| `escrever_parquet` de 1 M linhas | ~1,0 s | **~0,55 s** | |
-| `sql` sobre o CSV com DuckDB (agregação de 1 M linhas) | — | **0,19 s** | DuckDB CLI 0,17 s |
+As tabelas históricas de `bench/baseline.json` foram medidas em outra máquina;
+compare tempos absolutos e versões do ambiente antes de interpretar seus
+limites normalizados como regressão.
 
 ## O que já foi feito
 
-Ordem cronológica; cada item é um commit com o antes/depois na mensagem.
+Principais otimizações disponíveis no runtime atual.
 
 **Lógica (VM e interpretador)**
 - Operadores pré-decodificados na VM (`BinOp`), aritmética inteira/decimal *in place* sem
   alocar `Value` temporário, escalares copiados campo a campo.
 - Chamada de função VM → VM direta: quadro novo na mesma pilha, sem `Env`, sem mutex, sem
   vetor de argumentos por chamada; tabela de destinos por chunk (com cache do último).
+- Recursão em modo JIT usa a chamada VM → VM quando o corpo não é compilável em JIT;
+  assim `fib(30)` não passa pelo hook do interpretador em cada chamada.
+- A VM funde padrões `local/literal/op`, `local/local/op` e `literal/local/op`
+  em superinstruções, remapeando saltos antes de salvar o cache. Frames mantêm
+  tags escalares paralelas aos valores para reduzir verificações no caminho quente.
+- O JIT x86-64 compila chamadas para funções Tilt escalares, argumentos decimais e
+  resultados decimais; chamadas que exigem builtins ou objetos continuam no fallback
+  da VM. O JIT AArch64 usa o mesmo subconjunto em memória, com helpers nativos para
+  chamadas, laços, impressão e operações escalares. O codegen nativo x86-64/ARM64
+  também aceita as superinstruções.
 
 **Dados**
 - `ler_csv`: arquivo inteiro num buffer, varredura sem alocar por célula, cabeçalho
   resolvido uma vez e, acima de ~2 MB, leitura em até 8 threads (faixas alinhadas a `\n`).
+- `ler_csv` e `ler_parquet` aceitam `selecionar: ["coluna", ...]`: o CSV evita
+  materializar as células descartadas e o Parquet pula a descompressão e a
+  decodificação das colunas não selecionadas.
+- `ler_csv ..., inferir: verdadeiro` examina uma amostra limitada (`amostra:`)
+  para fixar o tipo por coluna antes da leitura completa. Datas com hora podem
+  ser normalizadas entre fusos IANA com `fuso:` e `destino_fuso:`.
+- `perfil`, `inferir_schema`, `validar_schema` e `evoluir_schema` fornecem
+  perfilagem automática e contratos JSON versionados para validar entradas e
+  adicionar colunas compatíveis.
+- `ler_csv` e `ler_parquet` com `colunar: verdadeiro` usam vetores tipados,
+  dicionário de textos, offsets de listas e campos separados em estruturas estáveis.
+  `agrupar_por` e filtros simples percorrem as colunas diretamente; a escrita
+  Parquet evita mapas por linha. Outros métodos podem
+  materializar linhas quando necessários. No pipeline de 1 milhão de linhas,
+  esta opção reduziu a mediana de 646 para 187 ms e o pico de RAM de 513 para
+  35 MiB no ambiente do relatório.
+- `ler_csv`, `ler_parquet` e `ler_delta` aceitam `lazy: verdadeiro` (alias
+  `preguicoso`). O retorno mantém um plano colunar e carrega a fonte somente no
+  primeiro acesso; projeção, filtros e conversões ficam dentro do carregamento.
+- `TILT_ANALYTIC_ENGINE=duckdb` (ou `TILT_DUCKDB_ANALYTICS=1`) delega agregações e
+  junções colunares ao DuckDB quando a biblioteca e o appender estão disponíveis.
+  `auto` delega apenas lotes a partir de 131.072 linhas; qualquer erro recua para
+  o motor nativo. O padrão continua nativo.
+- `paralelo: verdadeiro` no pipeline, ou `TILT_PIPELINE_PARALLEL=1`, executa em
+  threads atribuições simples independentes. Dependências são detectadas pelos
+  nomes lidos; etapas com dependência, escrita de arquivos ou saída textual permanecem sequenciais.
+- Funções de usuário preservam a representação colunar dos argumentos; filtros
+  numéricos simples com literal leem os vetores tipados sem criar um `Value`
+  por linha. O RPC local Python tem transporte Parquet opt-in para evitar listas
+  JSON em tabelas grandes (medição no relatório de 25/09/2026).
 - `agrupar_por`, `filtrar`, `derivar`: sem cópias de `Value` por linha, um `Env` reaproveitado.
+- `agrupar_por`: especificações de agregação são analisadas uma vez e os grupos
+  acumulam soma/contagem/mínimo/máximo numa única passagem.
 - `ordenar_por`: ordena índices sobre chaves extraídas uma vez (antes copiava a tabela e
   procurava a coluna a cada comparação); estável.
+- Colunas de texto dictionary encoded ordenam por ranks lexicais pré-calculados,
+  evitando comparar strings do dicionário em cada comparação do sort.
+- Quando todas as chaves são inteiras e a ordem é crescente, `ordenar_por` aplica
+  radix sort estável em cada chave, da última para a primeira.
+- Para tabelas grandes, a fusão das partições ordenadas ocorre em árvore e em
+  paralelo, evitando refazer a fusão de um prefixo crescente a cada partição.
+- Agregações de uma única chave usam redução AVX2 para soma e soma de quadrados
+  em colunas decimais quando disponível; CPUs sem AVX2 usam o caminho escalar.
+- Quando a tabela está ordenada pela chave de agrupamento, as reduções são
+  aplicadas diretamente aos intervalos contíguos de cada grupo.
+- Mapas, listas e contêineres de linhas criados por `Value` usam um pool PMR
+  compartilhado. O benchmark `scripts/benchmark_value_pool.py <tilt>` mede o
+  custo de materialização e derivação, que são os caminhos com maior criação de
+  objetos.
 - Parquet: dicionário por `unordered_map` (teto de 1024 distintos), gzip no nível rápido,
   colunas geradas em paralelo na escrita (sem criptografia) e valores *movidos* na leitura.
 - **`sql`** (e `tabela.sql`) roda SQL sobre tabelas em memória; com DuckDB lê CSV/Parquet
@@ -51,58 +100,159 @@ Ordem cronológica; cada item é um commit com o antes/depois na mensagem.
 
 **Ferramentas**
 - `bench/comparar.py` + `bench/baseline.json`: sete casos normalizados por uma calibração
-  da máquina; falha se algum ficar mais de 1,6× pior que a referência.
+  da máquina; baselines novos registram CPU e Python. Falha se algum ficar mais
+  de 1,6× pior que a referência no mesmo ambiente. O baseline legado sem
+  procedência só exibe os tempos, sem classificá-los como regressões.
+- `scripts/benchmark_columnar_join.py <tilt>` compara join materializado e
+  colunar em duas execuções consecutivas, incluindo o cache do índice hash. Em
+  uma medição local de 20 mil linhas, o caminho colunar ficou 4,34× mais rápido;
+  repita com `--rows` e `--repetitions` na máquina alvo.
+- `scripts/benchmark_columnar_composite_join.py <tilt>` compara hash join e
+  merge join colunar com duas chaves. O merge join só é escolhido quando os
+  dois lados estão ordenados; o script mede os dois cenários separadamente.
+  Após a comparação tipada sem serializar chaves, uma execução local com 20 mil
+  linhas mediu 32,864 ms (merge) contra 32,878 ms (hash); repita na CPU alvo.
+  Tabelas produzidas por `ordenar_por` carregam a ordem conhecida e não repetem
+  a varredura de validação ao entrar no merge join.
+  Em `tipo: "direita"`, o índice é mantido na tabela esquerda e pode ser
+  reutilizado por chamadas seguintes com as mesmas chaves.
+  Os postings do índice usam um vetor contínuo com buckets por offset, evitando
+  uma alocação separada para cada chave repetida.
+  Para inspecionar o cache durante a execução, use `t.metricas_join()`, que
+  retorna `bytes`, `limite_bytes`, `buckets`, `posicoes`, `hits`, `misses` e
+  `indices`. O limite padrão é 64 MiB por tabela; índices antigos são expulsos
+  quando o limite é atingido.
+  Para ajustar o orçamento, use `tabela = tabela.limitar_cache_join(1048576)`;
+  o valor é informado em bytes e a redução remove índices antigos imediatamente.
+  `tabela.metricas_memoria()` informa `bytes`, `pico_bytes`, `pico_row_group_bytes`,
+  `linhas`, `colunas` e `cache_join_bytes`; o pico representa o maior uso observado
+  desde a criação da tabela. Leitura Parquet de folhas escalares usa buffers diretos,
+  portanto `pico_row_group_bytes` pode ser zero nesse caminho.
+- `matmul` usa OpenBLAS/oneMKL por `dlopen` em matrizes 2D grandes (pelo menos
+  1 milhão de produtos) quando há biblioteca CBLAS. `TILT_BLAS=off` força o
+  kernel C++ portátil; `TILT_BLAS_LIBRARY=/caminho/libmkl_rt.so` escolhe uma
+  instalação fora do caminho de bibliotecas do sistema. O binário não depende
+  de BLAS para funcionar.
+- A leitura Parquet de listas e structs reutiliza a capacidade dos buffers de
+  valores e definition levels entre row groups; `clear()` remove apenas o
+  tamanho lógico, reduzindo chamadas ao allocator.
+- O decoder mantém um scratch por leitura e, no caminho nested, um scratch por
+  row group para reutilizar payloads de páginas, cabeçalhos criptografados,
+  repetition/definition levels e índices de dictionary entre folhas. As
+  capacidades ficam limitadas à maior página decodificada.
+- A rodada de 1 milhão de linhas com gzip, snappy e zstd confirmou que esse
+  scratch mantém RSS e pico de row group estáveis, mas não produziu ganho
+  consistente de tempo; um allocator dedicado adicional fica adiado.
+- O gravador Parquet escolhe entre gerar folhas em paralelo e anexá-las
+  sequencialmente. Quando a capacidade estimada dos buffers passa de 256 MiB,
+  cada corpo comprimido é anexado antes de gerar o próximo; isso reduz o pico
+  de memória sem alterar schema ou encoding. Repita o benchmark de escrita na
+  CPU alvo, pois o caminho sequencial troca memória por previsibilidade de RSS.
+- Quando a entrada já é uma tabela colunar, folhas escalares são copiadas
+  diretamente dos vetores tipados para o writer; listas, structs e colunas
+  mistas continuam no caminho geral, que preserva a semântica de nulos e
+  nested.
+- `scripts/benchmark_parquet_nested.py <tilt>` mede tempo, RSS e
+  `pico_row_group_bytes` para leituras nested em vários row groups.
+  Na medição local atual com 100 mil linhas, o modo colunar levou 30,744 ms e
+  17.856 KiB de RSS, contra 78,048 ms e 126.300 KiB no modo por linhas. A
+  materialização nested usa até duas threads por leitura quando há vários row
+  groups; o limite mantém o pico de memória previsível.
+  Em um milhão de linhas, `benchmark_parquet_columnar.py` mediu 115,254 ms no
+  caminho colunar, 631,331 ms por linhas e 86,599 ms no pandas; essa
+  comparação inclui a criação de um processo Tilt por amostra e serve como
+  baseline da máquina, não como garantia entre CPUs diferentes.
+- O modo por linhas usa decodificação tipada direta para folhas escalares,
+  materialização por grupo e até quatro workers para row groups grandes. Em um
+  CSV→Parquet de 1 milhão de linhas com duas
+  derivações aritméticas, `derivar` levou 0,32 s e o processo ficou em 70.236
+  KiB de RSS.
+- `Value` passou de 120 para 112 bytes ao compartilhar o armazenamento dos
+  escalares `logico`, `inteiro` e `decimal` em uma união. Na etapa seguinte,
+  listas, mapas, tensores, funções e tabelas colunares foram reunidos em um
+  único `ValueStorage`: o objeto agora mede 64 bytes. Escalares não alocam
+  esse bloco e os acessos internos usam referências tipadas (`list_ref`,
+  `map_ref`, `tensor_ref` e `payload_ref`). O bloco reúne os slots de
+  referência; as estruturas de listas e mapas continuam com ownership próprio.
+- `scripts/benchmark_data_stack.py <tilt>` mede CSV → groupby → Parquet e
+  escreve `backends_unavailable=...` quando Polars ou DuckDB não estão
+  instalados; resultados ausentes não são tratados como zero.
+- `scripts/benchmark_data_backends.py <tilt>` amplia a matriz para agregação,
+  filtro + agregação e join em Tilt, pandas, Polars e DuckDB. Ele aceita `--json`
+  e registra explicitamente os backends ausentes; um virtualenv pode instalar
+  `polars` e `duckdb` sem alterar o ambiente do projeto.
+- `conv2d` grande usa tiles im2col limitados em memória e CBLAS quando disponível;
+  a implementação direta permanece para entradas pequenas ou CPU sem BLAS.
+- CUDA e cuBLAS opcionais são carregados em tempo de execução. Os tensores de
+  entrada/saída ainda são sincronizados com o host, mas o operando de pesos do
+  GEMM fica residente entre chamadas quando o ponteiro e o checksum não mudam;
+  uma atualização dos pesos invalida o cache automaticamente. Operações pequenas
+  continuam sujeitas ao custo de transferência.
+- O cliente HTTP, inclusive chamadas LLM, usa libcurl nativa, com conexão e cache DNS por thread, se os
+  headers de compilação e a biblioteca em runtime estiverem disponíveis.
+  `TILT_HTTP_BACKEND=cli` força o caminho por subprocesso `curl`; a escolha
+  automática recua para ele se libcurl não estiver disponível.
+- Builds Release podem ativar LTO (`TILT_LTO=ON`) e PGO GCC
+  (`TILT_PGO=GENERATE`/`USE` com `TILT_PGO_PROFILE_DIR`). O build padrão
+  continua sem essas opções; instruções estão em [benchmarks](../benchmarks/README.md).
 
 ## Próximos passos
 
 Em ordem de prioridade. O critério é o que mais pesa em **limpeza de dados e pipelines**;
-lógica pura em laços fica por último porque o gargalo dela (o `Value` de 120 bytes) é uma
-mudança grande e isolada.
+o próximo salto da lógica pura depende agora de medir o efeito do `ValueStorage`
+único em cargas de texto, listas e mapas.
 
 1. ~~**API de limpeza de dados nativa**~~ feita (guia 03): `remover_nulos`,
    `preencher_nulos`, `renomear`, `remover_colunas`, `converter`, `deduplicar`, `juntar`,
    `empilhar`, `descrever`, `amostra`, `contar_valores`, `limpar_texto`. O que ainda falta
    nessa frente está em [guia 14](guia-14-roteiro.md).
-2. **`ler_parquet` (1,7 s)**: falta o custo de criar cada `Value`; leitura por row group em
-   paralelo e materialização direta nos mapas.
-3. **`derivar` (~1 s por 1 M de linhas, 1,5 GB)**: avaliar expressões simples (coluna
-   operador constante/coluna) sem passar pelo interpretador, e paralelizar por faixas.
-4. **VM**: superinstruções (`local op local`, `local op const`, comparar-e-saltar) montadas
-   em tempo de carga sem mexer no bytecode que o JIT e o cache `.tiltc` leem; ganho
-   estimado de 25–30% em laços.
+2. ~~**`ler_parquet`**~~ feita: folhas escalares usam vetores tipados, row groups
+   são materializados independentemente e a leitura por linhas pode usar workers;
+   listas e structs nested são concatenados em lote, sem converter cada célula
+   novamente em `Value`.
+3. ~~**`derivar`**~~ feita para expressões aritméticas colunares simples: colunas
+   existentes são copiadas por bloco e o literal é avaliado uma vez, sem `Value`
+   temporário por linha. Paralelização por faixas permanece como ganho futuro para
+   expressões mais complexas.
+4. ~~**VM**~~ feita: superinstruções para operações locais e tags escalares paralelas
+   no frame. Comparar o ganho em laços maiores continua recomendado antes de ampliar
+   a fusão para chamadas e operações de objetos.
 5. **DuckDB como motor opcional de `agrupar_por`/`juntar`** em tabelas grandes, com o mesmo
    resultado (ordem e tipos) do caminho nativo.
-6. **`Value` compacto (~16–24 bytes)**: tag + união escalar e um ponteiro para a carga
-   pesada (texto, lista, mapa, tensor, função). É a mudança que destrava lógica, memória
-   (hoje ~650 bytes por linha de 3 colunas) e leitura de Parquet. Envolve ~1 800 pontos de
-   uso (`.map`, `.list`, `.s`...): fazer em branch próprio, com a suíte completa e os
-   *goldens* a cada etapa.
-7. **JIT com chamadas e decimais** e backend ARM64, depois do item 6.
-8. **CI**: rodar `bench/comparar.py` num job Linux (não bloqueante no início, para calibrar
-   a tolerância) e, depois, tornar bloqueante.
+6. ~~**Compactação de `Value`**~~ feita em duas etapas: a união dos escalares e o
+   `ValueStorage` único reduziram o objeto de 120 para 64 bytes. A string continua
+   inline para preservar o caminho quente de textos; uma etapa posterior pode
+   movê-la para o storage compartilhado se os benchmarks mostrarem benefício real.
+7. ~~**JIT dinâmico ARM64**~~ feito: `executar --jit` gera código AArch64 em
+   memória para o subconjunto escalar e recua para a VM em estruturas e builtins
+   não suportados.
 
 ## Por que a lógica é lenta
 
-1. **`Value` é gordo.** Cada valor carrega `kind`, `bool`, `int64`, `double`, um
-   `std::string` e três `shared_ptr` (lista, mapa, tensor): dezenas de bytes e
-   construtores/destrutores caros até para um inteiro. Copiar um `Value` no laço
-   quente custa mais que a própria soma.
+1. **`Value` ainda carrega uma string inline.** A união escalar e o storage de
+   referências já reduziram o objeto para 64 bytes, e escalares não alocam o
+   storage. Textos, listas e mapas ainda têm seus próprios objetos heap-backed;
+   cópias desses valores continuam custando mais que a própria soma em laços
+   quentes.
 2. **Variáveis por nome.** `Env` guarda `unordered_map<string, Value>`; cada leitura
    ou escrita é um hash de texto, e cada iteração de `enquanto`/`para cada` cria um
    `Env` novo (alocação).
-3. **Chamada de função cara.** `call_function` toma um mutex (`vm_chunks_mutex_`)
-   para achar o bytecode em um mapa e monta um `Env` novo por chamada.
+3. **Chamadas do interpretador caras.** Quando a função não passa pela VM,
+   `call_function` consulta o bytecode e monta um `Env` por chamada.
 4. **A VM não usa os tipos.** O checker já infere tipos, mas a VM emite as mesmas
    operações genéricas e checa a tag de cada operando em toda instrução.
-5. **Tabela = lista de mapas.** Uma `tabela` de 1 M linhas são 1 M `ValueMap` com
-   chaves em texto e valores boxeados: muita memória, pouca localidade de cache.
+5. **Tabela por linhas ainda é o padrão.** Uma `tabela` de 1 M linhas são 1 M
+   `ValueMap` com chaves em texto e valores boxeados. O modo colunar do CSV
+   evita esse custo para `agrupar_por`; outras operações ainda podem
+   materializar os mapas.
 
 ## Plano de fundo: lógica (detalhe do item 6 acima)
 
-1. **`Value` compacto (~16 bytes).** Tag + union (`int64`/`double`/`bool`) e um único
-   ponteiro para a carga pesada (texto, lista, mapa, tensor, função). Inteiros e
-   decimais deixam de alocar e de copiar strings. Esperado: 2–3× em laço e chamada.
-   Medir: `bench/laco.tilt` e `bench/fib.tilt`.
+1. **`Value` compacto (64 bytes).** A união escalar e o `ValueStorage` único já
+   foram entregues e medidos em `tests/value_size_test.cpp`. O próximo ponto
+   opcional é mover também a string para o storage, o que reduziria o objeto
+   novamente, mas só deve ser feito após medir textos curtos e longos em
+   `bench/laco.tilt` e `bench/fib.tilt`.
 2. **Variáveis por slot.** Uma passada depois do checker atribui a cada variável um
    índice de quadro; `Env` vira um vetor. Fim do hash por acesso e da alocação por
    iteração. Esperado: 1,5–2× adicional.
@@ -111,30 +261,34 @@ mudança grande e isolada.
    argumentos. Alvo: aproximar `fib(30)` do CPython (hoje 8× atrás).
 4. **VM de registradores com tipos.** Usar os tipos do checker para emitir
    `soma_int`, `menor_int`, etc. sem checar a tag, e manter inteiros em registradores.
-   Só então a VM passa a valer a pena em relação ao interpretador de árvore.
-5. **JIT com chamadas e decimais**, e **backend ARM64** (`macos-latest` e servidores
-   Graviton hoje não têm JIT). Depende dos passos 1–4 para o custo compensar.
+   Isso pode dar vantagem à VM em relação ao interpretador de árvore.
+5. **JIT com chamadas e decimais**: o backend x86-64 e o AArch64 já cobrem o
+   subconjunto escalar; falta ampliar a cobertura para objetos e builtins sem
+   aumentar o custo de compilação.
 
 ## Plano de fundo: dados (parte já feita acima)
 
-1. **Tabela colunar.** Guardar cada coluna como vetor tipado (`int64`, `double`,
-   texto por dicionário), como no Arrow, em vez de lista de mapas. `somar`, `contar`,
-   `filtrar` e `agrupar_por` passam a varrer vetores contíguos (SIMD). É o maior
-   ganho para dados (5–10×) e reduz a memória em ordem de grandeza. Medir:
-   `bench/dados.tilt` e o uso de memória (`/usr/bin/time -v`).
-2. **Paralelismo.** Ler o CSV por blocos em várias threads (o arquivo é dividido em
-   faixas de bytes alinhadas a `\n`) e agregar por thread, com um *merge* no fim.
-   Nas fontes com row groups (Parquet) paralelizar por grupo.
-3. **Delegar ao DuckDB.** O runtime já carrega a `libduckdb` por `dlopen`; agregações
-   e junções grandes podem ser traduzidas para SQL e executadas lá, mantendo a mesma
-   sintaxe do Tilt. O alvo é chegar perto dos 0,17 s da referência.
-4. **Planos preguiçosos com pushdown.** Já existe para fontes SQL (`pushdown:`);
-   estender a colunas e filtros de CSV, Parquet e Delta, pulando row groups pelas
-   estatísticas e lendo só as colunas usadas.
-5. **Rede.** Trocar o subprocesso `curl` (um processo por chamada) por um cliente
-   HTTP nativo sobre a camada TLS que já existe, com *keep-alive* — latência menor
-   em S3, LLM e Elasticsearch. E executar passos independentes de um `pipeline` (ou
-   as iterações de um `para cada` sem dependência) em paralelo.
+1. **Ampliar a tabela colunar.** CSV e Parquet já podem guardar `int64`, `double`,
+   lógicos e texto por dicionário; `agrupar_por`, junções, filtros compostos,
+   projeções nested e a escrita Parquet operam nas colunas. Folhas escalares e
+   textos PLAIN são decodificados sem `Value` temporário por página; listas e
+   structs são concatenados em lote.
+   Medir com `scripts/benchmark_data_stack.py` e `/usr/bin/time -v`.
+2. **Paralelismo.** A leitura Parquet já materializa row groups independentes em
+   paralelo (com limite de duas threads no nested); a leitura CSV por faixas de
+   bytes e o merge paralelo de operações gerais continuam como próximos ganhos.
+3. ~~**Delegar ao DuckDB**~~ feita de forma opcional: agregações e junções colunares
+   usam SQL gerado apenas quando o motor é solicitado ou o modo `auto` amortiza a carga.
+4. ~~**Planos preguiçosos com pushdown**~~ feita para CSV, Parquet e Delta locais e
+   conectores remotos. `lazy: verdadeiro` adia a primeira consulta; SQL mantém
+   projeção/filtro/limite parametrizados e Elasticsearch/OpenSearch traduz
+   `pushdown.colunas`, `pushdown.onde` e `pushdown.limite` para `_source`,
+   `bool.filter` e `size`.
+5. ~~**Rede e loops.**~~ O cliente HTTP persistente já reduz o custo das chamadas
+   repetidas; fontes remotas podem ser lazy e aplicar pushdown. A execução paralela
+   de passos e o loop independente `saida[i] = expressao` estão disponíveis com
+   `TILT_PIPELINE_PARALLEL=1`/`TILT_LOOP_PARALLEL=1`; o runtime recua para serial
+   quando detecta efeitos colaterais ou dependências.
 
 ## Como medir e não regredir
 
@@ -148,11 +302,13 @@ mudança grande e isolada.
   commit; o interpretador tem ~12 mil linhas e vários pontos de acoplamento
   (`Value`, `Env`, VM, JIT, codegen), então mudanças de representação (`Value`,
   slots) merecem um branch próprio e a suíte completa (`ctest`) mais os *goldens*
-  antes de mesclar.
+  antes de mesclar. O backward CUDA de convolução, recorrência e embeddings já
+  tem kernels dedicados; operadores fora deles e Metal continuam com fallback CPU.
 
 ## O que não é gargalo
 
-Treino e inferência de tensores (matmul/conv em C++ com AVX e *thread pool*), leitura
-e escrita de Parquet/Delta/Iceberg e os conectores de rede já são código nativo; a
-otimização de lógica acima não os afeta. Para modelos grandes o ganho vem da GPU
-(CUDA ainda não validada em hardware real — ver [guia 12](guia-12-limitacoes.md)).
+Treino e inferência de tensores e conectores já rodam em código nativo; otimizar
+o laço do interpretador não acelera seu núcleo numérico. Ainda há gargalos
+próprios: materialização de linhas, operadores não cobertos por kernels e
+transferência host↔GPU. Para modelos grandes, o ganho seletivo da GPU está
+medido no [relatório](../benchmarks/relatorio-2026-09-24.md).

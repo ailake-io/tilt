@@ -85,7 +85,7 @@ bool base64_decode(const std::string& input, std::string& output) {
 }
 
 std::string required_text(const Value& object, const char* name) {
-  const Value* field = object.map ? object.map->find(name) : nullptr;
+  const Value* field = object.map_ref() ? object.map_ref()->find(name) : nullptr;
   if (!field || field->kind != ValueKind::Texto || field->s.empty()) {
     die(std::string("resposta KMS sem campo ") + name);
   }
@@ -95,9 +95,9 @@ std::string required_text(const Value& object, const char* name) {
 std::string error_text(const std::string& body) {
   try {
     const Value value = json_parse(body);
-    if (value.kind == ValueKind::Mapa && value.map) {
-      const Value* message = value.map->find("message");
-      if (!message) message = value.map->find("Message");
+    if (value.kind == ValueKind::Mapa && value.map_ref()) {
+      const Value* message = value.map_ref()->find("message");
+      if (!message) message = value.map_ref()->find("Message");
       if (message && message->kind == ValueKind::Texto && !message->s.empty()) {
         return message->s.substr(0, 200);
       }
@@ -150,7 +150,7 @@ Value kms_request(const std::string& operation, const Value& request) {
   try {
     Value parsed = json_parse(response.body);
     wipe(response.body);
-    if (parsed.kind != ValueKind::Mapa || !parsed.map) {
+    if (parsed.kind != ValueKind::Mapa || !parsed.map_ref()) {
       die("resposta AWS KMS nao e um objeto JSON");
     }
     return parsed;
@@ -161,7 +161,7 @@ Value kms_request(const std::string& operation, const Value& request) {
 }
 
 void decode_plaintext(Value& response, std::array<std::uint8_t, 32>& plaintext) {
-  Value* field = response.map ? response.map->find("Plaintext") : nullptr;
+  Value* field = response.map_ref() ? response.map_ref()->find("Plaintext") : nullptr;
   if (!field || field->kind != ValueKind::Texto) {
     die("resposta AWS KMS sem Plaintext");
   }
@@ -182,8 +182,8 @@ void aws_kms_generate_data_key(const std::string& key_id, std::array<std::uint8_
                                std::string& ciphertext_blob, std::string& resolved_key_id) {
   if (key_id.empty()) die("KeyId vazio para GenerateDataKey");
   Value request = Value::mapa();
-  request.map->set("KeyId", Value::texto(key_id));
-  request.map->set("KeySpec", Value::texto("AES_256"));
+  request.map_ref()->set("KeyId", Value::texto(key_id));
+  request.map_ref()->set("KeySpec", Value::texto("AES_256"));
   Value response = kms_request("GenerateDataKey", request);
   const std::string blob = required_text(response, "CiphertextBlob");
   const std::string resolved = required_text(response, "KeyId");
@@ -198,8 +198,8 @@ void aws_kms_decrypt_data_key(const std::string& key_id, const std::string& ciph
     die("KeyId ou CiphertextBlob vazio para Decrypt");
   }
   Value request = Value::mapa();
-  request.map->set("KeyId", Value::texto(key_id));
-  request.map->set("CiphertextBlob", Value::texto(ciphertext_blob));
+  request.map_ref()->set("KeyId", Value::texto(key_id));
+  request.map_ref()->set("CiphertextBlob", Value::texto(ciphertext_blob));
   Value response = kms_request("Decrypt", request);
   decode_plaintext(response, plaintext);
 }

@@ -279,7 +279,7 @@ const std::vector<BuiltinDoc>& builtin_docs() {
        "Chama qualquer endpoint REST do Elasticsearch/OpenSearch.", nullptr},
       {"ler_parquet", "ler_parquet(caminho)", "caminho", "Le um arquivo Parquet como tabela.",
        nullptr},
-      {"escrever_parquet", "escrever_parquet(tabela, caminho)", "tabela,caminho",
+      {"escrever_parquet", "escrever_parquet(tabela, caminho, row_group?)", "tabela,caminho,row_group",
        "Grava uma tabela em arquivo Parquet.", nullptr},
       {"ler_delta", "ler_delta(caminho)", "caminho", "Le uma tabela Delta Lake.", nullptr},
       {"escrever_delta", "escrever_delta(tabela, caminho)", "tabela,caminho",

@@ -30,9 +30,13 @@
 - [x] 12-6.5 — Callbacks de pipeline, alerta de SLA e jitter no backoff
 - [x] 12-6.6 — Logs JSON opt-in com contexto de execução dos pipelines
 - [x] 12-6.7 — Vacuum conservador de arquivos órfãos Delta/Iceberg
-- [ ] Fase 12-7 — GPU real/CUDA + AMP (deferida; não bloqueia as demais fases)
+- [x] Fase 12-7 — CUDA para GEMM/conv2d/ReLU/GELU/soma + AMP de GEMM denso/residual, com pesos e gradientes FP32
 - [x] Fase 12-8 — CI Windows com testes funcionais (build MSVC + CTest nativo via `tests/windows_functional.ps1`; conectores shell permanecem em Linux/macOS)
-- [ ] GPU — validação em hardware CUDA real (deferida)
+- [x] GPU — GEMM FP32/FP16, conv2d, ReLU, GELU e soma validados em RTX 5050 (CUDA 12.0)
+- [x] CPU — CBLAS opcional para GEMM e conv2d grande, mantendo kernels portáteis
+- [x] Inferência offline em lote de tabela para `experimento` e `modelo` vetorial
+- [x] Benchmark detalhado CPU/GPU e comparação local com CPython, pandas e NumPy (`benchmarks/relatorio-2026-09-24.md`)
+- [x] GPU — backend Metal (macOS), buffers de tensores residentes e ativação de Tensor Core via cuBLAS quando disponível; AMD/ROCm permanece fora do escopo atual
 
 
 ---
@@ -104,7 +108,7 @@
 - [x] Implementar `registrar_em: mlflow://` via Tracking REST
 
 ### 3.2 Treino (P1)
-- [ ] Implementar AMP (automatic mixed precision) — roteiro
+- [x] Implementar AMP em GEMM denso/residual no treino (`precisao: mista`; FP16 nos operandos, FP32 no acumulador/pesos/gradientes)
 - [x] Implementar `ao_epoca` (callback por época; bloco com contexto da época)
 - [x] Adicionar dataloader de Parquet para treino (row groups, fluxo 2D)
 - [x] Implementar dilation e padding explícito em conv2d
@@ -116,7 +120,9 @@
 - [x] Adicionar camada `residual` (bloco treinável CPU, persistência e ONNX)
 - [x] Implementar `salvar_pesos`/`carregar_pesos` em formato ONNX
 - [x] Integrar Safetensors F32 para pesos de produção
-- [x] Implementar exportação GGUF v3 (escrita F32; quantização ainda pendente)
+- [x] Implementar exportação/importação GGUF v3 F32 e Q8_0, com desquantização no runtime
+- [x] Exportar a camada `incorporacao` inicial para ONNX via `Gather` INT64
+- [x] Adicionar busca bayesiana adaptativa sobre grades finitas (`estrategia: bayesiana`)
 
 ---
 
@@ -140,6 +146,14 @@
 - [x] Implementar amostragem estratificada (estratificar_por: com cotas proporcionais e desempate por maior resto)
 - [x] Adicionar `registrar_em` com POST REST para experimento e avaliação
 
+### 4.4 LLMOps e recuperação (P1)
+- [x] Contabilidade persistente de tokens e custos (`contabilidade:` + `llm_metricas`)
+- [x] Observabilidade opt-in de prompts/respostas (`observabilidade:`)
+- [x] Chunking sensível a sentença, parágrafo, linha e código (`fragmentar`/`dividir_texto`)
+- [x] Avaliação de recuperação em índices locais e backends externos (recall, precisão, MRR, nDCG)
+- [x] Hash SHA-256 para prompts/respostas omitidos e rastreamento por `trace_id`
+- [x] Contabilizar embeddings declarados com `llm:` no mesmo ledger, limites e métricas
+
 ---
 
 ## 5. Agentes
@@ -153,6 +167,8 @@
 - [x] `memoria: vetorial` (Sprint 3: índice por agente, top-3, T011 em valor inválido)
 - [x] Adicionar suporte a múltiplos LLMs em `equipe` (supervisor com fallback)
 - [x] Implementar `max_passos` com logging detalhado de cada passo
+- [x] Políticas compartilháveis de orçamento e aprovação (`politica Nome:`)
+- [x] Orçamento global opcional entre agentes (`compartilhado: verdadeiro`)
 
 ---
 
@@ -233,7 +249,8 @@
 ## 10. Integração com Ecossistema
 
 ### 10.1 IDE/LSP (P2)
-- [x] `goto definition` no LSP (same-file; cross-file futuro)
+- [x] `goto definition` no LSP (same-file e importações explícitas locais/
+  `TILT_STDLIB_PATH`; índice de workspace futuro)
 - [x] Implementar `find references` no LSP (same-file, com `includeDeclaration` e ranges LSP)
 - [x] `hover type` (Sprint 3: assinatura de `funcao`, campos de `tipo`, tipo
   do valor em usos de variável, tipo da expressão sob o cursor com forma de
@@ -326,3 +343,149 @@ documentação fecha sem o antigo T032 duplo (`docs` 102/102).
 3. [x] Agentes com memória vetorial (5.2)
 4. [x] Windows port improvements (7.1); permanece apenas a migração da suíte CTest completa
 5. [x] LSP features (10.1) — goto definition, hover, signature help, completion e formatting
+
+### Estado salvo — otimização colunar (2026-09-25)
+
+- [x] Leitura Parquet de structs de topo diretamente em `ColumnarColumn`.
+- [x] Leitura Parquet de listas de structs com offsets e campos tipados.
+- [x] Seleção colunar de linhas sem materializar mapas/listas intermediários.
+- [x] Ordenação tipada colunar e ordenação paralela para tabelas grandes.
+- [x] Filtros simples tipados e filtros compostos com máscaras de bits.
+- [x] Avaliação paralela de máscaras em tabelas grandes.
+- [x] Agregação colunar paralela com fusão determinística.
+- [x] Hash join com chaves binárias tipadas e cache reutilizável por tabela.
+- [x] Construção paralela do índice hash para tabelas grandes, com fusão determinística.
+- [x] Radix sort estável para ordenação colunar inteira crescente.
+- [x] Agregações colunar `variancia` (soma de quadrados) e `distintos` (conjuntos por grupo), incluindo o caminho paralelo.
+- [x] Merge join linear para joins internos e à esquerda quando ambos os lados já estão ordenados pelas chaves.
+- [x] Agregações `mediana` e `quantil`, com seleção parcial e fusão no caminho paralelo.
+- [x] Pushdown Parquet para comparadores e predicados compostos `e`/`ou`, incluindo filtros nested projetados.
+- [x] Benchmark reproduzível de joins compostos, cobrindo merge join ordenado e hash join.
+- [x] Merge join composto sem serialização de chaves durante a varredura, com comparação tipada.
+- [x] Propagação de metadados de ordenação colunar para evitar nova verificação no merge join.
+- [x] Cache reutilizável do índice hash no lado esquerdo para right joins.
+- [x] Índice de join compacto: buckets com offsets e vetor contínuo de posições, reduzindo alocações por chave.
+- [x] Métricas de cache de join (`metricas_join`): bytes, buckets, posições, hits e misses.
+- [x] Limite de 64 MiB por tabela para o cache de joins, com expulsão FIFO de índices antigos.
+- [x] Limite de cache configurável por tabela via `limitar_cache_join(bytes)`.
+- [x] Métricas de memória colunar via `metricas_memoria()`, incluindo bytes atuais, pico e cache de joins.
+- [x] Pico temporário de decodificação Parquet por row group (`pico_row_group_bytes`).
+- [x] Ordenação colunar de textos dictionary encoded por ranks lexicais pré-calculados.
+- [x] Radix sort estável para múltiplas colunas inteiras ascendentes, aplicado da última chave à primeira.
+- [x] Merge paralelo em árvore para ordenações compostas, combinando partições em rodadas paralelas.
+- [x] Redução SIMD AVX2 para soma e soma de quadrados de colunas decimais, com detecção runtime e fallback escalar.
+- [x] Redução SIMD por intervalos de grupos quando a tabela está ordenada pela chave de agrupamento.
+- [x] `mediana_aproximada` e `quantil_aproximado` com amostragem limitada a 4096 valores por grupo.
+- [x] Pool sincronizado de objetos `ValueMap` e `ValueList` via `std::pmr::synchronized_pool_resource`.
+- [x] Benchmark isolado de materialização e derivação para medir o impacto do pool (`benchmark_value_pool.py`).
+- [x] CI de performance executando `bench/comparar.py` em pushes e pull requests.
+
+`selecionar: ["struct.campo"]` e `onde: {coluna: valor}` já evitam
+materialização de linhas no caminho colunar; filtros escalares também usam
+min/max do footer Parquet para eliminar row groups incompatíveis. Predicados
+compostos, caminhos nested, joins compostos e mediana/quantis já estão cobertos
+pelos itens acima. A comparação em Parquet grande (1 milhão de linhas, 100 row
+groups e gzip/snappy/zstd) mostrou que o scratch reutilizável é suficiente; um
+allocator dedicado adicional foi adiado por não apresentar ganho consistente. O
+benchmark `scripts/benchmark_columnar_join.py`
+registrou ganho colunar de 4,34x em 20 mil linhas (uma repetição local). AMD/ROCm
+continua fora do escopo salvo indicação explícita.
+
+### Ponto de retomada — 2026-09-25
+
+- [x] Agregações colunares `variancia`, `distintos`, `mediana` e `quantil`.
+- [x] Pushdown Parquet com comparadores, predicados compostos `e`/`ou` e caminhos nested.
+- [x] Merge join tipado para entradas ordenadas, sem serialização de chaves na varredura.
+- [x] Cache de índices nos lados direito e esquerdo, com índice compacto por buckets e vetor contínuo.
+- [x] Limite de cache por tabela (`limitar_cache_join(bytes)`) e métricas `metricas_join()`.
+- [x] Métricas de memória colunar (`metricas_memoria()`), incluindo pico de row group.
+- [x] Testes Release, colunares, Parquet, golden, documentação e `git diff --check` passando.
+- [x] Reutilização dos buffers `columns`/`coldefs` durante a leitura Parquet por row group,
+  preservando capacidade e reduzindo alocações.
+- [x] Allocator de scratch Parquet por leitura, reutilizando payload e cabeçalho entre páginas e row groups.
+- [x] Scratch dedicado por row group também reutiliza repetition/definition levels e índices de dictionary, reduzindo reservas por página.
+- [x] Benchmark nested mede tempo, RSS e `pico_row_group_bytes` (`scripts/benchmark_parquet_nested.py`).
+- [x] Smoke benchmark do scratch em 100 mil linhas/20 row groups: nested colunar 27,710 ms e 15.682 KiB RSS; linhas 76,116 ms e 114.642 KiB.
+- [x] Gravador Parquet com política adaptativa de memória: folhas pequenas seguem
+  em paralelo; cargas acima de 256 MiB são anexadas sequencialmente para evitar
+  manter todos os corpos comprimidos simultaneamente.
+- [x] Writer colunar copia folhas escalares diretamente dos vetores tipados,
+  evitando materialização de um `Value` por célula; nested/mixed mantém o
+  decoder geral.
+- [x] Medição local em 100 mil linhas após a materialização tipada por grupo e a
+  concatenação nested em lote: colunar 30,744 ms/17.856 KiB RSS contra linhas
+  78,048 ms/126.300 KiB; em 1 milhão, leitura colunar 115,254 ms contra
+  631,331 ms por linhas (pandas: 86,599 ms).
+- [x] Materialização colunar de listas e structs nested paralelizada por row
+  group, limitada a duas threads para preservar o pico de memória e mantendo a
+  ordem original dos grupos.
+- [x] `derivar` colunar sem `Value` temporário por coluna existente: duas
+  expressões aritméticas em 1 milhão de linhas levaram 0,32 s/70.236 KiB RSS.
+- [x] VM com superinstruções para operandos locais/literais, remapeamento de
+  saltos e tags escalares paralelas no frame.
+- [x] JIT x86-64 com chamadas para funções Tilt escalares, decimais e resultados
+  decimais; o callback rejeita builtins que exigem objetos e preserva o fallback.
+- [x] Codegen estático ARM64 aceita as novas superinstruções e mantém chamadas e
+  decimais no subconjunto nativo.
+- [x] Emissor JIT AArch64 em memória para `executar --jit` (subconjunto escalar,
+  chamadas, loops, impressão e decimais via helpers nativos; fallback preservado
+  para estruturas e builtins fora do subconjunto).
+- [x] Planos preguiçosos para `ler_csv`, `ler_parquet` e `ler_delta`, com carga
+  thread-safe no primeiro acesso e fallback colunar/nativo.
+- [x] Delegação opcional de `agrupar_por` e `juntar` colunares para DuckDB via
+  `TILT_ANALYTIC_ENGINE`/`TILT_DUCKDB_ANALYTICS`, recuando quando a biblioteca
+  ou o subconjunto SQL não estiver disponível.
+- [x] Execução paralela conservadora de atribuições independentes em pipelines
+  (`paralelo: verdadeiro` ou `TILT_PIPELINE_PARALLEL=1`); dependências e saída
+  textual permanecem sequenciais.
+- [x] Leitura colunar CSV por faixas de bytes em paralelo e loop independente
+  `saida[i] = expressao` via `TILT_LOOP_PARALLEL=1`, com commit determinístico.
+- [x] Planos lazy para fontes remotas e pushdown Elasticsearch/OpenSearch
+  (`_source`, `bool.filter`, `size`), mantendo pushdown SQL parametrizado.
+- [x] MLflow publica `detalhes.json` com relatório e casos individuais como
+  artefato Tracking REST.
+- [x] CUDA opt-in para residência f32, GEMM em lote, backward denso,
+  convolução, recorrência (RNN/LSTM/GRU), embeddings, normalização,
+  max-pooling e redução; fallback CPU preservado.
+- [x] Dados e adoção: `ler_csv` pode inferir tipos por amostra (inclusive
+  `data_hora` com conversão de fuso), `perfil` produz estatísticas e schema,
+  `inferir_schema`/`validar_schema`/`evoluir_schema` mantêm contratos JSON
+  versionados; `scripts/benchmark_data_backends.py` compara agregação, filtros
+  e joins com pandas, Polars e DuckDB quando instalados. A rodada de 1 milhão
+  de linhas está em `benchmarks/relatorio-2026-09-28.md`.
+- [x] `Value` compacto na segunda etapa: as referências para listas, mapas,
+  tensores, funções e tabelas colunares agora compartilham um único bloco de
+  armazenamento. `sizeof(Value)` caiu de 112 para 64 bytes; escalares continuam
+  sem alocação e a semântica da linguagem permanece igual. Os acessos internos
+  usam `*_ref()` para manter a migração explícita e segura.
+- [x] Matriz atualizada CSV→groupby→Parquet: Tilt colunar 197,078 ms e pandas 187,471 ms em 1 milhão de linhas; Polars/DuckDB foram marcados como indisponíveis no ambiente, sem tratar ausência como zero.
+- [x] Medição de escrita colunar em 1 milhão de linhas: `row_group: 100000`
+  gerou 10 grupos em 0,28 s/35.120 KiB RSS, contra 1 grupo em 0,31 s/112.580
+  KiB no mesmo processo e carga.
+- [x] Comparação antes/depois em 1 milhão de linhas, 100 row groups e gzip/snappy/zstd:
+  leitura, roundtrip, RSS e pico de row group em `benchmarks/parquet-large-2026-09-28.md`;
+  o scratch foi mantido, mas não há evidência para um allocator dedicado adicional.
+- [x] Writer particiona entradas com schema estável via `row_group:`/`grupo:` e
+  emite múltiplos row groups no mesmo arquivo, ajustando offsets no footer;
+  entradas com schemas locais incompatíveis recuam para um único grupo.
+
+### Investigação do pool — 2026-09-26
+
+- [x] Benchmark com e sem pool para materialização, join e listas, validando todos os resultados.
+- [x] Medir criação e destruição com 1, 2 e 4 threads; variante sem sincronização apenas como diagnóstico de uma thread.
+- [x] Usar alocação padrão nos mapas materializados em lote e registrar comparação antes/depois.
+- [x] Investigar listas de 0, 2, 32 e 256 elementos com liberação local e em outra thread; adotar `std::make_shared` somente em `Value::lista`.
+
+### Validação Parquet das políticas de alocação — 2026-09-26
+
+- [x] Comparar antes/depois em um milhão de linhas aninhadas, 100 row groups,
+  medindo tempo total e RSS em leitura e leitura+escrita, linhas e colunar.
+- [x] Conferir integralmente valores e nulos dos arquivos regravados com PyArrow.
+- [x] Localizar conversão de colunas inteiras em `Value` no gravador Parquet;
+  registrar pico de 1262 MiB no pipeline colunar contra 84 MiB na leitura isolada.
+- [x] Priorizar escrita colunar por lotes/row groups e medir seu efeito no pico RSS;
+  `row_group: 100000` reduziu o pico observado nesta carga de 112.580 para
+  35.120 KiB.
+- [x] Reavaliar allocator dedicado por row group depois de medir o novo gravador;
+  foi adiado: o ganho medido veio da escrita em lotes, sem evidência suficiente
+  para justificar um allocator separado agora.

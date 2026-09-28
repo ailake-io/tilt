@@ -1,6 +1,9 @@
 name: ci
 
 on:
+  push:
+    branches: [main, master]
+  pull_request:
   workflow_dispatch: # Actions > ci > Run workflow (qualquer branch)
 
 jobs:
@@ -77,6 +80,26 @@ jobs:
           ./build/release/bin/tilt executar exemplos/etl_delta.tilt
           TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente.tilt
           TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente_multi_etapas.tilt
+
+  performance:
+    # O baseline só é comparado quando a CPU/arquitetura coincidem; em runners
+    # diferentes o script ainda executa os casos e publica os tempos no log.
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure release
+        run: cmake --preset release
+      - name: build tilt
+        run: cmake --build --preset release --target tilt -j2
+      - name: benchmark de regressão
+        timeout-minutes: 10
+        run: |
+          python3 bench/comparar.py build/release/bin/tilt --repeticoes 1
+          python3 scripts/benchmark_columnar_join.py build/release/bin/tilt --rows 100000 --repetitions 1
+          python3 scripts/benchmark_columnar_composite_join.py build/release/bin/tilt --rows 100000 --repetitions 1
+          python3 scripts/benchmark_parquet_nested.py build/release/bin/tilt --rows 100000 --repetitions 1
+          python3 scripts/benchmark_value_pool.py build/release/bin/tilt --rows 100000 --repetitions 1
 
   # Port Windows (MSVC, windows-latest): o CTest registra uma suíte funcional
   # nativa em PowerShell; os testes shell de conectores ficam em Linux/macOS.

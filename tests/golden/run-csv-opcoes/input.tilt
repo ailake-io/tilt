@@ -10,6 +10,26 @@ bruno;NA;-
     - escrever_texto "br.csv", conteudo
     - t = ler_csv "br.csv", separador: ";", pular: 1, nulos: ["NA", "-"], tipos: { valor: "decimal" }
     - imprimir tamanho(t), t[0].nome, t[0].valor, tipo_de(t[1].valor), t[1].obs, t[2].nome, t[2].valor, t[2].obs
+    - proj = ler_csv "br.csv", separador: ";", pular: 1, selecionar: ["obs", "nome"]
+    - imprimir "projecao:", tamanho(proj[0]), proj[0].obs, proj[2].nome
+    - col = ler_csv "br.csv", separador: ";", pular: 1, nulos: ["NA"], selecionar: ["nome", "valor"], tipos: { valor: "decimal" }, colunar: verdadeiro
+    - grupos = col.agrupar_por "nome", { total: somar "valor", n: contar }
+    - imprimir "colunar:", tamanho(col), tamanho(grupos), grupos[0].total, grupos[1].total, grupos[2].total
+    - imprimir col[2].nome, col[2].valor, col.tamanho
+    - filtradas = col.filtrar linha.valor > 2
+    - filtradas_grupo = filtradas.agrupar_por "nome", { total: somar "valor", n: contar }
+    - imprimir "filtro colunar:", tamanho(filtradas), filtradas_grupo[0].total
+    - escrever_parquet col, "colunar.parquet"
+    - colunar_volta = ler_parquet "colunar.parquet"
+    - imprimir "parquet colunar:", colunar_volta[0].valor, colunar_volta[1].valor, colunar_volta[2].nome
+    - escrever_texto "misto.csv", """chave,valor
+x,1
+x,oi
+x,3
+"""
+    - misto = ler_csv "misto.csv", colunar: verdadeiro
+    - mix_grupo = misto.agrupar_por "chave", { total: somar "valor", n: contar }
+    - imprimir "misto:", mix_grupo[0].total, mix_grupo[0].n, misto[1].valor
     # separador detectado
     - tabulado = """a	b
 1	2
@@ -35,6 +55,8 @@ bruno;NA;-
     - r2 = ler_csv "rt2.csv", separador: ";", nulos: [""]
     - imprimir r2[0].n, tipo_de(r2[0].z), r2[1].z
     - remover_arquivo "br.csv"
+    - remover_arquivo "colunar.parquet"
+    - remover_arquivo "misto.csv"
     - remover_arquivo "tab.csv"
     - remover_arquivo "sem.csv"
     - remover_arquivo "rt.csv"

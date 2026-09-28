@@ -15,6 +15,9 @@
 
 namespace tilt::rt {
 
+using ConversorTabela = Value (*)(const Value&);
+ConversorTabela tabela_conversor(const std::string& tipo);
+
 // Celula ausente ou nula (nulo, chave faltando, texto vazio/so espacos).
 bool celula_nula(const Value* v);
 
@@ -31,7 +34,7 @@ Value tabela_renomear(const Value& t, const Value& mapa);
 // Remove colunas por nome (nome inexistente e erro: pega typo).
 Value tabela_remover_colunas(const Value& t, const std::vector<std::string>& nomes);
 
-// { coluna: tipo } com tipo = inteiro | decimal | texto | logico | data. Valor que
+// { coluna: tipo } com tipo = inteiro | decimal | texto | logico | data | data_hora. Valor que
 // nao converte vira nulo (fracao em `inteiro` tambem: arredonde antes).
 Value tabela_converter(const Value& t, const Value& tipos);
 
@@ -49,6 +52,14 @@ Value tabela_empilhar(const std::vector<Value>& tabelas);
 // Perfil por coluna: coluna, tipo, total, nulos, distintos, minimo, maximo, media.
 Value tabela_descrever(const Value& t);
 
+// Contrato de dados versionado. O formato retornado e um mapa com `versao`,
+// `campos` (nome/tipo/nulavel) e `linhas_amostra`; pode ser persistido com
+// `escrever_json` e lido novamente com `ler_json`.
+Value tabela_inferir_schema(const Value& t, std::size_t limite_amostra = 0);
+Value tabela_perfil(const Value& t, std::size_t limite_amostra = 10'000);
+Value tabela_validar_schema(const Value& t, const Value& schema);
+Value tabela_evoluir_schema(const Value& schema, const Value& t);
+
 // `n` linhas (n >= 1) ou a fracao `n` (0 < n < 1) de linhas, sem reposicao,
 // deterministica para a mesma semente; preserva a ordem original.
 Value tabela_amostra(const Value& t, double n, std::uint64_t semente);
@@ -63,6 +74,8 @@ Value tabela_limpar_texto(const Value& t, const std::vector<std::string>& coluna
 
 // Ordena por uma ou mais colunas (estavel; numero contra numero, senao texto).
 Value tabela_ordenar(const Value& t, const std::vector<std::string>& colunas, bool decrescente);
+Value tabela_ordenar_colunar(const Value& t, const std::vector<std::string>& colunas,
+                             bool decrescente);
 
 // Data em varios formatos (2024-01-31, 31/01/2024, 2024/01/31, com hora opcional) para
 // ISO `AAAA-MM-DD[THH:MM[:SS]]`; vazio se invalida.

@@ -1,4 +1,36 @@
 if(NOT WIN32)
+add_executable(columnar_unit columnar_unit.cpp)
+target_link_libraries(columnar_unit PRIVATE tilt_core)
+add_test(NAME columnar_unit COMMAND columnar_unit)
+
+add_executable(value_size_unit value_size_test.cpp)
+target_link_libraries(value_size_unit PRIVATE tilt_core)
+add_test(NAME value_size COMMAND value_size_unit)
+
+add_executable(tensor_matmul_unit tensor_matmul_unit.cpp)
+target_link_libraries(tensor_matmul_unit PRIVATE tilt_core)
+add_test(NAME tensor_matmul_portable COMMAND tensor_matmul_unit)
+set_tests_properties(tensor_matmul_portable PROPERTIES ENVIRONMENT "TILT_BLAS=off")
+add_test(NAME tensor_matmul_blas_auto COMMAND tensor_matmul_unit)
+
+add_executable(tensor_conv_unit tensor_conv_unit.cpp)
+target_link_libraries(tensor_conv_unit PRIVATE tilt_core)
+add_test(NAME tensor_conv_portable COMMAND tensor_conv_unit)
+set_tests_properties(tensor_conv_portable PROPERTIES ENVIRONMENT "TILT_BLAS=off")
+add_test(NAME tensor_conv_blas_auto COMMAND tensor_conv_unit)
+
+add_executable(gpu_dispatch_benchmark ../benchmarks/gpu_dispatch_benchmark.cpp)
+target_link_libraries(gpu_dispatch_benchmark PRIVATE tilt_core)
+
+add_executable(gpu_runtime_unit gpu_runtime_unit.cpp)
+target_link_libraries(gpu_runtime_unit PRIVATE tilt_core)
+add_test(NAME gpu_fake COMMAND gpu_runtime_unit)
+set_tests_properties(gpu_fake PROPERTIES ENVIRONMENT "TILT_GPU=fake")
+add_test(NAME gpu_cuda COMMAND gpu_runtime_unit)
+set_tests_properties(gpu_cuda PROPERTIES ENVIRONMENT "TILT_GPU=auto")
+add_test(NAME gpu_metal COMMAND gpu_runtime_unit)
+set_tests_properties(gpu_metal PROPERTIES ENVIRONMENT "TILT_GPU=metal")
+
 add_test(
   NAME sharding
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sharding_test.sh
@@ -23,6 +55,12 @@ add_test(
   NAME thread_pool
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/thread_pool_test.sh
           ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+
+add_test(
+  NAME loop_parallel
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/loop_parallel_test.sh
+          $<TARGET_FILE:tilt>
 )
 
 add_test(
@@ -56,6 +94,11 @@ add_test(
           ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_robusto.tilt)
 
 add_test(
+  NAME llm_adoption
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/llm_adoption_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME abandono
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/abandono_test.sh
           $<TARGET_FILE:tilt>)
@@ -83,6 +126,41 @@ add_test(
 add_test(
   NAME dev_cmds
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/dev_cmds_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME language_contract
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/language_contract_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME project_lock
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/project_lock_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME model_registry
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/model_registry_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME columnar_function
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/columnar_function_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME analytic_engine
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/analytic_engine_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME data_contract
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/data_contract_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME ml_features
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/ml_features_test.sh
           $<TARGET_FILE:tilt>)
 
 find_package(Python3 COMPONENTS Interpreter)

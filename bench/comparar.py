@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Benchmarks de regressao (guia 16): roda os casos de bench/, normaliza pelo tempo de
-uma calibracao da propria maquina e compara com bench/baseline.json.
+uma calibracao local e compara com um baseline do mesmo ambiente.
 
   bench/comparar.py <tilt> [--baseline bench/baseline.json] [--atualizar]
                     [--tolerancia 1.6] [--repeticoes 3]
 
-Sem a calibracao os tempos absolutos nao servem de baseline (a CI e o notebook tem
-velocidades diferentes): o que se compara e `tempo / calibracao`. Falha (exit 1) se
-algum caso ficar mais de `tolerancia` vezes pior que a referencia registrada.
+Compara `tempo / calibracao` apenas se CPU, arquitetura, sistema e versao do
+Python coincidirem. Baselines antigos sem procedencia exibem so os tempos.
+Falha (exit 1) se algum caso comparavel exceder a tolerancia.
 """
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,19 @@ def calibracao(repeticoes):
     return cronometrar([sys.executable, "-c", codigo], None, repeticoes)
 
 
+def ambiente():
+    """Identifica a CPU e o Python usados pela calibracao do baseline."""
+    cpu = platform.processor()
+    info = Path("/proc/cpuinfo")
+    if info.exists():
+        for line in info.read_text(errors="replace").splitlines():
+            if line.startswith("model name"):
+                cpu = line.partition(":")[2].strip()
+                break
+    return {"sistema": platform.system(), "arquitetura": platform.machine(),
+            "cpu": cpu, "python": platform.python_version()}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("tilt")
@@ -70,7 +84,7 @@ def main():
                            capture_output=True)
         shutil.copy(AQUI / "vendas.csv", tmp)
         calib = calibracao(args.repeticoes)
-        atual = {"calibracao_s": round(calib, 4), "casos": {}}
+        atual = {"ambiente": ambiente(), "calibracao_s": round(calib, 4), "casos": {}}
         for nome, modo, arquivo in CASOS:
             t = cronometrar([tilt, *modo, arquivo], tmp, args.repeticoes)
             atual["casos"][nome] = {"s": round(t, 4), "relativo": round(t / calib, 4)}
@@ -79,10 +93,14 @@ def main():
     base = None
     if not args.atualizar and Path(args.baseline).exists():
         base = json.loads(Path(args.baseline).read_text())
+    comparavel = base is not None and base.get("ambiente") == atual["ambiente"]
+    if base is not None and not comparavel:
+        print("aviso: baseline sem procedencia ou de outro ambiente; tempos exibidos "
+              "sem classificar regressoes. Gere um baseline local com --atualizar.")
     falhas = 0
     for nome, r in atual["casos"].items():
         linha = f"{nome:28s} {r['s']:7.3f}s  rel {r['relativo']:6.3f}"
-        if base and nome in base["casos"]:
+        if comparavel and nome in base["casos"]:
             ref = base["casos"][nome]["relativo"]
             razao = r["relativo"] / ref if ref > 0 else 1.0
             marca = "REGRESSAO" if razao > args.tolerancia else "ok"

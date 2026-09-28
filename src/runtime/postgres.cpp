@@ -122,27 +122,27 @@ Value materializa_pg(const PqApi& pq, void* res) {
       const char* name = pq.fname(res, c);
       const std::string col = name ? name : ("coluna" + std::to_string(c + 1));
       if (pq.getisnull(res, r, c)) {
-        row.map->set(col, Value::nulo());
+        row.map_ref()->set(col, Value::nulo());
         continue;
       }
       const char* raw = pq.getvalue(res, r, c);
       const std::string val = raw ? raw : "";
       switch (pq.ftype(res, c)) {
         case kOidBool:
-          row.map->set(col, Value::logico(!val.empty() && val[0] == 't'));
+          row.map_ref()->set(col, Value::logico(!val.empty() && val[0] == 't'));
           break;
         case kOidInt8:
         case kOidInt2:
         case kOidInt4:
-          row.map->set(col, Value::inteiro(std::strtoll(val.c_str(), nullptr, 10)));
+          row.map_ref()->set(col, Value::inteiro(std::strtoll(val.c_str(), nullptr, 10)));
           break;
         case kOidFloat4:
         case kOidFloat8:
         case kOidNumeric:
-          row.map->set(col, Value::decimal(std::strtod(val.c_str(), nullptr)));
+          row.map_ref()->set(col, Value::decimal(std::strtod(val.c_str(), nullptr)));
           break;
         default:
-          row.map->set(col, Value::texto(val));
+          row.map_ref()->set(col, Value::texto(val));
           break;
       }
     }

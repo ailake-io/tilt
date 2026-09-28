@@ -84,17 +84,17 @@ void bson_encode_doc(std::string& out, const ValueMap& map, const std::string* o
         break;
       }
       case ValueKind::Mapa: {
-        if (!v.map) die("mapa invalido (campo '" + k + "')");
+        if (!v.map_ref()) die("mapa invalido (campo '" + k + "')");
         std::string val;
-        bson_encode_doc(val, *v.map, nullptr);
+        bson_encode_doc(val, *v.map_ref(), nullptr);
         bson_element(body, 0x03, k, val);
         break;
       }
       case ValueKind::Lista: {
-        if (!v.list) die("lista invalida (campo '" + k + "')");
+        if (!v.list_ref()) die("lista invalida (campo '" + k + "')");
         ValueMap como_mapa;
-        for (std::size_t i = 0; i < v.list->size(); ++i) {
-          como_mapa.set(std::to_string(i), (*v.list)[i]);
+        for (std::size_t i = 0; i < v.list_ref()->size(); ++i) {
+          como_mapa.set(std::to_string(i), (*v.list_ref())[i]);
         }
         std::string val;
         bson_encode_doc(val, como_mapa, nullptr);
@@ -226,10 +226,10 @@ Value bson_parse_value(std::uint8_t type, const std::string& campo, Reader& r) {
     case 0x04: {
       Value doc = bson_parse_doc(r);
       Value out = Value::lista();
-      if (doc.map) {
-        for (const auto& [k, v] : doc.map->items) {
+      if (doc.map_ref()) {
+        for (const auto& [k, v] : doc.map_ref()->items) {
           (void)k;  // arrays BSON: posicao, nao nome
-          out.list->push_back(v);
+          out.list_ref()->push_back(v);
         }
       }
       return out;
@@ -268,7 +268,7 @@ Value bson_parse_doc(Reader& r) {
       return out;
     }
     const std::string campo = r.cstr();
-    out.map->set(campo, bson_parse_value(type, campo, r));
+    out.map_ref()->set(campo, bson_parse_value(type, campo, r));
   }
   die("documento BSON com tamanho invalido");  // fim sem terminador
 }
@@ -418,15 +418,15 @@ class Conn {
 
 // ok:1 (double/int) da resposta do servidor.
 bool ok_de(const Value& resp) {
-  if (!resp.map) return false;
-  const Value* ok = resp.map->find("ok");
+  if (!resp.map_ref()) return false;
+  const Value* ok = resp.map_ref()->find("ok");
   if (!ok || !ok->is_number()) return false;
   return ok->as_number() != 0.0;
 }
 
 std::string errmsg_de(const Value& resp) {
-  if (resp.map) {
-    if (const Value* e = resp.map->find("errmsg"); e && e->kind == ValueKind::Texto) return e->s;
+  if (resp.map_ref()) {
+    if (const Value* e = resp.map_ref()->find("errmsg"); e && e->kind == ValueKind::Texto) return e->s;
   }
   return "comando falhou (ok: 0)";
 }
@@ -434,8 +434,8 @@ std::string errmsg_de(const Value& resp) {
 // Campo inteiro da resposta do servidor (n / nModified). Servidores reais
 // mandam double; o mock manda int32 — aceitamos os dois.
 std::int64_t inteiro_de(const Value& resp, const std::string& campo, const std::string& ctx) {
-  if (!resp.map) die(ctx + ": resposta sem documento");
-  const Value* v = resp.map->find(campo);
+  if (!resp.map_ref()) die(ctx + ": resposta sem documento");
+  const Value* v = resp.map_ref()->find(campo);
   if (!v || !v->is_number()) die(ctx + ": resposta sem '" + campo + "'");
   // Inteiro exato: passar por double perde precisao acima de 2^53 (ids de cursor).
   return v->kind == ValueKind::Inteiro ? v->i : static_cast<std::int64_t>(v->as_number());
@@ -459,16 +459,16 @@ struct PartesCursor {
 };
 
 PartesCursor cursor_de(const Value& resp, const std::string& campo_batch, const std::string& ctx) {
-  if (!resp.map) die(ctx + ": resposta sem documento");
-  const Value* cursor = resp.map->find("cursor");
-  if (!cursor || cursor->kind != ValueKind::Mapa || !cursor->map) {
+  if (!resp.map_ref()) die(ctx + ": resposta sem documento");
+  const Value* cursor = resp.map_ref()->find("cursor");
+  if (!cursor || cursor->kind != ValueKind::Mapa || !cursor->map_ref()) {
     die(ctx + ": resposta sem 'cursor'");
   }
-  const Value* batch = cursor->map->find(campo_batch);
-  if (!batch || batch->kind != ValueKind::Lista || !batch->list) {
+  const Value* batch = cursor->map_ref()->find(campo_batch);
+  if (!batch || batch->kind != ValueKind::Lista || !batch->list_ref()) {
     die(ctx + ": resposta sem 'cursor." + campo_batch + "'");
   }
-  return {inteiro_opcional(*cursor->map, "id", 0), batch};
+  return {inteiro_opcional(*cursor->map_ref(), "id", 0), batch};
 }
 
 // Sessao OP_MSG: connecta, faz o handshake isMaster e executa comandos.
@@ -479,8 +479,8 @@ class Sessao {
     conn_ = std::make_unique<Conn>(url_.host, url_.port, url_.tls);
 
     Value handshake = Value::mapa();
-    handshake.map->set("isMaster", Value::inteiro(1));
-    handshake.map->set("$db",
+    handshake.map_ref()->set("isMaster", Value::inteiro(1));
+    handshake.map_ref()->set("$db",
                        Value::texto("admin"));  // mongod real exige $db em todo comando OP_MSG
     const Value resp = comando(handshake);
     if (!ok_de(resp)) die("handshake isMaster falhou (ok != 1)");
@@ -493,8 +493,8 @@ class Sessao {
   // kind 0) e devolve o documento da resposta (primeira section kind 0;
   // sections kind 1 sao puladas; bit de checksum ignorado na leitura).
   Value comando(const Value& cmd) {
-    if (!cmd.map) die("comando interno invalido");
-    return comando_bson(bson_doc(*cmd.map));
+    if (!cmd.map_ref()) die("comando interno invalido");
+    return comando_bson(bson_doc(*cmd.map_ref()));
   }
 
   // Idem, mas o documento de comando ja vem codificado em BSON (uso interno
@@ -568,7 +568,7 @@ std::string banco_efetivo(const MongoUrl& url, const std::string& opt) {
 }  // namespace
 
 void mongo_inserir(const std::string& colecao, const Value& doc, const std::string& banco) {
-  if (doc.kind != ValueKind::Mapa || !doc.map) die("inserir espera um mapa");
+  if (doc.kind != ValueKind::Mapa || !doc.map_ref()) die("inserir espera um mapa");
 
   const MongoUrl url = parse_url();
   const std::string db = banco_efetivo(url, banco);
@@ -579,10 +579,10 @@ void mongo_inserir(const std::string& colecao, const Value& doc, const std::stri
   std::string cmd_bson;
   {
     std::string id;
-    const bool tem_id = doc.map->find("_id") != nullptr;
+    const bool tem_id = doc.map_ref()->find("_id") != nullptr;
     if (!tem_id) id = novo_object_id();
     std::string doc_bson;
-    bson_encode_doc(doc_bson, *doc.map, tem_id ? nullptr : &id);
+    bson_encode_doc(doc_bson, *doc.map_ref(), tem_id ? nullptr : &id);
 
     std::string arr_body;
     bson_element(arr_body, 0x03, "0", doc_bson);
@@ -619,7 +619,7 @@ namespace {
 Value coletar_cursor(Sessao& sessao, const std::string& db, const std::string& colecao,
                      const PartesCursor& c0, std::int64_t lote, const std::string& ctx) {
   Value resultado = Value::lista();
-  for (const Value& doc : *c0.batch->list) resultado.list->push_back(doc);
+  for (const Value& doc : *c0.batch->list_ref()) resultado.list_ref()->push_back(doc);
   constexpr int kMaxGetMore = 10000;
   std::int64_t id = c0.id;
   int rodadas = 0;
@@ -629,14 +629,14 @@ Value coletar_cursor(Sessao& sessao, const std::string& db, const std::string& c
           " getMore");
     }
     Value gm = Value::mapa();
-    gm.map->set("getMore", Value::inteiro(id));
-    gm.map->set("$db", Value::texto(db));
-    gm.map->set("collection", Value::texto(colecao));
-    if (lote > 0) gm.map->set("batchSize", Value::inteiro(lote));
+    gm.map_ref()->set("getMore", Value::inteiro(id));
+    gm.map_ref()->set("$db", Value::texto(db));
+    gm.map_ref()->set("collection", Value::texto(colecao));
+    if (lote > 0) gm.map_ref()->set("batchSize", Value::inteiro(lote));
     const Value r2 = sessao.comando(gm);
     if (!ok_de(r2)) die("getMore em '" + colecao + "': " + errmsg_de(r2));
     const PartesCursor c2 = cursor_de(r2, "nextBatch", "getMore");
-    for (const Value& doc : *c2.batch->list) resultado.list->push_back(doc);
+    for (const Value& doc : *c2.batch->list_ref()) resultado.list_ref()->push_back(doc);
     id = c2.id;
   }
   return resultado;
@@ -646,20 +646,20 @@ Value coletar_cursor(Sessao& sessao, const std::string& db, const std::string& c
 
 Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t max,
                    const std::string& banco, const Value& somente, std::int64_t lote) {
-  if (filtro.kind != ValueKind::Mapa || !filtro.map) die("buscar espera um mapa como filtro");
+  if (filtro.kind != ValueKind::Mapa || !filtro.map_ref()) die("buscar espera um mapa como filtro");
   if (max < 0) die("max deve ser >= 0");
   if (lote < 0) die("lote deve ser >= 0");
 
   // Projeção whitelist: somente: ["campo", ...] vira {campo: 1, ...} no
   // comando find (o _id continua vindo do servidor, como no mongo de verdade).
   Value proj;
-  if (somente.kind == ValueKind::Lista && somente.list && !somente.list->empty()) {
+  if (somente.kind == ValueKind::Lista && somente.list_ref() && !somente.list_ref()->empty()) {
     proj = Value::mapa();
-    for (const Value& c : *somente.list) {
+    for (const Value& c : *somente.list_ref()) {
       if (c.kind != ValueKind::Texto || c.s.empty()) {
         die("buscar: 'somente' deve ser uma lista de textos nao vazios");
       }
-      proj.map->set(c.s, Value::inteiro(1));
+      proj.map_ref()->set(c.s, Value::inteiro(1));
     }
   }
 
@@ -668,12 +668,12 @@ Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t
   Sessao sessao(url);
 
   Value cmd = Value::mapa();
-  cmd.map->set("find", Value::texto(colecao));
-  cmd.map->set("$db", Value::texto(db));
-  cmd.map->set("filter", filtro);
-  if (proj.map) cmd.map->set("projection", proj);
-  cmd.map->set("limit", Value::inteiro(max));
-  cmd.map->set("batchSize", Value::inteiro(lote > 0 ? lote : max));
+  cmd.map_ref()->set("find", Value::texto(colecao));
+  cmd.map_ref()->set("$db", Value::texto(db));
+  cmd.map_ref()->set("filter", filtro);
+  if (proj.map_ref()) cmd.map_ref()->set("projection", proj);
+  cmd.map_ref()->set("limit", Value::inteiro(max));
+  cmd.map_ref()->set("batchSize", Value::inteiro(lote > 0 ? lote : max));
 
   const Value resp = sessao.comando(cmd);
   if (!ok_de(resp)) die("find em '" + colecao + "': " + errmsg_de(resp));
@@ -684,11 +684,11 @@ Value mongo_buscar(const std::string& colecao, const Value& filtro, std::int64_t
 
 std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
                              const Value& mudancas, bool multi, const std::string& banco) {
-  if (filtro.kind != ValueKind::Mapa || !filtro.map) die("atualizar espera um mapa como filtro");
-  if (mudancas.kind != ValueKind::Mapa || !mudancas.map || mudancas.map->items.empty()) {
+  if (filtro.kind != ValueKind::Mapa || !filtro.map_ref()) die("atualizar espera um mapa como filtro");
+  if (mudancas.kind != ValueKind::Mapa || !mudancas.map_ref() || mudancas.map_ref()->items.empty()) {
     die("atualizar espera um mapa de mudancas, ex.: {$set: {valor: 999}, $inc: {acessos: 1}}");
   }
-  for (const auto& [op, v] : mudancas.map->items) {
+  for (const auto& [op, v] : mudancas.map_ref()->items) {
     static const char* const kOperadores[] = {"$set",      "$inc",    "$unset",      "$push",
                                               "$addToSet", "$pull",   "$mul",        "$min",
                                               "$max",      "$rename", "$currentDate"};
@@ -699,7 +699,7 @@ std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
           "' nao suportado (use $set, $inc, $unset, $push, $addToSet, $pull, $mul, $min, "
           "$max, $rename ou $currentDate)");
     }
-    if (v.kind != ValueKind::Mapa || !v.map) {
+    if (v.kind != ValueKind::Mapa || !v.map_ref()) {
       die("atualizar: '" + op + "' deve ser um mapa {campo: valor}");
     }
   }
@@ -709,15 +709,15 @@ std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
   Sessao sessao(url);
 
   Value cmd = Value::mapa();
-  cmd.map->set("update", Value::texto(colecao));
-  cmd.map->set("$db", Value::texto(db));
+  cmd.map_ref()->set("update", Value::texto(colecao));
+  cmd.map_ref()->set("$db", Value::texto(db));
   Value upd = Value::mapa();
-  upd.map->set("q", filtro);
-  upd.map->set("u", mudancas);
-  upd.map->set("multi", Value::logico(multi));
+  upd.map_ref()->set("q", filtro);
+  upd.map_ref()->set("u", mudancas);
+  upd.map_ref()->set("multi", Value::logico(multi));
   Value updates = Value::lista();
-  updates.list->push_back(upd);
-  cmd.map->set("updates", updates);
+  updates.list_ref()->push_back(upd);
+  cmd.map_ref()->set("updates", updates);
 
   const Value resp = sessao.comando(cmd);
   if (!ok_de(resp)) die("update em '" + colecao + "': " + errmsg_de(resp));
@@ -726,21 +726,21 @@ std::int64_t mongo_atualizar(const std::string& colecao, const Value& filtro,
 
 std::int64_t mongo_deletar(const std::string& colecao, const Value& filtro,
                            const std::string& banco) {
-  if (filtro.kind != ValueKind::Mapa || !filtro.map) die("deletar espera um mapa como filtro");
+  if (filtro.kind != ValueKind::Mapa || !filtro.map_ref()) die("deletar espera um mapa como filtro");
 
   const MongoUrl url = parse_url();
   const std::string db = banco_efetivo(url, banco);
   Sessao sessao(url);
 
   Value cmd = Value::mapa();
-  cmd.map->set("delete", Value::texto(colecao));
-  cmd.map->set("$db", Value::texto(db));
+  cmd.map_ref()->set("delete", Value::texto(colecao));
+  cmd.map_ref()->set("$db", Value::texto(db));
   Value dl = Value::mapa();
-  dl.map->set("q", filtro);
-  dl.map->set("limit", Value::inteiro(0));
+  dl.map_ref()->set("q", filtro);
+  dl.map_ref()->set("limit", Value::inteiro(0));
   Value deletes = Value::lista();
-  deletes.list->push_back(dl);
-  cmd.map->set("deletes", deletes);
+  deletes.list_ref()->push_back(dl);
+  cmd.map_ref()->set("deletes", deletes);
 
   const Value resp = sessao.comando(cmd);
   if (!ok_de(resp)) die("delete em '" + colecao + "': " + errmsg_de(resp));
@@ -749,17 +749,17 @@ std::int64_t mongo_deletar(const std::string& colecao, const Value& filtro,
 
 std::string mongo_criar_indice(const std::string& colecao, const Value& campos,
                                const std::string& banco) {
-  if (campos.kind != ValueKind::Lista || !campos.list || campos.list->empty()) {
+  if (campos.kind != ValueKind::Lista || !campos.list_ref() || campos.list_ref()->empty()) {
     die("criar_indice espera uma lista de campos nao vazia");
   }
   Value key = Value::mapa();
   std::string name;
-  for (std::size_t i = 0; i < campos.list->size(); ++i) {
-    const Value& c = (*campos.list)[i];
+  for (std::size_t i = 0; i < campos.list_ref()->size(); ++i) {
+    const Value& c = (*campos.list_ref())[i];
     if (c.kind != ValueKind::Texto || c.s.empty()) {
       die("criar_indice: campos devem ser textos nao vazios");
     }
-    key.map->set(c.s, Value::inteiro(1));
+    key.map_ref()->set(c.s, Value::inteiro(1));
     if (i > 0) name += "_";
     name += c.s + "_1";
   }
@@ -769,14 +769,14 @@ std::string mongo_criar_indice(const std::string& colecao, const Value& campos,
   Sessao sessao(url);
 
   Value cmd = Value::mapa();
-  cmd.map->set("createIndexes", Value::texto(colecao));
-  cmd.map->set("$db", Value::texto(db));
+  cmd.map_ref()->set("createIndexes", Value::texto(colecao));
+  cmd.map_ref()->set("$db", Value::texto(db));
   Value idx = Value::mapa();
-  idx.map->set("key", key);
-  idx.map->set("name", Value::texto(name));
+  idx.map_ref()->set("key", key);
+  idx.map_ref()->set("name", Value::texto(name));
   Value indexes = Value::lista();
-  indexes.list->push_back(idx);
-  cmd.map->set("indexes", indexes);
+  indexes.list_ref()->push_back(idx);
+  cmd.map_ref()->set("indexes", indexes);
 
   const Value resp = sessao.comando(cmd);
   if (!ok_de(resp)) die("createIndexes em '" + colecao + "': " + errmsg_de(resp));
@@ -785,11 +785,11 @@ std::string mongo_criar_indice(const std::string& colecao, const Value& campos,
 
 Value mongo_agregar(const std::string& colecao, const Value& etapas,
                     const std::string& banco) {
-  if (etapas.kind != ValueKind::Lista || !etapas.list) {
+  if (etapas.kind != ValueKind::Lista || !etapas.list_ref()) {
     die("agregar espera uma lista de etapas, ex.: [{$group: {_id: \"$cliente\", total: {$sum: 1}}}]");
   }
-  for (const Value& etapa : *etapas.list) {
-    if (etapa.kind != ValueKind::Mapa || !etapa.map || etapa.map->items.empty()) {
+  for (const Value& etapa : *etapas.list_ref()) {
+    if (etapa.kind != ValueKind::Mapa || !etapa.map_ref() || etapa.map_ref()->items.empty()) {
       die("agregar: cada etapa deve ser um mapa {operador: {...}}");
     }
   }
@@ -801,14 +801,14 @@ Value mongo_agregar(const std::string& colecao, const Value& etapas,
   // As etapas sao traduzidas 1:1 para BSON (bson_encode_doc aceita chaves
   // como "$group"/"$gte" normalmente); a semantica fica com o servidor.
   Value cmd = Value::mapa();
-  cmd.map->set("aggregate", Value::texto(colecao));
-  cmd.map->set("$db", Value::texto(db));
-  cmd.map->set("pipeline", etapas);
-  cmd.map->set("cursor", Value::mapa());
+  cmd.map_ref()->set("aggregate", Value::texto(colecao));
+  cmd.map_ref()->set("$db", Value::texto(db));
+  cmd.map_ref()->set("pipeline", etapas);
+  cmd.map_ref()->set("cursor", Value::mapa());
 
   const Value resp = sessao.comando(cmd);
   if (!ok_de(resp)) die("aggregate em '" + colecao + "': " + errmsg_de(resp));
-  if (!resp.map) die("resposta de aggregate sem documento");
+  if (!resp.map_ref()) die("resposta de aggregate sem documento");
 
   // O servidor pagina (batchSize default 101): itera getMore ate fechar o cursor.
   const PartesCursor c0 = cursor_de(resp, "firstBatch", "aggregate");

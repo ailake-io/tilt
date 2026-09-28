@@ -55,12 +55,12 @@ class Args {
     return v_[i].s;
   }
   const ValueList& lista(std::size_t i) const {
-    if (v_[i].kind != ValueKind::Lista || !v_[i].list) tipo_errado(i, "lista");
-    return *v_[i].list;
+    if (v_[i].kind != ValueKind::Lista || !v_[i].list_ref()) tipo_errado(i, "lista");
+    return *v_[i].list_ref();
   }
   const ValueMap& mapa(std::size_t i) const {
-    if (v_[i].kind != ValueKind::Mapa || !v_[i].map) tipo_errado(i, "mapa");
-    return *v_[i].map;
+    if (v_[i].kind != ValueKind::Mapa || !v_[i].map_ref()) tipo_errado(i, "mapa");
+    return *v_[i].map_ref();
   }
   [[noreturn]] void tipo_errado(std::size_t i, const char* esperado) const {
     erro(nome_ + ": o argumento " + std::to_string(i + 1) + " deve ser " + esperado + ", mas e " +
@@ -514,8 +514,8 @@ const std::unordered_map<std::string, Handler>& tabela() {
       std::int64_t i = 0;
       for (const Value& v : a.lista(0)) {
         Value par = Value::mapa();
-        par.map->set("indice", Value::inteiro(i++));
-        par.map->set("valor", v);
+        par.map_ref()->set("indice", Value::inteiro(i++));
+        par.map_ref()->set("valor", v);
         out.push_back(std::move(par));
       }
       return Value::lista(std::move(out));
@@ -566,9 +566,9 @@ const std::unordered_map<std::string, Handler>& tabela() {
       for (const Value& it : itens) {
         if (it.kind == ValueKind::Texto) {
           textos.push_back(it.s);
-        } else if (it.kind == ValueKind::Mapa && it.map && it.map->find("texto") &&
-                   it.map->find("texto")->kind == ValueKind::Texto) {
-          textos.push_back(it.map->find("texto")->s);
+        } else if (it.kind == ValueKind::Mapa && it.map_ref() && it.map_ref()->find("texto") &&
+                   it.map_ref()->find("texto")->kind == ValueKind::Texto) {
+          textos.push_back(it.map_ref()->find("texto")->s);
         } else {
           a.falha("cada item deve ser um texto ou um mapa com o campo 'texto'");
         }
@@ -588,12 +588,12 @@ const std::unordered_map<std::string, Handler>& tabela() {
         const Value& it = itens[ordem[r]];
         Value item = Value::mapa();
         if (it.kind == ValueKind::Mapa) {
-          for (const auto& kv : it.map->items) item.map->set(kv.first, kv.second);
-          if (const Value* s = it.map->find("score")) item.map->set("score_original", *s);
+          for (const auto& kv : it.map_ref()->items) item.map_ref()->set(kv.first, kv.second);
+          if (const Value* s = it.map_ref()->find("score")) item.map_ref()->set("score_original", *s);
         } else {
-          item.map->set("texto", it);
+          item.map_ref()->set("texto", it);
         }
-        item.map->set("score", Value::decimal(fundido[ordem[r]]));
+        item.map_ref()->set("score", Value::decimal(fundido[ordem[r]]));
         out.push_back(std::move(item));
       }
       return Value::lista(std::move(out));
@@ -806,10 +806,15 @@ std::vector<std::string> unidades_de(const std::string& s, const std::string& mo
         while (i + 1 < s.size() && s[i + 1] == '\n') atual += s[++i];
         fecha();
       }
-    } else {  // sentenca
+    } else {  // sentenca ou codigo
       const bool pontua = s[i] == '.' || s[i] == '!' || s[i] == '?';
       const bool proximo_espaco = ultimo || std::isspace(static_cast<unsigned char>(s[i + 1])) != 0;
-      if (pontua && proximo_espaco) {
+      const bool fim_codigo = modo == "codigo" &&
+                              ((s[i] == '\n' && (atual.size() >= 2 &&
+                                                 (atual[atual.size() - 2] == ';' ||
+                                                  atual[atual.size() - 2] == '}'))) ||
+                               (s[i] == '\n' && i + 1 < s.size() && s[i + 1] == '\n'));
+      if ((modo == "sentenca" && pontua && proximo_espaco) || fim_codigo) {
         while (i + 1 < s.size() && std::isspace(static_cast<unsigned char>(s[i + 1]))) {
           atual += s[++i];
         }
@@ -834,9 +839,9 @@ std::vector<std::string> dividir_texto_em_pedacos(const std::string& texto, std:
     if (out.empty()) out.push_back(texto);
     return out;
   }
-  if (modo != "sentenca" && modo != "paragrafo" && modo != "linha") {
+  if (modo != "sentenca" && modo != "paragrafo" && modo != "linha" && modo != "codigo") {
     erro("dividir_texto: modo '" + modo +
-         "' invalido (use \"tamanho\", \"sentenca\", \"paragrafo\" ou \"linha\")");
+         "' invalido (use \"tamanho\", \"sentenca\", \"codigo\", \"paragrafo\" ou \"linha\")");
   }
   if (tamanho == 0) tamanho = 1;
   if (sobreposicao > tamanho / 2) sobreposicao = tamanho / 2;  // sempre avanca

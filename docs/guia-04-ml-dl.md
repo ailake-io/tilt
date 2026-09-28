@@ -2,7 +2,9 @@
 
 ## Tensores
 
-f32, row-major, na CPU (kernels escalares; GPU opcional adiante).
+Tensores usam f32 row-major e funcionam na CPU por padrão. Quando solicitado,
+o runtime pode despachar operações suportadas para CUDA; sem CUDA disponível,
+o modo CPU continua sendo o fallback explícito.
 
 | Construtor | Resultado |
 |---|---|
@@ -141,7 +143,15 @@ pipeline usa:
   passos:
     - p = experimento prever_churn.prever { uso: 9, plano: "a" }
     - imprimir p.classe, p.probabilidade
+    - predicoes = experimento prever_churn.prever_lote([{ uso: 9, plano: "a" }, { uso: 2, plano: "b" }])
+    - imprimir predicoes.tamanho
 ```
+
+`prever_lote` aceita uma tabela ou lista de mapas e devolve uma tabela só com
+as colunas de previsão (`valor`, `grupo` ou `classe` e `probabilidade`), na
+mesma ordem da entrada. O modelo ajustado é compartilhado entre as linhas; uma
+linha inválida informa seu índice (começando em 1). `prever` continua aceitando
+um único mapa.
 
 Modelos: `regressao_linear` (equações normais + crista 1e-8; prevê
 `{valor}`), `regressao_logistica` (binária, GD interno com padronização
@@ -252,6 +262,8 @@ incluindo pós-`treino`) para **ONNX opset 20**, sem dependências externas:
 cada `densa`/`linear` vira um `Gemm`, ativações viram `Relu`/`Gelu`/
 `Sigmoid`+`Mul` (`silu`) /`Sigmoid`/`Tanh`, mais `Softmax` (eixo 1),
 `LayerNormalization`, `Conv`, `BatchNormalization`, `MaxPool`, `Flatten`, `RNN`/`LSTM`/`GRU` e `residual` (`Gemm` + `Add`);
+uma camada `incorporacao` na primeira posição vira `Gather` com entrada
+`INT64` e tabela de pesos;
 `abandono` é identidade na inferência e não é
 exportado (no treino é dropout invertido: `p` em `[0, 1)`, máscara determinística
 por semente/época/lote — retomar continua bit-idêntico; ver `tests/abandono_test.sh`). A entrada é `[lote, ...]` (`lote` dinâmico, resto de
@@ -278,11 +290,23 @@ pipeline exporta:
 ### Exportação GGUF
 
 `modelo <Nome>.exportar_gguf "modelo.gguf"` grava os pesos no formato
-**GGUF v3** (o mesmo do llama.cpp), sem dependências: cada camada com
-parâmetros vira dois tensores F32 (`camada-<i>.peso` e `camada-<i>.vies`,
-dimensões invertidas por convenção do GGUF) mais metadados
-(`general.architecture = "tilt"`, nome do modelo). Só escrita — a Tilt não
-executa GGUF (use llama.cpp/ollama para inferir).
+**GGUF v3** (o mesmo do llama.cpp), sem dependências. Cada camada com
+parâmetros vira tensores nomeados (`camada-<i>.peso` e
+`camada-<i>.vies`; recorrentes também gravam `.u` e norma de lote grava as
+estatísticas correntes) mais metadados. A opção `quantizacao: "q8_0"` grava blocos
+Q8_0 quando o tensor é múltiplo de 32; os demais permanecem F32. O runtime
+desquantiza Q8_0 para F32 ao importar:
+
+```tilt skip
+pipeline pesos:
+  passos:
+    - modelo Mini.exportar_gguf "mini-q8.gguf", quantizacao: "q8_0"
+    - modelo Mini.carregar_pesos "mini-q8.gguf"
+```
+
+`pesos: "mini-q8.gguf"` também carrega automaticamente na declaração do
+modelo. A execução da inferência continua sendo feita pelo runtime da Tilt;
+GGUF é interoperável com llama.cpp/ollama.
 
 ### Inferência
 
@@ -301,10 +325,18 @@ pipeline infere:
     - lote = tensor [[0.1, 0.2, 0.3, 0.4], [0.9, 0.8, 0.7, 0.6]]
     - lote_probs = modelo Mini2.executar lote
     - imprimir lote_probs.forma   # [2, 3]
+    - linhas = [{ a: 0.1, b: 0.2, c: 0.3, d: 0.4 }, { a: 0.9, b: 0.8, c: 0.7, d: 0.6 }]
+    - predicoes = modelo Mini2.prever_lote(linhas, colunas: ["a", "b", "c", "d"])
+    - imprimir predicoes.tamanho, predicoes[0].saida
 ```
 
 Init dos pesos: Xavier-uniforme com semente fixa → resultados reproduzíveis
 sem arquivo de pesos.
+`prever_lote` aceita tabela ou lista de mapas numéricos e reúne as colunas
+na ordem indicada em um tensor `[linhas, atributos]`. Executa o modelo uma
+vez por lote e devolve tabela de mapas `{saida: [valores]}` na mesma ordem;
+uma coluna ausente ou não numérica identifica a linha no erro. Para entrada
+multidimensional (imagens, sequências), use `executar` com tensor próprio.
 
 ## `treino`
 
@@ -323,6 +355,7 @@ treino Xor:
   perda: entropia_cruzada           # exige `softmax` na última camada
   # perda: quadratica              # regressão escalar: saída largura 1, sem softmax
   otimizador: adam                  # sgd | adam
+  # precisao: mista                # requer dispositivo gpu + TILT_GPU=auto/fake
   taxa: 0.05                         # ou taxa_aprendizado:
   epocas: 3
   lote: 4                            # mini-lote (default: lote cheio); embaralha por época
@@ -447,7 +480,12 @@ e deixa os melhores pesos no `modelo`. Aceita os mesmos campos do `treino`
 uma grade de até 1 milhão (`estrategia: grade` é o padrão). O sorteio é
 determinístico pela `semente:` da busca; a saída mostra `N de TOTAL combinacoes
 (aleatoria)`. Chaves de `grade`: `taxa`, `lote`, `otimizador`, `semente`, `epocas`.
-Busca bayesiana não existe.
+
+**Busca bayesiana**: `estrategia: bayesiana` começa com três combinações e
+escolhe as seguintes por uma aquisição adaptativa sobre a grade finita,
+combinando previsão ponderada das tentativas próximas e exploração de regiões
+ainda não visitadas. `tentativas: N` limita a 64 avaliações; grades de até 1 milhão de
+combinações são aceitas e o resultado é determinístico pela `semente:`.
 
 ### Dataloader streaming
 
@@ -459,16 +497,52 @@ ao treino em RAM (mesma semente, mesmos lotes) e à retomada. Limite: modelo 2D
 
 ## GPU
 
-`dispositivo: auto|gpu|"cuda:N"` + `TILT_GPU`:
+`dispositivo: auto|gpu|"cuda:N"|"metal"` + `TILT_GPU`:
 
 | `TILT_GPU` | Comportamento |
 |---|---|
 | `off` (padrão) | CPU sempre |
-| `auto` | tenta `dlopen` de `libcuda` + `libnvrtc`, compila os kernels; sem driver → CPU (silencioso) |
-| `fake` | roteia `matmul`/`relu` pelo caminho de dispatch da GPU usando math de CPU — saída idêntica, útil para testar sem hardware |
+| `auto` | tenta carregar `libcuda` + `libnvrtc`; sem driver → CPU (silencioso). `cuBLAS` é opcional para GEMM |
+| `metal` | ativa Metal no macOS quando `dispositivo: "metal"`; em outras plataformas retorna para CPU |
+| `fake` | roteia forward e backward de GEMM, `conv2d`, recorrência e embeddings, além de ReLU, GELU e soma, pelo dispatch da GPU usando math de CPU; `precisao: mista` simula a conversão FP16 |
 
-Quando um backend de GPU ativa, imprime uma vez `[gpu] <info>`. O caminho CUDA
-foi validado apenas em hardware.
+Quando um backend de GPU ativa, imprime uma vez `[gpu] <info>`. `"cuda:N"`
+seleciona o índice N; um índice ausente volta para CPU. A mesma instância do
+runtime usa um dispositivo CUDA por processo. Foram validados GEMM FP32,
+GEMM misto, `conv2d`, ReLU, GELU e soma numa NVIDIA RTX 5050 (CUDA 12.0).
+O backward denso, de convolução, recorrência (RNN/LSTM/GRU) e embeddings usa
+kernels CUDA quando o caminho é elegível. Normalização, pooling, redução e
+GEMM em lote também têm kernels; qualquer operação não elegível retorna ao
+backward CPU de referência sem alterar o resultado.
+O GEMM usa cuBLAS quando disponível e mantém o kernel NVRTC como fallback;
+buffers CUDA são reutilizados entre chamadas. O modo Tensor Core do cuBLAS é
+ativado quando o driver expõe `cublasSetMathMode`, e `gpu.info()` inclui
+`tensor-cores`. Como os tensores ainda residem
+na CPU, a execução do modelo mantém na CPU operações pequenas (GEMM abaixo
+de 2 milhões de produtos sem BLAS otimizado, ou 64 milhões com ele, e lado
+mínimo de 64; convolução abaixo de 2 milhões de produtos; ReLU/GELU/soma
+abaixo de 262144 elementos) para evitar cópias que custariam mais que o
+cálculo. Os limiares são conservadores e devem ser recalibrados na máquina
+de destino com `gpu_dispatch_benchmark`. O backend
+`fake` executa todos os caminhos para testes de correção.
+
+Em `treino`, `precisao: mista` converte os operandos de GEMM das camadas
+densas e residuais para FP16, acumula e devolve em FP32. Pesos mestres,
+gradientes, otimizador, perdas e normalizações continuam em FP32. Operandos
+fora da faixa finita de FP16 usam GEMM FP32. Sem GPU ativa, a opção produz
+erro explícito; `TILT_GPU=fake` permite exercitar a lógica sem hardware.
+cuBLAS usa Tensor Cores nos dispositivos compatíveis; o fallback NVRTC não usa
+um kernel especializado. O backend Metal compila kernels MSL para GEMM,
+conv2d, ReLU, GELU e soma; nele a acumulação permanece em FP32. A API C++ do
+runtime expõe `upload`, `gemm_resident`, `download` e `release` para manter
+tensores no device entre operações. Ainda não há redução FP16 para convolução
+ou gradientes; desempenho depende do tamanho do tensor e das cópias
+host/device quando a API residente não é usada.
+Em Metal, “Tensor Core” não é uma API NVIDIA: o caminho equivalente usa as
+unidades matriciais do GPU Apple através dos kernels MSL.
+Entradas 3D compatíveis (`[lote, M, K] @ [lote, K, N]`) usam batching
+automático no dispatch CUDA/fake; o runtime também expõe `batch_gemm` para
+integrações nativas.
 
 ## stdlib: `nn` e `io`
 

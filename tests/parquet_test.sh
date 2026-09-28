@@ -36,7 +36,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 # --- 1. arquivo pyarrow: multi row groups + dictionary + gzip + nulos -----------
-python3 - "$tmp/interop.parquet" <<'PYEOF'
+python3 - "$tmp/interop.parquet" "$tmp/interop_plain.parquet" <<'PYEOF'
 import sys
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -52,6 +52,8 @@ tabela = pa.table({
 })
 pq.write_table(tabela, sys.argv[1], row_group_size=5,
                use_dictionary=True, compression="gzip")
+pq.write_table(tabela, sys.argv[2], row_group_size=5,
+               use_dictionary=False, compression="gzip")
 
 f = pq.ParquetFile(sys.argv[1])
 assert f.metadata.num_row_groups >= 3, "esperado >= 3 row groups"
@@ -84,6 +86,35 @@ confere "22 cliente-2 33 falso"
 confere "aa 1 9.9"
 confere "nulo nulo 4.5"
 confere "cc 7 nulo"
+
+# Mesmo resultado no caminho colunar direto: varios row groups, dictionary,
+# nulos, booleanos e tres tipos escalares no mesmo arquivo.
+cat > "$tmp/leitura_colunar.tilt" <<'TILTEOF'
+pipeline leitura:
+  passos:
+    - dados = ler_parquet "interop.parquet", colunar: verdadeiro
+    - imprimir tamanho(dados), dados[3].id, dados[3].nome, dados[3].score, dados[3].ativo, dados[17].nome
+    - grupos = dados.agrupar_por "ativo", { total: somar "score", n: contar }
+    - para cada grupo em grupos:
+        - imprimir grupo.ativo, grupo.total, grupo.n
+TILTEOF
+sed 's/, colunar: verdadeiro//' "$tmp/leitura_colunar.tilt" > "$tmp/leitura_linhas.tilt"
+out_colunar=$(cd "$tmp" && "$BIN" executar leitura_colunar.tilt)
+out_linhas=$(cd "$tmp" && "$BIN" executar leitura_linhas.tilt)
+if [ "$out_colunar" != "$out_linhas" ]; then
+  echo "leitura colunar Parquet difere da leitura por linhas"
+  echo "colunar: $out_colunar"
+  echo "linhas: $out_linhas"
+  exit 1
+fi
+sed 's/interop.parquet/interop_plain.parquet/' "$tmp/leitura_colunar.tilt" > "$tmp/leitura_plain_colunar.tilt"
+sed 's/interop.parquet/interop_plain.parquet/' "$tmp/leitura_linhas.tilt" > "$tmp/leitura_plain_linhas.tilt"
+out_colunar=$(cd "$tmp" && "$BIN" executar leitura_plain_colunar.tilt)
+out_linhas=$(cd "$tmp" && "$BIN" executar leitura_plain_linhas.tilt)
+if [ "$out_colunar" != "$out_linhas" ]; then
+  echo "leitura colunar Parquet PLAIN difere da leitura por linhas"
+  exit 1
+fi
 
 # --- 3. roundtrip de escrita do tilt validado pelo pyarrow ---------------------
 python3 - "$tmp/saida_nulos.parquet" <<'PYEOF'
@@ -487,11 +518,11 @@ print("pyarrow: aninhadas e structs escritos pelo tilt validados")
 
 t2 = pa.table({"m": pa.array([[[1, 2], [3]], [], None, [[], [4, None]], [None]],
                              type=pa.list_(pa.list_(pa.int64())))})
-pq.write_table(t2, sys.argv[3])
+pq.write_table(t2, sys.argv[3], row_group_size=2)
 s2 = pa.table({"l": pa.array([[ {"a": 1, "b": "x"}, {"a": 2, "b": None}], [], None, [None]],
                              type=pa.list_(pa.field("element", pa.struct(
                                  [("a", pa.int64()), ("b", pa.string())]))))})
-pq.write_table(s2, sys.argv[4])
+pq.write_table(s2, sys.argv[4], row_group_size=2)
 print("pyarrow: fixtures aninhadas gerados")
 PYEOF
 
@@ -513,6 +544,25 @@ out=$(cd "$tmp" && "$BIN" executar leitura_nest.tilt)
 printf '%s\n' "$out"
 confere "[[1, 2], [3]]"
 confere "[{a: 1, b: x}, {a: 2, b: nulo}]"
+sed 's/\.parquet"/.parquet", colunar: verdadeiro/g' \
+  "$tmp/leitura_nest.tilt" > "$tmp/leitura_nest_colunar.tilt"
+cat >> "$tmp/leitura_nest_colunar.tilt" <<'TILTEOF'
+    - escrever_parquet dados, "round_nest.parquet"
+    - escrever_parquet s, "round_structs.parquet"
+TILTEOF
+out_colunar=$(cd "$tmp" && "$BIN" executar leitura_nest_colunar.tilt)
+if [ "$out_colunar" != "$out" ]; then
+  echo "leitura colunar de listas e structs em varios row groups difere da leitura por linhas"
+  exit 1
+fi
+python3 - "$tmp/py_nest.parquet" "$tmp/round_nest.parquet" \
+  "$tmp/py_structs.parquet" "$tmp/round_structs.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+
+for source, roundtrip in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
+    assert pq.read_table(source).to_pylist() == pq.read_table(roundtrip).to_pylist(), roundtrip
+PYEOF
 
 # --- 13. 3 niveis + struct com campo lista (Fase 12-5a.1) --------------------
 cat > "$tmp/escrita_nivel3.tilt" <<'TILTEOF'
@@ -693,7 +743,30 @@ printf '%s\n' "$out"
 confere "3 carla"
 confere "4 davi"
 
-# --- 17. Modular Encryption AES_GCM_V1 local (PARE) ----------------------------
+# --- 17. writer multi-row-group com offsets ajustados --------------------------
+cat > "$tmp/escrita_row_groups.tilt" <<'TILTEOF'
+pipeline escrita_row_groups:
+  passos:
+    - t = [{ id: 1, nome: "ana" }, { id: 2, nome: "bruno" },
+           { id: 3, nome: "carla" }, { id: 4, nome: "davi" },
+           { id: 5, nome: "eva" }, { id: 6, nome: "fabio" }]
+    - escrever_parquet t, "saida_row_groups.parquet", row_group: 2, codec: "gzip"
+TILTEOF
+(cd "$tmp" && "$BIN" executar escrita_row_groups.tilt >/dev/null)
+python3 - "$tmp/saida_row_groups.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+
+f = pq.ParquetFile(sys.argv[1])
+assert f.metadata.num_row_groups == 3, f.metadata.num_row_groups
+assert f.read().to_pylist() == [
+    {"id": 1, "nome": "ana"}, {"id": 2, "nome": "bruno"},
+    {"id": 3, "nome": "carla"}, {"id": 4, "nome": "davi"},
+    {"id": 5, "nome": "eva"}, {"id": 6, "nome": "fabio"}], f.read().to_pylist()
+print("pyarrow: writer multi-row-group validado (3 grupos, offsets e valores ok)")
+PYEOF
+
+# --- 18. Modular Encryption AES_GCM_V1 local (PARE) ----------------------------
 cat > "$tmp/escrita_criptografada.tilt" <<'TILTEOF'
 pipeline escrita_criptografada:
   passos:

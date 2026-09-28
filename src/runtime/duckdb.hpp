@@ -9,6 +9,15 @@
 
 namespace tilt::rt {
 
+bool duckdb_disponivel();
+
+struct DuckdbAggSpec {
+  std::string nome;
+  std::string funcao;
+  std::string coluna;
+  double quantil = 0.5;
+};
+
 // Conector DuckDB via dlopen("libduckdb.so") — zero dependencias de link.
 // `db_path` e o arquivo do banco (":memory:" abre um banco em memoria).
 // Aceita apenas consultas que retornam
@@ -47,5 +56,13 @@ void duckdb_transact(const std::string& db_path,
 Value duckdb_consulta_tabelas(const std::string& sql,
                               const std::vector<std::pair<std::string, Value>>& tabelas,
                               const std::vector<SqlParam>& params);
+
+// Caminhos analíticos opcionais. O chamador continua podendo usar o motor
+// nativo quando a lib não estiver instalada ou quando a consulta sair do
+// subconjunto SQL seguro.
+Value duckdb_agrupar(const Value& tabela, const std::string& chave,
+                     const std::vector<DuckdbAggSpec>& agregacoes);
+Value duckdb_juntar(const Value& esquerda, const Value& direita,
+                    const std::vector<std::string>& chaves, const std::string& tipo);
 
 }  // namespace tilt::rt

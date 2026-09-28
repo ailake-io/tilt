@@ -36,11 +36,11 @@ std::pair<std::string, std::string> parte_kafka(const std::string& r) {
 
 Value junta_mapas(const Value& acumulado, const Value& novo) {
   Value out = Value::mapa();
-  if (acumulado.kind == ValueKind::Mapa && acumulado.map) {
-    for (const auto& kv : acumulado.map->items) out.map->set(kv.first, kv.second);
+  if (acumulado.kind == ValueKind::Mapa && acumulado.map_ref()) {
+    for (const auto& kv : acumulado.map_ref()->items) out.map_ref()->set(kv.first, kv.second);
   }
-  if (novo.kind == ValueKind::Mapa && novo.map) {
-    for (const auto& kv : novo.map->items) out.map->set(kv.first, kv.second);
+  if (novo.kind == ValueKind::Mapa && novo.map_ref()) {
+    for (const auto& kv : novo.map_ref()->items) out.map_ref()->set(kv.first, kv.second);
   }
   return out;
 }
@@ -90,8 +90,8 @@ std::string checkpoint_ler(const std::string& resolvido) {
     // Sem grupo: le do inicio e junta (last-wins); historico curto por
     // construcao (1 record por save, mapa inteiro).
     const Value lista = kafka_ler(topico, false, 500, "", false);
-    if (lista.kind == ValueKind::Lista && lista.list) {
-      for (const Value& item : *lista.list) {
+    if (lista.kind == ValueKind::Lista && lista.list_ref()) {
+      for (const Value& item : *lista.list_ref()) {
         if (item.kind != ValueKind::Texto) continue;
         try {
           acumulado = junta_mapas(acumulado, json_parse(item.s));
@@ -100,11 +100,11 @@ std::string checkpoint_ler(const std::string& resolvido) {
         }
       }
     }
-    if (acumulado.kind != ValueKind::Mapa || !acumulado.map) return "";
-    const Value* v = acumulado.map->find(chave);
+    if (acumulado.kind != ValueKind::Mapa || !acumulado.map_ref()) return "";
+    const Value* v = acumulado.map_ref()->find(chave);
     if (!v) return "";
     Value out = Value::mapa();
-    out.map->set(chave, *v);
+    out.map_ref()->set(chave, *v);
     return json_dump(out);
   }
   std::ifstream in(resolvido);

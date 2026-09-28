@@ -10,9 +10,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   em posição de operador, nome em posição de nome).
 - Parâmetros compostos em `funcao` (Marco 3 / C3): `nome[]` ou
   `nome[]: <tipo>` (opcional), `mapa` como tipo base; `Arg.optional` é
-  metadado do parser. A aridade de funções de usuário é validada pelo checker:
-  argumentos faltantes são erro; argumentos excedentes são aceitos apenas no
-  formato de chamada entre parênteses, conforme a regra de chamada da Tilt.
+  metadado do parser. A aridade de funções de usuário é validada pelo checker
+  nas chamadas locais e pelo runtime em todas as chamadas:
+  argumentos obrigatórios faltantes ou excedentes são erro; os parâmetros
+  opcionais ausentes recebem `nulo` ou o valor padrão declarado. Argumentos
+  nomeados podem vir após os posicionais; nomes desconhecidos, duplicados ou
+  posicionais após nomeados são erro.
 
 ## Semântica
 
@@ -64,7 +67,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   escrita é PLAIN com compressão **gzip** (padrão), **snappy** (`codec:
   "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
-  por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
+  por padrão ou vários com `row_group:`, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
   RLE),   **listas de escalares** (anotação LIST, elemento Nulo vira OPTIONAL —
   Marco 2 / B3), **structs** (Fase 12-5a), **listas aninhadas**
   (`list<list<...>>`, Marco 2 / B2a, nulos em todos os níveis),
@@ -110,6 +113,15 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   commit; arquivos antigos ficam sem a coluna e a leitura projeta nulo
   (union-by-name). Remover coluna ou mudar o tipo de uma existente → erro
   claro.
+- Planos `lazy: verdadeiro` existem para CSV, Parquet e Delta locais e carregam
+  a fonte no primeiro acesso; SQL remoto, Elasticsearch/OpenSearch e Spark
+  também podem adiar a primeira consulta. SQL mantém pushdown parametrizado;
+  Elasticsearch/OpenSearch traduz projeção, filtros `term` e limite para o DSL.
+  A delegação de agregações/junções para DuckDB é opt-in (`TILT_ANALYTIC_ENGINE`) ou
+  automática em `auto`, mas exige `libduckdb` com appender e recua para o motor
+  nativo quando necessário. `paralelo: verdadeiro` só paraleliza atribuições
+  independentes simples em `passos:`; loops elementwise independentes podem usar
+  `TILT_LOOP_PARALLEL=1`, e loops com efeitos externos continuam sequenciais.
 - Iceberg é de 1ª passada: o catálogo default é **Hadoop** (diretório local).
   Há um **REST catalog opt-in** (fase 29: `ICEBERG_CATALOG=rest` +
   `ICEBERG_URI`) falando o subconjunto `loadTable`/`createTable`/`transactions`
@@ -344,13 +356,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
   tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20
   (Gemm + ativações + Softmax + LayerNormalization + Conv +
-  BatchNormalization + MaxPool + Flatten + RNN/LSTM/GRU + residual). A camada `incorporacao` ainda nao e exportavel para ONNX;
-  use pesos/treino nativos ou GGUF.
+  BatchNormalization + MaxPool + Flatten + RNN/LSTM/GRU + residual) e
+  `incorporacao` inicial via `Gather` com entrada INT64. GGUF v3 aceita
+  exportação F32 e Q8_0 (blocos múltiplos de 32), e `carregar_pesos` importa
+  ambos desquantizando para F32.
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
-  `agrupamento_max`, `achatar`, `residual` e `recorrente` (RNN/LSTM/GRU com BPTT em CPU) (CNN de brinquedo em CPU, com mini-lotes).
+  `agrupamento_max`, `achatar`, `residual`, `incorporacao` e
+  `recorrente` (RNN/LSTM/GRU com BPTT). O backward CUDA dessas três camadas
+  usa kernels dedicados quando CUDA está ativo; CPU permanece como fallback.
 - `conv2d` e `norma_lote` existem como **operações de tensor** (guia 04);
   `incorporacao`, `recorrente`, `conv2d` e `norma_lote` existem como camadas de `modelo`/`treino` (`incorporacao: [vocabulario, dimensao]`,
   `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`
@@ -366,13 +382,26 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   (`{ tipo: cosseno }` ou `{ tipo: degrau, a_cada:, fator: }`),
   `validacao:` (fração) + `parar_cedo:` (`N` ou
   `{ paciencia:, melhorar_min: }`, restaura os melhores pesos) e `busca`
-  em grade (`modelo:`, `grade:`, `criterio: perda|acuracia`, máx. 64
-  combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
+  em grade, aleatória ou bayesiana (`modelo:`, `grade:`, `estrategia:`,
+  `criterio: perda|acuracia`, máx. 64 combinações, melhor fica no modelo).
+  `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
   (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
-  ao RAM. `exportar_gguf` grava GGUF v3 (só escrita) e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32 e ONNX; ONNX cobre as camadas exportáveis e a camada `incorporacao` continua sem suporte. Limites: fluxo só modelo 2D;
-  sem AMP.
-- GPU: o backend CUDA (`TILT_GPU=auto`) ainda não foi validado em hardware
-  CUDA real; aqui use `TILT_GPU=fake` para exercitar o caminho de dispatch.
+  ao RAM. `exportar_gguf` grava GGUF v3 F32/Q8_0 e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32, ONNX e GGUF; ONNX cobre as camadas exportáveis, inclusive `incorporacao` inicial. Limites: fluxo só modelo 2D;
+  AMP limitado a GEMM de camadas densas/residuais.
+- GPU: GEMM FP32/FP16, `conv2d`, ReLU, GELU e soma foram validados em RTX 5050.
+  GEMM usa cuBLAS opcionalmente, com fallback NVRTC; buffers CUDA são
+  reutilizados e Tensor Cores são ativados via cuBLAS quando suportados. Metal
+  no macOS oferece os mesmos kernels em MSL. A API residente mantém buffers
+  de entrada, pesos e saída no device entre chamadas; o dispatch de modelo
+  mantém operações pequenas na
+  CPU para evitar o custo de transferência. `TILT_GPU=fake` exercita o
+  dispatch e a conversão FP16 sem medir desempenho CUDA.
+
+- O backward das camadas suportadas (`densa`, `residual`, `conv2d`,
+  `incorporacao`, `recorrente`, `norma_lote`, `agrupamento_max` e ativações)
+  é executado em CUDA quando há kernel dedicado e o lote é elegível. O
+  runtime mantém fallback CPU para qualquer ausência de CUDA, Metal ou erro
+  de despacho; Metal ainda usa o caminho CPU para esses três backward.
 
 ## LLM / RAG
 
@@ -388,10 +417,15 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   1s/2s/4s… teto 15s em erro de transporte, 429 e 5xx; 4xx falha rápido),
   `reserva: [outro_llm]` (fallback em ordem, sem cadeia) e `teto_tokens:`
   (barreira no acumulado entrada+saída por `llm` antes de cada chamada).
-  `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` (tokens do
-  `usage` da API; no mock, heurística chars/4). O retry respeita `Retry-After`
-  numérico ou HTTP-date em respostas 429 (limitado a 300s). Ainda não há cache
-  de respostas nem retry em streaming (timeout vale para o SSE inteiro).
+  `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}, custo,
+  contabilidade}` (tokens do `usage` da API; no mock, heurística chars/4). O
+  retry respeita `Retry-After` numérico ou HTTP-date em respostas 429 (limitado
+  a 300s). `contabilidade:` persiste tokens/custos em JSONL e
+  `observabilidade:` registra metadados; prompts/respostas só entram com
+  `registrar_prompts: verdadeiro`. Há cache opt-in em memória por processo e
+  retry da tentativa inteira no streaming SSE. Para contabilizar embeddings no
+  mesmo ledger, o `indice` ou agente deve declarar `llm: <nome>`; sem isso o
+  embedding continua local/sem custo associado.
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
   `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
@@ -405,11 +439,14 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   score é `1 - distance` da query do Chroma).
 - Os embeddings do modo `mock` mantêm 16 dimensões e combinam tokens hasheados com trigrams
   com padding de borda e normalização L2; continuam sendo apenas um mock determinístico, não relevância real.
+- `dividir_texto`/`fragmentar` oferecem modos de sentença, código, parágrafo e
+  linha. `.avaliar` em índices calcula recall, precisão, MRR e nDCG executando
+  a busca no backend configurado.
 - `avaliacao` é de 1ª passada (guia 05): `dados:` inline/bloco/caminho,
   `executar:` por caso com `caso` + `retornar`, métricas `exata`/`contem`/
   `regex`/`tolerancia`/`juiz` (todas precisam passar por caso), gate no
   `limiar:`, `amostra:` + `semente:` determinísticos e `registrar_em:` local ou via MLflow REST. Limites: juiz sem cadeia de pensamento; voto multi-juiz usa maioria ou unanimidade,
-  amostra por contagem, opcionalmente estratificada proporcionalmente por campo; não há frações ou pesos manuais; o MLflow ainda não publica artefatos ou detalhes de cada caso.
+  amostra por contagem, opcionalmente estratificada proporcionalmente por campo; não há frações ou pesos manuais. O MLflow publica `detalhes.json` como artefato, incluindo cada caso avaliado e o relatório do experimento; o servidor precisa expor o endpoint de artifacts.
 
 ## Agentes
 
@@ -420,7 +457,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   uma vez, na ordem declarada).
 - Supervisor delega por rótulo; um rótulo sugerido pelo LLM que não está em
   `agentes:` é erro de execução (`T901`).
-- Serviços HTTP podem restringir chamadas de ferramentas com `ferramentas: [...]`; sem essa lista, rotas mantêm o comportamento aberto.
+- Serviços HTTP podem restringir chamadas de ferramentas com `ferramentas: [...]`; sem essa lista, rotas mantêm o comportamento aberto. Agentes também podem usar uma `politica Nome:` compartilhada com limites de tokens, custo, passos, aprovação e ferramentas permitidas. `compartilhado: verdadeiro` aplica os tetos de tokens/custo ao ledger do `llm` entre agentes que reutilizam a política; concorrência exige margem, pois a reserva é verificada antes de cada etapa.
 - Ferramentas validam campos obrigatórios, campos desconhecidos e tipos escalares/listas/mapas nas chamadas; registros nomeados são tratados como mapas e não têm validação recursiva de esquema.
 
 ## HTTP
@@ -460,7 +497,7 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `qemu-aarch64` no job `arm64_codegen` do CI, que instala a toolchain cross.
   Localmente, sem `gcc-aarch64-linux-gnu` + QEMU, ele fica limitado à geração
   e montagem quando o assembler estiver disponível. Mach-O (macOS) e PE/COFF (Windows) ficam fora: o codegen
-  é ELF-only. O JIT (`tilt executar --jit`) emite x86-64 diretamente em memória para o subconjunto inteiro (constantes, locais, aritmética, comparações, condicionais, laços e `imprimir`); decimal, texto, listas, membros e chamadas caem automaticamente para a VM. Arquiteturas sem backend JIT usam o mesmo fallback.
+  é ELF-only. O JIT (`tilt executar --jit`) emite x86-64 ou AArch64 diretamente em memória para o subconjunto escalar (constantes, locais, aritmética, comparações, condicionais, laços, chamadas numéricas, impressão e decimais); textos, listas, membros e builtins continuam no fallback da VM. Arquiteturas sem emissor JIT em memória usam o codegen estático (`tilt compilar --arch arm64`) ou o mesmo fallback.
 
 ## Stdlib
 
@@ -475,8 +512,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 `anexar_texto`, `listar_arquivos`, `remover_arquivo`) e `sha256`,
 `base64_codificar`/`base64_decodificar`, `json_texto`/`json_ler`. Função do
 usuário com o mesmo nome tem prioridade. Limites: `maiusculas`/`minusculas`
-só ASCII; datas só UTC (sem fuso); `ordenar` compara só números com números ou
-textos com textos.
+só ASCII; datas em CSV são normalizadas por amostra e usam tzdata do sistema
+quando `fuso:` é informado, enquanto `Value` continua representando datas como
+texto ISO; `ordenar` compara só números com números ou textos com textos.
 
 
 A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em

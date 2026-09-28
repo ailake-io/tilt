@@ -86,12 +86,12 @@ std::vector<VectorHit> pgvector_search(const std::string& url, const std::string
                           std::to_string(k);
   Value result = postgres_query(url, sql);
   std::vector<VectorHit> out;
-  if (!result.list) return out;
-  for (const Value& row : *result.list) {
-    if (row.kind != ValueKind::Mapa || !row.map) continue;
-    const Value* id = row.map->find("id");
-    const Value* score = row.map->find("score");
-    const Value* texto = row.map->find("texto");
+  if (!result.list_ref()) return out;
+  for (const Value& row : *result.list_ref()) {
+    if (row.kind != ValueKind::Mapa || !row.map_ref()) continue;
+    const Value* id = row.map_ref()->find("id");
+    const Value* score = row.map_ref()->find("score");
+    const Value* texto = row.map_ref()->find("texto");
     out.push_back({id && id->kind == ValueKind::Texto ? id->s : "?",
                    score ? score->as_number() : 0.0,
                    texto && texto->kind == ValueKind::Texto ? texto->s : ""});

@@ -228,12 +228,12 @@ std::string reescrever_location(const CatalogoCtx& ctx, const std::string& host_
 void reescrever_locations(const CatalogoCtx& ctx, const std::string& host_hdr, Value& v) {
   if (v.kind == ValueKind::Texto) return;
   if (v.kind == ValueKind::Lista) {
-    if (!v.list) return;
-    for (Value& e : *v.list) reescrever_locations(ctx, host_hdr, e);
+    if (!v.list_ref()) return;
+    for (Value& e : *v.list_ref()) reescrever_locations(ctx, host_hdr, e);
     return;
   }
-  if (v.kind != ValueKind::Mapa || !v.map) return;
-  for (auto& kv : v.map->items) {
+  if (v.kind != ValueKind::Mapa || !v.map_ref()) return;
+  for (auto& kv : v.map_ref()->items) {
     const bool chave_reecrita = kv.first == "metadata-file" ||
                                 (ctx.reescrever_manifests && kv.first == "manifest-list");
     if (chave_reecrita && kv.second.kind == ValueKind::Texto) {
@@ -317,9 +317,9 @@ HttpResponse rota_load_table(const CatalogoCtx& ctx, const HttpRequest& req,
   reescrever_locations(ctx, req.host, md);
 
   Value out = Value::mapa();
-  out.map->set("metadata-location", Value::texto(url_arquivo(ctx, req.host, meta_path)));
-  out.map->set("metadata", std::move(md));
-  out.map->set("config", Value::mapa());
+  out.map_ref()->set("metadata-location", Value::texto(url_arquivo(ctx, req.host, meta_path)));
+  out.map_ref()->set("metadata", std::move(md));
+  out.map_ref()->set("config", Value::mapa());
   HttpResponse resp;
   resp.body = json_dump(out);
   return resp;
@@ -331,13 +331,13 @@ HttpResponse rota_list_tables(const CatalogoCtx& ctx) {
   for (const std::string& t : tabelas) {
     Value id = Value::mapa();
     Value ns = Value::lista();
-    ns.list->push_back(Value::texto("default"));
-    id.map->set("namespace", std::move(ns));
-    id.map->set("name", Value::texto(t));
-    ids.list->push_back(std::move(id));
+    ns.list_ref()->push_back(Value::texto("default"));
+    id.map_ref()->set("namespace", std::move(ns));
+    id.map_ref()->set("name", Value::texto(t));
+    ids.list_ref()->push_back(std::move(id));
   }
   Value out = Value::mapa();
-  out.map->set("identifiers", std::move(ids));
+  out.map_ref()->set("identifiers", std::move(ids));
   HttpResponse resp;
   resp.body = json_dump(out);
   return resp;

@@ -1,5 +1,11 @@
 == pipeline csv_opcoes ==
 3 ana 1.5 nulo nulo silva; jr 3.25 diz "oi" ok
+projecao: 2 ok silva; jr
+colunar: 3 3 1.5 0 3.25
+silva; jr 3.25 3
+filtro colunar: 1 3.25
+parquet colunar: 1.5 nulo silva; jr
+misto: 4 3 oi
 1 2
 2 1 y
 1 x

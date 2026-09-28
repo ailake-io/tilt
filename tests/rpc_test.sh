@@ -74,5 +74,16 @@ grep -q "sempre falha" "$tmp/err" || { echo "FALHA: chamar sem mensagem: $(cat "
 printf 'funcao f:\n  retornar nao_definido\n' >"$tmp/ruim.tilt"
 "$BIN" rpc "$tmp/ruim.tilt" </dev/null >/dev/null 2>&1 && { echo "FALHA: rpc subiu com erro de checagem"; fail=1; }
 
+# Nomeado apos uma lacuna nao deve suprimir o valor padrao intermediario.
+cat >"$tmp/padroes.tilt" <<'EOF'
+funcao f a, b = 10, c = 100:
+  retornar a + b + c
+EOF
+printf '%s\n' '{"id":1,"chamar":"f","args":[1],"nomeados":{"c":100}}' |
+  "$BIN" rpc "$tmp/padroes.tilt" >"$tmp/padroes.out"
+grep -qF '{"id":1,"ok":true,"resultado":111}' "$tmp/padroes.out" || {
+  echo "FALHA: default intermediario no RPC"; fail=1;
+}
+
 [ "$fail" = 0 ] && echo "rpc ok"
 exit "$fail"

@@ -56,13 +56,13 @@ std::string motivo_erro(const std::string& body) {
   if (body.empty()) return "erro desconhecido (resposta vazia)";
   try {
     const Value j = json_parse(body);
-    if (j.kind == ValueKind::Mapa && j.map) {
+    if (j.kind == ValueKind::Mapa && j.map_ref()) {
       for (const char* chave : {"error", "detail", "message"}) {
-        const Value* err = j.map->find(chave);
+        const Value* err = j.map_ref()->find(chave);
         if (!err) continue;
         if (err->kind == ValueKind::Texto && !err->s.empty()) return err->s;
-        if (err->kind == ValueKind::Mapa && err->map) {
-          const Value* msg = err->map->find("message");
+        if (err->kind == ValueKind::Mapa && err->map_ref()) {
+          const Value* msg = err->map_ref()->find("message");
           if (msg && msg->kind == ValueKind::Texto && !msg->s.empty()) return msg->s;
         }
       }
@@ -115,8 +115,8 @@ std::string ensure_colecao(const std::string& base, const std::string& colecao) 
   } catch (const std::exception& e) {
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
-  if (parsed.kind == ValueKind::Mapa && parsed.map) {
-    if (const Value* id = parsed.map->find("id");
+  if (parsed.kind == ValueKind::Mapa && parsed.map_ref()) {
+    if (const Value* id = parsed.map_ref()->find("id");
         id && id->kind == ValueKind::Texto && !id->s.empty()) {
       return id->s;
     }
@@ -154,37 +154,37 @@ std::vector<VectorHit> chroma_search(const std::string& base, const std::string&
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
   std::vector<VectorHit> out;
-  if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
-  const Value* ids = parsed.map->find("ids");
-  const Value* dists = parsed.map->find("distances");
+  if (parsed.kind != ValueKind::Mapa || !parsed.map_ref()) return out;
+  const Value* ids = parsed.map_ref()->find("ids");
+  const Value* dists = parsed.map_ref()->find("distances");
   // O Chroma devolve listas aninhadas por consulta: ids[[...]], distances[[...]].
-  if (!ids || ids->kind != ValueKind::Lista || !ids->list || ids->list->empty()) return out;
-  if (!dists || dists->kind != ValueKind::Lista || !dists->list || dists->list->empty()) {
+  if (!ids || ids->kind != ValueKind::Lista || !ids->list_ref() || ids->list_ref()->empty()) return out;
+  if (!dists || dists->kind != ValueKind::Lista || !dists->list_ref() || dists->list_ref()->empty()) {
     return out;
   }
-  const Value& ids_q = (*ids->list)[0];
-  const Value& dists_q = (*dists->list)[0];
-  if (ids_q.kind != ValueKind::Lista || !ids_q.list || dists_q.kind != ValueKind::Lista ||
-      !dists_q.list) {
+  const Value& ids_q = (*ids->list_ref())[0];
+  const Value& dists_q = (*dists->list_ref())[0];
+  if (ids_q.kind != ValueKind::Lista || !ids_q.list_ref() || dists_q.kind != ValueKind::Lista ||
+      !dists_q.list_ref()) {
     return out;
   }
-  const std::size_t n = ids_q.list->size() < dists_q.list->size() ? ids_q.list->size()
-                                                                  : dists_q.list->size();
+  const std::size_t n = ids_q.list_ref()->size() < dists_q.list_ref()->size() ? ids_q.list_ref()->size()
+                                                                  : dists_q.list_ref()->size();
   // documents[[...]]: o texto guardado no `inserir` (alinhado a ids).
-  const Value* docs = parsed.map->find("documents");
-  const Value* docs_q = docs && docs->kind == ValueKind::Lista && docs->list && !docs->list->empty()
-                            ? &(*docs->list)[0]
+  const Value* docs = parsed.map_ref()->find("documents");
+  const Value* docs_q = docs && docs->kind == ValueKind::Lista && docs->list_ref() && !docs->list_ref()->empty()
+                            ? &(*docs->list_ref())[0]
                             : nullptr;
   for (std::size_t i = 0; i < n; ++i) {
-    const Value& id = (*ids_q.list)[i];
-    const Value& d = (*dists_q.list)[i];
+    const Value& id = (*ids_q.list_ref())[i];
+    const Value& d = (*dists_q.list_ref())[i];
     const std::string id_s = id.kind == ValueKind::Texto ? id.s : "?";
     // hnsw:space cosine: distance = 1 - cosseno -> score = 1 - distance.
     const double sc = d.is_number() ? 1.0 - d.as_number() : 0.0;
     std::string texto;
-    if (docs_q && docs_q->kind == ValueKind::Lista && docs_q->list && i < docs_q->list->size() &&
-        (*docs_q->list)[i].kind == ValueKind::Texto) {
-      texto = (*docs_q->list)[i].s;
+    if (docs_q && docs_q->kind == ValueKind::Lista && docs_q->list_ref() && i < docs_q->list_ref()->size() &&
+        (*docs_q->list_ref())[i].kind == ValueKind::Texto) {
+      texto = (*docs_q->list_ref())[i].s;
     }
     out.push_back({id_s, sc, texto});
   }

@@ -12,3 +12,5 @@ pipeline listas:
         - imprimir linha.nome, linha.tags, linha.nums, linha.ok
     - outra = ler_parquet "saida_listas_v1.parquet"
     - imprimir "v1:", outra[0].tags, outra[1].nums, outra[2].nome
+    - col = ler_parquet "saida_listas.parquet", selecionar: ["tags", "nome"], colunar: verdadeiro
+    - imprimir "colunar:", tamanho(col), col[0].tags, col[1].tags, col[2].tags

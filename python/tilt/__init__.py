@@ -21,6 +21,7 @@ import math
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -132,6 +133,55 @@ class Tilt:
     def chamar(self, funcao: str, *args: Any, **nomeados: Any) -> Any:
         """Chama ``funcao`` e devolve o resultado (JSON convertido em tipos Python)."""
         return self.chamar_com_saida(funcao, *args, **nomeados)[0]
+
+    def chamar_colunar(self, funcao: str, *args: Any, **nomeados: Any) -> Any:
+        """Envia tabelas Arrow/pandas/Polars por Parquet e devolve ``pyarrow.Table``
+        quando a funcao retorna uma tabela. Requer ``pyarrow`` instalado.
+
+        O transporte usa arquivos temporarios locais; escalares e outros valores
+        continuam no protocolo JSON. O processo Tilt permanece reutilizavel.
+        """
+        try:
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise TiltErro("chamar_colunar requer pyarrow (pip install tilt-lang[columnar])") from exc
+
+        with tempfile.TemporaryDirectory(prefix="tilt-colunar-") as directory:
+            next_file = 0
+
+            def encode(value: Any) -> Any:
+                nonlocal next_file
+                table = None
+                if isinstance(value, pa.Table):
+                    table = value
+                elif hasattr(value, "to_arrow"):
+                    table = value.to_arrow()  # Polars DataFrame
+                elif type(value).__module__.startswith("pandas.") and hasattr(value, "columns"):
+                    table = pa.Table.from_pandas(value, preserve_index=False)
+                if table is None:
+                    return _para_json(value)
+                if not isinstance(table, pa.Table):
+                    raise TypeError("to_arrow() deve devolver pyarrow.Table")
+                path = os.path.join(directory, f"arg-{next_file}.parquet")
+                next_file += 1
+                pq.write_table(table, path, compression="snappy")
+                return {"$parquet": path}
+
+            result_path = os.path.join(directory, "resultado.parquet")
+            request: Dict[str, Any] = {
+                "chamar": funcao,
+                "args": [encode(value) for value in args],
+                "parquet": True,
+                "resultado_parquet": result_path,
+            }
+            if nomeados:
+                request["nomeados"] = {key: encode(value) for key, value in nomeados.items()}
+            response = self._requisitar(request)
+            result = response.get("resultado")
+            if isinstance(result, dict) and result.get("$parquet") == result_path:
+                return pq.read_table(result_path)
+            return result
 
     def chamar_com_saida(self, funcao: str, *args: Any, **nomeados: Any):
         """Como :meth:`chamar`, mas devolve ``(resultado, saida_impressa)``."""

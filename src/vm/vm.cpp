@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "runtime/tensor.hpp"
+#include "runtime/columnar.hpp"
 
 namespace tilt::vm {
 
@@ -18,21 +19,20 @@ namespace {
 
 // Copia de escalar sem o custo do construtor de copia do Value (string + 4 shared_ptr).
 // `v` pode apontar para dentro de `pilha` (LoadLocal): le os campos antes de crescer o vetor.
-inline void empilhar_copia(std::vector<Value>& pilha, const Value& v) {
+inline Value copiar_valor(const Value& v) {
   if (v.kind <= ValueKind::Decimal) {
     const ValueKind k = v.kind;
     const bool b = v.b;
     const std::int64_t i = v.i;
     const double d = v.d;
-    pilha.emplace_back();
-    Value& r = pilha.back();
+    Value r;
     r.kind = k;
     r.b = b;
     r.i = i;
     r.d = d;
-  } else {
-    pilha.push_back(v);
+    return r;
   }
+  return v;
 }
 
 // Recursao maxima VM -> VM (cada nivel usa um frame C++ de executar()).
@@ -111,17 +111,37 @@ inline bool binop_numerico(BinOp op, std::vector<Value>& pilha) {
   return true;
 }
 
+inline Value binop_super(BinOp op, const Value& lhs, const Value& rhs,
+                         const std::string& name) {
+  if (lhs.is_number() && rhs.is_number()) {
+    std::vector<Value> values;
+    values.reserve(2);
+    values.push_back(lhs);
+    values.push_back(rhs);
+    if (binop_numerico(op, values)) return std::move(values.front());
+  }
+  bool ok = false;
+  Value result = rt::apply_binop(name, lhs, rhs, &ok);
+  if (!ok) throw std::runtime_error("VM: operador desconhecido");
+  return result;
+}
+
 }  // namespace
 
 rt::Value Vm::run(const Chunk& chunk, std::vector<rt::Value> args) {
   const std::size_t base = pilha_.size();
   const std::size_t nl = static_cast<std::size_t>(chunk.num_locals);
   pilha_.resize(base + nl);
-  for (std::size_t i = 0; i < args.size() && i < nl; ++i) pilha_[base + i] = std::move(args[i]);
+  tipos_.resize(pilha_.size(), static_cast<std::uint8_t>(ValueKind::Nulo));
+  for (std::size_t i = 0; i < args.size() && i < nl; ++i) {
+    pilha_[base + i] = std::move(args[i]);
+    tipos_[base + i] = static_cast<std::uint8_t>(pilha_[base + i].kind);
+  }
   orcamento_ = 50'000'000;
   profundidade_ = 0;
   rt::Value r = executar(chunk, base);
   pilha_.resize(base);
+  tipos_.resize(base);
   return r;
 }
 
@@ -150,10 +170,19 @@ const Chunk* Vm::alvo_da_chamada(const Chunk& chunk, std::size_t idx_nome) {
 }
 
 rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
+  auto push = [&](Value value) {
+    tipos_.push_back(static_cast<std::uint8_t>(value.kind));
+    pilha_.push_back(std::move(value));
+  };
   auto pop = [&]() -> Value {
     Value v = std::move(pilha_.back());
     pilha_.pop_back();
+    tipos_.pop_back();
     return v;
+  };
+  auto drop = [&]() {
+    pilha_.pop_back();
+    tipos_.pop_back();
   };
 
   std::size_t ip = 0;
@@ -162,10 +191,10 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
     const Instr& in = chunk.code[ip++];
     switch (in.op) {
       case Op::Const:
-        empilhar_copia(pilha_, chunk.consts[static_cast<std::size_t>(in.a)]);
+        push(copiar_valor(chunk.consts[static_cast<std::size_t>(in.a)]));
         break;
       case Op::LoadLocal:
-        empilhar_copia(pilha_, pilha_[base + static_cast<std::size_t>(in.a)]);
+        push(copiar_valor(pilha_[base + static_cast<std::size_t>(in.a)]));
         break;
       case Op::StoreLocal: {
         Value& dst = pilha_[base + static_cast<std::size_t>(in.a)];
@@ -179,27 +208,30 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
         } else {
           dst = std::move(src);
         }
-        pilha_.pop_back();
+        tipos_[base + static_cast<std::size_t>(in.a)] = static_cast<std::uint8_t>(dst.kind);
+        drop();
         break;
       }
       case Op::Pop:
-        pilha_.pop_back();
+        drop();
         break;
       case Op::Neg: {
         Value v = pop();
-        pilha_.push_back(v.kind == ValueKind::Inteiro ? Value::inteiro(-v.i)
-                                                      : Value::decimal(-v.as_number()));
+        push(v.kind == ValueKind::Inteiro ? Value::inteiro(-v.i)
+                                          : Value::decimal(-v.as_number()));
         break;
       }
       case Op::Not:
-        pilha_.push_back(Value::logico(!pop().truthy()));
+        push(Value::logico(!pop().truthy()));
         break;
       case Op::Truthy:
-        pilha_.push_back(Value::logico(pop().truthy()));
+        push(Value::logico(pop().truthy()));
         break;
       case Op::Binop: {
         if (in.b != 0 && pilha_.size() >= base + static_cast<std::size_t>(chunk.num_locals) + 2 &&
             binop_numerico(static_cast<BinOp>(in.b), pilha_)) {
+          tipos_[pilha_.size() - 1] = static_cast<std::uint8_t>(pilha_.back().kind);
+          tipos_.pop_back();
           break;
         }
         Value b = pop();
@@ -207,7 +239,28 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
         bool ok = false;
         Value r = rt::apply_binop(chunk.op_names[static_cast<std::size_t>(in.a)], a, b, &ok);
         if (!ok) throw std::runtime_error("VM: operador desconhecido");
-        pilha_.push_back(std::move(r));
+        push(std::move(r));
+        break;
+      }
+      case Op::SuperLocalConstBinop:
+      case Op::SuperLocalLocalBinop:
+      case Op::SuperConstLocalBinop: {
+        const Value* lhs = nullptr;
+        const Value* rhs = nullptr;
+        Value left;
+        Value right;
+        if (in.op == Op::SuperLocalConstBinop) {
+          lhs = &pilha_[base + static_cast<std::size_t>(in.a)];
+          rhs = &chunk.consts[static_cast<std::size_t>(in.b)];
+        } else if (in.op == Op::SuperLocalLocalBinop) {
+          lhs = &pilha_[base + static_cast<std::size_t>(in.a)];
+          rhs = &pilha_[base + static_cast<std::size_t>(in.b)];
+        } else {
+          lhs = &chunk.consts[static_cast<std::size_t>(in.a)];
+          rhs = &pilha_[base + static_cast<std::size_t>(in.b)];
+        }
+        const std::string& name = chunk.op_names[static_cast<std::size_t>(in.c)];
+        push(binop_super(binop_de(name), *lhs, *rhs, name));
         break;
       }
       case Op::Jump:
@@ -215,7 +268,7 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
         break;
       case Op::JumpIfFalse: {
         const bool verdadeiro = pilha_.back().truthy();
-        pilha_.pop_back();
+        drop();
         if (!verdadeiro) ip = static_cast<std::size_t>(in.a);
         break;
       }
@@ -230,10 +283,12 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
           const std::size_t novo_base = pilha_.size() - argc;
           // Argumentos viram os primeiros locals; sobrando: descartados; faltando: nulo.
           pilha_.resize(novo_base + static_cast<std::size_t>(alvo->num_locals));
+          tipos_.resize(pilha_.size(), static_cast<std::uint8_t>(ValueKind::Nulo));
           Value r = executar(*alvo, novo_base);
           pilha_.resize(novo_base);
+          tipos_.resize(novo_base);
           --profundidade_;
-          pilha_.push_back(std::move(r));
+          push(std::move(r));
           break;
         }
         std::vector<Value> a(static_cast<std::size_t>(in.b));
@@ -241,7 +296,7 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
         bool handled = false;
         Value r = call_(chunk.names[static_cast<std::size_t>(in.a)], a, &handled);
         if (!handled) throw std::runtime_error("VM: funcao desconhecida");
-        pilha_.push_back(std::move(r));
+        push(std::move(r));
         break;
       }
       case Op::Print: {
@@ -252,111 +307,117 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
           out_ << rt::to_display(a[k]);
         }
         out_ << '\n';
-        pilha_.push_back(Value::nulo());
+        push(Value::nulo());
         break;
       }
       case Op::Len: {
         Value v = pop();
         std::int64_t n = 0;
-        if ((v.kind == ValueKind::Lista || v.kind == ValueKind::Tabela) && v.list) {
-          n = static_cast<std::int64_t>(v.list->size());
+        if (v.columnar()) {
+          n = static_cast<std::int64_t>(v.columnar()->rows);
+        } else if ((v.kind == ValueKind::Lista || v.kind == ValueKind::Tabela) && v.list_ref()) {
+          n = static_cast<std::int64_t>(v.list_ref()->size());
         } else if (v.kind == ValueKind::Texto) {
           n = static_cast<std::int64_t>(v.s.size());
-        } else if (v.kind == ValueKind::Mapa && v.map) {
-          n = static_cast<std::int64_t>(v.map->items.size());
+        } else if (v.kind == ValueKind::Mapa && v.map_ref()) {
+          n = static_cast<std::int64_t>(v.map_ref()->items.size());
         }
-        pilha_.push_back(Value::inteiro(n));
+        push(Value::inteiro(n));
         break;
       }
       case Op::MakeList: {
         rt::ValueList items(static_cast<std::size_t>(in.b));
         for (std::size_t k = items.size(); k-- > 0;) items[k] = pop();
-        pilha_.push_back(Value::lista(std::move(items)));
+        push(Value::lista(std::move(items)));
         break;
       }
       case Op::Index: {
         Value idx = pop();
         Value base = pop();
-        if ((base.kind != ValueKind::Lista && base.kind != ValueKind::Tabela) || !base.list) {
+        if ((base.kind != ValueKind::Lista && base.kind != ValueKind::Tabela) || !base.list_ref()) {
           throw std::runtime_error("VM: indice espera uma lista");
         }
         const auto i = static_cast<long long>(idx.as_number());
-        if (i < 0 || static_cast<std::size_t>(i) >= base.list->size()) {
+        if (i < 0 || static_cast<std::size_t>(i) >= base.list_ref()->size()) {
           throw std::runtime_error("VM: indice fora da faixa");
         }
-        pilha_.push_back((*base.list)[static_cast<std::size_t>(i)]);
+        push((*base.list_ref())[static_cast<std::size_t>(i)]);
         break;
       }
       case Op::GetField: {
         Value base = pop();
         const std::string& m = chunk.names[static_cast<std::size_t>(in.a)];
         const bool optional = in.b != 0;
-        if (base.kind == ValueKind::Tensor && base.tensor) {
-          const rt::Tensor& t = *base.tensor;
+        if (base.kind == ValueKind::Tensor && base.tensor_ref()) {
+          const rt::Tensor& t = *base.tensor_ref();
           if (m == "forma") {
             rt::ValueList dims;
             for (std::int64_t d : t.shape) dims.push_back(Value::inteiro(d));
-            pilha_.push_back(Value::lista(std::move(dims)));
+            push(Value::lista(std::move(dims)));
             break;
           }
           if (m == "dados") {
             rt::ValueList vals;
             for (float fv : t.data) vals.push_back(Value::decimal(fv));
-            pilha_.push_back(Value::lista(std::move(vals)));
+            push(Value::lista(std::move(vals)));
             break;
           }
           if (m == "soma") {
-            pilha_.push_back(Value::decimal(rt::sum_all(t)));
+            push(Value::decimal(rt::sum_all(t)));
             break;
           }
           if (m == "media") {
-            pilha_.push_back(Value::decimal(rt::mean_all(t)));
+            push(Value::decimal(rt::mean_all(t)));
             break;
           }
           if (m == "argmax") {
-            pilha_.push_back(Value::inteiro(rt::argmax_last(t)));
+            push(Value::inteiro(rt::argmax_last(t)));
             break;
           }
           if (m == "transposta") {
-            pilha_.push_back(Value::tensor_de(rt::transpose2d(t)));
+            push(Value::tensor_de(rt::transpose2d(t)));
             break;
           }
           if (m == "softmax") {
-            pilha_.push_back(Value::tensor_de(rt::softmax_last(t)));
+            push(Value::tensor_de(rt::softmax_last(t)));
             break;
           }
           if (m == "relu" || m == "gelu" || m == "silu" || m == "sigmoide" || m == "tanh") {
-            pilha_.push_back(Value::tensor_de(rt::apply_unary(t, m)));
+            push(Value::tensor_de(rt::apply_unary(t, m)));
             break;
           }
           if (m == "item") {
             if (t.size() != 1) throw std::runtime_error("item espera um tensor de 1 elemento");
-            pilha_.push_back(Value::decimal(t.data[0]));
+            push(Value::decimal(t.data[0]));
             break;
           }
           if (m == "tamanho") {
-            pilha_.push_back(Value::inteiro(t.size()));
+            push(Value::inteiro(t.size()));
             break;
           }
         }
-        if ((base.kind == ValueKind::Mapa || base.kind == ValueKind::Tabela) && base.map) {
-          if (Value* f = base.map->find(m)) {
-            pilha_.push_back(*f);
+        if ((base.kind == ValueKind::Mapa || base.kind == ValueKind::Tabela) && base.map_ref()) {
+          if (Value* f = base.map_ref()->find(m)) {
+            push(*f);
             break;
           }
         }
         if (m == "tamanho") {
-          if ((base.kind == ValueKind::Lista || base.kind == ValueKind::Tabela) && base.list) {
-            pilha_.push_back(Value::inteiro(static_cast<std::int64_t>(base.list->size())));
+          if (base.columnar()) {
+            push(Value::inteiro(static_cast<std::int64_t>(base.columnar()->rows)));
+            break;
+          }
+          if ((base.kind == ValueKind::Lista || base.kind == ValueKind::Tabela) && base.list_ref()) {
+            push(Value::inteiro(static_cast<std::int64_t>(base.list_ref()->size())));
             break;
           }
           if (base.kind == ValueKind::Texto) {
-            pilha_.push_back(Value::inteiro(static_cast<std::int64_t>(base.s.size())));
+            push(Value::inteiro(static_cast<std::int64_t>(base.s.size())));
             break;
           }
         }
         if (optional) {
-          pilha_.push_back(Value::nulo());
+          push(Value::nulo());
           break;
         }
         throw std::runtime_error(std::string("'") + base.type_name() + "' nao tem o campo '" + m + "'");

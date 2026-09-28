@@ -1,0 +1,7 @@
+erro[T901]: postgres: libpq.so.5 nao encontrada; instale o pacote libpq5
+  --> input.tilt:8:7
+   |
+ 8 |     - docs.inserir("x")
+   |       ^^^^
+   |
+

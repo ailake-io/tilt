@@ -957,7 +957,7 @@ Value kafka_ler(const std::string& topico, bool do_fim, std::int64_t max,
   for (const auto& [off, valor] :
        fetch_msgs(conn, topico, 0, do_fim ? -1 : 0, max)) {
     (void)off;
-    out.list->push_back(Value::texto(valor));
+    out.list_ref()->push_back(Value::texto(valor));
   }
   return out;
 }

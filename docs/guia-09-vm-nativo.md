@@ -47,12 +47,12 @@ pipeline. A saída é idêntica à de `tilt executar` — todo o suíte de golde
 
 ## `tilt executar --jit`
 
-Emite código x86-64 diretamente em memória executável, sem gerar `.s` nem
-chamar `cc`. O backend cobre chunks de inteiros com constantes, locais,
-`+ - *`, comparações, `nao`, condicionais, laços e `imprimir`, preservando
-os tipos `inteiro`/`logico` na saída. Bytecode com decimal, texto, listas,
-membros, chamadas ou outras operações cai automaticamente para a VM. Em
-arquiteturas sem backend JIT o fallback também é automático.
+Emite código x86-64 ou AArch64 diretamente em memória executável, sem gerar
+`.s` nem chamar `cc`. O backend cobre chunks escalares com constantes, locais,
+aritmética, comparações, `nao`, condicionais, laços, impressão, chamadas e
+decimais, preservando os tipos na saída. Bytecode com texto, listas, membros ou
+outras operações cai automaticamente para a VM. Em arquiteturas sem backend
+JIT o fallback também é automático.
 
 `TILT_JIT_DEBUG=1` informa no stderr se cada pipeline usou `native` ou
 `fallback`.

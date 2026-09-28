@@ -1,5 +1,6 @@
 #include "runtime/duckdb.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <stdexcept>
@@ -306,7 +307,7 @@ ValueList materializa_duckdb(const DuckdbApi& db, DuckdbResult* result) {
       const char* name = db.column_name(result, c);
       const std::string col = (name && *name) ? name : ("coluna" + std::to_string(c + 1));
       if (db.value_is_null(result, c, r)) {
-        row.map->set(col, Value::nulo());
+        row.map_ref()->set(col, Value::nulo());
         continue;
       }
       switch (db.column_type(result, c)) {
@@ -320,19 +321,19 @@ ValueList materializa_duckdb(const DuckdbApi& db, DuckdbResult* result) {
         case kDuckdbUinteger:
         case kDuckdbUbigint:
         case kDuckdbHugeint:  // sum(bigint) e count(*) em versoes novas
-          row.map->set(col, Value::inteiro(db.value_int64(result, c, r)));
+          row.map_ref()->set(col, Value::inteiro(db.value_int64(result, c, r)));
           break;
         case kDuckdbFloat:
         case kDuckdbDecimal:
         case kDuckdbDouble:
-          row.map->set(col, Value::decimal(db.value_double(result, c, r)));
+          row.map_ref()->set(col, Value::decimal(db.value_double(result, c, r)));
           break;
         case kDuckdbVarchar:
         default: {
           // VARCHAR e demais tipos (DATE, TIMESTAMP, DECIMAL, UUID, BLOB...)
           // chegam como texto; o valor precisa ser liberado com duckdb_free.
           char* txt = db.value_varchar(result, c, r);
-          row.map->set(col, Value::texto(txt ? txt : ""));
+          row.map_ref()->set(col, Value::texto(txt ? txt : ""));
           if (txt) db.free_value(txt);
           break;
         }
@@ -587,6 +588,8 @@ void exec_simples(const DuckdbApi& db, void* conn, const std::string& sql) {
 
 }  // namespace
 
+bool duckdb_disponivel() { return api().lib != nullptr && api().appender_ok; }
+
 Value duckdb_consulta_tabelas(const std::string& sql,
                               const std::vector<std::pair<std::string, Value>>& tabelas,
                               const std::vector<SqlParam>& params) {
@@ -604,16 +607,19 @@ Value duckdb_consulta_tabelas(const std::string& sql,
   DbConn* h = abre_banco(db, ":memory:");
   try {
     for (const auto& [nome, tabela] : tabelas) {
-      if ((tabela.kind != ValueKind::Tabela && tabela.kind != ValueKind::Lista) || !tabela.list) {
+      Value materializada = tabela;
+      materializada.materialize_rows();
+      if ((materializada.kind != ValueKind::Tabela && materializada.kind != ValueKind::Lista) ||
+          !materializada.list_ref()) {
         die("'" + nome + "' deve ser uma tabela (lista de mapas)");
       }
-      const ValueList& linhas = *tabela.list;
+      const ValueList& linhas = *materializada.list_ref();
       std::vector<ColunaDuck> colunas;
       for (const Value& linha : linhas) {
-        if (linha.kind != ValueKind::Mapa || !linha.map) {
+        if (linha.kind != ValueKind::Mapa || !linha.map_ref()) {
           die("'" + nome + "' deve ser uma tabela (lista de mapas)");
         }
-        for (const auto& [chave, v] : linha.map->items) {
+        for (const auto& [chave, v] : linha.map_ref()->items) {
           ColunaDuck* c = nullptr;
           for (ColunaDuck& e : colunas) {
             if (e.nome == chave) {
@@ -653,7 +659,7 @@ Value duckdb_consulta_tabelas(const std::string& sql,
       }
       for (const Value& linha : linhas) {
         for (const ColunaDuck& col : colunas) {
-          const Value* v = linha.map->find(col.nome);
+          const Value* v = linha.map_ref()->find(col.nome);
           if (v == nullptr || v->kind == ValueKind::Nulo) {
             db.append_null(app);
           } else if (v->kind == ValueKind::Logico) {
@@ -734,6 +740,75 @@ Value duckdb_consulta_tabelas(const std::string& sql,
     fecha_banco(db, h);
     throw;
   }
+}
+
+Value duckdb_agrupar(const Value& tabela, const std::string& chave,
+                     const std::vector<DuckdbAggSpec>& agregacoes) {
+  if (chave.empty() || agregacoes.empty()) die("agrupar: chave e agregacoes sao obrigatorias");
+  std::string sql = "SELECT " + ident_duck(chave);
+  for (const DuckdbAggSpec& agg : agregacoes) {
+    const std::string col = agg.coluna.empty() ? "*" : ident_duck(agg.coluna);
+    const std::string numero = agg.coluna.empty() ? "0" : "COALESCE(" + col + ", 0)";
+    std::string expr;
+    if (agg.funcao == "contar") expr = "COUNT(*)";
+    else if (agg.funcao == "somar") expr = "SUM(" + numero + ")";
+    else if (agg.funcao == "media") expr = "SUM(" + numero + ") / COUNT(*)";
+    else if (agg.funcao == "min") expr = "MIN(" + numero + ")";
+    else if (agg.funcao == "max") expr = "MAX(" + numero + ")";
+    else if (agg.funcao == "variancia") expr = "VAR_POP(" + numero + ")";
+    else if (agg.funcao == "distintos") expr = "COUNT(DISTINCT " + col + ")";
+    else if (agg.funcao == "quantil" || agg.funcao == "quantil_aproximado")
+      expr = "QUANTILE_CONT(" + col + ", " + std::to_string(agg.quantil) + ")";
+    else die("agrupar: funcao '" + agg.funcao + "' fora do motor DuckDB");
+    sql += ", " + expr + " AS " + ident_duck(agg.nome);
+  }
+  sql += " FROM \"t\" GROUP BY " + ident_duck(chave);
+  return duckdb_consulta_tabelas(sql, {{"t", tabela}}, {});
+}
+
+Value duckdb_juntar(const Value& esquerda, const Value& direita,
+                    const std::vector<std::string>& chaves, const std::string& tipo) {
+  if (chaves.empty()) die("juntar: nenhuma chave informada");
+  Value esq = esquerda;
+  Value dir = direita;
+  esq.materialize_rows();
+  dir.materialize_rows();
+  if (!esq.list_ref() || !dir.list_ref()) die("juntar: tabelas invalidas para DuckDB");
+  std::vector<std::string> nomes_esq;
+  std::vector<std::string> nomes_dir;
+  for (const Value& linha : *esq.list_ref())
+    if (linha.map_ref()) for (const auto& [nome, _] : linha.map_ref()->items)
+      if (std::find(nomes_esq.begin(), nomes_esq.end(), nome) == nomes_esq.end()) nomes_esq.push_back(nome);
+  for (const Value& linha : *dir.list_ref())
+    if (linha.map_ref()) for (const auto& [nome, _] : linha.map_ref()->items)
+      if (std::find(nomes_dir.begin(), nomes_dir.end(), nome) == nomes_dir.end()) nomes_dir.push_back(nome);
+  std::string sql = "SELECT ";
+  bool first = true;
+  for (const std::string& nome : nomes_esq) {
+    if (!first) sql += ", ";
+    first = false;
+    sql += "e." + ident_duck(nome) + " AS " + ident_duck(nome);
+  }
+  for (const std::string& nome : nomes_dir) {
+    if (std::find(chaves.begin(), chaves.end(), nome) != chaves.end()) continue;
+    std::string saida = nome;
+    if (std::find(nomes_esq.begin(), nomes_esq.end(), saida) != nomes_esq.end()) saida += "_direita";
+    if (!first) sql += ", ";
+    first = false;
+    sql += "d." + ident_duck(nome) + " AS " + ident_duck(saida);
+  }
+  if (first) sql += "e." + ident_duck(chaves.front());
+  std::string join;
+  if (tipo == "esquerda" || tipo == "left") join = " LEFT JOIN ";
+  else if (tipo == "direita" || tipo == "right") join = " RIGHT JOIN ";
+  else if (tipo == "completa" || tipo == "full" || tipo == "outer") join = " FULL OUTER JOIN ";
+  else join = " INNER JOIN ";
+  sql += " FROM \"l\" AS e" + join + "\"r\" AS d ON ";
+  for (std::size_t i = 0; i < chaves.size(); ++i) {
+    if (i) sql += " AND ";
+    sql += "e." + ident_duck(chaves[i]) + " = d." + ident_duck(chaves[i]);
+  }
+  return duckdb_consulta_tabelas(sql, {{"l", esquerda}, {"r", direita}}, {});
 }
 
 }  // namespace tilt::rt

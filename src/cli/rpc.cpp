@@ -15,6 +15,7 @@
 #include "parser/parser.hpp"
 #include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
+#include "runtime/parquet.hpp"
 #include "semantic/checker.hpp"
 #include "tilt/version.hpp"
 
@@ -62,16 +63,16 @@ Value texto(const std::string& s) { return Value::texto(s); }
 
 std::string resposta_erro(const Value* id, const std::string& msg, const std::string& saida) {
   Value m = Value::mapa();
-  if (id) m.map->items.emplace_back("id", *id);
-  m.map->items.emplace_back("ok", Value::logico(false));
-  m.map->items.emplace_back("erro", texto(msg));
-  if (!saida.empty()) m.map->items.emplace_back("saida", texto(saida));
+  if (id) m.map_ref()->items.emplace_back("id", *id);
+  m.map_ref()->items.emplace_back("ok", Value::logico(false));
+  m.map_ref()->items.emplace_back("erro", texto(msg));
+  if (!saida.empty()) m.map_ref()->items.emplace_back("saida", texto(saida));
   return rt::json_dump_compacto(m);
 }
 
 const Value* campo(const Value& m, const std::string& chave) {
-  if (m.kind != rt::ValueKind::Mapa || !m.map) return nullptr;
-  for (const auto& kv : m.map->items) {
+  if (m.kind != rt::ValueKind::Mapa || !m.map_ref()) return nullptr;
+  for (const auto& kv : m.map_ref()->items) {
     if (kv.first == chave) return &kv.second;
   }
   return nullptr;
@@ -81,27 +82,27 @@ std::string banner(Interpreter& interp) {
   Value funcoes = Value::lista();
   for (const Interpreter::FuncaoPublica& f : interp.funcoes_publicas()) {
     Value params = Value::lista();
-    for (const std::string& p : f.params) params.list->push_back(texto(p));
+    for (const std::string& p : f.params) params.list_ref()->push_back(texto(p));
     Value item = Value::mapa();
-    item.map->items.emplace_back("nome", texto(f.nome));
-    item.map->items.emplace_back("params", params);
-    funcoes.list->push_back(item);
+    item.map_ref()->items.emplace_back("nome", texto(f.nome));
+    item.map_ref()->items.emplace_back("params", params);
+    funcoes.list_ref()->push_back(item);
   }
   Value pipelines = Value::lista();
-  for (const std::string& n : interp.pipelines_publicos()) pipelines.list->push_back(texto(n));
+  for (const std::string& n : interp.pipelines_publicos()) pipelines.list_ref()->push_back(texto(n));
   Value m = Value::mapa();
-  m.map->items.emplace_back("tilt", texto("rpc"));
-  m.map->items.emplace_back("versao", texto(std::string(kVersion)));
-  m.map->items.emplace_back("protocolo", Value::inteiro(kProtocolo));
-  m.map->items.emplace_back("funcoes", funcoes);
-  m.map->items.emplace_back("pipelines", pipelines);
+  m.map_ref()->items.emplace_back("tilt", texto("rpc"));
+  m.map_ref()->items.emplace_back("versao", texto(std::string(kVersion)));
+  m.map_ref()->items.emplace_back("protocolo", Value::inteiro(kProtocolo));
+  m.map_ref()->items.emplace_back("funcoes", funcoes);
+  m.map_ref()->items.emplace_back("pipelines", pipelines);
   return rt::json_dump_compacto(m);
 }
 
 // Trata uma requisicao; devolve a linha de resposta. `sair` liga quando o
 // cliente pediu para encerrar.
 std::string tratar(Interpreter& interp, std::ostringstream& saida, const std::string& linha,
-                   bool& sair) {
+                   bool& sair, bool local_stdio) {
   saida.str("");
   saida.clear();
   Value req;
@@ -114,12 +115,31 @@ std::string tratar(Interpreter& interp, std::ostringstream& saida, const std::st
     return resposta_erro(nullptr, "requisicao invalida: esperado um objeto JSON", "");
   }
   const Value* id = campo(req, "id");
+  const Value* colunar = campo(req, "parquet");
+  const bool usar_parquet = colunar && colunar->kind == rt::ValueKind::Logico && colunar->b;
+  if (usar_parquet && !local_stdio) {
+    return resposta_erro(id, "transporte Parquet disponivel apenas no RPC por stdin/stdout", "");
+  }
+  auto decodificar_tabela = [&](Value& arg) -> std::string {
+    if (!usar_parquet || arg.kind != rt::ValueKind::Mapa || !arg.map_ref() ||
+        arg.map_ref()->items.size() != 1 || arg.map_ref()->items[0].first != "$parquet") return {};
+    const Value& path = arg.map_ref()->items[0].second;
+    if (path.kind != rt::ValueKind::Texto || path.s.empty()) {
+      return "marcador $parquet requer caminho de arquivo";
+    }
+    try {
+      arg = rt::parquet_read(path.s, {}, true);
+    } catch (const std::exception& e) {
+      return std::string("falha ao ler tabela Parquet: ") + e.what();
+    }
+    return {};
+  };
   auto ok = [&](const Value* resultado) {
     Value m = Value::mapa();
-    if (id) m.map->items.emplace_back("id", *id);
-    m.map->items.emplace_back("ok", Value::logico(true));
-    if (resultado) m.map->items.emplace_back("resultado", *resultado);
-    if (!saida.str().empty()) m.map->items.emplace_back("saida", texto(saida.str()));
+    if (id) m.map_ref()->items.emplace_back("id", *id);
+    m.map_ref()->items.emplace_back("ok", Value::logico(true));
+    if (resultado) m.map_ref()->items.emplace_back("resultado", *resultado);
+    if (!saida.str().empty()) m.map_ref()->items.emplace_back("saida", texto(saida.str()));
     return rt::json_dump_compacto(m);
   };
 
@@ -147,42 +167,69 @@ std::string tratar(Interpreter& interp, std::ostringstream& saida, const std::st
   // `lote`: lista de listas de argumentos; uma so ida e volta para N chamadas.
   // O resultado e a lista de resultados; a primeira falha aborta o lote.
   if (const Value* lote = campo(req, "lote")) {
-    if (lote->kind != rt::ValueKind::Lista || !lote->list) {
+    if (usar_parquet) return resposta_erro(id, "transporte Parquet nao suporta lote RPC", "");
+    if (lote->kind != rt::ValueKind::Lista || !lote->list_ref()) {
       return resposta_erro(id, "'lote' deve ser uma lista de listas de argumentos", "");
     }
     Value resultados = Value::lista();
-    for (std::size_t k = 0; k < lote->list->size(); ++k) {
-      const Value& item = (*lote->list)[k];
-      if (item.kind != rt::ValueKind::Lista || !item.list) {
+    for (std::size_t k = 0; k < lote->list_ref()->size(); ++k) {
+      const Value& item = (*lote->list_ref())[k];
+      if (item.kind != rt::ValueKind::Lista || !item.list_ref()) {
         return resposta_erro(id, "'lote' deve ser uma lista de listas de argumentos", "");
       }
       Value um;
       std::string erro;
-      if (!interp.chamar_por_nome(fn->s, *item.list, {}, um, erro)) {
+      if (!interp.chamar_por_nome(fn->s, *item.list_ref(), {}, um, erro)) {
         return resposta_erro(id, "item " + std::to_string(k) + " do lote: " + erro, saida.str());
       }
-      resultados.list->push_back(std::move(um));
+      resultados.list_ref()->push_back(std::move(um));
     }
     return ok(&resultados);
   }
   std::vector<Value> args;
   if (const Value* a = campo(req, "args")) {
-    if (a->kind != rt::ValueKind::Lista || !a->list) {
+    if (a->kind != rt::ValueKind::Lista || !a->list_ref()) {
       return resposta_erro(id, "'args' deve ser uma lista", "");
     }
-    args = *a->list;
+    args = *a->list_ref();
+    for (Value& arg : args) {
+      const std::string erro = decodificar_tabela(arg);
+      if (!erro.empty()) return resposta_erro(id, erro, "");
+    }
   }
   std::vector<std::pair<std::string, Value>> nomeados;
   if (const Value* n = campo(req, "nomeados")) {
-    if (n->kind != rt::ValueKind::Mapa || !n->map) {
+    if (n->kind != rt::ValueKind::Mapa || !n->map_ref()) {
       return resposta_erro(id, "'nomeados' deve ser um objeto", "");
     }
-    for (const auto& kv : n->map->items) nomeados.emplace_back(kv.first, kv.second);
+    for (const auto& kv : n->map_ref()->items) {
+      Value arg = kv.second;
+      const std::string erro = decodificar_tabela(arg);
+      if (!erro.empty()) return resposta_erro(id, erro, "");
+      nomeados.emplace_back(kv.first, std::move(arg));
+    }
   }
   Value resultado;
   std::string erro;
   if (!interp.chamar_por_nome(fn->s, std::move(args), nomeados, resultado, erro)) {
     return resposta_erro(id, erro, saida.str());
+  }
+  if (usar_parquet && resultado.kind == rt::ValueKind::Tabela) {
+    const Value* output = campo(req, "resultado_parquet");
+    if (!output || output->kind != rt::ValueKind::Texto || output->s.empty()) {
+      return resposta_erro(id, "resultado_parquet requer caminho de arquivo", saida.str());
+    }
+    try {
+      rt::ParquetWriteOpts opts;
+      opts.codec = 1;  // snappy
+      rt::parquet_write(output->s, resultado, nullptr, opts);
+    } catch (const std::exception& e) {
+      return resposta_erro(id, std::string("falha ao escrever resultado Parquet: ") + e.what(),
+                           saida.str());
+    }
+    Value marker = Value::mapa();
+    marker.map_ref()->items.emplace_back("$parquet", texto(output->s));
+    return ok(&marker);
   }
   return ok(&resultado);
 }
@@ -226,24 +273,24 @@ rt::HttpResponse tratar_http(Interpreter& interp, std::ostringstream& saida,
   }
   Value pedido = Value::mapa();
   if (acao == "chamar") {
-    pedido.map->items.emplace_back("chamar", texto(nome));
+    pedido.map_ref()->items.emplace_back("chamar", texto(nome));
     if (corpo.kind == rt::ValueKind::Lista) {
-      pedido.map->items.emplace_back("args", corpo);
+      pedido.map_ref()->items.emplace_back("args", corpo);
     } else if (corpo.kind == rt::ValueKind::Mapa) {
-      for (const auto& kv : corpo.map->items) {
-        if (kv.first == "args" || kv.first == "nomeados") pedido.map->items.push_back(kv);
+      for (const auto& kv : corpo.map_ref()->items) {
+        if (kv.first == "args" || kv.first == "nomeados") pedido.map_ref()->items.push_back(kv);
       }
     }
   } else if (acao == "lote") {
-    pedido.map->items.emplace_back("chamar", texto(nome));
-    pedido.map->items.emplace_back("lote",
+    pedido.map_ref()->items.emplace_back("chamar", texto(nome));
+    pedido.map_ref()->items.emplace_back("lote",
                                    corpo.kind == rt::ValueKind::Nulo ? Value::lista() : corpo);
   } else if (acao == "pipeline") {
-    pedido.map->items.emplace_back("pipeline", texto(nome));
+    pedido.map_ref()->items.emplace_back("pipeline", texto(nome));
   } else {
     return resposta(404, resposta_erro(nullptr, "rota desconhecida: " + p, ""));
   }
-  const std::string linha = tratar(interp, saida, rt::json_dump_compacto(pedido), sair);
+  const std::string linha = tratar(interp, saida, rt::json_dump_compacto(pedido), sair, false);
   bool ok = false;
   bool inexistente = false;
   try {
@@ -315,7 +362,7 @@ int cmd_rpc(const std::vector<std::string_view>& args) {
   bool sair = false;
   while (!sair && std::getline(std::cin, linha)) {
     if (linha.empty() || linha.find_first_not_of(" \t\r") == std::string::npos) continue;
-    std::cout << tratar(interp, saida, linha, sair) << "\n" << std::flush;
+    std::cout << tratar(interp, saida, linha, sair, true) << "\n" << std::flush;
   }
   return kOk;
 }

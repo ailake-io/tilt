@@ -34,6 +34,14 @@ llm gpt:
   modelo: "claude-sonnet-5"
   chave: env "ANTHROPIC_API_KEY"
 
+politica OperacaoSegura:
+  max_tokens: 4000
+  max_custo: 0.50
+  max_passos: 6
+  compartilhado: verdadeiro       # orçamento global do llm entre agentes
+  requer_aprovacao: verdadeiro
+  ferramentas_permitidas: [eco]
+
 ferramenta eco:
   descricao: "Repete o texto de volta."
   entrada:
@@ -48,6 +56,7 @@ agente AssistenteTecnico:
     - eco
   memoria: conversa                 # nenhuma | conversa | vetorial
   max_passos: 8
+  politica: OperacaoSegura           # reutilizável por outros agentes
 
 pipeline pergunta:
   passos:
@@ -75,6 +84,7 @@ Retorna (ilustração da forma; ver exemplo executável no fim do guia):
 
 ```tilt skip
 { texto: "...",
+  tokens: 123, custo: 0.01, politica: "OperacaoSegura",
   rastro: [ { passo: 1, ferramenta: "busca_documentos",
               argumentos: {...}, observacao: "..." } ] }
 ```
@@ -112,7 +122,13 @@ formatos).
   `negada: verdadeiro`.
 - `agente` com `max_tokens_sessao: N` para de chamar o LLM quando a soma de
   tokens (entrada + saída) de uma chamada de `.responder` chega a `N` e responde
-  `[agente] limite de tokens da sessao (N) atingido`. `0`/ausente = sem teto.
+  `[agente] limite compartilhado de tokens/custo atingido`. `0`/ausente = sem teto.
+- `politica Nome:` pode ser compartilhada por vários agentes. Seus campos
+  `max_tokens`, `max_custo`, `max_passos`, `requer_aprovacao` e
+  `ferramentas_permitidas` são combinados com os limites locais (o menor limite
+  vence). Com `compartilhado: verdadeiro`, `max_tokens` e `max_custo` consultam
+  também o ledger acumulado do primeiro `llm` da cadeia e valem para os agentes
+  que reutilizam essa política. O resultado inclui tokens, custo e `trace_id`.
 
 ## `equipe`
 

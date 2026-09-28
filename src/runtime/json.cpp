@@ -140,7 +140,7 @@ struct Reader {
       return arr;
     }
     while (true) {
-      arr.list->push_back(parse_value());
+      arr.list_ref()->push_back(parse_value());
       skip_ws();
       char c = take();
       if (c == ']') break;
@@ -162,7 +162,7 @@ struct Reader {
       std::string key = parse_string();
       skip_ws();
       if (take() != ':') die("esperado ':'");
-      obj.map->set(key, parse_value());
+      obj.map_ref()->set(key, parse_value());
       skip_ws();
       char c = take();
       if (c == '}') break;
@@ -211,15 +211,15 @@ void dump_value(const Value& v, std::string& out, int indent) {
       break;
     case ValueKind::Lista:
     case ValueKind::Tabela: {
-      if (!v.list || v.list->empty()) {
+      if (!v.list_ref() || v.list_ref()->empty()) {
         out += "[]";
         break;
       }
       out += "[\n";
-      for (std::size_t k = 0; k < v.list->size(); ++k) {
+      for (std::size_t k = 0; k < v.list_ref()->size(); ++k) {
         out += pad_in;
-        dump_value((*v.list)[k], out, indent + 1);
-        if (k + 1 < v.list->size()) out += ',';
+        dump_value((*v.list_ref())[k], out, indent + 1);
+        if (k + 1 < v.list_ref()->size()) out += ',';
         out += '\n';
       }
       out += pad + "]";
@@ -227,18 +227,18 @@ void dump_value(const Value& v, std::string& out, int indent) {
     }
     case ValueKind::Tensor: {
       out += "{ \"forma\": [";
-      if (v.tensor) {
-        for (std::size_t k = 0; k < v.tensor->shape.size(); ++k) {
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->shape.size(); ++k) {
           if (k) out += ", ";
-          out += std::to_string(v.tensor->shape[k]);
+          out += std::to_string(v.tensor_ref()->shape[k]);
         }
       }
       out += "], \"dados\": [";
-      if (v.tensor) {
-        for (std::size_t k = 0; k < v.tensor->data.size(); ++k) {
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->data.size(); ++k) {
           if (k) out += ", ";
           std::ostringstream ss;
-          ss << std::setprecision(9) << v.tensor->data[k];  // round-trip exato de f32
+          ss << std::setprecision(9) << v.tensor_ref()->data[k];  // round-trip exato de f32
           out += ss.str();
         }
       }
@@ -249,17 +249,17 @@ void dump_value(const Value& v, std::string& out, int indent) {
       out += "null";  // funcoes nao tem representacao JSON
       break;
     case ValueKind::Mapa: {
-      if (!v.map || v.map->items.empty()) {
+      if (!v.map_ref() || v.map_ref()->items.empty()) {
         out += "{}";
         break;
       }
       out += "{\n";
-      for (std::size_t k = 0; k < v.map->items.size(); ++k) {
+      for (std::size_t k = 0; k < v.map_ref()->items.size(); ++k) {
         out += pad_in;
-        dump_string(v.map->items[k].first, out);
+        dump_string(v.map_ref()->items[k].first, out);
         out += ": ";
-        dump_value(v.map->items[k].second, out, indent + 1);
-        if (k + 1 < v.map->items.size()) out += ',';
+        dump_value(v.map_ref()->items[k].second, out, indent + 1);
+        if (k + 1 < v.map_ref()->items.size()) out += ',';
         out += '\n';
       }
       out += pad + "}";
@@ -337,10 +337,10 @@ void compacto_value(const Value& v, std::string& out) {
     case ValueKind::Lista:
     case ValueKind::Tabela: {
       out += '[';
-      if (v.list) {
-        for (std::size_t k = 0; k < v.list->size(); ++k) {
+      if (v.list_ref()) {
+        for (std::size_t k = 0; k < v.list_ref()->size(); ++k) {
           if (k) out += ',';
-          compacto_value((*v.list)[k], out);
+          compacto_value((*v.list_ref())[k], out);
         }
       }
       out += ']';
@@ -348,17 +348,17 @@ void compacto_value(const Value& v, std::string& out) {
     }
     case ValueKind::Tensor: {
       out += "{\"forma\":[";
-      if (v.tensor) {
-        for (std::size_t k = 0; k < v.tensor->shape.size(); ++k) {
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->shape.size(); ++k) {
           if (k) out += ',';
-          out += std::to_string(v.tensor->shape[k]);
+          out += std::to_string(v.tensor_ref()->shape[k]);
         }
       }
       out += "],\"dados\":[";
-      if (v.tensor) {
-        for (std::size_t k = 0; k < v.tensor->data.size(); ++k) {
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->data.size(); ++k) {
           if (k) out += ',';
-          compacto_decimal(static_cast<double>(v.tensor->data[k]), out);
+          compacto_decimal(static_cast<double>(v.tensor_ref()->data[k]), out);
         }
       }
       out += "]}";
@@ -366,12 +366,12 @@ void compacto_value(const Value& v, std::string& out) {
     }
     case ValueKind::Mapa: {
       out += '{';
-      if (v.map) {
-        for (std::size_t k = 0; k < v.map->items.size(); ++k) {
+      if (v.map_ref()) {
+        for (std::size_t k = 0; k < v.map_ref()->items.size(); ++k) {
           if (k) out += ',';
-          compacto_string(v.map->items[k].first, out);
+          compacto_string(v.map_ref()->items[k].first, out);
           out += ':';
-          compacto_value(v.map->items[k].second, out);
+          compacto_value(v.map_ref()->items[k].second, out);
         }
       }
       out += '}';

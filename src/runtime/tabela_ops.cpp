@@ -9,10 +9,12 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
 #include "runtime/fuso.hpp"
+#include "runtime/columnar.hpp"
 #include "runtime/json.hpp"
 #include "runtime/sorteio.hpp"
 
@@ -27,17 +29,17 @@ const ValueList& linhas_de(const Value& t, const char* metodo) {
   if (t.kind != ValueKind::Tabela && t.kind != ValueKind::Lista) {
     erro(std::string(metodo) + ": o receptor deve ser uma tabela (lista de mapas)");
   }
-  return t.list ? *t.list : vazia;
+  return t.list_ref() ? *t.list_ref() : vazia;
 }
 
 const Value* celula(const Value& linha, const std::string& coluna) {
-  return linha.kind == ValueKind::Mapa && linha.map ? linha.map->find(coluna) : nullptr;
+  return linha.kind == ValueKind::Mapa && linha.map_ref() ? linha.map_ref()->find(coluna) : nullptr;
 }
 
 // Copia rasa dos itens do mapa (as tabelas de entrada nao podem ser alteradas).
 Value nova_linha(const Value& linha) {
   Value nl = Value::mapa();
-  if (linha.kind == ValueKind::Mapa && linha.map) nl.map->items = linha.map->items;
+  if (linha.kind == ValueKind::Mapa && linha.map_ref()) nl.map_ref()->items = linha.map_ref()->items;
   return nl;
 }
 
@@ -46,12 +48,79 @@ std::vector<std::string> colunas_de(const ValueList& linhas) {
   std::vector<std::string> cols;
   std::unordered_set<std::string> vistas;
   for (const Value& l : linhas) {
-    if (l.kind != ValueKind::Mapa || !l.map) continue;
-    for (const auto& kv : l.map->items) {
+    if (l.kind != ValueKind::Mapa || !l.map_ref()) continue;
+    for (const auto& kv : l.map_ref()->items) {
       if (vistas.insert(kv.first).second) cols.push_back(kv.first);
     }
   }
   return cols;
+}
+
+std::string tipo_de_valor(const Value& v) {
+  switch (v.kind) {
+    case ValueKind::Logico: return "logico";
+    case ValueKind::Inteiro: return "inteiro";
+    case ValueKind::Decimal: return "decimal";
+    case ValueKind::Texto: {
+      if (!normalizar_data(v.s).empty()) return normalizar_data(v.s).size() > 10 ? "data_hora" : "data";
+      return "texto";
+    }
+    case ValueKind::Lista: return "lista";
+    case ValueKind::Mapa: return "mapa";
+    case ValueKind::Tabela: return "tabela";
+    case ValueKind::Tensor: return "tensor";
+    case ValueKind::Nulo: return "nulo";
+    default: return "texto";
+  }
+}
+
+std::string promover_tipo_schema(const std::string& atual, const std::string& novo) {
+  if (novo == "nulo") return atual;
+  if (atual.empty() || atual == "nulo" || atual == novo) return novo;
+  if ((atual == "inteiro" && novo == "decimal") || (atual == "decimal" && novo == "inteiro"))
+    return "decimal";
+  if ((atual == "data" && novo == "data_hora") || (atual == "data_hora" && novo == "data"))
+    return "data_hora";
+  return "texto";
+}
+
+bool schema_tipo_compativel(const std::string& esperado, const Value& valor) {
+  if (valor.kind == ValueKind::Nulo) return true;
+  const std::string atual = tipo_de_valor(valor);
+  if (esperado == atual || esperado == "texto") return true;
+  if (esperado == "decimal" && atual == "inteiro") return true;
+  if (esperado == "data_hora" && atual == "data") return true;
+  return false;
+}
+
+Value schema_copia_campo(const Value& campo) {
+  Value out = Value::mapa();
+  if (campo.kind == ValueKind::Mapa && campo.map_ref()) {
+    for (const auto& kv : campo.map_ref()->items) out.map_ref()->set(kv.first, kv.second);
+  }
+  return out;
+}
+
+const Value* schema_campo(const Value& campos, const std::string& nome) {
+  if (campos.kind != ValueKind::Lista || !campos.list_ref()) return nullptr;
+  for (const Value& campo : *campos.list_ref()) {
+    if (campo.kind != ValueKind::Mapa || !campo.map_ref()) continue;
+    const Value* n = campo.map_ref()->find("nome");
+    if (n && n->kind == ValueKind::Texto && n->s == nome) return &campo;
+  }
+  return nullptr;
+}
+
+std::string campo_tipo(const Value& campo) {
+  if (campo.kind != ValueKind::Mapa || !campo.map_ref()) return "texto";
+  const Value* tipo = campo.map_ref()->find("tipo");
+  return tipo && tipo->kind == ValueKind::Texto ? tipo->s : "texto";
+}
+
+bool campo_nulavel(const Value& campo) {
+  if (campo.kind != ValueKind::Mapa || !campo.map_ref()) return true;
+  const Value* n = campo.map_ref()->find("nulavel");
+  return n == nullptr || n->truthy();
 }
 
 void exige_coluna(const std::vector<std::string>& cols, const std::string& nome,
@@ -162,6 +231,16 @@ Value para_data(const Value& v) {
   return d.empty() ? Value::nulo() : Value::texto(d);
 }
 
+Value para_data_hora(const Value& v) {
+  if (v.kind != ValueKind::Texto) return Value::nulo();
+  try {
+    const std::string d = converter_fuso(v.s, "UTC", "UTC");
+    return d.empty() ? Value::nulo() : Value::texto(d);
+  } catch (const std::exception&) {
+    return Value::nulo();
+  }
+}
+
 using Conversor = Value (*)(const Value&);
 
 Conversor conversor_de(const std::string& tipo) {
@@ -170,12 +249,14 @@ Conversor conversor_de(const std::string& tipo) {
   if (tipo == "logico" || tipo == "boolean" || tipo == "bool") return para_logico;
   if (tipo == "texto" || tipo == "text" || tipo == "string") return para_texto;
   if (tipo == "data" || tipo == "date") return para_data;
+  if (tipo == "data_hora" || tipo == "datetime" || tipo == "timestamp") return para_data_hora;
   if (tipo == "inteiro") return para_inteiro;
   if (tipo == "decimal") return para_decimal;
   if (tipo == "logico") return para_logico;
   if (tipo == "texto") return para_texto;
   if (tipo == "data") return para_data;
-  erro("converter: tipo desconhecido '" + tipo + "' (use inteiro, decimal, texto, logico ou data)");
+  erro("converter: tipo desconhecido '" + tipo +
+       "' (use inteiro, decimal, texto, logico, data ou data_hora)");
 }
 
 // ---- ordenacao ------------------------------------------------------------------
@@ -264,6 +345,8 @@ int digitos(const std::string& s, std::size_t p, std::size_t n) {
 
 }  // namespace
 
+ConversorTabela tabela_conversor(const std::string& tipo) { return conversor_de(tipo); }
+
 std::string normalizar_data(const std::string& texto) {
   const std::string s = aparar(texto);
   int a = -1;
@@ -287,7 +370,7 @@ std::string normalizar_data(const std::string& texto) {
     return "";
   }
   if (a < 0 || m < 1 || m > 12 || d < 1 || d > dias_no_mes(a, m)) return "";
-  char buf[16];
+  char buf[32];
   std::snprintf(buf, sizeof buf, "%04d-%02d-%02d", a, m, d);
   std::string out = buf;
   if (p == s.size()) return out;
@@ -321,8 +404,8 @@ Value tabela_remover_nulos(const Value& t, const std::vector<std::string>& colun
   for (const Value& l : linhas) {
     bool remove = false;
     if (colunas.empty()) {
-      if (l.kind == ValueKind::Mapa && l.map) {
-        for (const auto& kv : l.map->items) remove = remove || celula_nula(&kv.second);
+      if (l.kind == ValueKind::Mapa && l.map_ref()) {
+        for (const auto& kv : l.map_ref()->items) remove = remove || celula_nula(&kv.second);
       }
     } else {
       for (const std::string& c : colunas) remove = remove || celula_nula(celula(l, c));
@@ -336,14 +419,14 @@ Value tabela_preencher_nulos(const Value& t, const Value& preenchimento) {
   const ValueList& linhas = linhas_de(t, "preencher_nulos");
   ValueList out;
   out.reserve(linhas.size());
-  if (preenchimento.kind == ValueKind::Mapa && preenchimento.map) {
+  if (preenchimento.kind == ValueKind::Mapa && preenchimento.map_ref()) {
     for (const Value& l : linhas) {
       Value nl = nova_linha(l);
-      for (const auto& [col, valor] : preenchimento.map->items) {
-        if (Value* c = nl.map->find(col)) {
+      for (const auto& [col, valor] : preenchimento.map_ref()->items) {
+        if (Value* c = nl.map_ref()->find(col)) {
           if (celula_nula(c)) *c = valor;
         } else {
-          nl.map->items.emplace_back(col, valor);
+          nl.map_ref()->items.emplace_back(col, valor);
         }
       }
       out.push_back(std::move(nl));
@@ -351,7 +434,7 @@ Value tabela_preencher_nulos(const Value& t, const Value& preenchimento) {
   } else {
     for (const Value& l : linhas) {
       Value nl = nova_linha(l);
-      for (auto& kv : nl.map->items) {
+      for (auto& kv : nl.map_ref()->items) {
         if (celula_nula(&kv.second)) kv.second = preenchimento;
       }
       out.push_back(std::move(nl));
@@ -362,11 +445,11 @@ Value tabela_preencher_nulos(const Value& t, const Value& preenchimento) {
 
 Value tabela_renomear(const Value& t, const Value& mapa) {
   const ValueList& linhas = linhas_de(t, "renomear");
-  if (mapa.kind != ValueKind::Mapa || !mapa.map) {
+  if (mapa.kind != ValueKind::Mapa || !mapa.map_ref()) {
     erro("renomear espera um mapa { antigo: \"novo\" }");
   }
   const std::vector<std::string> cols = colunas_de(linhas);
-  for (const auto& [antigo, novo] : mapa.map->items) {
+  for (const auto& [antigo, novo] : mapa.map_ref()->items) {
     if (novo.kind != ValueKind::Texto)
       erro("renomear: o novo nome de '" + antigo + "' deve ser texto");
     exige_coluna(cols, antigo, "renomear");
@@ -375,11 +458,11 @@ Value tabela_renomear(const Value& t, const Value& mapa) {
   out.reserve(linhas.size());
   for (const Value& l : linhas) {
     Value nl = Value::mapa();
-    if (l.kind == ValueKind::Mapa && l.map) {
-      nl.map->items.reserve(l.map->items.size());
-      for (const auto& kv : l.map->items) {
-        const Value* novo = mapa.map->find(kv.first);
-        nl.map->set(novo ? novo->s : kv.first, kv.second);
+    if (l.kind == ValueKind::Mapa && l.map_ref()) {
+      nl.map_ref()->items.reserve(l.map_ref()->items.size());
+      for (const auto& kv : l.map_ref()->items) {
+        const Value* novo = mapa.map_ref()->find(kv.first);
+        nl.map_ref()->set(novo ? novo->s : kv.first, kv.second);
       }
     }
     out.push_back(std::move(nl));
@@ -396,9 +479,9 @@ Value tabela_remover_colunas(const Value& t, const std::vector<std::string>& nom
   out.reserve(linhas.size());
   for (const Value& l : linhas) {
     Value nl = Value::mapa();
-    if (l.kind == ValueKind::Mapa && l.map) {
-      for (const auto& kv : l.map->items) {
-        if (fora.count(kv.first) == 0) nl.map->items.push_back(kv);
+    if (l.kind == ValueKind::Mapa && l.map_ref()) {
+      for (const auto& kv : l.map_ref()->items) {
+        if (fora.count(kv.first) == 0) nl.map_ref()->items.push_back(kv);
       }
     }
     out.push_back(std::move(nl));
@@ -408,14 +491,14 @@ Value tabela_remover_colunas(const Value& t, const std::vector<std::string>& nom
 
 Value tabela_converter(const Value& t, const Value& tipos) {
   const ValueList& linhas = linhas_de(t, "converter");
-  if (tipos.kind != ValueKind::Mapa || !tipos.map) {
+  if (tipos.kind != ValueKind::Mapa || !tipos.map_ref()) {
     erro(
         "converter espera um mapa { coluna: \"inteiro\" | \"decimal\" | \"texto\" | \"logico\" | "
         "\"data\" }");
   }
   const std::vector<std::string> cols = colunas_de(linhas);
   std::vector<std::pair<std::string, Conversor>> plano;
-  for (const auto& [col, tipo] : tipos.map->items) {
+  for (const auto& [col, tipo] : tipos.map_ref()->items) {
     if (tipo.kind != ValueKind::Texto) erro("converter: o tipo de '" + col + "' deve ser texto");
     exige_coluna(cols, col, "converter");
     plano.emplace_back(col, conversor_de(tipo.s));
@@ -425,7 +508,7 @@ Value tabela_converter(const Value& t, const Value& tipos) {
   for (const Value& l : linhas) {
     Value nl = nova_linha(l);
     for (const auto& [col, conv] : plano) {
-      if (Value* c = nl.map->find(col)) *c = conv(*c);
+      if (Value* c = nl.map_ref()->find(col)) *c = conv(*c);
     }
     out.push_back(std::move(nl));
   }
@@ -476,13 +559,13 @@ Value tabela_juntar_pt(const Value& esq, const Value& dir, const Value& por,
   std::vector<std::pair<std::string, std::string>> chaves;  // (coluna esquerda, coluna direita)
   if (por.kind == ValueKind::Texto) {
     chaves.emplace_back(por.s, por.s);
-  } else if (por.kind == ValueKind::Lista && por.list) {
-    for (const Value& v : *por.list) {
+  } else if (por.kind == ValueKind::Lista && por.list_ref()) {
+    for (const Value& v : *por.list_ref()) {
       if (v.kind != ValueKind::Texto) erro("juntar: 'por' deve listar nomes de coluna (texto)");
       chaves.emplace_back(v.s, v.s);
     }
-  } else if (por.kind == ValueKind::Mapa && por.map) {
-    for (const auto& [e, d] : por.map->items) {
+  } else if (por.kind == ValueKind::Mapa && por.map_ref()) {
+    for (const auto& [e, d] : por.map_ref()->items) {
       if (d.kind != ValueKind::Texto) erro("juntar: em { esquerda: direita } os nomes sao texto");
       chaves.emplace_back(e, d.s);
     }
@@ -530,7 +613,7 @@ Value tabela_juntar_pt(const Value& esq, const Value& dir, const Value& por,
   const auto acrescenta_direita = [&](Value& nl, const Value* d) {
     for (const auto& [origem, final] : extras) {
       const Value* v = d ? celula(*d, origem) : nullptr;
-      nl.map->set(final, v ? *v : Value::nulo());
+      nl.map_ref()->set(final, v ? *v : Value::nulo());
     }
   };
   for (const Value& l : le) {
@@ -554,10 +637,10 @@ Value tabela_juntar_pt(const Value& esq, const Value& dir, const Value& por,
     for (std::size_t j = 0; j < ld.size(); ++j) {
       if (direita_casou[j] != 0) continue;
       Value nl = Value::mapa();
-      for (const std::string& c : cols_e) nl.map->set(c, Value::nulo());
+      for (const std::string& c : cols_e) nl.map_ref()->set(c, Value::nulo());
       for (const auto& [e, d] : chaves) {  // a chave vem da direita
         const Value* v = celula(ld[j], d);
-        nl.map->set(e, v ? *v : Value::nulo());
+        nl.map_ref()->set(e, v ? *v : Value::nulo());
       }
       acrescenta_direita(nl, &ld[j]);
       out.push_back(std::move(nl));
@@ -580,10 +663,10 @@ Value tabela_empilhar(const std::vector<Value>& tabelas) {
   for (const ValueList* p : partes) {
     for (const Value& l : *p) {
       Value nl = Value::mapa();
-      nl.map->items.reserve(cols.size());
+      nl.map_ref()->items.reserve(cols.size());
       for (const std::string& c : cols) {
         const Value* v = celula(l, c);
-        nl.map->items.emplace_back(c, v ? *v : Value::nulo());
+        nl.map_ref()->items.emplace_back(c, v ? *v : Value::nulo());
       }
       out.push_back(std::move(nl));
     }
@@ -669,19 +752,189 @@ Value tabela_descrever(const Value& t) {
       }
     }
     Value r = Value::mapa();
-    r.map->set("coluna", Value::texto(c));
-    r.map->set("tipo", Value::texto(tipo));
-    r.map->set("total", Value::inteiro(static_cast<std::int64_t>(linhas.size())));
-    r.map->set("nulos", Value::inteiro(nulos));
-    r.map->set("distintos", Value::inteiro(static_cast<std::int64_t>(distintos.size())));
-    r.map->set("minimo", menor ? *menor : Value::nulo());
-    r.map->set("maximo", maior ? *maior : Value::nulo());
-    r.map->set("media", algum && todos_num && n_num > 0
+    r.map_ref()->set("coluna", Value::texto(c));
+    r.map_ref()->set("tipo", Value::texto(tipo));
+    r.map_ref()->set("total", Value::inteiro(static_cast<std::int64_t>(linhas.size())));
+    r.map_ref()->set("nulos", Value::inteiro(nulos));
+    r.map_ref()->set("distintos", Value::inteiro(static_cast<std::int64_t>(distintos.size())));
+    r.map_ref()->set("minimo", menor ? *menor : Value::nulo());
+    r.map_ref()->set("maximo", maior ? *maior : Value::nulo());
+    r.map_ref()->set("media", algum && todos_num && n_num > 0
                             ? Value::decimal(soma / static_cast<double>(n_num))
                             : Value::nulo());
     out.push_back(std::move(r));
   }
   return Value::tabela(std::move(out));
+}
+
+Value tabela_inferir_schema(const Value& t, std::size_t limite_amostra) {
+  Value materializada = t;
+  materializada.materialize_rows();
+  const ValueList& linhas = linhas_de(materializada, "inferir_schema");
+  const std::size_t limite = limite_amostra == 0 ? linhas.size() : std::min(limite_amostra, linhas.size());
+  const std::vector<std::string> cols = colunas_de(linhas);
+  Value campos = Value::lista();
+  for (std::size_t ordem = 0; ordem < cols.size(); ++ordem) {
+    std::string tipo;
+    std::size_t nulos = 0;
+    for (std::size_t i = 0; i < limite; ++i) {
+      const Value* cel = celula(linhas[i], cols[ordem]);
+      if (celula_nula(cel)) {
+        ++nulos;
+        continue;
+      }
+      tipo = promover_tipo_schema(tipo, tipo_de_valor(*cel));
+    }
+    if (tipo.empty()) tipo = "texto";
+    Value campo = Value::mapa();
+    campo.map_ref()->set("nome", Value::texto(cols[ordem]));
+    campo.map_ref()->set("tipo", Value::texto(tipo));
+    campo.map_ref()->set("nulavel", Value::logico(nulos != 0));
+    campo.map_ref()->set("ordem", Value::inteiro(static_cast<std::int64_t>(ordem)));
+    campos.list_ref()->push_back(std::move(campo));
+  }
+  Value schema = Value::mapa();
+  schema.map_ref()->set("versao", Value::inteiro(1));
+  schema.map_ref()->set("formato", Value::texto("tilt.schema"));
+  schema.map_ref()->set("linhas_amostra", Value::inteiro(static_cast<std::int64_t>(limite)));
+  schema.map_ref()->set("linhas_total", Value::inteiro(static_cast<std::int64_t>(linhas.size())));
+  schema.map_ref()->set("campos", std::move(campos));
+  return schema;
+}
+
+Value tabela_perfil(const Value& t, std::size_t limite_amostra) {
+  Value materializada = t;
+  materializada.materialize_rows();
+  const ValueList& linhas = linhas_de(materializada, "perfil");
+  const std::size_t limite = limite_amostra == 0 ? linhas.size() : std::min(limite_amostra, linhas.size());
+  ValueList amostra;
+  amostra.reserve(limite);
+  for (std::size_t i = 0; i < limite; ++i) amostra.push_back(linhas[i]);
+  Value amostra_tabela = Value::tabela(std::move(amostra));
+  Value perfil = Value::mapa();
+  perfil.map_ref()->set("linhas", Value::inteiro(static_cast<std::int64_t>(linhas.size())));
+  perfil.map_ref()->set("amostra", Value::inteiro(static_cast<std::int64_t>(limite)));
+  perfil.map_ref()->set("schema", tabela_inferir_schema(amostra_tabela, 0));
+  perfil.map_ref()->set("colunas", tabela_descrever(amostra_tabela));
+  return perfil;
+}
+
+Value tabela_validar_schema(const Value& t, const Value& schema) {
+  Value materializada = t;
+  materializada.materialize_rows();
+  const ValueList& linhas = linhas_de(materializada, "validar_schema");
+  Value resultado = Value::mapa();
+  Value erros = Value::lista();
+  if (schema.kind != ValueKind::Mapa || !schema.map_ref()) {
+    erros.list_ref()->push_back(Value::texto("schema deve ser um mapa versionado"));
+    resultado.map_ref()->set("ok", Value::logico(false));
+    resultado.map_ref()->set("erros", std::move(erros));
+    return resultado;
+  }
+  const Value* versao = schema.map_ref()->find("versao");
+  const Value* campos = schema.map_ref()->find("campos");
+  if (!versao || versao->kind != ValueKind::Inteiro || versao->i < 1)
+    erros.list_ref()->push_back(Value::texto("schema.versao deve ser inteiro >= 1"));
+  if (!campos || campos->kind != ValueKind::Lista || !campos->list_ref()) {
+    erros.list_ref()->push_back(Value::texto("schema.campos deve ser uma lista"));
+  } else {
+    std::unordered_set<std::string> esperadas;
+    for (const Value& campo : *campos->list_ref()) {
+      if (campo.kind != ValueKind::Mapa || !campo.map_ref()) {
+        erros.list_ref()->push_back(Value::texto("schema.campos contem uma entrada invalida"));
+        continue;
+      }
+      const Value* nome = campo.map_ref()->find("nome");
+      if (!nome || nome->kind != ValueKind::Texto || nome->s.empty()) {
+        erros.list_ref()->push_back(Value::texto("campo do schema sem nome"));
+        continue;
+      }
+      esperadas.insert(nome->s);
+      const std::string tipo = campo_tipo(campo);
+      for (std::size_t i = 0; i < linhas.size(); ++i) {
+        const Value* cel = celula(linhas[i], nome->s);
+        if (!cel) {
+          if (!campo_nulavel(campo)) {
+            erros.list_ref()->push_back(Value::texto("linha " + std::to_string(i) + ": coluna '" +
+                                                      nome->s + "' ausente"));
+          }
+          continue;
+        }
+        if (celula_nula(cel)) {
+          if (!campo_nulavel(campo))
+            erros.list_ref()->push_back(Value::texto("linha " + std::to_string(i) + ": coluna '" +
+                                                      nome->s + "' nao aceita nulo"));
+        } else if (!schema_tipo_compativel(tipo, *cel)) {
+          erros.list_ref()->push_back(Value::texto("linha " + std::to_string(i) + ": coluna '" +
+                                                    nome->s + "' esperava " + tipo + ", recebeu " +
+                                                    tipo_de_valor(*cel)));
+        }
+      }
+    }
+    for (const std::string& col : colunas_de(linhas)) {
+      if (esperadas.count(col) == 0)
+        erros.list_ref()->push_back(Value::texto("coluna inesperada: '" + col + "'"));
+    }
+  }
+  resultado.map_ref()->set("ok", Value::logico(erros.list_ref()->empty()));
+  resultado.map_ref()->set("versao", versao ? *versao : Value::nulo());
+  resultado.map_ref()->set("erros", std::move(erros));
+  return resultado;
+}
+
+Value tabela_evoluir_schema(const Value& schema, const Value& t) {
+  if (schema.kind != ValueKind::Mapa || !schema.map_ref())
+    throw std::runtime_error("evoluir_schema espera um schema versionado");
+  const Value* campos_antigos = schema.map_ref()->find("campos");
+  if (!campos_antigos || campos_antigos->kind != ValueKind::Lista || !campos_antigos->list_ref())
+    throw std::runtime_error("evoluir_schema: schema.campos deve ser uma lista");
+  const Value novo = tabela_inferir_schema(t, 0);
+  const Value* campos_novos = novo.map_ref()->find("campos");
+  Value out = Value::mapa();
+  for (const auto& kv : schema.map_ref()->items) {
+    if (kv.first != "campos" && kv.first != "versao") out.map_ref()->set(kv.first, kv.second);
+  }
+  Value campos = Value::lista();
+  bool alterado = false;
+  for (const Value& antigo : *campos_antigos->list_ref()) {
+    const Value* nome = antigo.map_ref() ? antigo.map_ref()->find("nome") : nullptr;
+    if (!nome || nome->kind != ValueKind::Texto) continue;
+    Value campo = schema_copia_campo(antigo);
+    if (const Value* atual = schema_campo(*campos_novos, nome->s)) {
+      const std::string tipo_antigo = campo_tipo(antigo);
+      const std::string tipo_novo = campo_tipo(*atual);
+      const std::string promovido = promover_tipo_schema(tipo_antigo, tipo_novo);
+      if (promovido != tipo_antigo) {
+        campo.map_ref()->set("tipo", Value::texto(promovido));
+        alterado = true;
+      }
+      if (!campo_nulavel(antigo) && campo_nulavel(*atual)) {
+        campo.map_ref()->set("nulavel", Value::logico(true));
+        alterado = true;
+      }
+    }
+    campos.list_ref()->push_back(std::move(campo));
+  }
+  for (const Value& atual : *campos_novos->list_ref()) {
+    const Value* nome = atual.map_ref() ? atual.map_ref()->find("nome") : nullptr;
+    if (!nome || nome->kind != ValueKind::Texto || schema_campo(*campos_antigos, nome->s)) continue;
+    Value campo = schema_copia_campo(atual);
+    campo.map_ref()->set("nulavel", Value::logico(true));
+    campos.list_ref()->push_back(std::move(campo));
+    alterado = true;
+  }
+  std::int64_t versao = 1;
+  if (const Value* v = schema.map_ref()->find("versao"); v && v->kind == ValueKind::Inteiro)
+    versao = std::max<std::int64_t>(1, v->i);
+  out.map_ref()->set("versao", Value::inteiro(alterado ? versao + 1 : versao));
+  out.map_ref()->set("linhas_amostra", novo.map_ref()->find("linhas_amostra")
+                                          ? *novo.map_ref()->find("linhas_amostra")
+                                          : Value::nulo());
+  out.map_ref()->set("linhas_total", novo.map_ref()->find("linhas_total")
+                                        ? *novo.map_ref()->find("linhas_total")
+                                        : Value::nulo());
+  out.map_ref()->set("campos", std::move(campos));
+  return out;
 }
 
 Value tabela_amostra(const Value& t, double n, std::uint64_t semente) {
@@ -727,8 +980,8 @@ Value tabela_contar_valores(const Value& t, const std::string& coluna) {
   ValueList out;
   for (const std::uint32_t i : ordem) {
     Value r = Value::mapa();
-    r.map->set("valor", valores[i].first);
-    r.map->set("contagem", Value::inteiro(valores[i].second));
+    r.map_ref()->set("valor", valores[i].first);
+    r.map_ref()->set("contagem", Value::inteiro(valores[i].second));
     out.push_back(std::move(r));
   }
   return Value::tabela(std::move(out));
@@ -767,7 +1020,7 @@ Value tabela_limpar_texto(const Value& t, const std::vector<std::string>& coluna
   out.reserve(linhas.size());
   for (const Value& l : linhas) {
     Value nl = nova_linha(l);
-    for (auto& kv : nl.map->items) {
+    for (auto& kv : nl.map_ref()->items) {
       if (kv.second.kind != ValueKind::Texto) continue;
       if (!alvo.empty() && alvo.count(kv.first) == 0) continue;
       kv.second = Value::texto(limpa(kv.second.s));
@@ -790,6 +1043,140 @@ Value tabela_ordenar(const Value& t, const std::vector<std::string>& colunas, bo
   out.reserve(linhas.size());
   for (const std::uint32_t i : ordem) out.push_back(linhas[i]);
   return Value::tabela(std::move(out));
+}
+
+Value tabela_ordenar_colunar(const Value& t, const std::vector<std::string>& colunas,
+                             bool decrescente) {
+  const ColumnarTable* table = t.columnar();
+  if (!table) return tabela_ordenar(t, colunas, decrescente);
+  if (colunas.empty()) erro("ordenar_por espera uma ou mais colunas");
+  std::vector<std::size_t> ordem(table->rows);
+  std::iota(ordem.begin(), ordem.end(), std::size_t{0});
+  for (std::size_t k = colunas.size(); k-- > 0;) {
+    const ColumnarColumn* column = table->find(colunas[k]);
+    if (!column) erro("ordenar_por: coluna inexistente '" + colunas[k] + "'");
+    std::vector<std::uint32_t> dictionary_rank;
+    if (column->type == ColumnarColumn::Type::Text) {
+      std::vector<std::uint32_t> ordem_dicionario(column->dictionary.size());
+      std::iota(ordem_dicionario.begin(), ordem_dicionario.end(), std::uint32_t{0});
+      std::stable_sort(ordem_dicionario.begin(), ordem_dicionario.end(),
+                       [&](std::uint32_t a, std::uint32_t b) {
+                         return column->dictionary[a] < column->dictionary[b];
+                       });
+      dictionary_rank.resize(ordem_dicionario.size());
+      for (std::uint32_t rank = 0; rank < ordem_dicionario.size(); ++rank)
+        dictionary_rank[ordem_dicionario[rank]] = rank;
+    }
+    const auto menor = [&](std::size_t a, std::size_t b) {
+      const bool na = a >= column->nulls.size() || column->nulls[a];
+      const bool nb = b >= column->nulls.size() || column->nulls[b];
+      if (na || nb) return na != nb ? na : false;
+      switch (column->type) {
+        case ColumnarColumn::Type::Integer: return column->integers[a] < column->integers[b];
+        case ColumnarColumn::Type::Decimal: return column->decimals[a] < column->decimals[b];
+        case ColumnarColumn::Type::Boolean: return column->booleans[a] < column->booleans[b];
+        case ColumnarColumn::Type::Text:
+          return dictionary_rank[column->codes[a]] < dictionary_rank[column->codes[b]];
+        case ColumnarColumn::Type::TextPlain: return column->texts[a] < column->texts[b];
+        default: return to_display(column->at(a)) < to_display(column->at(b));
+      }
+    };
+    const auto comparar = [&](std::size_t a, std::size_t b) {
+      return decrescente ? menor(b, a) : menor(a, b);
+    };
+    const bool todas_inteiras = !decrescente && std::all_of(
+        colunas.begin(), colunas.end(), [&](const std::string& nome) {
+          const ColumnarColumn* c = table->find(nome);
+          return c && c->type == ColumnarColumn::Type::Integer;
+        });
+    if (todas_inteiras && column->type == ColumnarColumn::Type::Integer) {
+      // LSD radix estável: transforma a ordem assinada em unsigned preservando
+      // negativos antes dos positivos. Nulos ficam no início, como no
+      // comparador colunar, e não participam das passagens de radix.
+      std::vector<std::size_t> nulos;
+      std::vector<std::size_t> valores;
+      valores.reserve(ordem.size());
+      for (std::size_t row : ordem) {
+        if (row >= column->nulls.size() || column->nulls[row]) nulos.push_back(row);
+        else valores.push_back(row);
+      }
+      std::vector<std::size_t> temporario(valores.size());
+      for (unsigned deslocamento = 0; deslocamento < 64; deslocamento += 8) {
+        std::size_t contagem[256] = {};
+        for (std::size_t row : valores) {
+          const auto chave = static_cast<std::uint64_t>(column->integers[row]) ^ (1ULL << 63);
+          ++contagem[(chave >> deslocamento) & 0xFFu];
+        }
+        std::size_t acumulado = 0;
+        for (std::size_t& quantidade : contagem) {
+          const std::size_t atual = quantidade;
+          quantidade = acumulado;
+          acumulado += atual;
+        }
+        for (std::size_t row : valores) {
+          const auto chave = static_cast<std::uint64_t>(column->integers[row]) ^ (1ULL << 63);
+          temporario[contagem[(chave >> deslocamento) & 0xFFu]++] = row;
+        }
+        valores.swap(temporario);
+      }
+      ordem.clear();
+      ordem.insert(ordem.end(), nulos.begin(), nulos.end());
+      ordem.insert(ordem.end(), valores.begin(), valores.end());
+      continue;
+    }
+    const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+    if (ordem.size() < 131072 || hardware < 2) {
+      std::stable_sort(ordem.begin(), ordem.end(), comparar);
+    } else {
+      const unsigned partes = static_cast<unsigned>(
+          std::min<std::size_t>(hardware, ordem.size() / 65536 + 1));
+      std::vector<std::thread> workers;
+      workers.reserve(partes);
+      for (unsigned parte = 0; parte < partes; ++parte) {
+        const std::size_t inicio = ordem.size() * parte / partes;
+        const std::size_t fim = ordem.size() * (parte + 1) / partes;
+        workers.emplace_back([&, inicio, fim] {
+          std::stable_sort(ordem.begin() + static_cast<std::ptrdiff_t>(inicio),
+                           ordem.begin() + static_cast<std::ptrdiff_t>(fim), comparar);
+        });
+      }
+      for (auto& worker : workers) worker.join();
+      // Fusão em árvore: cada rodada combina pares de partições em paralelo,
+      // evitando fundir repetidamente um prefixo cada vez maior.
+      std::vector<std::size_t> fundido(ordem.size());
+      for (unsigned largura = 1; largura < partes; largura *= 2) {
+        const unsigned tarefas = (partes + largura * 2 - 1) / (largura * 2);
+        std::vector<std::thread> mergers;
+        mergers.reserve(tarefas);
+        for (unsigned tarefa = 0; tarefa < tarefas; ++tarefa) {
+          const unsigned primeira = tarefa * largura * 2;
+          const unsigned segunda = std::min(primeira + largura, partes);
+          const unsigned ultima = std::min(primeira + largura * 2, partes);
+          const std::size_t inicio = ordem.size() * primeira / partes;
+          const std::size_t meio = ordem.size() * segunda / partes;
+          const std::size_t fim = ordem.size() * ultima / partes;
+          mergers.emplace_back([&, inicio, meio, fim] {
+            if (meio == fim) {
+              std::copy(ordem.begin() + static_cast<std::ptrdiff_t>(inicio),
+                        ordem.begin() + static_cast<std::ptrdiff_t>(fim),
+                        fundido.begin() + static_cast<std::ptrdiff_t>(inicio));
+              return;
+            }
+            std::merge(ordem.begin() + static_cast<std::ptrdiff_t>(inicio),
+                       ordem.begin() + static_cast<std::ptrdiff_t>(meio),
+                       ordem.begin() + static_cast<std::ptrdiff_t>(meio),
+                       ordem.begin() + static_cast<std::ptrdiff_t>(fim),
+                       fundido.begin() + static_cast<std::ptrdiff_t>(inicio), comparar);
+          });
+        }
+        for (auto& merger : mergers) merger.join();
+        ordem.swap(fundido);
+      }
+    }
+  }
+  auto resultado = table->take_rows(ordem);
+  if (!decrescente) resultado->sorted_by.push_back(colunas);
+  return Value::tabela_colunar(std::move(resultado));
 }
 
 namespace {
@@ -877,7 +1264,7 @@ Value tabela_pivotar(const Value& t, const std::vector<std::string>& indice,
   out.reserve(chaves_indice.size());
   for (std::size_t r = 0; r < chaves_indice.size(); ++r) {
     Value nl = Value::mapa();
-    for (std::size_t k = 0; k < indice.size(); ++k) nl.map->set(indice[k], chaves_indice[r][k]);
+    for (std::size_t k = 0; k < indice.size(); ++k) nl.map_ref()->set(indice[k], chaves_indice[r][k]);
     for (std::size_t c = 0; c < nomes_colunas.size(); ++c) {
       const Acum* a = c < celulas[r].size() ? &celulas[r][c] : nullptr;
       Value v = agregacao == "contar" ? Value::inteiro(a ? a->n : 0) : Value::nulo();
@@ -895,7 +1282,7 @@ Value tabela_pivotar(const Value& t, const std::vector<std::string>& indice,
           v = *a->primeiro;
         }
       }
-      nl.map->set(nomes_colunas[c], std::move(v));
+      nl.map_ref()->set(nomes_colunas[c], std::move(v));
     }
     out.push_back(std::move(nl));
   }
@@ -924,10 +1311,10 @@ Value tabela_despivotar(const Value& t, const std::vector<std::string>& id,
       Value nl = Value::mapa();
       for (const std::string& i : id) {
         const Value* iv = celula(l, i);
-        nl.map->set(i, iv ? *iv : Value::nulo());
+        nl.map_ref()->set(i, iv ? *iv : Value::nulo());
       }
-      nl.map->set(nome, Value::texto(c));
-      nl.map->set(valor, v ? *v : Value::nulo());
+      nl.map_ref()->set(nome, Value::texto(c));
+      nl.map_ref()->set(valor, v ? *v : Value::nulo());
       out.push_back(std::move(nl));
     }
   }
@@ -1073,7 +1460,7 @@ Value tabela_janela(const Value& t, const JanelaOpcoes& op) {
   out.reserve(n);
   for (std::size_t i = 0; i < n; ++i) {
     Value nl = nova_linha(linhas[i]);
-    nl.map->set(op.nome, std::move(resultado[i]));
+    nl.map_ref()->set(op.nome, std::move(resultado[i]));
     out.push_back(std::move(nl));
   }
   return Value::tabela(std::move(out));
@@ -1120,12 +1507,12 @@ Value tabela_dividir_coluna(const Value& t, const std::string& coluna, const std
   out.reserve(linhas.size());
   for (std::size_t i = 0; i < linhas.size(); ++i) {
     Value nl = Value::mapa();
-    for (const auto& kv : linhas[i].map->items) {
+    for (const auto& kv : linhas[i].map_ref()->items) {
       if (remover && kv.first == coluna) continue;
-      nl.map->items.push_back(kv);
+      nl.map_ref()->items.push_back(kv);
     }
     for (std::size_t k = 0; k < novos.size(); ++k) {
-      nl.map->set(novos[k], tem[i] != 0 && k < por_linha[i].size() ? Value::texto(por_linha[i][k])
+      nl.map_ref()->set(novos[k], tem[i] != 0 && k < por_linha[i].size() ? Value::texto(por_linha[i][k])
                                                                    : Value::nulo());
     }
     out.push_back(std::move(nl));
@@ -1141,7 +1528,7 @@ Value tabela_converter_fuso(const Value& t, const std::string& coluna, const std
   out.reserve(linhas.size());
   for (const Value& l : linhas) {
     Value nl = nova_linha(l);
-    if (Value* c = nl.map->find(coluna)) {
+    if (Value* c = nl.map_ref()->find(coluna)) {
       const std::string r =
           c->kind == ValueKind::Texto ? converter_fuso(c->s, origem, destino) : "";
       *c = r.empty() ? Value::nulo() : Value::texto(r);

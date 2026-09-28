@@ -383,6 +383,52 @@ struct Builder {
     }
   }
 
+  // Junta sequências quentes antes da VM receber o chunk. O bytecode mantém
+  // a mesma semântica, mas elimina dois despachos e temporários de pilha.
+  void fuse_superinstructions() {
+    std::vector<Instr> fused;
+    fused.reserve(chunk.code.size());
+    std::vector<std::size_t> old_to_new(chunk.code.size() + 1, 0);
+    for (std::size_t i = 0; i < chunk.code.size();) {
+      if (i + 2 < chunk.code.size()) {
+        const Instr& first = chunk.code[i];
+        const Instr& second = chunk.code[i + 1];
+        const Instr& third = chunk.code[i + 2];
+        if (third.op == Op::Binop && third.a >= 0 &&
+            static_cast<std::size_t>(third.a) < chunk.op_names.size() &&
+            binop_de(chunk.op_names[static_cast<std::size_t>(third.a)]) != BinOp::Generico) {
+          if (first.op == Op::LoadLocal && second.op == Op::Const) {
+            old_to_new[i] = old_to_new[i + 1] = old_to_new[i + 2] = fused.size();
+            fused.push_back({Op::SuperLocalConstBinop, first.a, second.a, third.a});
+            i += 3;
+            continue;
+          }
+          if (first.op == Op::LoadLocal && second.op == Op::LoadLocal) {
+            old_to_new[i] = old_to_new[i + 1] = old_to_new[i + 2] = fused.size();
+            fused.push_back({Op::SuperLocalLocalBinop, first.a, second.a, third.a});
+            i += 3;
+            continue;
+          }
+          if (first.op == Op::Const && second.op == Op::LoadLocal) {
+            old_to_new[i] = old_to_new[i + 1] = old_to_new[i + 2] = fused.size();
+            fused.push_back({Op::SuperConstLocalBinop, first.a, second.a, third.a});
+            i += 3;
+            continue;
+          }
+        }
+      }
+      old_to_new[i] = fused.size();
+      fused.push_back(chunk.code[i++]);
+    }
+    old_to_new[chunk.code.size()] = fused.size();
+    for (Instr& in : fused) {
+      if ((in.op == Op::Jump || in.op == Op::JumpIfFalse) && in.a >= 0 &&
+          static_cast<std::size_t>(in.a) < old_to_new.size())
+        in.a = static_cast<std::int32_t>(old_to_new[static_cast<std::size_t>(in.a)]);
+    }
+    chunk.code.swap(fused);
+  }
+
   int b_slot() { return fresh_slot(); }
 };
 
@@ -393,6 +439,7 @@ Chunk compile_function(const Item& fn, const std::unordered_set<std::string>& kn
   for (const auto& p : fn.params) b.slot_of(p.name, true);
   if (!fn.block) bail("funcao sem corpo");
   b.block(*fn.block);
+  b.fuse_superinstructions();
   b.emit(Op::ReturnNil);
   b.chunk.num_locals = b.total_locals();
   return std::move(b.chunk);
@@ -418,6 +465,7 @@ Chunk compile_pipeline(const Item& pipeline, const std::unordered_set<std::strin
   }
   Builder b{known_funcs, {}, {}};
   if (passos && passos->block) b.block(*passos->block);
+  b.fuse_superinstructions();
   b.emit(Op::ReturnNil);
   b.chunk.num_locals = b.total_locals();
   return std::move(b.chunk);

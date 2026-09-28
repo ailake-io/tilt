@@ -68,16 +68,16 @@ std::string motivo_erro(const std::string& body) {
   if (body.empty()) return "erro desconhecido (resposta vazia)";
   try {
     const Value j = json_parse(body);
-    if (j.kind == ValueKind::Mapa && j.map) {
+    if (j.kind == ValueKind::Mapa && j.map_ref()) {
       for (const char* chave : {"error", "errors"}) {
-        const Value* err = j.map->find(chave);
+        const Value* err = j.map_ref()->find(chave);
         if (!err) continue;
         const Value* primeiro = err;
-        if (err->kind == ValueKind::Lista && err->list && !err->list->empty()) {
-          primeiro = &(*err->list)[0];
+        if (err->kind == ValueKind::Lista && err->list_ref() && !err->list_ref()->empty()) {
+          primeiro = &(*err->list_ref())[0];
         }
-        if (primeiro->kind == ValueKind::Mapa && primeiro->map) {
-          const Value* msg = primeiro->map->find("message");
+        if (primeiro->kind == ValueKind::Mapa && primeiro->map_ref()) {
+          const Value* msg = primeiro->map_ref()->find("message");
           if (msg && msg->kind == ValueKind::Texto && !msg->s.empty()) return msg->s;
         }
         if (primeiro->kind == ValueKind::Texto && !primeiro->s.empty()) return primeiro->s;
@@ -179,27 +179,27 @@ std::vector<VectorHit> weaviate_search(const std::string& base, const std::strin
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
   std::vector<VectorHit> out;
-  if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
+  if (parsed.kind != ValueKind::Mapa || !parsed.map_ref()) return out;
   // Erros GraphQL chegam com status 200: {"errors": [{"message": ...}]}.
-  if (const Value* errs = parsed.map->find("errors");
-      errs && errs->kind == ValueKind::Lista && errs->list && !errs->list->empty()) {
+  if (const Value* errs = parsed.map_ref()->find("errors");
+      errs && errs->kind == ValueKind::Lista && errs->list_ref() && !errs->list_ref()->empty()) {
     die(motivo_erro(resp));
   }
-  const Value* data = parsed.map->find("data");
-  if (!data || data->kind != ValueKind::Mapa || !data->map) return out;
-  const Value* get = data->map->find("Get");
-  if (!get || get->kind != ValueKind::Mapa || !get->map) return out;
-  const Value* hits = get->map->find(classe);
-  if (!hits || hits->kind != ValueKind::Lista || !hits->list) return out;
-  for (const Value& hit : *hits->list) {
-    if (hit.kind != ValueKind::Mapa || !hit.map) continue;
-    const Value* add = hit.map->find("_additional");
-    if (!add || add->kind != ValueKind::Mapa || !add->map) continue;
-    const Value* id = add->map->find("id");
-    const Value* dist = add->map->find("distance");
+  const Value* data = parsed.map_ref()->find("data");
+  if (!data || data->kind != ValueKind::Mapa || !data->map_ref()) return out;
+  const Value* get = data->map_ref()->find("Get");
+  if (!get || get->kind != ValueKind::Mapa || !get->map_ref()) return out;
+  const Value* hits = get->map_ref()->find(classe);
+  if (!hits || hits->kind != ValueKind::Lista || !hits->list_ref()) return out;
+  for (const Value& hit : *hits->list_ref()) {
+    if (hit.kind != ValueKind::Mapa || !hit.map_ref()) continue;
+    const Value* add = hit.map_ref()->find("_additional");
+    if (!add || add->kind != ValueKind::Mapa || !add->map_ref()) continue;
+    const Value* id = add->map_ref()->find("id");
+    const Value* dist = add->map_ref()->find("distance");
     const std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
     const double d = dist && dist->is_number() ? dist->as_number() : 0.0;
-    const Value* txt = hit.map->find("texto");
+    const Value* txt = hit.map_ref()->find("texto");
     // score = 1 - distancia de cosseno
     out.push_back({id_s, 1.0 - d, txt && txt->kind == ValueKind::Texto ? txt->s : ""});
   }

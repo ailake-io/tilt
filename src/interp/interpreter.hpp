@@ -265,6 +265,7 @@ class Interpreter {
     std::shared_ptr<Env> dono;
   };
   void exec_block(const ast::Block& block, Env& env, const PrazoPasso* prazo = nullptr);
+  void exec_block_parallel(const ast::Block& block, Env& env);
   void exec_item(const ast::Item& item, Env& env);
   void exec_stmt(const ast::Stmt& stmt, Env& env);
   rt::Value* lookup_lvalue(const ast::Expr& target, Env& env);
@@ -276,7 +277,10 @@ class Interpreter {
   rt::Value eval_method(const std::string& method, rt::Value receiver, const ast::Expr& call,
                         Env& env);
   rt::Value call_function(const ast::Item& fn, std::vector<rt::Value> args, Span span,
-                          Env* module_scope = nullptr);
+                          Env* module_scope = nullptr,
+                          const std::vector<bool>& provided = {});
+  rt::Value call_user_function(const ast::Item& fn, const ast::Expr& call, Env& env,
+                               Env* module_scope = nullptr);
 
   std::vector<rt::Value> eval_args(const ast::Expr& call, Env& env);
   rt::Value call_closure(const rt::Closure& fn, std::vector<rt::Value> args, Span span);
@@ -293,15 +297,21 @@ class Interpreter {
 
   // Opcoes de leitura de CSV (`ler_csv "x.csv", separador: ";", nulos: ["NA"], ...`).
   struct CsvOpcoes {
+    bool colunar = false;
     char separador = ',';
     bool detectar_separador = false;   // separador: "auto"
     bool cabecalho = true;             // sem_cabecalho: verdadeiro -> false
     std::vector<std::string> colunas;  // nomes das colunas (substituem/definem o cabecalho)
+    std::vector<std::string> selecionar;  // projecao: le/materializa so estas colunas
     std::size_t pular = 0;             // linhas ignoradas no inicio
     std::vector<std::string> nulos;    // textos lidos como nulo (ex.: "NA", "-")
+    bool inferir = false;              // infere tipos em uma amostra antes da leitura
+    std::size_t amostra_tipos = 1000;  // numero maximo de linhas usadas na inferencia
+    std::string fuso_origem = "UTC";   // fuso assumido quando o texto nao informa offset
+    std::string fuso_destino = "UTC";  // fuso da representacao normalizada
   };
   rt::Value read_csv_file(const std::string& path, Span span, const CsvOpcoes* opcoes = nullptr);
-  rt::Value read_fonte(const std::string& name, Span span);
+  rt::Value read_fonte(const std::string& name, Span span, bool allow_lazy = true);
 
   // Deep learning.
   struct Layer {
@@ -354,6 +364,10 @@ class Interpreter {
   void set_device(const ast::Item& decl);  // reads `dispositivo:` -> gpu on/off
   rt::Tensor mm(const rt::Tensor& a, const rt::Tensor& b);
   rt::Tensor act_relu(const rt::Tensor& x);
+  rt::Tensor act_gelu(const rt::Tensor& x);
+  rt::Tensor add_same(const rt::Tensor& a, const rt::Tensor& b);
+  rt::Tensor conv(const rt::Tensor& x, const rt::Tensor& weights, std::int64_t stride,
+                  std::int64_t padding, std::int64_t dilation);
   std::vector<Layer> build_layers(const ast::Item& model_decl, std::int64_t in_dim,
                                  std::uint64_t seed_inicial = 0xC1A5);
   static bool camada_com_pesos(Layer::Kind kind);
@@ -366,6 +380,7 @@ class Interpreter {
   struct TreinoCfg {
     std::string perda = "entropia_cruzada";
     std::string otim = "sgd";
+    bool amp = false;
     double lr = 0.1;
     int epocas = 50;
     int lote = -1;  // -1 = lote cheio
@@ -375,6 +390,7 @@ class Interpreter {
     int cluster_rank = 0;
     int cluster_world = 1;
     int cluster_timeout = 120;
+    std::vector<std::int64_t> fluxo_grupos_linhas;  // row groups Parquet, para sharding de cluster
     bool embaralhar = true;
     std::uint64_t seed_init = 0xC1A5;
     std::uint64_t seed_mistura = 7;
@@ -434,7 +450,8 @@ class Interpreter {
   void run_experimento(const ast::Item& decl);
   void run_avaliacao(const ast::Item& decl);
   rt::Value eval_experimento_call(const ast::Expr& call, Env& env);
-  rt::Value experimento_prever(const std::string& nome, const rt::Value& entrada, Span span);
+  rt::Value experimento_prever(const std::string& nome, const rt::Value& entrada, Span span,
+                               bool lote = false);
 
   // LLM + RAG.
   rt::LlmConfig llm_config(const std::string& name, Span span);

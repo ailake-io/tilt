@@ -16,7 +16,7 @@ namespace tilt::vm {
 class Vm {
  public:
   using CallHook =
-      std::function<rt::Value(const std::string&, std::vector<rt::Value>&, bool* handled)>;
+  std::function<rt::Value(const std::string&, std::vector<rt::Value>&, bool* handled)>;
 
   // Resolve o nome de uma funcao de usuario para o Chunk ja compilado dela (nullptr
   // = nao esta no subconjunto da VM: a chamada vai pelo `call_hook`). O ponteiro
@@ -39,6 +39,9 @@ class Vm {
   CallHook call_;
   ChunkResolver resolver_;
   std::vector<rt::Value> pilha_;
+  // Tags paralelas funcionam como registradores tipados do frame: operações
+  // numéricas consultam o tipo sem reexaminar objetos compostos.
+  std::vector<std::uint8_t> tipos_;
   std::int64_t orcamento_ = 0;
   int profundidade_ = 0;
   // Por chunk, o resultado da resolucao de cada nome de CallFunc (1 = ja resolvido).

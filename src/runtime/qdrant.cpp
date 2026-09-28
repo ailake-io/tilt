@@ -120,25 +120,25 @@ std::vector<VectorHit> qdrant_search(const std::string& base, const std::string&
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
   std::vector<VectorHit> out;
-  if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
-  const Value* result = parsed.map->find("result");
-  if (!result || result->kind != ValueKind::Lista || !result->list) return out;
-  for (const Value& hit : *result->list) {
-    if (hit.kind != ValueKind::Mapa || !hit.map) continue;
-    const Value* id = hit.map->find("id");
-    const Value* score = hit.map->find("score");
+  if (parsed.kind != ValueKind::Mapa || !parsed.map_ref()) return out;
+  const Value* result = parsed.map_ref()->find("result");
+  if (!result || result->kind != ValueKind::Lista || !result->list_ref()) return out;
+  for (const Value& hit : *result->list_ref()) {
+    if (hit.kind != ValueKind::Mapa || !hit.map_ref()) continue;
+    const Value* id = hit.map_ref()->find("id");
+    const Value* score = hit.map_ref()->find("score");
     std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
     const double sc = score && (score->kind == ValueKind::Decimal || score->kind == ValueKind::Inteiro)
                           ? score->as_number()
                           : 0.0;
     std::string texto;
-    if (const Value* payload = hit.map->find("payload");
-        payload && payload->kind == ValueKind::Mapa && payload->map) {
-      if (const Value* t = payload->map->find("text"); t && t->kind == ValueKind::Texto) {
+    if (const Value* payload = hit.map_ref()->find("payload");
+        payload && payload->kind == ValueKind::Mapa && payload->map_ref()) {
+      if (const Value* t = payload->map_ref()->find("text"); t && t->kind == ValueKind::Texto) {
         texto = t->s;
       }
       // O id do Qdrant e um UUID derivado; devolve o id que o usuario inseriu.
-      if (const Value* orig = payload->map->find("tilt_id");
+      if (const Value* orig = payload->map_ref()->find("tilt_id");
           orig && orig->kind == ValueKind::Texto) {
         id_s = orig->s;
       }

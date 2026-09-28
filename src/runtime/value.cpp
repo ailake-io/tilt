@@ -1,12 +1,23 @@
 #include "runtime/value.hpp"
 
 #include <cmath>
+#include <memory_resource>
 #include <sstream>
 #include <utility>
 
 #include "runtime/tensor.hpp"
+#include "runtime/columnar.hpp"
 
 namespace tilt::rt {
+
+namespace {
+std::pmr::synchronized_pool_resource value_object_pool;
+
+template <typename T>
+std::shared_ptr<T> pooled_object() {
+  return std::allocate_shared<T>(std::pmr::polymorphic_allocator<T>(&value_object_pool));
+}
+}  // namespace
 
 Value* ValueMap::find(const std::string& key) {
   for (auto& kv : items) {
@@ -57,32 +68,73 @@ Value Value::texto(std::string v) {
 Value Value::lista(ValueList v) {
   Value x;
   x.kind = ValueKind::Lista;
-  x.list = std::make_shared<ValueList>(std::move(v));
+  // Lists may be released by a different worker. The shared PMR pool adds
+  // contention here; make_shared wins the size/concurrency/handoff benchmark.
+  x.storage = std::make_shared<ValueStorage>();
+  x.storage->list = std::make_shared<ValueList>();
+  *x.storage->list = std::move(v);
   return x;
 }
 Value Value::mapa() {
   Value x;
   x.kind = ValueKind::Mapa;
-  x.map = std::make_shared<ValueMap>();
+  x.storage = std::make_shared<ValueStorage>();
+  x.storage->map = pooled_object<ValueMap>();
   return x;
 }
 Value Value::tabela(ValueList rows) {
   Value x;
   x.kind = ValueKind::Tabela;
-  x.list = std::make_shared<ValueList>(std::move(rows));
+  x.storage = std::make_shared<ValueStorage>();
+  x.storage->list = pooled_object<ValueList>();
+  *x.storage->list = std::move(rows);
   return x;
+}
+Value Value::tabela_colunar(std::shared_ptr<ColumnarTable> columns) {
+  Value x;
+  x.kind = ValueKind::Tabela;
+  x.storage = std::make_shared<ValueStorage>();
+  x.storage->payload = std::move(columns);
+  return x;
+}
+
+Closure* Value::closure() const {
+  return kind == ValueKind::Funcao ? static_cast<Closure*>(payload_ref().get()) : nullptr;
+}
+
+std::shared_ptr<Closure> Value::closure_shared() const {
+  return kind == ValueKind::Funcao ? std::static_pointer_cast<Closure>(payload_ref()) : nullptr;
+}
+
+ColumnarTable* Value::columnar() const {
+  if (kind != ValueKind::Tabela || !payload_ref()) return nullptr;
+  auto* columns = static_cast<ColumnarTable*>(payload_ref().get());
+  columnar_ensure_loaded(columns);
+  return columns;
+}
+
+void Value::materialize_rows() {
+  if (ColumnarTable* columns = columnar(); columns && !list_ref()) {
+    // Cópias de Value compartilham o bloco para reduzir custo de cópia, mas a
+    // materialização troca o ponteiro do slot. Separe somente nesse caso para
+    // preservar a semântica anterior de cópia por ponteiro.
+    if (storage && !storage.unique()) storage = std::make_shared<ValueStorage>(*storage);
+    list_ref() = columns->rows_materialized();
+  }
 }
 Value Value::tensor_de(Tensor t) {
   Value x;
   x.kind = ValueKind::Tensor;
-  x.tensor = std::make_shared<Tensor>(std::move(t));
+  x.storage = std::make_shared<ValueStorage>();
+  x.storage->tensor = std::make_shared<Tensor>(std::move(t));
   return x;
 }
 
 Value Value::funcao(std::shared_ptr<Closure> c) {
   Value x;
   x.kind = ValueKind::Funcao;
-  x.closure = std::move(c);
+  x.storage = std::make_shared<ValueStorage>();
+  x.storage->payload = std::move(c);
   return x;
 }
 
@@ -100,13 +152,13 @@ bool Value::truthy() const {
       return !s.empty();
     case ValueKind::Lista:
     case ValueKind::Tabela:
-      return list && !list->empty();
+      return (list_ref() && !list_ref()->empty()) || (columnar() && columnar()->rows > 0);
     case ValueKind::Mapa:
-      return map && !map->items.empty();
+      return map_ref() && !map_ref()->items.empty();
     case ValueKind::Tensor:
-      return tensor && tensor->size() > 0;
+      return tensor_ref() && tensor_ref()->size() > 0;
     case ValueKind::Funcao:
-      return closure != nullptr;
+      return closure() != nullptr;
   }
   return false;
 }
@@ -171,30 +223,30 @@ std::string to_display(const Value& v) {
       return v.s;
     case ValueKind::Lista: {
       std::string r = "[";
-      if (v.list) {
-        for (std::size_t k = 0; k < v.list->size(); ++k) {
+      if (v.list_ref()) {
+        for (std::size_t k = 0; k < v.list_ref()->size(); ++k) {
           if (k) r += ", ";
-          r += to_display((*v.list)[k]);
+          r += to_display((*v.list_ref())[k]);
         }
       }
       return r + "]";
     }
     case ValueKind::Mapa: {
       std::string r = "{";
-      if (v.map) {
-        for (std::size_t k = 0; k < v.map->items.size(); ++k) {
+      if (v.map_ref()) {
+        for (std::size_t k = 0; k < v.map_ref()->items.size(); ++k) {
           if (k) r += ", ";
-          r += v.map->items[k].first + ": " + to_display(v.map->items[k].second);
+          r += v.map_ref()->items[k].first + ": " + to_display(v.map_ref()->items[k].second);
         }
       }
       return r + "}";
     }
     case ValueKind::Tabela: {
-      std::size_t n = v.list ? v.list->size() : 0;
+      std::size_t n = v.list_ref() ? v.list_ref()->size() : (v.columnar() ? v.columnar()->rows : 0);
       return "tabela(" + std::to_string(n) + " linha" + (n == 1 ? "" : "s") + ")";
     }
     case ValueKind::Tensor:
-      return v.tensor ? "tensor[" + v.tensor->shape_str() + "]" : "tensor[]";
+      return v.tensor_ref() ? "tensor[" + v.tensor_ref()->shape_str() + "]" : "tensor[]";
     case ValueKind::Funcao:
       return "<funcao>";
   }
@@ -210,16 +262,16 @@ Value apply_binop(const std::string& op, const Value& a, const Value& b, bool* o
     if (a.kind == ValueKind::Texto && b.kind == ValueKind::Texto) {
       return Value::logico(a.s.find(b.s) != std::string::npos);
     }
-    if (a.kind == ValueKind::Lista && a.list) {
-      for (const Value& el : *a.list) {
+    if (a.kind == ValueKind::Lista && a.list_ref()) {
+      for (const Value& el : *a.list_ref()) {
         if (equals(el, b)) return Value::logico(true);
       }
     }
     return Value::logico(false);
   }
-  if (op == "+" && a.kind == ValueKind::Lista && b.kind == ValueKind::Lista && a.list && b.list) {
-    ValueList out = *a.list;
-    out.insert(out.end(), b.list->begin(), b.list->end());
+  if (op == "+" && a.kind == ValueKind::Lista && b.kind == ValueKind::Lista && a.list_ref() && b.list_ref()) {
+    ValueList out = *a.list_ref();
+    out.insert(out.end(), b.list_ref()->begin(), b.list_ref()->end());
     return Value::lista(std::move(out));
   }
   if (op == "+" && (a.kind == ValueKind::Texto || b.kind == ValueKind::Texto)) {
@@ -272,12 +324,16 @@ bool equals(const Value& a, const Value& b) {
     case ValueKind::Texto:
       return a.s == b.s;
     case ValueKind::Funcao:
-      return a.closure == b.closure;
+      return a.payload_ref() == b.payload_ref();
     case ValueKind::Lista:
     case ValueKind::Tabela: {
-      if (!a.list || !b.list || a.list->size() != b.list->size()) return false;
-      for (std::size_t k = 0; k < a.list->size(); ++k) {
-        if (!equals((*a.list)[k], (*b.list)[k])) return false;
+      Value left = a;
+      Value right = b;
+      left.materialize_rows();
+      right.materialize_rows();
+      if (!left.list_ref() || !right.list_ref() || left.list_ref()->size() != right.list_ref()->size()) return false;
+      for (std::size_t k = 0; k < left.list_ref()->size(); ++k) {
+        if (!equals((*left.list_ref())[k], (*right.list_ref())[k])) return false;
       }
       return true;
     }

@@ -7,5 +7,11 @@ pipeline roundtrip:
       ]
     - escrever_parquet dados, "saida.parquet"
     - volta = ler_parquet "saida.parquet"
+    - poucas = ler_parquet "saida.parquet", selecionar: ["salario", "nome"]
+    - imprimir "projecao:", tamanho(poucas[0]), poucas[0].salario, poucas[2].nome
+    - col = ler_parquet "saida.parquet", selecionar: ["ativo", "salario", "nome"], colunar: verdadeiro
+    - agrupado = col.agrupar_por "ativo", { total: somar "salario", n: contar }
+    - imprimir "colunar:", tamanho(col), agrupado[0].ativo, agrupado[0].total, agrupado[1].n
+    - imprimir col[1].nome, col.tamanho
     - para cada linha em volta:
         - imprimir linha.nome, linha.idade, linha.salario, linha.ativo

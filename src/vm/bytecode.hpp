@@ -27,6 +27,12 @@ enum class Op : std::uint8_t {
   GetField,    // a: names index (field), b: 1 if reached via '?.' (missing -> nulo)
   Return,      // pop -> function result
   ReturnNil,
+  // Superinstruções geradas pelo compilador para os padrões quentes
+  // local/literal/op e local/local/op. `a` e `b` são slots/constante e
+  // `c` aponta para o nome do operador.
+  SuperLocalConstBinop,
+  SuperLocalLocalBinop,
+  SuperConstLocalBinop,
 };
 
 // Operador de um Binop pre-decodificado (Instr::b): a VM despacha por este numero e
@@ -65,6 +71,7 @@ struct Instr {
   Op op{};
   std::int32_t a = 0;
   std::int32_t b = 0;
+  std::int32_t c = 0;
 };
 
 struct Chunk {

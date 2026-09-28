@@ -48,14 +48,14 @@ std::string kind_da_lingua(const std::string& lingua) {
 }
 
 std::string campo_texto(const Value& m, const char* chave) {
-  if (m.kind != ValueKind::Mapa || !m.map) return "";
-  const Value* v = m.map->find(chave);
+  if (m.kind != ValueKind::Mapa || !m.map_ref()) return "";
+  const Value* v = m.map_ref()->find(chave);
   return v && v->kind == ValueKind::Texto ? v->s : "";
 }
 
 std::int64_t campo_inteiro(const Value& m, const char* chave) {
-  if (m.kind != ValueKind::Mapa || !m.map) return -1;
-  const Value* v = m.map->find(chave);
+  if (m.kind != ValueKind::Mapa || !m.map_ref()) return -1;
+  const Value* v = m.map_ref()->find(chave);
   return v && v->kind == ValueKind::Inteiro ? v->i : -1;
 }
 
@@ -76,15 +76,15 @@ Statement le_statement(const std::string& base, std::int64_t sessao, std::int64_
   });
   Statement out;
   out.estado = campo_texto(v, "state");
-  if (v.kind == ValueKind::Mapa && v.map) {
-    const Value* output = v.map->find("output");
-    if (output && output->kind == ValueKind::Mapa && output->map) {
+  if (v.kind == ValueKind::Mapa && v.map_ref()) {
+    const Value* output = v.map_ref()->find("output");
+    if (output && output->kind == ValueKind::Mapa && output->map_ref()) {
       out.status_saida = campo_texto(*output, "status");
       out.ename = campo_texto(*output, "ename");
       out.evalue = campo_texto(*output, "evalue");
-      if (const Value* data = output->map->find("data");
-          data && data->kind == ValueKind::Mapa && data->map) {
-        const Value* txt = data->map->find("text/plain");
+      if (const Value* data = output->map_ref()->find("data");
+          data && data->kind == ValueKind::Mapa && data->map_ref()) {
+        const Value* txt = data->map_ref()->find("text/plain");
         if (txt && txt->kind == ValueKind::Texto) out.texto = txt->s;
       }
     }
@@ -107,10 +107,10 @@ Statement le_statement(const std::string& base, std::int64_t sessao, std::int64_
 std::int64_t obter_sessao(const std::string& base, const std::string& kind, const Value* conf) {
   const Value lista =
       json_ou_die([&] { return http_get_json(base + "/sessions", {}, kTimeoutHttpS); });
-  if (lista.kind == ValueKind::Mapa && lista.map) {
-    const Value* sessoes = lista.map->find("sessions");
-    if (sessoes && sessoes->kind == ValueKind::Lista && sessoes->list) {
-      for (const Value& s : *sessoes->list) {
+  if (lista.kind == ValueKind::Mapa && lista.map_ref()) {
+    const Value* sessoes = lista.map_ref()->find("sessions");
+    if (sessoes && sessoes->kind == ValueKind::Lista && sessoes->list_ref()) {
+      for (const Value& s : *sessoes->list_ref()) {
         if (campo_texto(s, "kind") == kind && campo_texto(s, "state") == "idle") {
           const std::int64_t id = campo_inteiro(s, "id");
           if (id >= 0) return id;
@@ -119,9 +119,9 @@ std::int64_t obter_sessao(const std::string& base, const std::string& kind, cons
     }
   }
   Value corpo = Value::mapa();
-  corpo.map->set("kind", Value::texto(kind));
-  if (conf && conf->kind == ValueKind::Mapa && conf->map && !conf->map->items.empty()) {
-    corpo.map->set("conf", *conf);
+  corpo.map_ref()->set("kind", Value::texto(kind));
+  if (conf && conf->kind == ValueKind::Mapa && conf->map_ref() && !conf->map_ref()->items.empty()) {
+    corpo.map_ref()->set("conf", *conf);
   }
   const Value criada =
       json_ou_die([&] { return http_post_json(base + "/sessions", corpo, {}, kTimeoutHttpS); });
@@ -148,7 +148,7 @@ Statement executar_statement(const std::string& base, const std::string& codigo,
                              const std::string& lingua, const Value* conf) {
   const std::int64_t sessao = obter_sessao(base, kind_da_lingua(lingua), conf);
   Value corpo = Value::mapa();
-  corpo.map->set("code", Value::texto(codigo));
+  corpo.map_ref()->set("code", Value::texto(codigo));
   const Value submetido = json_ou_die([&] {
     return http_post_json(base + "/sessions/" + std::to_string(sessao) + "/statements", corpo, {},
                           kTimeoutHttpS);
@@ -193,16 +193,16 @@ Value livy_sql(const std::string& url, const std::string& codigo_sql, const std:
     die("saida do Spark nao e um JSON valido: " + std::string(e.what()) +
         " (recebido: " + truncar(st.texto, 120) + ")");
   }
-  if (parsed.kind != ValueKind::Lista || !parsed.list) {
+  if (parsed.kind != ValueKind::Lista || !parsed.list_ref()) {
     die("saida do Spark nao e uma lista de linhas (recebido: " + truncar(st.texto, 120) + ")");
   }
   Value tabela = Value::tabela();
-  for (const Value& linha : *parsed.list) {
-    if (linha.kind != ValueKind::Mapa || !linha.map) {
+  for (const Value& linha : *parsed.list_ref()) {
+    if (linha.kind != ValueKind::Mapa || !linha.map_ref()) {
       die("linha da saida do Spark nao e um objeto JSON (recebido: " + truncar(st.texto, 120) +
           ")");
     }
-    tabela.list->push_back(linha);
+    tabela.list_ref()->push_back(linha);
   }
   return tabela;
 }

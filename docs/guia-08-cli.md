@@ -71,7 +71,31 @@ fecha. Comandos: `:carregar <arquivo>` registra as declarações de um `.tilt`,
 ## `tilt novo <nome>`
 
 Cria a pasta `<nome>/` com `principal.tilt` (uma `funcao` e um `pipeline`),
-`testes.tilt` (exemplo de `teste`), `README.md` e `.gitignore`.
+`testes.tilt` (exemplo de `teste`), `tilt.toml`, `tilt.lock`, `README.md` e
+`.gitignore`. O manifesto registra nome, versão e dependências do projeto.
+
+## `tilt adicionar <nome> <arquivo.tilt>`
+
+Dentro de um projeto criado por `tilt novo`, copia um módulo local para
+`modulos/<nome>.tilt`, registra o caminho em `tilt.toml` e o SHA-256 do conteúdo
+em `tilt.lock`. Por exemplo:
+
+```sh
+tilt novo app
+cd app
+tilt adicionar calculos ../calculos.tilt
+```
+
+`importar calculos` encontra o módulo vendorizado. Na execução, o Tilt confere
+seu conteúdo contra o lockfile; alteração ou ausência da entrada gera erro.
+Arquivos `.tilt` em subdiretórios encontram `modulos/` na raiz do projeto pelo
+`tilt.toml` mais próximo.
+Inclua `tilt.toml`, `tilt.lock` e `modulos/` no controle de versão para copiar
+o projeto sem depender do caminho original. Esta primeira versão aceita arquivos
+`.tilt` locais e exige adicionar separadamente os módulos de que eles dependem;
+ainda não resolve versões em um registro remoto. Para substituir um módulo
+vendorizado por outro arquivo, use `tilt atualizar <nome> <arquivo.tilt>`; o
+comando substitui o conteúdo e grava o novo hash no lockfile.
 
 ## `tilt rpc <arquivo> [--porta N [--host H]]` / `tilt chamar <arquivo> <funcao> [json...]`
 
@@ -80,10 +104,16 @@ por stdin/stdout (ou HTTP com `--porta`); `chamar` faz uma chamada e imprime o
 resultado em JSON (cada argumento é JSON; texto que não é JSON vale como texto).
 Protocolo, Python, PySpark e Kof: [guia 17](guia-17-interoperabilidade.md).
 
-## `tilt servir <arquivo> [--porta N] [--requisicoes N]`
+## `tilt servir <arquivo> [--porta N] [--requisicoes N] [--pesos ARQUIVO]`
 
 Sobe o primeiro `servico` declarado. `--porta` sobrepõe `porta:`.
 `--requisicoes N` atende N e encerra (0 = para sempre). Ver [guia 07](guia-07-http.md).
+`--pesos ARQUIVO` sobrepõe o caminho definido em `pesos:` no serviço. Para
+servir uma versão promovida do registry local, resolva o artefato antes:
+
+```sh
+tilt servir api.tilt --pesos "$(tilt resolver-modelo churn --stage production)"
+```
 
 ## `tilt servir-catalogo <diretorio-raiz> [--porta N] [--prefixo P]`
 
@@ -138,12 +168,30 @@ Despejam a árvore sintática (S-expression) e o fluxo de tokens. Debug.
 
 ## `tilt versao` / `tilt ajuda`
 
+## Registry local de modelos
+
+`tilt registrar-modelo <nome> <arquivo> [--versao V] [--registro DIR]` copia
+um artefato de pesos para um registry local, grava seu SHA-256 e cria um
+manifesto. O diretório padrão é `.tilt-modelos`.
+
+```sh
+tilt registrar-modelo churn modelos/churn.safetensors --versao 1
+tilt listar-modelos
+```
+
+Use `--registro` para compartilhar o diretório entre processos ou serviços.
+`tilt promover-modelo <nome> <versao> <stage>` grava o stage `staging`,
+`production` ou `archived` no manifesto; isso permite selecionar e reverter
+versões antes de conectá-las a um `servico`.
+O comando não publica o arquivo na rede nem altera o modelo carregado; ele
+fornece versionamento e integridade local para a próxima etapa de rollout.
+
 ## Variáveis de ambiente
 
 | Var | Comandos | Efeito |
 |---|---|---|
 | `TILT_LLM` | executar, servir | `mock` = offline determinístico; vazio = `curl` real |
-| `TILT_GPU` | executar | `off` (padrão) · `auto` · `fake` |
+| `TILT_GPU` | executar | `off` (padrão) · `auto` · `metal` (macOS) · `fake` |
 | `TILT_VM_DEBUG` | executar | `1` despeja o bytecode das funções |
 | `TILT_JIT_DEBUG` | executar | `1` informa JIT nativo ou fallback por pipeline |
 | `TILT_STDLIB_PATH` | executar, servir | diretórios com módulos `importar` (sep. `:`), consultados antes de `../share/tilt/stdlib` |

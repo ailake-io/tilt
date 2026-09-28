@@ -107,7 +107,7 @@ URL e credencial compatíveis.
 
 Confirme os plugs com `snap connections tilt`. Drivers externos usam o content
 id `tilt-database-drivers-v1`; o plug `gpu` fornece OpenGL e observação de
-hardware. A validação CUDA em hardware real está deferida.
+hardware. Os kernels CUDA do Tilt foram validados em RTX 5050.
 
 ```bash
 snap connections tilt
@@ -115,8 +115,10 @@ sudo snap connect tilt:database-drivers provider:tilt-database-drivers
 sudo snap connect tilt:gpu
 ```
 
-Nesta máquina, `TILT_GPU=fake` serve apenas para exercitar dispatch e mensagens,
-não para validar desempenho ou compatibilidade CUDA.
+`TILT_GPU=fake` exercita dispatch e conversão FP16 sem medir desempenho ou
+compatibilidade CUDA. Use `TILT_GPU=auto` com `dispositivo: gpu` para executar
+o backend real; no macOS use `TILT_GPU=metal` com `dispositivo: "metal"`. O
+banner mostra `cuda:N` (e `tensor-cores` quando ativos) ou `metal`.
 
 ## Windows e editores
 

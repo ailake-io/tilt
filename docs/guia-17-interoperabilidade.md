@@ -84,6 +84,30 @@ vendas.fechar()                                          # ou `with tilt.carrega
 Erros do Tilt viram `tilt.TiltErro` (com `.saida`). O objeto é seguro entre threads
 (as chamadas são serializadas). Para uma chamada avulsa: `tilt.chamar(arq, "f", 1)`.
 
+### Ponte colunar opcional
+
+Para tabelas grandes em um processo local, instale `pip install './python[columnar]'`
+e use `chamar_colunar`. O cliente grava os argumentos `pyarrow.Table`,
+`pandas.DataFrame` ou `polars.DataFrame` em Parquet Snappy temporário; o RPC
+por stdin/stdout carrega as colunas sem criar uma lista JSON de linhas. Se a
+função devolver uma `tabela`, a resposta também usa Parquet e o Python devolve
+`pyarrow.Table`. Escalares continuam em JSON.
+
+```python
+import pyarrow as pa
+import tilt
+
+tabela = pa.table({"regiao": ["sul", "norte"], "valor": [10, 20]})
+with tilt.carregar("transformacao.tilt") as programa:
+    saida = programa.chamar_colunar("transformar", tabela)
+    print(saida.to_pylist())
+```
+
+Este transporte é opt-in e local: usa arquivos temporários, portanto ainda há
+cópia e serialização Parquet. Não é passagem de memória Arrow sem cópia; o RPC
+HTTP permanece em JSON. Tabelas devolvidas como `lista` de mapas continuam em
+JSON até que a função Tilt retorne explicitamente uma `tabela`.
+
 ### Tilt chamando Python: `chamar_python`
 
 ```tilt skip

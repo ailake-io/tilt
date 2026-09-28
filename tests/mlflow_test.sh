@@ -6,6 +6,20 @@ BIN="$1"
 PORT_BASE="${TILT_TEST_PORT:-8671}"
 command -v curl >/dev/null 2>&1 || { echo "curl ausente; pulando mlflow"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 ausente; pulando mlflow"; exit 0; }
+if ! python3 - <<'PYEOF'
+import socket
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", 0))
+except OSError as exc:
+    print(f"loopback indisponivel; pulando mlflow ({exc})")
+    raise SystemExit(1)
+finally:
+    s.close()
+PYEOF
+then
+  exit 0
+fi
 
 tmp=$(mktemp -d)
 trap 'kill "$mock_pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
@@ -66,6 +80,12 @@ class MlflowMock(http.server.BaseHTTPRequestHandler):
             self.reply(200, {})
         else:
             self.reply(404, {"error_code": "NOT_FOUND"})
+
+    def do_PUT(self):
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length).decode("utf-8") if length else "{}"
+        self.record("PUT", json.loads(raw or "{}"))
+        self.reply(200, {})
 
 for port in range(base, base + 20):
     try:
@@ -144,5 +164,7 @@ grep -q '"key": "tilt.linhas"' "$tmp/log" || {
   echo "parametros nao foram enviados"; cat "$tmp/log"; exit 1; }
 grep -q 'runs/update' "$tmp/log" || {
   echo "run nao foi finalizado"; cat "$tmp/log"; exit 1; }
+grep -q 'detalhes.json' "$tmp/log" || {
+  echo "artefato de detalhes nao foi enviado"; cat "$tmp/log"; exit 1; }
 
 echo "mlflow: ok"

@@ -26,8 +26,8 @@ O manifesto Snap declara dois pontos opcionais para integrações nativas:
   `$SNAP_COMMON/tilt/drivers`; um snap fornecedor pode publicar ali as
   bibliotecas SQLite, DuckDB, PostgreSQL ou MariaDB/MySQL.
 - `gpu`: plug `opengl` e `hardware-observe`, reservado para o acesso a
-  dispositivos gráficos/compute. A validação CUDA em hardware real continua
-  separada e deferida.
+  dispositivos gráficos/compute. Os kernels CUDA foram validados em RTX 5050;
+  o snap depende de driver e NVRTC acessíveis no ambiente instalado.
 
 O carregador tenta primeiro os nomes normais do sistema e depois os diretórios
 listados em `TILT_DRIVER_PATH` (`:` no Linux/macOS, `;` no Windows). No Snap,

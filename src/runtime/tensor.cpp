@@ -1,15 +1,69 @@
 #include "runtime/tensor.hpp"
+#include "runtime/compat.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 
+
 namespace tilt::rt {
+
+namespace {
+
+// Optional CPU BLAS. The CBLAS ABI is shared by OpenBLAS and oneMKL. Loading
+// it at runtime keeps a dependency-free binary and the original portable
+// kernel available on machines without an optimized library.
+struct CpuBlas {
+  using Sgemm = void (*)(int, int, int, int, int, int, float, const float*, int,
+                         const float*, int, float, float*, int);
+  void* lib = nullptr;
+  Sgemm sgemm = nullptr;
+};
+
+const CpuBlas& cpu_blas() {
+  static const CpuBlas state = [] {
+    CpuBlas result;
+    if (const char* mode = std::getenv("TILT_BLAS"); mode && std::string_view(mode) == "off") {
+      return result;
+    }
+    if (const char* path = std::getenv("TILT_BLAS_LIBRARY"); path && *path) {
+      result.lib = tilt_dlopen(path, true);
+    } else {
+#if defined(_WIN32)
+      constexpr const char* names[] = {"libopenblas.dll", "mkl_rt.dll"};
+#elif defined(__APPLE__)
+      constexpr const char* names[] = {"libopenblas.dylib", "/System/Library/Frameworks/Accelerate.framework/Accelerate"};
+#else
+      constexpr const char* names[] = {"libopenblas.so.0", "libopenblas.so",
+                                       "libmkl_rt.so"};
+#endif
+      for (const char* name : names) {
+        result.lib = tilt_dlopen(name, true);
+        if (result.lib) break;
+      }
+    }
+    if (result.lib) {
+      result.sgemm = reinterpret_cast<CpuBlas::Sgemm>(tilt_dlsym(result.lib, "cblas_sgemm"));
+      if (!result.sgemm) {
+        (void)tilt_dlclose(result.lib);
+        result.lib = nullptr;
+      }
+    }
+    return result;
+  }();
+  return state;
+}
+
+}  // namespace
+
+bool cpu_blas_available() { return cpu_blas().sgemm != nullptr; }
 
 namespace detail {
 
@@ -213,6 +267,20 @@ Tensor matmul(const Tensor& a, const Tensor& b) {
   Tensor out;
   out.shape = {m, n};
   out.data.assign(static_cast<size_t>(m * n), 0.0F);
+
+  if (!drop_row && !drop_col && m > 0 && n > 0 && k > 0 &&
+      m <= std::numeric_limits<int>::max() && n <= std::numeric_limits<int>::max() &&
+      k <= std::numeric_limits<int>::max() &&
+      static_cast<long double>(m) * n * k >= 1000000.0L) {
+    if (const auto& blas = cpu_blas(); blas.sgemm) {
+      // CblasRowMajor=101, CblasNoTrans=111; C = A*B.
+      blas.sgemm(101, 111, 111, static_cast<int>(m), static_cast<int>(n),
+                 static_cast<int>(k), 1.0F, a.data.data(), static_cast<int>(k),
+                 b.data.data(), static_cast<int>(n), 0.0F, out.data.data(),
+                 static_cast<int>(n));
+      return out;
+    }
+  }
 
   auto block = [&](std::int64_t i0, std::int64_t i1) {
     for (std::int64_t i = i0; i < i1; ++i) {
@@ -667,6 +735,56 @@ Tensor conv2d(const Tensor& x, const Tensor& k, std::int64_t passo, std::int64_t
   }
 
   Tensor out = Tensor::zeros({n, cout, oh, ow});
+
+  const long double estimated_work = static_cast<long double>(n) * cout * oh * ow * cin * kh * kw;
+  // For large convolutions, an optimized CBLAS provider can multiply a
+  // bounded im2col tile much faster than the direct scalar kernel. Tiles cap
+  // temporary input storage at about 4 MiB; no BLAS means no im2col cost.
+  if (cpu_blas_available() && estimated_work >= 4000000.0L && cout >= 8 &&
+      cin > 0 && kh > 0 && kw > 0 &&
+      static_cast<long double>(cin) * kh * kw <= std::numeric_limits<int>::max() &&
+      cout <= std::numeric_limits<int>::max()) {
+    const std::int64_t filter_size = cin * kh * kw;
+    const std::int64_t positions = oh * ow;
+    const std::int64_t tile_rows = std::max<std::int64_t>(1, (1 << 20) / filter_size);
+    Tensor kernel = Tensor::zeros({filter_size, cout});
+    for (std::int64_t co = 0; co < cout; ++co) {
+      for (std::int64_t p = 0; p < filter_size; ++p)
+        kernel.data[static_cast<std::size_t>(p * cout + co)] =
+            k.data[static_cast<std::size_t>(co * filter_size + p)];
+    }
+    for (std::int64_t batch = 0; batch < n; ++batch) {
+      for (std::int64_t start = 0; start < positions; start += tile_rows) {
+        const std::int64_t rows = std::min(tile_rows, positions - start);
+        Tensor columns = Tensor::zeros({rows, filter_size});
+        for (std::int64_t r = 0; r < rows; ++r) {
+          const std::int64_t pos = start + r;
+          const std::int64_t y0 = (pos / ow) * passo - padding;
+          const std::int64_t x0 = (pos % ow) * passo - padding;
+          std::int64_t p = 0;
+          for (std::int64_t c = 0; c < cin; ++c) {
+            for (std::int64_t u = 0; u < kh; ++u) {
+              for (std::int64_t v = 0; v < kw; ++v, ++p) {
+                const std::int64_t yy = y0 + u * dilatacao;
+                const std::int64_t xx = x0 + v * dilatacao;
+                if (yy >= 0 && yy < h && xx >= 0 && xx < w) {
+                  columns.data[static_cast<std::size_t>(r * filter_size + p)] =
+                      x.data[static_cast<std::size_t>(((batch * cin + c) * h + yy) * w + xx)];
+                }
+              }
+            }
+          }
+        }
+        const Tensor product = matmul(columns, kernel);
+        for (std::int64_t co = 0; co < cout; ++co) {
+          float* dest = out.data.data() + static_cast<std::size_t>((batch * cout + co) * positions + start);
+          for (std::int64_t r = 0; r < rows; ++r)
+            dest[r] = product.data[static_cast<std::size_t>(r * cout + co)];
+        }
+      }
+    }
+    return out;
+  }
 
   // Um bloco de trabalho = par (amostra, canal de saida).
   const std::int64_t jobs = n * cout;

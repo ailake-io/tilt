@@ -34,11 +34,11 @@ Termos usados na linguagem Tilt, no runtime e nos guias.
 
 | Termo | Significado |
 |---|---|
-| AMP | Automatic mixed precision: uso combinado de precisões numéricas; CUDA/AMP real está deferido. |
+| AMP | Automatic mixed precision: GEMM denso/residual em FP16 com acumulação FP32 no treino CUDA; pesos e gradientes seguem FP32. |
 | BPTT | Backpropagation through time, retropropagação usada no treino de RNN/LSTM/GRU. |
 | Embedding | Vetor numérico que representa texto, categoria ou índice em um espaço contínuo. |
-| GGUF | Formato de pesos e metadata voltado a modelos, atualmente exportado pela Tilt em F32. |
+| GGUF | Formato de pesos e metadata voltado a modelos; a Tilt exporta F32/Q8_0 e importa ambos. |
 | ONNX | Formato interoperável para grafos e pesos de modelos. |
 | RAG | Retrieval-Augmented Generation: recuperação de documentos/vetores antes da geração. |
-| RNN/LSTM/GRU | Camadas recorrentes para sequências; a Tilt possui caminho CPU com BPTT. |
+| RNN/LSTM/GRU | Camadas recorrentes para sequências; a Tilt possui BPTT em CPU e kernels CUDA de backward com fallback. |
 | Safetensors | Formato nativo recomendado para pesos de produção; ONNX é o formato de interoperabilidade. |

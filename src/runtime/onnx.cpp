@@ -127,9 +127,10 @@ std::string shape_proto_forma(const std::vector<std::int64_t>& forma_sem_lote) {
 }
 
 // TypeProto.tensor_type: elem_type (1, varint FLOAT=1) + shape (2, msg)
-std::string tensor_type_proto_forma(const std::vector<std::int64_t>& forma_sem_lote) {
+std::string tensor_type_proto_forma(const std::vector<std::int64_t>& forma_sem_lote,
+                                    std::int64_t elem_type = 1) {
   Writer inner;
-  inner.varint_field(1, 1);  // FLOAT
+  inner.varint_field(1, static_cast<std::uint64_t>(elem_type));
   inner.msg_field(2, shape_proto_forma(forma_sem_lote));
   Writer w;
   w.msg_field(1, inner.out);
@@ -138,10 +139,11 @@ std::string tensor_type_proto_forma(const std::vector<std::int64_t>& forma_sem_l
 
 // ValueInfoProto: name (1) + type (2)
 std::string value_info_forma(const std::string& name,
-                             const std::vector<std::int64_t>& forma_sem_lote) {
+                             const std::vector<std::int64_t>& forma_sem_lote,
+                             std::int64_t elem_type = 1) {
   Writer w;
   w.bytes_field(1, name);
-  w.msg_field(2, tensor_type_proto_forma(forma_sem_lote));
+  w.msg_field(2, tensor_type_proto_forma(forma_sem_lote, elem_type));
   return w.out;
 }
 
@@ -339,8 +341,10 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
   }
   if (layers.empty()) die("modelo sem camadas");
   std::int64_t dense_count = 0;
+  bool entrada_indices = false;
   for (const auto& l : layers)
     if (l.kind == OnnxLayer::Dense) ++dense_count;
+  if (!layers.empty() && layers.front().kind == OnnxLayer::Embedding) entrada_indices = true;
   if (dense_count == 0) die("modelo sem camada densa/linear");
 
   std::vector<std::string> nodes;
@@ -353,7 +357,18 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
   auto fresh = [&](const char* base) { return std::string(base) + std::to_string(seq++); };
 
   for (const auto& l : layers) {
-    if (l.kind == OnnxLayer::Recorrente) {
+    if (l.kind == OnnxLayer::Embedding) {
+      if (&l != &layers.front() || l.w.rank() != 2 || l.w.shape[0] <= 0 || l.w.shape[1] <= 0)
+        die("camada incorporacao ONNX deve ser a primeira e ter tabela 2D");
+      const std::string wn = "W_emb" + std::to_string(seq);
+      initializers.push_back(tensor_proto(wn, l.w.shape, l.w.data));
+      const std::string out = fresh("emb");
+      nodes.push_back(node_proto("Gather", {cur, wn}, {out}, "embedding" + std::to_string(seq),
+                                 {attr_int("axis", 0)}));
+      cur = out;
+      dim = l.w.shape[1];
+      out_dim = dim;
+    } else if (l.kind == OnnxLayer::Recorrente) {
       if (l.w.rank() != 2 || l.u.rank() != 2 || l.b.rank() != 1 || l.w.shape[1] != l.b.shape[0] ||
           l.u.shape[1] != l.b.shape[0])
         die("peso recorrente com forma invalida");
@@ -546,7 +561,7 @@ std::string onnx_export_bytes(const std::vector<OnnxLayer>& layers,
   for (const auto& n : nodes) g.msg_field(1, n);
   g.bytes_field(2, model_name.empty() ? "tilt" : model_name);
   for (const auto& t : initializers) g.msg_field(5, t);
-  g.msg_field(11, value_info_forma("entrada", forma_entrada));
+  g.msg_field(11, value_info_forma("entrada", forma_entrada, entrada_indices ? 7 : 1));
   g.msg_field(12, value_info_forma("saida", {out_dim}));
   const std::string graph = g.out;
 

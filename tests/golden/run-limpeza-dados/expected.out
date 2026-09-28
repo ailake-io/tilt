@@ -25,4 +25,4 @@ sp 3 3
 verdadeiro verdadeiro
 3 3 1
 erro: renomear: a coluna 'inexistente' nao existe (colunas: id, nome, idade, cidade, nascimento, ativo)
-erro: converter: tipo desconhecido 'romano' (use inteiro, decimal, texto, logico ou data)
+erro: converter: tipo desconhecido 'romano' (use inteiro, decimal, texto, logico, data ou data_hora)

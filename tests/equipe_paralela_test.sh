@@ -57,13 +57,14 @@ pipeline p:
         imprimir item.agente
 EOF2
 
-inicio=$(date +%s)
+inicio=$(python3 -c 'import time; print(time.monotonic_ns())')
 out=$(cd "$tmp" && TILT_LLM=mock "$BIN" executar prog.tilt 2>&1) || { echo "falhou: $out"; exit 1; }
-fim=$(date +%s)
+fim=$(python3 -c 'import time; print(time.monotonic_ns())')
 printf '%s\n' "$out"
 
 fail=0
-[ $((fim - inicio)) -le 2 ] || { echo "equipe paralela levou $((fim - inicio))s (esperado ~1s)"; fail=1; }
+duracao_ms=$(((fim - inicio) / 1000000))
+[ "$duracao_ms" -le 2500 ] || { echo "equipe paralela levou ${duracao_ms}ms (esperado ~1s)"; fail=1; }
 [ "$(printf '%s\n' "$out" | sed -n '2p')" = "3" ] || { echo "rastro sem 3 entradas"; fail=1; }
 [ "$(printf '%s\n' "$out" | sed -n '3,5p' | tr '\n' ',')" = "a,b,c," ] || { echo "ordem do rastro"; fail=1; }
 [ "$fail" = 0 ] && echo "equipe_paralela_test ok"

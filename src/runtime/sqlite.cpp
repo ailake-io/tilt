@@ -156,22 +156,22 @@ Value sqlite_query(const std::string& db_path, const std::string& sql) {
         const std::string col = name ? name : ("coluna" + std::to_string(c + 1));
         switch (db.column_type(stmt, c)) {
           case kSqliteInteger:
-            row.map->set(col, Value::inteiro(static_cast<std::int64_t>(db.column_int64(stmt, c))));
+            row.map_ref()->set(col, Value::inteiro(static_cast<std::int64_t>(db.column_int64(stmt, c))));
             break;
           case kSqliteFloat:
-            row.map->set(col, Value::decimal(db.column_double(stmt, c)));
+            row.map_ref()->set(col, Value::decimal(db.column_double(stmt, c)));
             break;
           case kSqliteText: {
             const auto* txt = db.column_text(stmt, c);
-            row.map->set(col, Value::texto(txt ? reinterpret_cast<const char*>(txt) : ""));
+            row.map_ref()->set(col, Value::texto(txt ? reinterpret_cast<const char*>(txt) : ""));
             break;
           }
           case kSqliteBlob:
-            row.map->set(col, Value::texto(blob_hex(db.column_blob(stmt, c), db.column_bytes(stmt, c))));
+            row.map_ref()->set(col, Value::texto(blob_hex(db.column_blob(stmt, c), db.column_bytes(stmt, c))));
             break;
           case kSqliteNull:
           default:
-            row.map->set(col, Value::nulo());
+            row.map_ref()->set(col, Value::nulo());
             break;
         }
       }
@@ -278,22 +278,22 @@ ValueList consome_select(const SqliteApi& db, void* conn, void* stmt, int ncols)
         const std::string col = name ? name : ("coluna" + std::to_string(c + 1));
         switch (db.column_type(stmt, c)) {
           case kSqliteInteger:
-            row.map->set(col, Value::inteiro(static_cast<std::int64_t>(db.column_int64(stmt, c))));
+            row.map_ref()->set(col, Value::inteiro(static_cast<std::int64_t>(db.column_int64(stmt, c))));
             break;
           case kSqliteFloat:
-            row.map->set(col, Value::decimal(db.column_double(stmt, c)));
+            row.map_ref()->set(col, Value::decimal(db.column_double(stmt, c)));
             break;
           case kSqliteText: {
             const auto* txt = db.column_text(stmt, c);
-            row.map->set(col, Value::texto(txt ? reinterpret_cast<const char*>(txt) : ""));
+            row.map_ref()->set(col, Value::texto(txt ? reinterpret_cast<const char*>(txt) : ""));
             break;
           }
           case kSqliteBlob:
-            row.map->set(col, Value::texto(blob_hex(db.column_blob(stmt, c), db.column_bytes(stmt, c))));
+            row.map_ref()->set(col, Value::texto(blob_hex(db.column_blob(stmt, c), db.column_bytes(stmt, c))));
             break;
           case kSqliteNull:
           default:
-            row.map->set(col, Value::nulo());
+            row.map_ref()->set(col, Value::nulo());
             break;
         }
       }
@@ -468,16 +468,16 @@ Value sqlite_consulta_tabelas(const std::string& sql,
     exec_um(db, conn, "PRAGMA journal_mode=OFF", {}, "");
     exec_um(db, conn, "PRAGMA synchronous=OFF", {}, "");
     for (const auto& [nome, tabela] : tabelas) {
-      if ((tabela.kind != ValueKind::Tabela && tabela.kind != ValueKind::Lista) || !tabela.list) {
+      if ((tabela.kind != ValueKind::Tabela && tabela.kind != ValueKind::Lista) || !tabela.list_ref()) {
         die("'" + nome + "' deve ser uma tabela (lista de mapas)");
       }
-      const ValueList& linhas = *tabela.list;
+      const ValueList& linhas = *tabela.list_ref();
       std::vector<ColunaSql> colunas;
       for (const Value& linha : linhas) {
-        if (linha.kind != ValueKind::Mapa || !linha.map) {
+        if (linha.kind != ValueKind::Mapa || !linha.map_ref()) {
           die("'" + nome + "' deve ser uma tabela (lista de mapas)");
         }
-        for (const auto& [chave, v] : linha.map->items) {
+        for (const auto& [chave, v] : linha.map_ref()->items) {
           ColunaSql* c = nullptr;
           for (ColunaSql& existente : colunas) {
             if (existente.nome == chave) {
@@ -526,7 +526,7 @@ Value sqlite_consulta_tabelas(const std::string& sql,
       for (const Value& linha : linhas) {
         for (std::size_t k = 0; k < colunas.size(); ++k) {
           const int idx = static_cast<int>(k + 1);
-          const Value* v = linha.map->find(colunas[k].nome);
+          const Value* v = linha.map_ref()->find(colunas[k].nome);
           if (v == nullptr || v->kind == ValueKind::Nulo) {
             db.bind_null(ins, idx);
           } else if (v->kind == ValueKind::Logico) {

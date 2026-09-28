@@ -139,11 +139,11 @@ struct Apagador {
 
 // Uma lista em que todo item e um mapa e uma tabela.
 Value como_tabela(Value v) {
-  if (v.kind != ValueKind::Lista || !v.list || v.list->empty()) return v;
-  for (const Value& item : *v.list) {
+  if (v.kind != ValueKind::Lista || !v.list_ref() || v.list_ref()->empty()) return v;
+  for (const Value& item : *v.list_ref()) {
     if (item.kind != ValueKind::Mapa) return v;
   }
-  return Value::tabela(*v.list);
+  return Value::tabela(*v.list_ref());
 }
 
 }  // namespace
@@ -177,12 +177,12 @@ Value chamar_python(const std::string& modulo, const std::string& funcao,
   }
 
   Value pedido = Value::mapa();
-  pedido.map->items.emplace_back("modulo", Value::texto(modulo));
-  pedido.map->items.emplace_back("funcao", Value::texto(funcao));
-  pedido.map->items.emplace_back("args", Value::lista(args));
+  pedido.map_ref()->items.emplace_back("modulo", Value::texto(modulo));
+  pedido.map_ref()->items.emplace_back("funcao", Value::texto(funcao));
+  pedido.map_ref()->items.emplace_back("args", Value::lista(args));
   Value nom = Value::mapa();
-  for (const auto& kv : nomeados.items) nom.map->items.emplace_back(kv.first, kv.second);
-  pedido.map->items.emplace_back("nomeados", nom);
+  for (const auto& kv : nomeados.items) nom.map_ref()->items.emplace_back(kv.first, kv.second);
+  pedido.map_ref()->items.emplace_back("nomeados", nom);
 
   Apagador limpeza;
   const std::string script = escrever_temp("py", kRunner);
@@ -213,14 +213,14 @@ Value chamar_python(const std::string& modulo, const std::string& funcao,
   } catch (const std::exception& e) {
     throw std::runtime_error(std::string("chamar_python: resposta invalida: ") + e.what());
   }
-  const Value* ok = saida.map ? saida.map->find("ok") : nullptr;
+  const Value* ok = saida.map_ref() ? saida.map_ref()->find("ok") : nullptr;
   if (ok == nullptr || ok->kind != ValueKind::Logico || !ok->b) {
-    const Value* erro = saida.map ? saida.map->find("erro") : nullptr;
+    const Value* erro = saida.map_ref() ? saida.map_ref()->find("erro") : nullptr;
     throw std::runtime_error("python: " + (erro != nullptr && erro->kind == ValueKind::Texto
                                                ? erro->s
                                                : std::string("erro desconhecido")));
   }
-  const Value* r = saida.map->find("resultado");
+  const Value* r = saida.map_ref()->find("resultado");
   return r != nullptr ? como_tabela(*r) : Value::nulo();
 }
 

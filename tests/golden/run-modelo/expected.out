@@ -2,3 +2,6 @@
 forma: [2]
 soma: 1
 lote: [2, 2]
+previsoes: 2
+primeira soma: 1
+mesma ordem: verdadeiro verdadeiro

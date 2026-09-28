@@ -10,7 +10,7 @@
 namespace tilt::rt {
 
 // Parquet nativo, sem dependencias externas de link:
-// - writer: um row group, encoding PLAIN; colunas sem nulos sao REQUIRED e
+// - writer: um ou varios row groups, encoding PLAIN; colunas sem nulos sao REQUIRED e
 //   colunas com nulos viram OPTIONAL, com definition levels RLE (valores
 //   nulos omitidos); paginas DATA_PAGE v1 por padrao ou v2 com
 //   `paginas_v2`; compressao gzip (padrao) ou snappy literal-only; strings
@@ -62,12 +62,20 @@ struct ParquetWriteOpts {
   // AWS KMS: KeyId para GenerateDataKey (AES_256); o arquivo persiste somente
   // o KeyId resolvido e CiphertextBlob, nunca a data key em claro.
   std::string chave_kms;
+  // Numero maximo de linhas por row group. Zero preserva o comportamento de
+  // um unico grupo (compatibilidade); valores positivos particionam tabelas
+  // grandes e permitem leitura incremental por grupo.
+  std::size_t row_group_size = 0;
 };
 
 void parquet_write(const std::string& path, const Value& tabela,
                    const std::vector<int>* field_ids = nullptr,
                    const ParquetWriteOpts& opts = {});
-Value parquet_read(const std::string& path);  // -> tabela (lista de mapas)
+// `selecionar` projeta campos top-level na ordem solicitada antes da decodificacao.
+Value parquet_read(const std::string& path,
+                   const std::vector<std::string>& selecionar = {},
+                   bool colunar = false,
+                   const Value* onde = nullptr);  // -> tabela
 
 // Streaming por row group (treino em arquivos grandes): abre uma vez e
 // decodifica grupo a grupo, sem materializar o arquivo todo.
@@ -81,6 +89,7 @@ struct ParquetFluxo {
   std::shared_ptr<ParquetEstado> estado;
 };
 ParquetFluxo parquet_abrir_fluxo(const std::string& path);  // lanca em erro
-Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo);  // tabela; lanca em erro
+Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo,
+                             const std::vector<std::string>& selecionar = {});  // tabela; lanca em erro
 
 }  // namespace tilt::rt

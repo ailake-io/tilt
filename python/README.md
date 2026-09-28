@@ -2,6 +2,9 @@
 
 Chama funcoes e pipelines de arquivos `.tilt` a partir do Python e do PySpark.
 Sem dependencias: fala com `tilt rpc` por JSON-lines.
+Para tabelas grandes, `pip install './python[columnar]'` habilita
+`vendas.chamar_colunar("funcao", tabela_arrow)`: os dados cruzam o processo
+em Parquet temporario e uma `tabela` retornada vira `pyarrow.Table`.
 
 ```python
 import tilt

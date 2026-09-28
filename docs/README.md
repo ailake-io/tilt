@@ -10,8 +10,8 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 02 | [Tipos](guia-02-tipos.md) | `tipo`, escalares, `lista`/`mapa`/`opcional`, `tensor`, `tabela`, `fluxo`, união de literais, valores padrão |
 | 03 | [Engenharia de dados](guia-03-dados.md) | `fonte`, `pipeline`, `passos`, métodos de tabela, `verificar`, `ao_falhar`, `agenda`, CSV/JSON, stdlib `io` |
 | 04 | [ML e Deep Learning](guia-04-ml-dl.md) | tensores e ops, `modelo`/`camadas`, `modelo X.executar`, `treino`, `carregador`, otimizadores, `dispositivo`/GPU, stdlib `nn` |
-| 05 | [LLMs e RAG](guia-05-llm-rag.md) | `llm`, `perguntar`, `formato: <tipo>`, `incorporar`, `dividir_texto`, `indice`, `.inserir`/`.buscar` |
-| 06 | [Agentes](guia-06-agentes.md) | `ferramenta`, `agente`, `.responder`, `rastro`, `memoria`, `equipe`, `estrategia` |
+| 05 | [LLMs e RAG](guia-05-llm-rag.md) | `llm`, contabilidade/observabilidade, `perguntar`, `formato: <tipo>`, `incorporar`, `fragmentar`/`dividir_texto`, `indice`, `.inserir`/`.buscar`/`.avaliar` |
+| 06 | [Agentes](guia-06-agentes.md) | `ferramenta`, `agente`, `politica`, `.responder`, `rastro`, `memoria`, `equipe`, `estrategia` |
 | 07 | [Serviços HTTP](guia-07-http.md) | `servico`, `rota`, `entrada`, `responder`, `tilt servir`, validação, códigos de status |
 | 08 | [CLI](guia-08-cli.md) | cada comando, flags, códigos de saída, variáveis de ambiente |
 | 09 | [VM e nativo](guia-09-vm-nativo.md) | subconjunto da VM de bytecode e do codegen x86-64/ARM64, limitações |

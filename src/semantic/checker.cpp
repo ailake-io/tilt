@@ -28,7 +28,7 @@ bool word_in(std::string_view w, std::initializer_list<std::string_view> set) {
 bool is_entity_keyword(std::string_view kw) {
   return word_in(kw, {"fonte", "pipeline", "verificar", "modelo", "treino", "busca", "tarefa",
                       "experimento", "avaliacao", "llm", "indice", "fluxo", "ferramenta", "agente",
-                      "equipe", "servico", "teste"});
+                      "equipe", "servico", "teste", "politica"});
 }
 
 bool is_secret_key(std::string_view key) {
@@ -946,14 +946,16 @@ bool is_table_method(std::string_view m) {
           "sql",         "remover_nulos",  "preencher_nulos", "renomear",    "remover_colunas",
           "converter",   "deduplicar",     "juntar",          "empilhar",    "descrever",
           "amostra",     "contar_valores", "limpar_texto",    "pivotar",     "despivotar",
-          "janela",      "dividir_coluna", "converter_fuso"});
+          "janela",      "dividir_coluna", "converter_fuso", "metricas_join",
+          "limitar_cache_join", "metricas_memoria"});
 }
 bool is_texto_method(std::string_view m) { return word_in(m, {"maiusculas", "minusculas"}); }
 // Metodos resolvidos dinamicamente sobre texto-nome-de-entidade (agente,
 // equipe, ferramenta, indice, modelo) — nunca rejeitar esses.
 bool is_entity_method(std::string_view m) {
   return word_in(m, {"responder", "perguntar", "executar", "para_frente", "inserir", "buscar",
-                     "salvar_pesos", "carregar_pesos", "exportar_onnx", "exportar"});
+                     "salvar_pesos", "carregar_pesos", "exportar_onnx", "exportar",
+                     "prever", "prever_lote"});
 }
 
 void collect_entrada_names(const ast::Block& block, std::unordered_set<std::string>& scope) {
@@ -1646,7 +1648,8 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
                   "ordenar_por, limite, primeiros, distinto, sql, remover_nulos, preencher_nulos, "
                   "renomear, remover_colunas, converter, deduplicar, juntar, empilhar, descrever, "
                   "amostra, contar_valores, limpar_texto, pivotar, despivotar, janela, "
-                  "dividir_coluna, converter_fuso"});
+                  "dividir_coluna, converter_fuso, metricas_join, limitar_cache_join, "
+                  "metricas_memoria"});
           return TypeKind::Unknown;
         }
         if (base == TypeKind::Tensor && !is_tensor_method(m) && !is_entity_method(m)) {
@@ -1803,15 +1806,37 @@ void SemanticChecker::check_return(const Expr* value, Span span, const TypeEnv& 
 }
 
 void SemanticChecker::check_funcao_arity(const std::string& name, const std::vector<ast::Arg>& args,
-                                          bool paren, Span span) {
+                                          Span span) {
   const Item* decl = find_funcao_decl(program_, name);
   if (!decl) return;  // ex.: importada de modulo — sem verificacao
   int npos = 0;
+  bool named = false;
+  std::vector<bool> supplied(decl->params.size(), false);
   for (const auto& arg : args) {
     if (arg.name.empty()) {
+      if (named) {
+        report(DiagCode::TypeMismatch, span,
+               "argumento posicional depois de nomeado em '" + name + "'");
+        return;
+      }
+      if (npos < static_cast<int>(supplied.size())) supplied[static_cast<std::size_t>(npos)] = true;
       ++npos;
     } else {
-      return;  // com argumento nomeado, pula (semantica nao modelada)
+      named = true;
+      auto it = std::find_if(decl->params.begin(), decl->params.end(),
+                             [&](const ast::Arg& p) { return p.name == arg.name; });
+      if (it == decl->params.end()) {
+        report(DiagCode::TypeMismatch, span,
+               "funcao '" + name + "' nao tem parametro '" + arg.name + "'");
+        return;
+      }
+      const std::size_t index = static_cast<std::size_t>(it - decl->params.begin());
+      if (supplied[index]) {
+        report(DiagCode::TypeMismatch, span,
+               "parametro '" + arg.name + "' recebido mais de uma vez");
+        return;
+      }
+      supplied[index] = true;
     }
   }
   int obrigatorios = 0;
@@ -1819,7 +1844,14 @@ void SemanticChecker::check_funcao_arity(const std::string& name, const std::vec
     if (p.optional_annotation.empty() && !p.default_value) ++obrigatorios;
   }
   const int total = static_cast<int>(decl->params.size());
-  if (npos >= obrigatorios && (npos <= total || !paren)) return;
+  bool missing_required = false;
+  for (std::size_t k = 0; k < supplied.size(); ++k) {
+    const ast::Arg& param = decl->params[k];
+    if (!supplied[k] && param.optional_annotation.empty() && !param.default_value) {
+      missing_required = true;
+    }
+  }
+  if (!missing_required && npos <= total) return;
   const std::string esperado = obrigatorios == total ? std::to_string(total) + " argumento(s)"
                                                      : "entre " + std::to_string(obrigatorios) +
                                                            " e " + std::to_string(total) +
@@ -1836,8 +1868,10 @@ void SemanticChecker::check_funcao_arity(const std::string& name, const std::vec
     }
     nota += ")";
   }
+  const int found = static_cast<int>(std::count(supplied.begin(), supplied.end(), true)) +
+                    std::max(0, npos - total);
   report(DiagCode::TypeMismatch, span,
-         "'" + name + "' espera " + esperado + ", encontrou " + std::to_string(npos), {nota});
+         "'" + name + "' espera " + esperado + ", encontrou " + std::to_string(found), {nota});
 }
 
 void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
@@ -1903,13 +1937,12 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
       if (e.lhs && e.lhs->kind == ExprKind::Member) {
         check_expr(*e.lhs->lhs, scope);  // the receiver
       }
-      // Aridade de `funcao` do usuario (T011): o runtime preenche faltantes
-      // com nulo e ignora sobrantes em silencio; o checker exige entre
-      // obrigatorios e total. So valida chamadas 100% posicionais.
+      // Aridade de `funcao` do usuario (T011): o runtime exige entre
+      // obrigatorios e total, inclusive quando os argumentos sao nomeados.
       if (e.lhs && e.lhs->kind == ExprKind::Name) {
         const std::string& callee = e.lhs->text;
         if (const Symbol* s = lookup(callee); s && s->kind == "funcao") {
-          check_funcao_arity(callee, e.args, e.paren_call, e.span);
+          check_funcao_arity(callee, e.args, e.span);
         }
       }
       // callee that is a bare Name is assumed to be a stdlib function; not flagged.

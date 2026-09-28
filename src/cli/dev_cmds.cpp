@@ -21,6 +21,7 @@
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
 #include "semantic/checker.hpp"
+#include "runtime/sha256.hpp"
 #include "tilt/version.hpp"
 
 namespace tilt {
@@ -515,7 +516,12 @@ int cmd_novo(const std::vector<std::string_view>& args) {
                                 "tilt testar                    # roda os blocos `teste`\n"
                                 "tilt checar principal.tilt     # verifica sintaxe e tipos\n"
                                 "tilt formatar .                # normaliza espacos\n"
+                                "tilt adicionar util ../util.tilt # copia e fixa modulo local\n"
                                 "```\n") &&
+      escrever("tilt.toml", "[projeto]\nnome = \"" + nome +
+                                 "\"\nversao = \"" + std::string(kVersion) +
+                                 "\"\n\n[dependencias]\n") &&
+      escrever("tilt.lock", "# tilt-lock-v1\n") &&
       escrever(".gitignore", "*.tiltc\n.env\n");
   if (!ok) {
     std::cerr << "tilt: falha ao gravar os arquivos de '" << nome << "'\n";
@@ -524,8 +530,277 @@ int cmd_novo(const std::vector<std::string_view>& args) {
   std::cout << "projeto '" << nome << "' criado:\n"
             << "  " << nome << "/principal.tilt\n"
             << "  " << nome << "/testes.tilt\n"
+            << "  " << nome << "/tilt.toml\n"
+            << "  " << nome << "/tilt.lock\n"
             << "  " << nome << "/README.md\n"
             << "proximo passo: cd " << nome << " && tilt executar principal.tilt && tilt testar\n";
+  return kOk;
+}
+
+int cmd_adicionar(const std::vector<std::string_view>& args) {
+  namespace fs = std::filesystem;
+  const bool updating = !args.empty() && args[0] == "atualizar";
+  if (args.size() != 3) {
+    std::cerr << "tilt: uso: tilt " << (updating ? "atualizar" : "adicionar")
+              << " <nome> <arquivo.tilt>\n";
+    return kUso;
+  }
+  const std::string name(args[1]);
+  const bool valid = !name.empty() && (std::isalpha(static_cast<unsigned char>(name[0])) ||
+                                       name[0] == '_') &&
+                     std::all_of(name.begin(), name.end(), [](unsigned char c) {
+                       return std::isalnum(c) != 0 || c == '_';
+                     });
+  if (!valid) {
+    std::cerr << "tilt: nome de modulo invalido '" << name << "'\n";
+    return kUso;
+  }
+  const fs::path manifest = "tilt.toml";
+  const fs::path lock = "tilt.lock";
+  const fs::path source(args[2]);
+  std::error_code ec;
+  if (!fs::is_regular_file(manifest, ec) || !fs::is_regular_file(source, ec) ||
+      source.extension() != ".tilt") {
+    std::cerr << "tilt: execute no diretorio de um projeto com tilt.toml e informe um .tilt valido\n";
+    return kUso;
+  }
+  std::ifstream mf(manifest, std::ios::binary);
+  std::string manifest_text((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+  if (manifest_text.find("[dependencias]") == std::string::npos) {
+    std::cerr << "tilt: tilt.toml sem secao [dependencias]\n";
+    return kUso;
+  }
+  const std::string entry = name + " = \"modulos/" + name + ".tilt\"";
+  const std::size_t section = manifest_text.find("[dependencias]");
+  const std::size_t next_section = manifest_text.find("\n[", section + 14);
+  const std::string dependencies = manifest_text.substr(
+      section, next_section == std::string::npos ? std::string::npos : next_section - section);
+  const bool listed = dependencies.find("\n" + entry) != std::string::npos;
+  const bool name_taken = dependencies.find("\n" + name + " = ") != std::string::npos;
+  const fs::path destination = fs::path("modulos") / (name + ".tilt");
+  const bool exists = fs::exists(destination, ec);
+  if (updating ? (!listed || !exists) : (name_taken || exists)) {
+    std::cerr << "tilt: modulo '" << name << "' "
+              << (updating ? "nao foi adicionado ao projeto" : "ja esta no projeto") << "\n";
+    return kUso;
+  }
+  std::ifstream sf(source, std::ios::binary);
+  const std::string contents((std::istreambuf_iterator<char>(sf)), std::istreambuf_iterator<char>());
+  if (!sf.eof() && !sf) {
+    std::cerr << "tilt: falha ao ler '" << source.string() << "'\n";
+    return kUso;
+  }
+  const std::string digest = rt::sha256_hex(contents);
+  std::ifstream lf(lock, std::ios::binary);
+  std::string lock_text((std::istreambuf_iterator<char>(lf)), std::istreambuf_iterator<char>());
+  if (lock_text.empty()) lock_text = "# tilt-lock-v1\n";
+  const std::string lock_entry = name + " = \"" + digest + "\"";
+  if (updating) {
+    const std::string prefix = "\n" + name + " = \"";
+    const std::size_t begin = lock_text.find(prefix);
+    if (begin == std::string::npos) {
+      std::cerr << "tilt: modulo '" << name << "' nao consta em tilt.lock\n";
+      return kUso;
+    }
+    const std::size_t end = lock_text.find('\n', begin + 1);
+    lock_text.replace(begin + 1, end == std::string::npos ? std::string::npos : end - begin - 1,
+                      lock_entry);
+  } else {
+    if (lock_text.back() != '\n') lock_text += '\n';
+    lock_text += lock_entry + "\n";
+    if (next_section == std::string::npos) {
+      if (manifest_text.back() != '\n') manifest_text += '\n';
+      manifest_text += entry + "\n";
+    } else {
+      manifest_text.insert(next_section, "\n" + entry);
+    }
+  }
+
+  fs::create_directories("modulos", ec);
+  if (ec) {
+    std::cerr << "tilt: nao foi possivel criar modulos: " << ec.message() << "\n";
+    return kUso;
+  }
+  auto write_file = [](const fs::path& p, const std::string& data) {
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    return static_cast<bool>(out);
+  };
+  if (!write_file(destination, contents) || !write_file(manifest, manifest_text) ||
+      !write_file(lock, lock_text)) {
+    std::cerr << "tilt: falha ao gravar modulo, manifesto ou lockfile\n";
+    return kUso;
+  }
+  std::cout << "modulo '" << name << "' " << (updating ? "atualizado" : "adicionado")
+            << ": " << destination.string() << " (sha256 "
+            << digest << ")\n";
+  return kOk;
+}
+
+int cmd_registrar_modelo(const std::vector<std::string_view>& args) {
+  namespace fs = std::filesystem;
+  if (args.size() < 3) {
+    std::cerr << "tilt: uso: tilt registrar-modelo <nome> <arquivo> [--versao V] [--registro DIR]\n";
+    return kUso;
+  }
+  const std::string nome(args[1]);
+  const fs::path origem(args[2]);
+  std::string versao = "1";
+  fs::path registro = ".tilt-modelos";
+  for (std::size_t i = 3; i < args.size(); ++i) {
+    if (args[i] == "--versao" && i + 1 < args.size()) versao = std::string(args[++i]);
+    else if (args[i] == "--registro" && i + 1 < args.size()) registro = fs::path(args[++i]);
+    else {
+      std::cerr << "tilt: opcao invalida em registrar-modelo\n";
+      return kUso;
+    }
+  }
+  const bool nome_ok = !nome.empty() && std::all_of(nome.begin(), nome.end(), [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.';
+  });
+  const bool versao_ok = !versao.empty() && std::all_of(versao.begin(), versao.end(), [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '.' || c == '-' || c == '_';
+  });
+  std::error_code ec;
+  if (!nome_ok || !versao_ok || !fs::is_regular_file(origem, ec)) {
+    std::cerr << "tilt: nome, versao ou arquivo de modelo invalido\n";
+    return kUso;
+  }
+  std::ifstream in(origem, std::ios::binary);
+  const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (!in.eof() && !in) {
+    std::cerr << "tilt: falha ao ler o artefato\n";
+    return kUso;
+  }
+  const fs::path destino = registro / nome / versao;
+  fs::create_directories(destino, ec);
+  if (ec) {
+    std::cerr << "tilt: nao foi possivel criar o registry: " << ec.message() << "\n";
+    return kUso;
+  }
+  const fs::path artefato = destino / origem.filename();
+  std::ofstream out(artefato, std::ios::binary | std::ios::trunc);
+  out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  const std::string digest = rt::sha256_hex(bytes);
+  std::ofstream manifest(destino / "manifest.json", std::ios::binary | std::ios::trunc);
+  manifest << "{\n  \"nome\": \"" << nome << "\",\n"
+           << "  \"versao\": \"" << versao << "\",\n"
+           << "  \"arquivo\": \"" << artefato.filename().string() << "\",\n"
+           << "  \"sha256\": \"" << digest << "\"\n}\n";
+  if (!out || !manifest) {
+    std::cerr << "tilt: falha ao gravar o artefato ou manifesto\n";
+    return kUso;
+  }
+  std::cout << "modelo registrado: " << nome << "@" << versao << " (sha256 " << digest
+            << ") em " << destino.string() << "\n";
+  return kOk;
+}
+
+int cmd_listar_modelos(const std::vector<std::string_view>& args) {
+  namespace fs = std::filesystem;
+  fs::path registro = ".tilt-modelos";
+  if (args.size() == 3 && args[1] == "--registro") registro = fs::path(args[2]);
+  else if (args.size() != 1) {
+    std::cerr << "tilt: uso: tilt listar-modelos [--registro DIR]\n";
+    return kUso;
+  }
+  std::error_code ec;
+  if (!fs::is_directory(registro, ec)) return kOk;
+  for (const auto& modelo : fs::directory_iterator(registro, ec)) {
+    if (!modelo.is_directory()) continue;
+    for (const auto& versao : fs::directory_iterator(modelo.path(), ec)) {
+      if (versao.is_directory() && fs::exists(versao.path() / "manifest.json"))
+        std::cout << modelo.path().filename().string() << "@" << versao.path().filename().string()
+                  << "\n";
+    }
+  }
+  return kOk;
+}
+
+int cmd_promover_modelo(const std::vector<std::string_view>& args) {
+  namespace fs = std::filesystem;
+  if (args.size() < 4 || args.size() > 6) {
+    std::cerr << "tilt: uso: tilt promover-modelo <nome> <versao> <stage> [--registro DIR]\n";
+    return kUso;
+  }
+  const std::string nome(args[1]);
+  const std::string versao(args[2]);
+  const std::string stage(args[3]);
+  fs::path registro = ".tilt-modelos";
+  if (args.size() == 6 && args[4] == "--registro") registro = fs::path(args[5]);
+  if (stage != "staging" && stage != "production" && stage != "archived") {
+    std::cerr << "tilt: stage invalido (use staging, production ou archived)\n";
+    return kUso;
+  }
+  const fs::path manifest = registro / nome / versao / "manifest.json";
+  std::ifstream in(manifest, std::ios::binary);
+  if (!in) {
+    std::cerr << "tilt: modelo " << nome << "@" << versao << " nao encontrado\n";
+    return kUso;
+  }
+  std::string texto((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::string campo = "  \"stage\": ";
+  const std::size_t pos = texto.find(campo);
+  if (pos == std::string::npos) {
+    const std::size_t fim = texto.rfind('}');
+    if (fim == std::string::npos) return kUso;
+    texto.insert(fim, "  \"stage\": \"" + stage + "\",\n");
+  } else {
+    const std::size_t inicio_valor = pos + campo.size();
+    const std::size_t fim_valor = texto.find('\n', inicio_valor);
+    texto.replace(inicio_valor, fim_valor - inicio_valor, "\"" + stage + "\",");
+  }
+  std::ofstream out(manifest, std::ios::binary | std::ios::trunc);
+  out << texto;
+  if (!out) return kUso;
+  std::cout << "modelo promovido: " << nome << "@" << versao << " -> " << stage << "\n";
+  return kOk;
+}
+
+int cmd_resolver_modelo(const std::vector<std::string_view>& args) {
+  namespace fs = std::filesystem;
+  if (args.size() < 2) {
+    std::cerr << "tilt: uso: tilt resolver-modelo <nome> [--versao V|--stage S] [--registro DIR]\n";
+    return kUso;
+  }
+  const std::string nome(args[1]);
+  std::string versao;
+  std::string stage;
+  fs::path registro = ".tilt-modelos";
+  for (std::size_t i = 2; i < args.size(); ++i) {
+    if ((args[i] == "--versao" || args[i] == "--stage" || args[i] == "--registro") && i + 1 < args.size()) {
+      if (args[i] == "--versao") versao = std::string(args[++i]);
+      else if (args[i] == "--stage") stage = std::string(args[++i]);
+      else registro = fs::path(args[++i]);
+    } else return kUso;
+  }
+  std::error_code ec;
+  fs::path escolhido;
+  for (const auto& item : fs::directory_iterator(registro / nome, ec)) {
+    if (!item.is_directory()) continue;
+    if (!versao.empty() && item.path().filename() != versao) continue;
+    const fs::path manifest = item.path() / "manifest.json";
+    std::ifstream in(manifest);
+    if (!in) continue;
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (!stage.empty() && text.find("\"stage\": \"" + stage + "\"") == std::string::npos) continue;
+    escolhido = item.path();
+    if (!stage.empty()) break;
+    if (escolhido.filename() < item.path().filename()) escolhido = item.path();
+  }
+  if (escolhido.empty()) {
+    std::cerr << "tilt: nenhuma versao encontrada para " << nome << "\n";
+    return kUso;
+  }
+  std::ifstream in(escolhido / "manifest.json");
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::string chave = "\"arquivo\": \"";
+  const std::size_t p = text.find(chave);
+  if (p == std::string::npos) return kUso;
+  const std::size_t begin = p + chave.size();
+  const std::size_t end = text.find('"', begin);
+  if (end == std::string::npos) return kUso;
+  std::cout << (escolhido / text.substr(begin, end - begin)).string() << "\n";
   return kOk;
 }
 

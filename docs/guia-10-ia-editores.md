@@ -77,10 +77,13 @@ Filtro por prefixo (case-insensitive).
   checker, tipo do valor em usos de variável e tipo da expressão mais interna
   sob o cursor (tensor mostra a forma quando conhecida; desconhecido mantém o
   texto atual, sem falsos positivos);
-- **go-to-definition** (`definitionProvider`): mesma arquivo — variáveis de
+- **go-to-definition** (`definitionProvider`): no mesmo arquivo — variáveis de
   `seja`/`constante`, atribuições, parâmetros de `funcao`, variáveis de
   `para cada`/`capturar` e nomes de declarações (`pipeline x:`, `funcao y`,
-  `agente z`, ...). Sem resolução cross-file;
+  `agente z`, ...). Importações explícitas `de modulo importar nome [como alias]`
+  e `importar modulo [como alias]` com acesso `alias.nome` navegam para o
+  arquivo `.tilt` local ou em `TILT_STDLIB_PATH`; módulos não encontrados
+  continuam sem destino;
 - **find references** (`referencesProvider`): localiza todas as ocorrências
   same-file do símbolo resolvido no cursor, ignorando acessos de membro
   (`obj.campo`). `context.includeDeclaration` controla se a declaração entra

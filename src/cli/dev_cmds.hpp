@@ -20,6 +20,15 @@ int cmd_repl(const std::vector<std::string_view>& args);
 // `tilt novo <nome>`: cria um projeto com programa, testes e README.
 int cmd_novo(const std::vector<std::string_view>& args);
 
+// `tilt adicionar <nome> <arquivo.tilt>`: vendoriza um modulo local e fixa seu hash.
+int cmd_adicionar(const std::vector<std::string_view>& args);
+
+// Registry local de artefatos de modelo (sem servidor externo).
+int cmd_registrar_modelo(const std::vector<std::string_view>& args);
+int cmd_listar_modelos(const std::vector<std::string_view>& args);
+int cmd_promover_modelo(const std::vector<std::string_view>& args);
+int cmd_resolver_modelo(const std::vector<std::string_view>& args);
+
 // Normaliza espacos de um fonte .tilt: fim de linha LF, sem espacos no fim das
 // linhas (exceto dentro de texto """...""" ), no maximo 2 linhas em branco
 // seguidas, sem linhas em branco no inicio e exatamente uma quebra de linha no
