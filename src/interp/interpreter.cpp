@@ -2447,8 +2447,32 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas(
     const std::string& fuso_destino) {
   auto table = std::make_shared<rt::ColumnarTable>(headers);
   std::vector<std::string> cells;
-  std::vector<Value> values;
-  values.reserve(headers.size());
+  const auto append_value = [](rt::ColumnarColumn& column, Value value) {
+    switch (value.kind) {
+      case ValueKind::Nulo: column.append_null(); break;
+      case ValueKind::Inteiro: column.append_integer(value.i); break;
+      case ValueKind::Decimal: column.append_decimal(value.d); break;
+      case ValueKind::Logico: column.append_boolean(value.b); break;
+      case ValueKind::Texto: column.append_text(std::move(value.s)); break;
+      default: column.append(std::move(value)); break;
+    }
+  };
+  const auto append_scalar = [&](rt::ColumnarColumn& column, const std::string& cell) {
+    if (!cell.empty()) {
+      char* end = nullptr;
+      const long long integer = std::strtoll(cell.c_str(), &end, 10);
+      if (end && *end == '\0') {
+        column.append_integer(static_cast<std::int64_t>(integer));
+        return;
+      }
+      const double decimal = std::strtod(cell.c_str(), &end);
+      if (end && *end == '\0') {
+        column.append_decimal(decimal);
+        return;
+      }
+    }
+    column.append_text(cell);
+  };
   std::size_t pos = ini;
   while (pos < fim) {
     const void* nl = std::memchr(buf + pos, '\n', fim - pos);
@@ -2460,19 +2484,21 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas(
     }
     const std::size_t ncell = csv_celulas(buf, pos, fim_linha, sep, cells, incluir);
     pos = fim_linha + 1;
-    values.clear();
-    for (std::size_t col : indices) {
+    for (std::size_t k = 0; k < indices.size(); ++k) {
+      const std::size_t col = indices[k];
       if (col >= ncell ||
           std::find(nulos.begin(), nulos.end(), cells[col]) != nulos.end()) {
-        values.push_back(Value::nulo());
+        table->columns[k].append_null();
       } else {
-        const std::size_t k = values.size();
-        values.push_back(tipos && k < tipos->size()
-                             ? csv_valor_tipado(cells[col], (*tipos)[k], fuso_origem, fuso_destino)
-                             : parse_scalar(cells[col]));
+        if (tipos && k < tipos->size()) {
+          append_value(table->columns[k],
+                       csv_valor_tipado(cells[col], (*tipos)[k], fuso_origem, fuso_destino));
+        } else {
+          append_scalar(table->columns[k], cells[col]);
+        }
       }
     }
-    table->append(values);
+    ++table->rows;
   }
   return table;
 }

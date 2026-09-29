@@ -143,6 +143,10 @@ Principais otimizações disponíveis no runtime atual.
 - A rodada de 1 milhão de linhas com gzip, snappy e zstd confirmou que esse
   scratch mantém RSS e pico de row group estáveis, mas não produziu ganho
   consistente de tempo; um allocator dedicado adicional fica adiado.
+- A repetição de 29/09/2026 confirmou redução de 2,6% a 13,3% no tempo de
+  leitura colunar com scratch, mantendo RSS entre 123 e 189 MiB; o caminho de
+  linhas variou entre processos e ainda precisa de mais repetições. Os dados
+  brutos estão em `benchmarks/parquet-large-2026-09-29.json`.
 - O gravador Parquet escolhe entre gerar folhas em paralelo e anexá-las
   sequencialmente. Quando a capacidade estimada dos buffers passa de 256 MiB,
   cada corpo comprimido é anexado antes de gerar o próximo; isso reduz o pico
@@ -181,6 +185,12 @@ Principais otimizações disponíveis no runtime atual.
   filtro + agregação e join em Tilt, pandas, Polars e DuckDB. Ele aceita `--json`
   e registra explicitamente os backends ausentes; um virtualenv pode instalar
   `polars` e `duckdb` sem alterar o ambiente do projeto.
+- A comparação completa de 29/09/2026, com 1 milhão de linhas, mediu Tilt em
+  sessão RPC persistente em 84,209/102,686/169,895 ms para agrupamento, filtro
+  e junção; pandas em 169,915/167,889/195,806 ms; Polars em
+  26,112/23,410/32,768 ms; e DuckDB em 83,735/78,854/71,633 ms. Os dados estão
+  em `benchmarks/data-backends-2026-09-29.md`. A leitura CSV colunar direta
+  removeu o vetor de `Value` por linha e reduziu o processo novo em 36%–51%.
 - `conv2d` grande usa tiles im2col limitados em memória e CBLAS quando disponível;
   a implementação direta permanece para entradas pequenas ou CPU sem BLAS.
 - CUDA e cuBLAS opcionais são carregados em tempo de execução. Os tensores de

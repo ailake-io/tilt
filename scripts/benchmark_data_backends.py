@@ -32,6 +32,51 @@ def median_ms(fn, repetitions: int) -> float:
     return statistics.median(samples)
 
 
+class TiltRpcSession:
+    """Persistent JSON-lines process used to exclude Tilt startup from timing."""
+
+    def __init__(self, binary: str, work: Path, program: str):
+        self.process = subprocess.Popen(
+            [binary, "rpc", program], cwd=work,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, bufsize=1,
+        )
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
+        banner = self.process.stdout.readline()
+        if not banner:
+            error = self.process.stderr.read() if self.process.stderr else ""
+            raise RuntimeError(f"Tilt RPC nao iniciou: {error}")
+        parsed = json.loads(banner)
+        if parsed.get("tilt") != "rpc":
+            raise RuntimeError(f"banner RPC inesperado: {parsed}")
+
+    def run(self, pipeline: str) -> dict:
+        assert self.process.stdin is not None
+        assert self.process.stdout is not None
+        self.process.stdin.write(json.dumps({"pipeline": pipeline}) + "\n")
+        self.process.stdin.flush()
+        response = self.process.stdout.readline()
+        if not response:
+            raise RuntimeError("Tilt RPC encerrou durante a requisicao")
+        parsed = json.loads(response)
+        if not parsed.get("ok"):
+            raise RuntimeError(f"Tilt RPC falhou: {parsed}")
+        return parsed
+
+    def close(self) -> None:
+        if self.process.poll() is not None:
+            return
+        try:
+            assert self.process.stdin is not None
+            self.process.stdin.write(json.dumps({"sair": True}) + "\n")
+            self.process.stdin.flush()
+            self.process.wait(timeout=5)
+        except (BrokenPipeError, subprocess.TimeoutExpired):
+            self.process.kill()
+            self.process.wait()
+
+
 def make_data(directory: Path, rows: int) -> None:
     regions = ["norte", "sul", "leste", "oeste", "centro"]
     with (directory / "vendas.csv").open("w", newline="") as out:
@@ -104,6 +149,24 @@ def main() -> int:
                 expected = str(min(args.rows, len(regions)))
             if expected not in result.stdout:
                 raise RuntimeError(f"unexpected Tilt result for {program}: {result.stdout}")
+
+        rpc_sessions = {
+            name: TiltRpcSession(tilt_bin, work, f"{name}.tilt")
+            for name in ("group", "filter", "join")
+        }
+
+        def tilt_rpc_run(program: str):
+            name = program.removesuffix(".tilt")
+            response = rpc_sessions[name].run("bench")
+            output = response.get("saida", "")
+            if program == "join.tilt":
+                expected = str(args.rows)
+            elif program == "filter.tilt":
+                expected = str(filter_groups)
+            else:
+                expected = str(min(args.rows, len(regions)))
+            if expected not in output:
+                raise RuntimeError(f"unexpected Tilt RPC result for {program}: {response}")
 
         python_runs = {}
         if available["pandas"]:
@@ -182,6 +245,8 @@ def main() -> int:
 
         # One validation run per backend is outside the timing loop.
         tilt_run("group.tilt")
+        for program in ("group.tilt", "filter.tilt", "join.tilt"):
+            tilt_rpc_run(program)
         for runs in python_runs.values():
             for run in runs.values():
                 run()
@@ -194,6 +259,16 @@ def main() -> int:
                 records.append({"backend": backend, "operation": operation,
                                 "rows": args.rows,
                                 "median_ms": round(median_ms(run, args.repetitions), 3)})
+
+        for backend, program in (("tilt_rpc", "group"), ("tilt_rpc", "filter"),
+                                 ("tilt_rpc", "join")):
+            records.append({"backend": backend, "operation": program,
+                            "rows": args.rows,
+                            "median_ms": round(median_ms(
+                                lambda p=program: tilt_rpc_run(p + ".tilt"),
+                                args.repetitions), 3)})
+        for session in rpc_sessions.values():
+            session.close()
 
     if args.json:
         print(json.dumps(records, ensure_ascii=False))

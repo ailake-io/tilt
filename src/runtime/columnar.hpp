@@ -33,6 +33,8 @@ struct ColumnarColumn {
   std::vector<std::unique_ptr<ColumnarColumn>> fields;
   std::vector<Value> mixed;
 
+  void append_null();
+  void append_text(std::string value);
   void append(Value value);
   // Concatena uma coluna tipada sem materializar cada célula em Value.
   void append_column(const ColumnarColumn& source);

@@ -489,3 +489,29 @@ continua fora do escopo salvo indicação explícita.
 - [x] Reavaliar allocator dedicado por row group depois de medir o novo gravador;
   foi adiado: o ganho medido veio da escrita em lotes, sem evidência suficiente
   para justificar um allocator separado agora.
+
+### Próxima sessão — continuidade
+
+- [ ] Manter os artefatos atuais; não limpar `build/` nem as saídas geradas de
+  `tests/golden` até confirmar quais fixtures serão preservados.
+- [x] Reexecutar a suíte completa e a regressão CUDA na RTX 5050: 98/98 testes
+  passaram sequencialmente em 124,44 s; `gpu_cuda` e `parquet_kms` também
+  passaram. A execução paralela teve uma flutuação isolada em `pipeline_ops`,
+  que passou novamente sozinho.
+- [x] Repetir o benchmark de Parquet em 1 milhão de linhas com gzip, Snappy e
+  Zstd, comparando leitura, escrita, RSS e pico por row group em
+  `benchmarks/parquet-large-2026-09-29.md`. O scratch segue útil no caminho
+  colunar; não há evidência para um allocator dedicado adicional.
+- [x] Atualizar a comparação com pandas, Polars e DuckDB em 1 milhão de linhas;
+  os resultados estão em `benchmarks/data-backends-2026-09-29.md`. A sessão RPC
+  persistente agora mede Tilt em 0,50x–0,87x do tempo de pandas após a leitura
+  CSV direta; o benchmark separa o custo de inicialização do processo.
+- [x] Caminho CSV colunar simples anexa inteiros, decimais, textos e nulos
+  diretamente nas colunas, removendo o vetor de `Value` temporário por linha.
+  Em 1 milhão de linhas, agrupamento/filtro/junção caíram para 120/132/207 ms
+  no processo novo; o roundtrip completo está no relatório de backends.
+- [ ] Priorizar os próximos ganhos de performance: caminho simples de leitura,
+  compactação adicional de `Value`, `derivar` vetorizado e materialização
+  nested sem decodificação desnecessária.
+- [ ] Manter AMD/ROCm fora do escopo; preservar fallback CPU para todos os
+  caminhos CUDA/Metal.

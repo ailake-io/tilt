@@ -56,8 +56,7 @@ ColumnarColumn::Type type_of(const Value& value) {
 
 }  // namespace
 
-void ColumnarColumn::append(Value value) {
-  if (value.kind == ValueKind::Nulo) {
+void ColumnarColumn::append_null() {
     nulls.push_back(1);
     switch (type) {
       case Type::Integer: integers.push_back(0); break;
@@ -72,6 +71,41 @@ void ColumnarColumn::append(Value value) {
       case Type::Mixed: mixed.push_back(Value::nulo()); break;
       case Type::Empty: break;
     }
+}
+
+void ColumnarColumn::append_text(std::string value) {
+  if (type == Type::Empty) {
+    type = Type::Text;
+    codes.resize(nulls.size());
+  }
+  if (type != Type::Text && type != Type::TextPlain) {
+    append(Value::texto(std::move(value)));
+    return;
+  }
+  nulls.push_back(0);
+  if (type == Type::TextPlain) {
+    texts.push_back(std::move(value));
+    return;
+  }
+  auto [it, inserted] = dictionary_index.try_emplace(value,
+                                                       static_cast<std::uint32_t>(dictionary.size()));
+  if (inserted) dictionary.push_back(std::move(value));
+  codes.push_back(it->second);
+  if (nulls.size() >= 65536 && dictionary.size() > 16384 &&
+      dictionary.size() * 2 > nulls.size()) {
+    texts.reserve(nulls.size());
+    for (std::size_t row = 0; row < codes.size(); ++row)
+      texts.push_back(nulls[row] ? std::string() : dictionary[codes[row]]);
+    codes.clear();
+    dictionary.clear();
+    dictionary_index.clear();
+    type = Type::TextPlain;
+  }
+}
+
+void ColumnarColumn::append(Value value) {
+  if (value.kind == ValueKind::Nulo) {
+    append_null();
     return;
   }
   const Type incoming = type_of(value);
@@ -132,7 +166,7 @@ void ColumnarColumn::append(Value value) {
     case Type::Boolean: booleans.push_back(value.b ? 1 : 0); break;
     case Type::Text: {
       auto [it, inserted] = dictionary_index.try_emplace(value.s,
-                                        static_cast<std::uint32_t>(dictionary.size()));
+                                                           static_cast<std::uint32_t>(dictionary.size()));
       if (inserted) dictionary.push_back(std::move(value.s));
       codes.push_back(it->second);
       // Dicionario so compensa quando ha repeticao suficiente. IDs quase
