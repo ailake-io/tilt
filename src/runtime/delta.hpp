@@ -13,8 +13,8 @@ namespace tilt::rt {
 //   sem apagar parquet nem log antigos. O commit grava o JSONL num arquivo
 //   temporario do mesmo diretorio e fecha + rename() para o nome final
 //   (rename atomico no mesmo filesystem); crash antes do rename deixa so um
-//   parquet orfao, ignorado pela leitura. Pressupoe um unico escritor —
-//   sem locks nem optimistic concurrency (1a passada);
+//   parquet orfao, ignorado pela leitura. Usa lock cooperativo
+//   `.tilt.lock.d` e rejeita conflito de versao antes do rename;
 // - particoes hive-style: com `part_cols` nao vazio, os parquet sao
 //   gravados em <dir>/<c1>=<v1>/<c2>=<v2>/part-NNNNN.parquet SEM as colunas
 //   de particao (padrao Delta), o add carrega partitionValues com todas as

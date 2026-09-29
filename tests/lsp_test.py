@@ -478,6 +478,14 @@ def main() -> int:
                         "position": {"line": line, "character": char}}}
             for idx, line, char in [(60, 4, 12), (61, 5, 14), (62, 1, 20)]
         ]
+        requests += [
+            {"jsonrpc": "2.0", "id": 63, "method": "textDocument/references",
+             "params": {"textDocument": {"uri": uri}, "position": {"line": 4, "character": 12},
+                        "context": {"includeDeclaration": True}}},
+            {"jsonrpc": "2.0", "id": 64, "method": "textDocument/rename",
+             "params": {"textDocument": {"uri": uri}, "position": {"line": 4, "character": 12},
+                        "newName": "triplo"}},
+        ]
         frames = run_lsp(binary, imported, requests, uri=uri)
         if frames is None:
             return 1
@@ -491,6 +499,13 @@ def main() -> int:
         location = imported_responses.get(62, {}).get("result") or {}
         if location.get("uri") != module_path.as_uri():
             problems.append(f"definition do alias de modulo: {location}")
+        refs = imported_responses.get(63, {}).get("result") or []
+        ref_uris = {ref.get("uri") for ref in refs}
+        if module_path.as_uri() not in ref_uris or uri not in ref_uris or len(refs) < 4:
+            problems.append(f"references entre modulos: {refs}")
+        changes = (imported_responses.get(64, {}).get("result") or {}).get("changes", {})
+        if module_path.as_uri() not in changes or uri not in changes:
+            problems.append(f"rename entre modulos: {changes}")
 
     # A project dependency installed by `tilt adicionar` is also navigable.
     with tempfile.TemporaryDirectory(prefix="tilt-lsp-vendor-") as tmp:

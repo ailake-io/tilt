@@ -390,6 +390,8 @@ class Interpreter {
     int cluster_rank = 0;
     int cluster_world = 1;
     int cluster_timeout = 120;
+    bool cluster_recuperar = false;
+    int cluster_tentativas = 0;
     std::vector<std::int64_t> fluxo_grupos_linhas;  // row groups Parquet, para sharding de cluster
     bool embaralhar = true;
     std::uint64_t seed_init = 0xC1A5;

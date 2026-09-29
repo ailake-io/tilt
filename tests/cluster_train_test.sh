@@ -41,6 +41,27 @@ test -s "$tmp/aggregate-epoch-1.json"
 test -s "$tmp/aggregate-epoch-2.json"
 grep -q "treino M:" "$tmp/out0"
 grep -q "treino M:" "$tmp/out1"
+python3 - "$tmp" <<'PY'
+import json
+import pathlib
+import sys
+
+tmp = pathlib.Path(sys.argv[1])
+aggregate = json.loads((tmp / "aggregate-epoch-2.json").read_text())
+layers = aggregate.get("camadas", [])
+assert layers and all("m_w" in layer and "v_w" in layer and "m_b" in layer and "v_b" in layer
+                      for layer in layers), "checkpoint agregado sem momentos do Adam"
+rank0 = json.loads((tmp / "rank-0-epoch-2.json").read_text())
+rank1 = json.loads((tmp / "rank-1-epoch-2.json").read_text())
+for idx, layer in enumerate(layers):
+    for key in ("m_w", "v_w", "m_b", "v_b"):
+        a = rank0["camadas"][idx][key]["dados"]
+        b = rank1["camadas"][idx][key]["dados"]
+        got = layer[key]["dados"]
+        assert len(a) == len(b) == len(got)
+        for x, y, z in zip(a, b, got):
+            assert abs(z - (x + y) / 2.0) < 2e-5, (idx, key, x, y, z)
+PY
 
 # Parquet com row groups independentes: cada rank do cluster processa apenas
 # os grupos que lhe pertencem nas epocas, mantendo os rotulos globais corretos.

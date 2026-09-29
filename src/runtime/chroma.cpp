@@ -178,7 +178,7 @@ std::vector<VectorHit> chroma_search(const std::string& base, const std::string&
   for (std::size_t i = 0; i < n; ++i) {
     const Value& id = (*ids_q.list_ref())[i];
     const Value& d = (*dists_q.list_ref())[i];
-    const std::string id_s = id.kind == ValueKind::Texto ? id.s : "?";
+    const std::string id_s = id.kind == ValueKind::Texto ? id.s.str() : "?";
     // hnsw:space cosine: distance = 1 - cosseno -> score = 1 - distance.
     const double sc = d.is_number() ? 1.0 - d.as_number() : 0.0;
     std::string texto;

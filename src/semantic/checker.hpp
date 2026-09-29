@@ -108,12 +108,25 @@ class SemanticChecker {
   std::optional<TensorShape> infer_shape_impl(const ast::Expr& expr, const ShapeEnv& shapes);
   void check_return(const ast::Expr* value, Span span, const TypeEnv& types,
                     const ShapeEnv& shapes);
-  // Aridade de chamada de `funcao` do usuario (T011). Faltantes sempre
-  // acusam (runtime preenche com nulo em silencio); sobrantes so na forma
-  // com parenteses — bare-call (`f x, y`) e guloso por desenho e o runtime
-  // ignora o excedente. So chamadas 100% posicionais; o resto pula.
+  // Aridade de chamada de `funcao` do usuario (T011). Faltantes e excedentes
+  // seguem o mesmo contrato do interpretador/VM; chamadas com argumentos
+  // nomeados também validam nomes, duplicatas e opcionais.
   void check_funcao_arity(const std::string& name, const std::vector<ast::Arg>& args,
                           Span span);
+  void check_imported_funcao_arity(const std::string& local_name,
+                                   const std::vector<ast::Arg>& args, Span span,
+                                   std::string module_alias = {},
+                                   std::string exported_name = {});
+
+  // Assinaturas importadas ficam em cache por caminho e nome exportado. A
+  // checagem percorre todas as chamadas do módulo atual; manter apenas os
+  // dados necessários evita reabrir e reparsear módulos grandes a cada uso.
+  struct ImportedSignature {
+    std::string name;
+    std::vector<std::string> params;
+    std::vector<bool> required;
+  };
+  std::unordered_map<std::string, std::optional<ImportedSignature>> imported_signature_cache_;
 
   // Anotacoes de tipo ja resolvidas na passada 2 (params/retorno de
   // `funcao`, campos de `entrada:`/`saida:`), por expressao de tipo.

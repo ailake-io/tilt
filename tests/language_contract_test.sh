@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Imported functions are checked at runtime because the local checker does not
-# know their signatures. They must obey the same arity contract as local calls.
+# Imported functions are checked from their local module signatures and must
+# obey the same arity contract in the interpreter and VM paths.
 set -eu
 
 bin=$1
@@ -14,6 +14,7 @@ EOF
 
 cat > "$dir/ok.tilt" <<'EOF'
 importar lib
+de lib importar soma como soma_local
 pipeline main:
   passos:
     - imprimir lib.soma(3)
@@ -21,6 +22,7 @@ pipeline main:
     - imprimir lib.soma(a: 3)
     - imprimir lib.soma(b: 4, a: 3)
     - imprimir lib.soma(3, b: 4)
+    - imprimir soma_local(5)
 EOF
 "$bin" checar "$dir/ok.tilt" >/dev/null
 out=$("$bin" executar "$dir/ok.tilt")
@@ -29,7 +31,10 @@ out=$("$bin" executar "$dir/ok.tilt")
 7
 5
 7
+7
 7" ]
+vm_out=$("$bin" executar --vm "$dir/ok.tilt")
+[ "$vm_out" = "$out" ]
 
 for case_name in missing extra; do
   if [ "$case_name" = missing ]; then call='lib.soma()'; else call='lib.soma(1, 2, 3)'; fi
@@ -39,16 +44,16 @@ pipeline main:
   passos:
     - imprimir $call
 EOF
-  "$bin" checar "$dir/$case_name.tilt" >/dev/null
+  if "$bin" checar "$dir/$case_name.tilt" >"$dir/out" 2>"$dir/err"; then
+    echo "FALHA: checker aceitou chamada importada $case_name" >&2
+    exit 1
+  fi
+  grep -q "espera" "$dir/err"
   if "$bin" executar "$dir/$case_name.tilt" >"$dir/out" 2>"$dir/err"; then
     echo "FALHA: $case_name aceito na execucao" >&2
     exit 1
   fi
-  if [ "$case_name" = missing ]; then
-    grep -q "espera entre 1 e 2 argumentos, recebeu" "$dir/err"
-  else
-    grep -q "aceita 2 argumento(s), recebeu mais" "$dir/err"
-  fi
+  grep -q "espera" "$dir/err"
 done
 
 # The checker must reject excess positional arguments with either call syntax.

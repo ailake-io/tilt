@@ -127,7 +127,7 @@ std::vector<VectorHit> qdrant_search(const std::string& base, const std::string&
     if (hit.kind != ValueKind::Mapa || !hit.map_ref()) continue;
     const Value* id = hit.map_ref()->find("id");
     const Value* score = hit.map_ref()->find("score");
-    std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
+    std::string id_s = id && id->kind == ValueKind::Texto ? id->s.str() : "?";
     const double sc = score && (score->kind == ValueKind::Decimal || score->kind == ValueKind::Inteiro)
                           ? score->as_number()
                           : 0.0;

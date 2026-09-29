@@ -107,6 +107,66 @@ namespace {
 
 constexpr std::int64_t kLoopGuard = 5'000'000;
 
+std::shared_ptr<rt::GpuTensorStorage> gpu_resident(const rt::Tensor& tensor) {
+  auto& runtime = rt::GpuRuntime::instance();
+  if (!use_gpu_ || !runtime.residency_available() || tensor.data.empty()) return {};
+  if (tensor.gpu && tensor.gpu->runtime == &runtime &&
+      tensor.gpu->host_data == tensor.data.data() &&
+      tensor.gpu->host_elements == tensor.data.size() && tensor.gpu->buffer.handle)
+    return tensor.gpu;
+  tensor.gpu.reset();
+  auto storage = std::make_shared<rt::GpuTensorStorage>();
+  storage->runtime = &runtime;
+  storage->host_data = tensor.data.data();
+  storage->host_elements = tensor.data.size();
+  if (!runtime.upload(tensor.data.data(), tensor.data.size(), storage->buffer)) return {};
+  tensor.gpu = storage;
+  return storage;
+}
+
+bool gpu_download(rt::Tensor& tensor) {
+  if (!tensor.gpu || !tensor.gpu->runtime || !tensor.gpu->buffer.handle) return false;
+  return tensor.gpu->runtime->download(tensor.gpu->buffer, tensor.data.data(), tensor.data.size());
+}
+
+bool gpu_add_resident(const rt::Tensor& a, const rt::Tensor& b, rt::Tensor& out) {
+  if (a.shape != b.shape) return false;
+  auto sa = gpu_resident(a);
+  auto sb = gpu_resident(b);
+  if (!sa || !sb) return false;
+  out.shape = a.shape;
+  out.data.resize(a.data.size());
+  out.gpu = std::make_shared<rt::GpuTensorStorage>();
+  out.gpu->runtime = sa->runtime;
+  if (!sa->runtime->add_resident(sa->buffer, sb->buffer, out.gpu->buffer, out.data.size())) {
+    out.gpu.reset();
+    return false;
+  }
+  out.gpu->host_data = out.data.data();
+  out.gpu->host_elements = out.data.size();
+  return gpu_download(out);
+}
+
+bool gpu_add_bias_resident(const rt::Tensor& input, const rt::Tensor& bias,
+                           int batches, int channels, int spatial, rt::Tensor& out) {
+  if (!input.gpu || batches <= 0 || channels <= 0 || spatial <= 0 ||
+      bias.data.size() != static_cast<std::size_t>(channels)) return false;
+  auto db = gpu_resident(bias);
+  if (!db) return false;
+  out.shape = input.shape;
+  out.data.resize(input.data.size());
+  out.gpu = std::make_shared<rt::GpuTensorStorage>();
+  out.gpu->runtime = input.gpu->runtime;
+  if (!out.gpu->runtime->add_channel_bias_resident(
+          input.gpu->buffer, db->buffer, out.gpu->buffer, batches, channels, spatial)) {
+    out.gpu.reset();
+    return false;
+  }
+  out.gpu->host_data = out.data.data();
+  out.gpu->host_elements = out.data.size();
+  return gpu_download(out);
+}
+
 // Funcao com parametro de valor padrao: fora do subconjunto da VM (que exige o
 // numero exato de argumentos); chamadas a ela tambem nao compilam para a VM.
 bool funcao_tem_padrao(const Item& fn) {
@@ -340,11 +400,78 @@ bool mlflow_metric(const std::string& line, std::string& key, double& value) {
   return !key.empty();
 }
 
+Value mlops_file_lineage(const std::filesystem::path& path, const std::string& role) {
+  Value out = Value::mapa();
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return out;
+  const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (!in.eof() && !in) return out;
+  std::error_code ec;
+  out.map_ref()->set("papel", Value::texto(role));
+  out.map_ref()->set("caminho", Value::texto(std::filesystem::absolute(path, ec).string()));
+  out.map_ref()->set("sha256", Value::texto(rt::sha256_hex(bytes)));
+  out.map_ref()->set("bytes", Value::inteiro(static_cast<std::int64_t>(bytes.size())));
+  return out;
+}
+
+Value mlops_lineage(const SourceFile* source, const std::string& entry_dir, const ast::Block& cfg,
+                    const std::string& model, const std::vector<Value>& rows) {
+  Value lineage = Value::mapa();
+  if (source) {
+    Value code = Value::mapa();
+    code.map_ref()->set("papel", Value::texto("codigo"));
+    code.map_ref()->set("caminho", Value::texto(source->path()));
+    code.map_ref()->set("sha256", Value::texto(rt::sha256_hex(std::string(source->text()))));
+    code.map_ref()->set("bytes", Value::inteiro(static_cast<std::int64_t>(source->text().size())));
+    lineage.map_ref()->set("codigo", std::move(code));
+    if (cfg.span.offset < source->text().size()) {
+      const std::size_t n = std::min<std::size_t>(cfg.span.length, source->text().size() - cfg.span.offset);
+      lineage.map_ref()->set("definicao_sha256",
+                             Value::texto(rt::sha256_hex(std::string(source->text().substr(cfg.span.offset, n)))));
+    }
+  }
+  Value modelo = Value::mapa();
+  modelo.map_ref()->set("nome", Value::texto(model));
+  // When a run consumes an explicit weights/checkpoint file, include its
+  // digest alongside the logical model name.  Runs trained fully in memory
+  // still retain the model definition hash above and can be registered later
+  // through the local registry.
+  const Item* pesos_field = find_field(cfg, "pesos");
+  if (pesos_field && pesos_field->value && pesos_field->value->kind == ExprKind::TextLit) {
+    std::filesystem::path path(pesos_field->value->text);
+    if (!path.is_absolute() && !entry_dir.empty()) path = std::filesystem::path(entry_dir) / path;
+    Value pesos = mlops_file_lineage(path, "pesos");
+    if (pesos.map_ref()->find("sha256")) modelo.map_ref()->set("pesos", std::move(pesos));
+  }
+  lineage.map_ref()->set("modelo", std::move(modelo));
+
+  Value dados = Value::mapa();
+  const Item* dados_field = find_field(cfg, "dados");
+  if (dados_field && dados_field->value && dados_field->value->kind == ExprKind::TextLit) {
+    std::filesystem::path path(dados_field->value->text);
+    if (!path.is_absolute() && !entry_dir.empty()) path = std::filesystem::path(entry_dir) / path;
+    Value file = mlops_file_lineage(path, "dados");
+    if (file.map_ref()->find("sha256")) dados = std::move(file);
+  }
+  if (!dados.map_ref()->find("sha256")) {
+    Value serialized = Value::lista(rows);
+    dados.map_ref()->set("papel", Value::texto("dados"));
+    dados.map_ref()->set("origem", Value::texto("memoria"));
+    const std::string json = rt::json_dump(serialized);
+    dados.map_ref()->set("sha256", Value::texto(rt::sha256_hex(json)));
+    dados.map_ref()->set("linhas", Value::inteiro(static_cast<std::int64_t>(rows.size())));
+  }
+  lineage.map_ref()->set("dados", std::move(dados));
+  lineage.map_ref()->set("tilt_versao", Value::texto("0.1.0"));
+  return lineage;
+}
+
 std::string mlflow_registrar_experimento(const std::string& uri, const std::string& name,
                                          const std::string& model, std::size_t total,
                                          std::int64_t seed,
                                          const std::vector<std::string>& report,
-                                         const Value* detalhes = nullptr) {
+                                         const Value* detalhes = nullptr,
+                                         const Value* lineage = nullptr) {
   const MlflowTarget target = mlflow_target(uri);
   const auto headers = mlflow_headers();
   Value experiment;
@@ -410,10 +537,25 @@ std::string mlflow_registrar_experimento(const std::string& uri, const std::stri
   add_param("tilt.modelo", model);
   add_param("tilt.linhas", std::to_string(total));
   add_param("tilt.semente", std::to_string(seed));
+  if (lineage && lineage->map_ref()) {
+    if (const Value* code = lineage->map_ref()->find("codigo"); code && code->map_ref()) {
+      if (const Value* hash = code->map_ref()->find("sha256")) add_param("tilt.codigo_sha256", hash->s.str());
+    }
+    if (const Value* data = lineage->map_ref()->find("dados"); data && data->map_ref()) {
+      if (const Value* hash = data->map_ref()->find("sha256")) add_param("tilt.dados_sha256", hash->s.str());
+    }
+    if (const Value* model_info = lineage->map_ref()->find("modelo"); model_info && model_info->map_ref()) {
+      if (const Value* weights = model_info->map_ref()->find("pesos"); weights && weights->map_ref()) {
+        if (const Value* hash = weights->map_ref()->find("sha256"))
+          add_param("tilt.modelo_sha256", hash->s.str());
+      }
+    }
+  }
   batch.map_ref()->set("params", std::move(params));
   batch.map_ref()->set("tags", Value::lista());
   mlflow_post(target, "runs/log-batch", batch);
   if (detalhes) mlflow_log_artifact(target, run_id, "detalhes.json", *detalhes);
+  if (lineage) mlflow_log_artifact(target, run_id, "lineage.json", *lineage);
 
   Value update = Value::mapa();
   update.map_ref()->set("run_id", Value::texto(run_id));
@@ -3469,26 +3611,61 @@ rt::Tensor Interpreter::mm(const rt::Tensor& a, const rt::Tensor& b) {
         a.shape[0] >= 64 && a.shape[1] >= 64 && b.shape[1] >= 64 &&
         static_cast<long double>(a.shape[0]) * a.shape[1] * b.shape[1] >=
             (rt::cpu_blas_available() ? 64000000.0L : 2000000.0L)));
+  auto& runtime = rt::GpuRuntime::instance();
+  const bool resident_backend = use_gpu_ && runtime.residency_available();
   if (use_gpu_ && a.rank() == 3 && b.rank() == 3 && a.shape[0] == b.shape[0] &&
       a.shape[2] == b.shape[1] && a.shape[0] <= std::numeric_limits<int>::max() &&
       a.shape[1] <= std::numeric_limits<int>::max() && b.shape[2] <= std::numeric_limits<int>::max()) {
     const std::size_t produtos = static_cast<std::size_t>(a.shape[0]) * a.shape[1] * b.shape[2];
-    if (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake || produtos >= 2'000'000) {
+    if (resident_backend &&
+        (runtime.backend() == rt::GpuBackend::Fake || a.gpu || b.gpu || produtos >= 2'000'000)) {
       rt::Tensor c;
       c.shape = {a.shape[0], a.shape[1], b.shape[2]};
       c.data.resize(static_cast<std::size_t>(a.shape[0]) * a.shape[1] * b.shape[2]);
-      if (rt::GpuRuntime::instance().batch_gemm(a.data.data(), b.data.data(), c.data.data(),
-                                                 static_cast<int>(a.shape[0]), static_cast<int>(a.shape[1]),
-                                                 static_cast<int>(a.shape[2]), static_cast<int>(b.shape[2]))) return c;
+      auto da = gpu_resident(a);
+      auto db = gpu_resident(b);
+      if (da && db) {
+        c.gpu = std::make_shared<rt::GpuTensorStorage>();
+        c.gpu->runtime = &runtime;
+        if (runtime.batch_gemm_resident(da->buffer, db->buffer, c.gpu->buffer,
+                                        static_cast<int>(a.shape[0]), static_cast<int>(a.shape[1]),
+                                        static_cast<int>(a.shape[2]), static_cast<int>(b.shape[2]))) {
+          c.gpu->host_data = c.data.data();
+          c.gpu->host_elements = c.data.size();
+          if (gpu_download(c)) return c;
+        }
+        c.gpu.reset();
+      }
     }
   }
-  if (worthwhile && a.rank() == 2 && b.rank() == 2 && a.shape[1] == b.shape[0] &&
+  const std::size_t products_2d = a.rank() == 2 && b.rank() == 2 && a.shape.size() > 1 && b.shape.size() > 1
+      ? static_cast<std::size_t>(a.shape[0]) * a.shape[1] * b.shape[1] : 0;
+  const bool resident_2d = resident_backend && !use_amp_ && a.rank() == 2 && b.rank() == 2 &&
+                           (runtime.backend() == rt::GpuBackend::Fake || a.gpu || b.gpu ||
+                            products_2d >= (rt::cpu_blas_available() ? 64000000ULL : 2000000ULL));
+  if ((worthwhile || resident_2d) && a.rank() == 2 && b.rank() == 2 && a.shape[1] == b.shape[0] &&
       a.shape[0] <= std::numeric_limits<int>::max() &&
       a.shape[1] <= std::numeric_limits<int>::max() &&
       b.shape[1] <= std::numeric_limits<int>::max()) {
     rt::Tensor c;
     c.shape = {a.shape[0], b.shape[1]};
     c.data.resize(static_cast<std::size_t>(a.shape[0] * b.shape[1]));
+    if (resident_2d) {
+      auto da = gpu_resident(a);
+      auto db = gpu_resident(b);
+      if (da && db) {
+        c.gpu = std::make_shared<rt::GpuTensorStorage>();
+        c.gpu->runtime = &runtime;
+        if (runtime.gemm_resident(da->buffer, db->buffer, c.gpu->buffer,
+                                  static_cast<int>(a.shape[0]), static_cast<int>(a.shape[1]),
+                                  static_cast<int>(b.shape[1]))) {
+          c.gpu->host_data = c.data.data();
+          c.gpu->host_elements = c.data.size();
+          if (gpu_download(c)) return c;
+        }
+        c.gpu.reset();
+      }
+    }
     bool ok = use_amp_
         ? rt::GpuRuntime::instance().gemm_mixed(a.data.data(), b.data.data(), c.data.data(),
                                                 static_cast<int>(a.shape[0]), static_cast<int>(a.shape[1]),
@@ -3509,6 +3686,13 @@ rt::Tensor Interpreter::mm(const rt::Tensor& a, const rt::Tensor& b) {
 }
 
 rt::Tensor Interpreter::act_relu(const rt::Tensor& x) {
+  if (x.gpu && use_gpu_) {
+    rt::Tensor out = x;
+    out.gpu = x.gpu;
+    if (rt::GpuRuntime::instance().relu_resident(out.gpu->buffer, out.data.size()) && gpu_download(out))
+      return out;
+    out.gpu.reset();
+  }
   if (use_gpu_ && (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake ||
                    x.data.size() >= 262144)) {
     rt::Tensor out = x;
@@ -3518,6 +3702,13 @@ rt::Tensor Interpreter::act_relu(const rt::Tensor& x) {
 }
 
 rt::Tensor Interpreter::act_gelu(const rt::Tensor& x) {
+  if (x.gpu && use_gpu_) {
+    rt::Tensor out = x;
+    out.gpu = x.gpu;
+    if (rt::GpuRuntime::instance().gelu_resident(out.gpu->buffer, out.data.size()) && gpu_download(out))
+      return out;
+    out.gpu.reset();
+  }
   if (use_gpu_ && (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake ||
                    x.data.size() >= 262144)) {
     rt::Tensor out = x;
@@ -3527,6 +3718,10 @@ rt::Tensor Interpreter::act_gelu(const rt::Tensor& x) {
 }
 
 rt::Tensor Interpreter::add_same(const rt::Tensor& a, const rt::Tensor& b) {
+  if (a.shape == b.shape && a.gpu && b.gpu && use_gpu_) {
+    rt::Tensor out;
+    if (gpu_add_resident(a, b, out)) return out;
+  }
   if (use_gpu_ && a.shape == b.shape &&
       (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake ||
        a.data.size() >= 262144)) {
@@ -3564,16 +3759,30 @@ rt::Tensor Interpreter::conv(const rt::Tensor& x, const rt::Tensor& weights,
         }
         const long double work = static_cast<long double>(total) * x.shape[1] *
                                  weights.shape[2] * weights.shape[3];
-        if (small && (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake ||
-                      work >= 2000000.0L)) {
+        auto& runtime = rt::GpuRuntime::instance();
+        const bool resident = use_gpu_ && runtime.residency_available() &&
+                              (runtime.backend() == rt::GpuBackend::Fake || x.gpu || weights.gpu ||
+                               work >= 2000000.0L);
+        if (small && resident) {
           rt::Tensor out = rt::Tensor::zeros({x.shape[0], weights.shape[0], oh, ow});
-          if (rt::GpuRuntime::instance().conv2d(
-                  x.data.data(), weights.data.data(), out.data.data(), static_cast<int>(x.shape[0]),
-                  static_cast<int>(x.shape[1]), static_cast<int>(x.shape[2]),
-                  static_cast<int>(x.shape[3]), static_cast<int>(weights.shape[0]),
-                  static_cast<int>(weights.shape[2]), static_cast<int>(weights.shape[3]),
-                  static_cast<int>(oh), static_cast<int>(ow), static_cast<int>(stride),
-                  static_cast<int>(padding), static_cast<int>(dilation))) return out;
+          auto dx = gpu_resident(x);
+          auto dw = gpu_resident(weights);
+          if (dx && dw) {
+            out.gpu = std::make_shared<rt::GpuTensorStorage>();
+            out.gpu->runtime = &runtime;
+            if (runtime.conv2d_resident(
+                    dx->buffer, dw->buffer, out.gpu->buffer, static_cast<int>(x.shape[0]),
+                    static_cast<int>(x.shape[1]), static_cast<int>(x.shape[2]),
+                    static_cast<int>(x.shape[3]), static_cast<int>(weights.shape[0]),
+                    static_cast<int>(weights.shape[2]), static_cast<int>(weights.shape[3]),
+                    static_cast<int>(oh), static_cast<int>(ow), static_cast<int>(stride),
+                    static_cast<int>(padding), static_cast<int>(dilation))) {
+              out.gpu->host_data = out.data.data();
+              out.gpu->host_elements = out.data.size();
+              if (gpu_download(out)) return out;
+            }
+            out.gpu.reset();
+          }
         }
       }
     }
@@ -3697,7 +3906,7 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
             }
             Layer& l = layers[li];
             const Value* tipo = c.kind == ValueKind::Mapa && c.map_ref() ? c.map_ref()->find("tipo") : nullptr;
-            std::string t = (tipo && tipo->kind == ValueKind::Texto) ? tipo->s : "densa";
+            std::string t = (tipo && tipo->kind == ValueKind::Texto) ? tipo->s.str() : "densa";
             const std::string esperado =
                 l.kind == Layer::Dense
                     ? "densa"
@@ -3840,12 +4049,20 @@ const std::vector<Interpreter::Layer>& Interpreter::build_model(const Item& decl
 rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Tensor x) {
   for (const Layer& l : layers) {
     switch (l.kind) {
-      case Layer::Dense:
-        x = rt::add(mm(x, l.w), l.b);
+      case Layer::Dense: {
+        rt::Tensor dense = mm(x, l.w);
+        rt::Tensor out;
+        x = dense.gpu && gpu_add_resident(dense, l.b, out) ? std::move(out)
+                                                           : rt::add(dense, l.b);
         break;
+      }
       case Layer::Residual: {
-        const rt::Tensor skip = x;
-        x = add_same(rt::add(mm(x, l.w), l.b), skip);
+        rt::Tensor skip = x;
+        skip.gpu = x.gpu;
+        rt::Tensor dense = mm(x, l.w);
+        rt::Tensor ramo;
+        if (!(dense.gpu && gpu_add_resident(dense, l.b, ramo))) ramo = rt::add(dense, l.b);
+        x = add_same(ramo, skip);
         break;
       }
       case Layer::Embedding:
@@ -3869,9 +4086,17 @@ rt::Tensor Interpreter::forward_layers(const std::vector<Layer>& layers, rt::Ten
         break;
       case Layer::Dropout:
         break;
-      case Layer::Conv2d:
-        x = rt::adicionar_vies_conv(conv(x, l.w, l.passo, l.padding, l.dilatacao), l.b);
+      case Layer::Conv2d: {
+        rt::Tensor conv_out = conv(x, l.w, l.passo, l.padding, l.dilatacao);
+        rt::Tensor biased;
+        const bool residente = conv_out.gpu && conv_out.rank() == 4 &&
+                               gpu_add_bias_resident(
+                                   conv_out, l.b, static_cast<int>(conv_out.shape[0]),
+                                   static_cast<int>(conv_out.shape[1]),
+                                   static_cast<int>(conv_out.shape[2] * conv_out.shape[3]), biased);
+        x = residente ? std::move(biased) : rt::adicionar_vies_conv(conv_out, l.b);
         break;
+      }
       case Layer::NormaLote:
         x = rt::norma_lote(x, l.w, l.b, l.media_running, l.var_running, 1e-5f, false);
         break;
@@ -4430,7 +4655,7 @@ rt::Value Interpreter::eval_modelo_call(const Expr& call, Env& env) {
         }
         Layer& l = model_cache_[mname][li];
         const Value* tipo = c.kind == ValueKind::Mapa && c.map_ref() ? c.map_ref()->find("tipo") : nullptr;
-        std::string t = (tipo && tipo->kind == ValueKind::Texto) ? tipo->s : "densa";
+        std::string t = (tipo && tipo->kind == ValueKind::Texto) ? tipo->s.str() : "densa";
         const std::string esperado =
             l.kind == Layer::Dense
                 ? "densa"
@@ -4855,6 +5080,16 @@ void Interpreter::ler_cfg_treino(const ast::Block& cfg, std::int64_t n, const st
           fail(span, ctx + ": 'cluster.timeout' deve ser inteiro");
         }
         out.cluster_timeout = static_cast<int>(std::strtol(e.value->text.c_str(), nullptr, 10));
+      } else if (e.key == "recuperar" || e.key == "recuperacao") {
+        if (!e.value || e.value->kind != ExprKind::BoolLit) {
+          fail(span, ctx + ": 'cluster.recuperar' deve ser verdadeiro ou falso");
+        }
+        out.cluster_recuperar = e.value->boolean;
+      } else if (e.key == "tentativas" || e.key == "retries") {
+        if (!e.value || e.value->kind != ExprKind::IntLit) {
+          fail(span, ctx + ": 'cluster.tentativas' deve ser inteiro");
+        }
+        out.cluster_tentativas = static_cast<int>(std::strtol(e.value->text.c_str(), nullptr, 10));
       } else {
         fail(span, ctx + ": chave '" + e.key + "' desconhecida em 'cluster'");
       }
@@ -4870,6 +5105,9 @@ void Interpreter::ler_cfg_treino(const ast::Block& cfg, std::int64_t n, const st
     }
     if (out.cluster_timeout < 1) {
       fail(span, ctx + ": 'cluster.timeout' deve ser >= 1");
+    }
+    if (out.cluster_tentativas < 0) {
+      fail(span, ctx + ": 'cluster.tentativas' deve ser >= 0");
     }
     out.shard_id = out.cluster_rank;
     out.num_shards = out.cluster_world;
@@ -5396,8 +5634,17 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         std::filesystem::path(cfg.cluster_dir) /
         ("rank-" + std::to_string(cfg.cluster_rank) + "-epoch-" + std::to_string(epoch) + ".json");
     salvar_checkpoint(rank_path.string(), epoch, adam_t);
-    if (!rt::cluster_barreira(cfg.cluster_dir, cfg.cluster_rank, cfg.cluster_world, epoch * 2,
-                              cfg.cluster_timeout, cluster_error)) {
+    auto barreira_cluster = [&](std::int64_t round) {
+      const int tentativas = cfg.cluster_recuperar ? cfg.cluster_tentativas : 0;
+      for (int tentativa = 0; tentativa <= tentativas; ++tentativa) {
+        if (rt::cluster_barreira(cfg.cluster_dir, cfg.cluster_rank, cfg.cluster_world, round,
+                                 cfg.cluster_timeout, cluster_error))
+          return true;
+        if (tentativa < tentativas) cluster_error.clear();
+      }
+      return false;
+    };
+    if (!barreira_cluster(epoch * 2)) {
       fail(span, ctx + ": cluster: " + cluster_error);
     }
 
@@ -5423,15 +5670,38 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       std::vector<rt::Tensor> sum_w;
       std::vector<rt::Tensor> sum_b;
       std::vector<rt::Tensor> sum_u;
+      std::vector<rt::Tensor> sum_m_w;
+      std::vector<rt::Tensor> sum_v_w;
+      std::vector<rt::Tensor> sum_m_b;
+      std::vector<rt::Tensor> sum_v_b;
+      std::vector<rt::Tensor> sum_m_u;
+      std::vector<rt::Tensor> sum_v_u;
       sum_w.reserve(weight_indices.size());
       sum_b.reserve(weight_indices.size());
       sum_u.reserve(weight_indices.size());
+      sum_m_w.reserve(weight_indices.size());
+      sum_v_w.reserve(weight_indices.size());
+      sum_m_b.reserve(weight_indices.size());
+      sum_v_b.reserve(weight_indices.size());
+      sum_m_u.reserve(weight_indices.size());
+      sum_v_u.reserve(weight_indices.size());
       for (std::size_t i : weight_indices) {
         const Layer& layer = layers[i];
         sum_w.push_back(rt::Tensor::zeros(layer.w.shape));
         sum_b.push_back(rt::Tensor::zeros(layer.b.shape));
+        sum_m_w.push_back(rt::Tensor::zeros(layer.m_w.shape));
+        sum_v_w.push_back(rt::Tensor::zeros(layer.v_w.shape));
+        sum_m_b.push_back(rt::Tensor::zeros(layer.m_b.shape));
+        sum_v_b.push_back(rt::Tensor::zeros(layer.v_b.shape));
         if (layer.kind == Layer::Recorrente) sum_u.push_back(rt::Tensor::zeros(layer.u.shape));
         else sum_u.emplace_back();
+        if (layer.kind == Layer::Recorrente) {
+          sum_m_u.push_back(rt::Tensor::zeros(layer.m_u.shape));
+          sum_v_u.push_back(rt::Tensor::zeros(layer.v_u.shape));
+        } else {
+          sum_m_u.emplace_back();
+          sum_v_u.emplace_back();
+        }
       }
       for (int rank = 0; rank < cfg.cluster_world; ++rank) {
         const std::filesystem::path path = std::filesystem::path(cfg.cluster_dir) /
@@ -5442,6 +5712,16 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         std::ostringstream text;
         text << input.rdbuf();
         Value checkpoint = rt::json_parse(text.str());
+        const Value* checkpoint_step = checkpoint.kind == ValueKind::Mapa && checkpoint.map_ref()
+                                           ? checkpoint.map_ref()->find("adam_t")
+                                           : nullptr;
+        const Value* first_step = aggregate.kind == ValueKind::Mapa && aggregate.map_ref()
+                                      ? aggregate.map_ref()->find("adam_t")
+                                      : nullptr;
+        if (!checkpoint_step || !checkpoint_step->is_number() || !first_step ||
+            !first_step->is_number() || checkpoint_step->as_number() != first_step->as_number()) {
+          fail(span, ctx + ": cluster: passo Adam divergente no rank " + std::to_string(rank));
+        }
         const Value* checkpoint_layers = checkpoint.kind == ValueKind::Mapa && checkpoint.map_ref()
                                              ? checkpoint.map_ref()->find("camadas")
                                              : nullptr;
@@ -5455,20 +5735,40 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           const Value& layer = (*checkpoint_layers->list_ref())[j];
           const Value* wv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("w") : nullptr;
           const Value* bv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("b") : nullptr;
-          rt::Tensor w, b, u;
-          if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b) ||
-              w.shape != sum_w[j].shape || b.shape != sum_b[j].shape) {
+          const Value* mwv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("m_w") : nullptr;
+          const Value* vwv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("v_w") : nullptr;
+          const Value* mbv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("m_b") : nullptr;
+          const Value* vbv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("v_b") : nullptr;
+          rt::Tensor w, b, u, m_w, v_w, m_b, v_b, m_u, v_u;
+          if (!wv || !bv || !mwv || !vwv || !mbv || !vbv ||
+              !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b) ||
+              !tensor_from_json(*mwv, m_w) || !tensor_from_json(*vwv, v_w) ||
+              !tensor_from_json(*mbv, m_b) || !tensor_from_json(*vbv, v_b) ||
+              w.shape != sum_w[j].shape || b.shape != sum_b[j].shape ||
+              m_w.shape != sum_m_w[j].shape || v_w.shape != sum_v_w[j].shape ||
+              m_b.shape != sum_m_b[j].shape || v_b.shape != sum_v_b[j].shape) {
             fail(span, ctx + ": cluster: forma divergente no rank " + std::to_string(rank));
           }
           for (std::size_t k = 0; k < w.data.size(); ++k) sum_w[j].data[k] += w.data[k];
           for (std::size_t k = 0; k < b.data.size(); ++k) sum_b[j].data[k] += b.data[k];
+          for (std::size_t k = 0; k < m_w.data.size(); ++k) sum_m_w[j].data[k] += m_w.data[k];
+          for (std::size_t k = 0; k < v_w.data.size(); ++k) sum_v_w[j].data[k] += v_w.data[k];
+          for (std::size_t k = 0; k < m_b.data.size(); ++k) sum_m_b[j].data[k] += m_b.data[k];
+          for (std::size_t k = 0; k < v_b.data.size(); ++k) sum_v_b[j].data[k] += v_b.data[k];
           if (layers[i].kind == Layer::Recorrente) {
             const Value* uv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("u") : nullptr;
-            if (!uv || !tensor_from_json(*uv, u) || u.shape != sum_u[j].shape) {
+            const Value* muv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("m_u") : nullptr;
+            const Value* vuv = layer.kind == ValueKind::Mapa && layer.map_ref() ? layer.map_ref()->find("v_u") : nullptr;
+            if (!uv || !muv || !vuv || !tensor_from_json(*uv, u) ||
+                !tensor_from_json(*muv, m_u) || !tensor_from_json(*vuv, v_u) ||
+                u.shape != sum_u[j].shape || m_u.shape != sum_m_u[j].shape ||
+                v_u.shape != sum_v_u[j].shape) {
               fail(span, ctx + ": cluster: forma recorrente divergente no rank " +
                            std::to_string(rank));
             }
             for (std::size_t k = 0; k < u.data.size(); ++k) sum_u[j].data[k] += u.data[k];
+            for (std::size_t k = 0; k < m_u.data.size(); ++k) sum_m_u[j].data[k] += m_u.data[k];
+            for (std::size_t k = 0; k < v_u.data.size(); ++k) sum_v_u[j].data[k] += v_u.data[k];
           }
         }
       }
@@ -5477,11 +5777,23 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         const float divisor = static_cast<float>(cfg.cluster_world);
         layers[i].w = std::move(sum_w[j]);
         layers[i].b = std::move(sum_b[j]);
+        layers[i].m_w = std::move(sum_m_w[j]);
+        layers[i].v_w = std::move(sum_v_w[j]);
+        layers[i].m_b = std::move(sum_m_b[j]);
+        layers[i].v_b = std::move(sum_v_b[j]);
         for (float& value : layers[i].w.data) value /= divisor;
         for (float& value : layers[i].b.data) value /= divisor;
+        for (float& value : layers[i].m_w.data) value /= divisor;
+        for (float& value : layers[i].v_w.data) value /= divisor;
+        for (float& value : layers[i].m_b.data) value /= divisor;
+        for (float& value : layers[i].v_b.data) value /= divisor;
         if (layers[i].kind == Layer::Recorrente) {
           layers[i].u = std::move(sum_u[j]);
+          layers[i].m_u = std::move(sum_m_u[j]);
+          layers[i].v_u = std::move(sum_v_u[j]);
           for (float& value : layers[i].u.data) value /= divisor;
+          for (float& value : layers[i].m_u.data) value /= divisor;
+          for (float& value : layers[i].v_u.data) value /= divisor;
         }
       }
       salvar_checkpoint(aggregate_path.string(), epoch, adam_t);
@@ -5505,27 +5817,50 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
         const std::size_t i = weight_indices[j];
         const Value& layer = (*aggregate_layers->list_ref())[j];
         if (!layer.map_ref()) continue;
-        rt::Tensor w, b;
+        rt::Tensor w, b, m_w, v_w, m_b, v_b;
         const Value* wv = layer.map_ref()->find("w");
         const Value* bv = layer.map_ref()->find("b");
-        if (!wv || !bv || !tensor_from_json(*wv, w) || !tensor_from_json(*bv, b) ||
-            w.shape != layers[i].w.shape || b.shape != layers[i].b.shape) {
+        const Value* mwv = layer.map_ref()->find("m_w");
+        const Value* vwv = layer.map_ref()->find("v_w");
+        const Value* mbv = layer.map_ref()->find("m_b");
+        const Value* vbv = layer.map_ref()->find("v_b");
+        if (!wv || !bv || !mwv || !vwv || !mbv || !vbv || !tensor_from_json(*wv, w) ||
+            !tensor_from_json(*bv, b) || !tensor_from_json(*mwv, m_w) ||
+            !tensor_from_json(*vwv, v_w) || !tensor_from_json(*mbv, m_b) ||
+            !tensor_from_json(*vbv, v_b) || w.shape != layers[i].w.shape ||
+            b.shape != layers[i].b.shape || m_w.shape != layers[i].m_w.shape ||
+            v_w.shape != layers[i].v_w.shape || m_b.shape != layers[i].m_b.shape ||
+            v_b.shape != layers[i].v_b.shape) {
           fail(span, ctx + ": cluster: forma agregada incompativel");
         }
         layers[i].w = std::move(w);
         layers[i].b = std::move(b);
+        layers[i].m_w = std::move(m_w);
+        layers[i].v_w = std::move(v_w);
+        layers[i].m_b = std::move(m_b);
+        layers[i].v_b = std::move(v_b);
         if (layers[i].kind == Layer::Recorrente) {
-          rt::Tensor u;
+          rt::Tensor u, m_u, v_u;
           const Value* uv = layer.map_ref()->find("u");
-          if (!uv || !tensor_from_json(*uv, u) || u.shape != layers[i].u.shape) {
+          const Value* muv = layer.map_ref()->find("m_u");
+          const Value* vuv = layer.map_ref()->find("v_u");
+          if (!uv || !muv || !vuv || !tensor_from_json(*uv, u) ||
+              !tensor_from_json(*muv, m_u) || !tensor_from_json(*vuv, v_u) ||
+              u.shape != layers[i].u.shape || m_u.shape != layers[i].m_u.shape ||
+              v_u.shape != layers[i].v_u.shape) {
             fail(span, ctx + ": cluster: forma recorrente agregada incompativel");
           }
           layers[i].u = std::move(u);
+          layers[i].m_u = std::move(m_u);
+          layers[i].v_u = std::move(v_u);
         }
       }
+      if (const Value* aggregate_step = aggregate.map_ref()->find("adam_t");
+          aggregate_step && aggregate_step->is_number()) {
+        adam_t = static_cast<int>(aggregate_step->as_number());
+      }
     }
-    if (!rt::cluster_barreira(cfg.cluster_dir, cfg.cluster_rank, cfg.cluster_world, epoch * 2 + 1,
-                              cfg.cluster_timeout, cluster_error)) {
+    if (!barreira_cluster(epoch * 2 + 1)) {
       fail(span, ctx + ": cluster: " + cluster_error);
     }
     if (std::getenv("TILT_CLUSTER_PROFILE")) {
@@ -5787,17 +6122,24 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
       std::vector<rt::Tensor> mascaras(layers.size());
       std::mt19937_64 rng_abandono(cfg.seed_mistura * 0x9E3779B97F4A7C15ULL +
                                    seed_sufixo * 1000003ULL + static_cast<std::uint64_t>(b0) + 1);
+      auto dense_bias = [&](rt::Tensor value, const rt::Tensor& bias) {
+        rt::Tensor out;
+        if (value.gpu && gpu_add_resident(value, bias, out)) return out;
+        return rt::add(value, bias);
+      };
       rt::Tensor cur = xb;
       for (std::size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
         Layer& l = layers[layer_idx];
         ins.push_back(cur);
         switch (l.kind) {
           case Layer::Dense:
-            cur = rt::add(mm(cur, l.w), l.b);
+            cur = dense_bias(mm(cur, l.w), l.b);
             break;
           case Layer::Residual: {
-            const rt::Tensor skip = cur;
-            cur = add_same(rt::add(mm(cur, l.w), l.b), skip);
+            rt::Tensor skip = cur;
+            skip.gpu = cur.gpu;
+            rt::Tensor ramo = dense_bias(mm(cur, l.w), l.b);
+            cur = add_same(ramo, skip);
             break;
           }
           case Layer::Embedding:
@@ -5828,25 +6170,59 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
                 mascara.data[k] = u >= static_cast<double>(l.taxa_abandono) ? mantem : 0.0F;
                 cur.data[k] *= mascara.data[k];
               }
+              cur.gpu.reset();
               mascaras[layer_idx] = std::move(mascara);
             }
             break;
           }
-          case Layer::Conv2d:
-            cur = rt::adicionar_vies_conv(conv(cur, l.w, l.passo, l.padding, l.dilatacao), l.b);
+          case Layer::Conv2d: {
+            rt::Tensor conv_out = conv(cur, l.w, l.passo, l.padding, l.dilatacao);
+            rt::Tensor biased;
+            const bool residente = conv_out.gpu && conv_out.rank() == 4 &&
+                                   gpu_add_bias_resident(
+                                       conv_out, l.b, static_cast<int>(conv_out.shape[0]),
+                                       static_cast<int>(conv_out.shape[1]),
+                                       static_cast<int>(conv_out.shape[2] * conv_out.shape[3]), biased);
+            cur = residente ? std::move(biased) : rt::adicionar_vies_conv(conv_out, l.b);
             break;
+          }
           case Layer::NormaLote: {
             rt::norma_lote_estatisticas(cur, l.bn_media, l.bn_var);
+            l.bn_media.gpu.reset();
+            l.bn_var.gpu.reset();
             bool acelerou = false;
             if (use_gpu_ && cur.rank() >= 2 && cur.shape[0] > 0 && cur.shape[1] > 0) {
               const std::int64_t spatial = cur.size() / (cur.shape[0] * cur.shape[1]);
-              if (spatial > 0 && (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake ||
-                                  cur.data.size() >= 262144)) {
+              auto& runtime = rt::GpuRuntime::instance();
+              if (spatial > 0 && runtime.residency_available() &&
+                  (runtime.backend() == rt::GpuBackend::Fake || cur.gpu || cur.data.size() >= 262144)) {
                 rt::Tensor normalized = rt::Tensor::zeros(cur.shape);
-                acelerou = rt::GpuRuntime::instance().normalize(
-                    cur.data.data(), l.bn_media.data.data(), l.bn_var.data.data(), l.w.data.data(),
-                    l.b.data.data(), normalized.data.data(), static_cast<int>(cur.shape[0]),
-                    static_cast<int>(cur.shape[1]), static_cast<int>(spatial), 1e-5f);
+                auto dx = gpu_resident(cur);
+                auto dm = gpu_resident(l.bn_media);
+                auto dv = gpu_resident(l.bn_var);
+                auto dg = gpu_resident(l.w);
+                auto db = gpu_resident(l.b);
+                if (dx && dm && dv && dg && db) {
+                  normalized.gpu = std::make_shared<rt::GpuTensorStorage>();
+                  normalized.gpu->runtime = &runtime;
+                  acelerou = runtime.normalize_resident(
+                      dx->buffer, dm->buffer, dv->buffer, dg->buffer, db->buffer,
+                      normalized.gpu->buffer, static_cast<int>(cur.shape[0]),
+                      static_cast<int>(cur.shape[1]), static_cast<int>(spatial), 1e-5f);
+                  if (acelerou) {
+                    normalized.gpu->host_data = normalized.data.data();
+                    normalized.gpu->host_elements = normalized.data.size();
+                    acelerou = gpu_download(normalized);
+                  }
+                  if (!acelerou) normalized.gpu.reset();
+                }
+                if (!acelerou && (runtime.backend() == rt::GpuBackend::Fake ||
+                                  cur.data.size() >= 262144)) {
+                  acelerou = runtime.normalize(
+                      cur.data.data(), l.bn_media.data.data(), l.bn_var.data.data(), l.w.data.data(),
+                      l.b.data.data(), normalized.data.data(), static_cast<int>(cur.shape[0]),
+                      static_cast<int>(cur.shape[1]), static_cast<int>(spatial), 1e-5f);
+                }
                 if (acelerou) cur = std::move(normalized);
               }
             }
@@ -5870,16 +6246,40 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
           case Layer::MaxPool:
             if (use_gpu_ && cur.rank() == 4 &&
                 cur.shape[2] >= l.janela && cur.shape[3] >= l.janela &&
-                (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake ||
+                (rt::GpuRuntime::instance().backend() == rt::GpuBackend::Fake || cur.gpu ||
                  cur.data.size() >= 262144)) {
               const std::int64_t oh = (cur.shape[2] - l.janela) / l.passo + 1;
               const std::int64_t ow = (cur.shape[3] - l.janela) / l.passo + 1;
               rt::Tensor pooled = rt::Tensor::zeros({cur.shape[0], cur.shape[1], oh, ow});
-              if (rt::GpuRuntime::instance().maxpool2d(
-                      cur.data.data(), pooled.data.data(), static_cast<int>(cur.shape[0]),
+              auto& runtime = rt::GpuRuntime::instance();
+              bool pooled_ok = false;
+              if (runtime.residency_available()) {
+                auto dx = gpu_resident(cur);
+                if (dx) {
+                  pooled.gpu = std::make_shared<rt::GpuTensorStorage>();
+                  pooled.gpu->runtime = &runtime;
+                  pooled_ok = runtime.maxpool2d_resident(
+                      dx->buffer, pooled.gpu->buffer, static_cast<int>(cur.shape[0]),
                       static_cast<int>(cur.shape[1]), static_cast<int>(cur.shape[2]),
                       static_cast<int>(cur.shape[3]), static_cast<int>(l.janela),
-                      static_cast<int>(l.passo))) {
+                      static_cast<int>(l.passo));
+                  if (pooled_ok) {
+                    pooled.gpu->host_data = pooled.data.data();
+                    pooled.gpu->host_elements = pooled.data.size();
+                    pooled_ok = gpu_download(pooled);
+                  }
+                  if (!pooled_ok) pooled.gpu.reset();
+                }
+              }
+              if (!pooled_ok && (runtime.backend() == rt::GpuBackend::Fake ||
+                                 cur.data.size() >= 262144)) {
+                pooled_ok = runtime.maxpool2d(
+                    cur.data.data(), pooled.data.data(), static_cast<int>(cur.shape[0]),
+                    static_cast<int>(cur.shape[1]), static_cast<int>(cur.shape[2]),
+                    static_cast<int>(cur.shape[3]), static_cast<int>(l.janela),
+                    static_cast<int>(l.passo));
+              }
+              if (pooled_ok) {
                 cur = std::move(pooled);
                 break;
               }
@@ -5919,8 +6319,40 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
 
       // Backward: skip the softmax layer (fused above); update Dense/Activation.
       ++adam_t;
+      std::int64_t grad_call = 0;
       auto aplicar_grad = [&](Layer& destino, const rt::Tensor& dw, const rt::Tensor& db,
                               const rt::Tensor* du = nullptr) {
+        // No cluster, o passo continua identico ao caminho local. Em cluster,
+        // todos os ranks reduzem o vetor concatenado antes de atualizar os
+        // pesos; assim Adam recebe o mesmo gradiente global em cada processo.
+        rt::Tensor dw_sync = dw;
+        rt::Tensor db_sync = db;
+        rt::Tensor du_sync;
+        if (du) du_sync = *du;
+        if (cfg.cluster_world > 1) {
+          std::vector<float> packed;
+          packed.reserve(dw.data.size() + db.data.size() + (du ? du->data.size() : 0));
+          packed.insert(packed.end(), dw.data.begin(), dw.data.end());
+          packed.insert(packed.end(), db.data.begin(), db.data.end());
+          if (du) packed.insert(packed.end(), du->data.begin(), du->data.end());
+          std::vector<float> reduced;
+          std::string reduce_error;
+          const std::int64_t round = static_cast<std::int64_t>(epoch) * 10000000LL +
+                                     static_cast<std::int64_t>(adam_t) * 10000LL + grad_call++;
+          if (!rt::cluster_allreduce(cfg.cluster_dir, cfg.cluster_rank, cfg.cluster_world, round,
+                                     packed, reduced, cfg.cluster_timeout, reduce_error,
+                                     cfg.cluster_recuperar ? cfg.cluster_tentativas : 0) ||
+              reduced.size() != packed.size()) {
+            fail(span, ctx + ": cluster all-reduce: " +
+                           (reduce_error.empty() ? "resultado invalido" : reduce_error));
+          }
+          std::size_t cursor = 0;
+          for (std::size_t k = 0; k < dw_sync.data.size(); ++k) dw_sync.data[k] = reduced[cursor++];
+          for (std::size_t k = 0; k < db_sync.data.size(); ++k) db_sync.data[k] = reduced[cursor++];
+          if (du) {
+            for (std::size_t k = 0; k < du_sync.data.size(); ++k) du_sync.data[k] = reduced[cursor++];
+          }
+        }
         if (cfg.otim == "adam") {
           const float b1 = 0.9F, b2 = 0.999F, eps = 1e-8F;
           const float c1 = 1.0F - std::pow(b1, static_cast<float>(adam_t));
@@ -5934,22 +6366,27 @@ Interpreter::TreinoRelato Interpreter::treinar_nucleo(const Item& modelo_decl, r
               w.data[k] -= static_cast<float>(lr) * mh / (std::sqrt(vh) + eps);
             }
           };
-          step(destino.w, destino.m_w, destino.v_w, dw);
-          step(destino.b, destino.m_b, destino.v_b, db);
-          if (du) step(destino.u, destino.m_u, destino.v_u, *du);
+          step(destino.w, destino.m_w, destino.v_w, dw_sync);
+          step(destino.b, destino.m_b, destino.v_b, db_sync);
+          if (du) step(destino.u, destino.m_u, destino.v_u, du_sync);
         } else {
           for (std::size_t k = 0; k < destino.w.data.size(); ++k) {
-            destino.w.data[k] -= static_cast<float>(lr) * dw.data[k];
+            destino.w.data[k] -= static_cast<float>(lr) * dw_sync.data[k];
           }
           for (std::size_t k = 0; k < destino.b.data.size(); ++k) {
-            destino.b.data[k] -= static_cast<float>(lr) * db.data[k];
+            destino.b.data[k] -= static_cast<float>(lr) * db_sync.data[k];
           }
           if (du) {
             for (std::size_t k = 0; k < destino.u.data.size(); ++k) {
-              destino.u.data[k] -= static_cast<float>(lr) * du->data[k];
+              destino.u.data[k] -= static_cast<float>(lr) * du_sync.data[k];
             }
           }
         }
+        // O conteúdo do peso mudou no host; a próxima etapa precisa reenviar
+        // o buffer residente antes de reutilizá-lo.
+        destino.w.gpu.reset();
+        destino.b.gpu.reset();
+        if (du) destino.u.gpu.reset();
       };
       auto backward_densa_gpu = [&](const rt::Tensor& entrada, const rt::Tensor& pesos,
                                     const rt::Tensor& grad_saida, rt::Tensor& grad_entrada,
@@ -8104,11 +8541,15 @@ void Interpreter::run_experimento(const Item& decl) {
       Value detalhes = Value::mapa();
       detalhes.map_ref()->set("experimento", Value::texto(name));
       detalhes.map_ref()->set("modelo", Value::texto(kind));
-      Value linhas = Value::lista();
-      for (const std::string& linha : relatorio) linhas.list_ref()->push_back(Value::texto(linha));
-      detalhes.map_ref()->set("relatorio", std::move(linhas));
+      Value linhas_relatorio = Value::lista();
+      for (const std::string& linha : relatorio)
+        linhas_relatorio.list_ref()->push_back(Value::texto(linha));
+      detalhes.map_ref()->set("relatorio", std::move(linhas_relatorio));
+      const Value lineage = mlops_lineage(diag_.source(), entry_dir_, cfg, kind, linhas);
+      detalhes.map_ref()->set("lineage", lineage);
       const std::string run_id =
-          mlflow_registrar_experimento(rv.s, name, kind, total, semente, relatorio, &detalhes);
+          mlflow_registrar_experimento(rv.s, name, kind, total, semente, relatorio, &detalhes,
+                                       &lineage);
       relatorio.push_back("run enviado ao MLflow: " + run_id);
     }
 
@@ -8515,12 +8956,12 @@ void Interpreter::run_avaliacao(const Item& decl) {
           }
           std::regex re;
           try {
-            re = std::regex(esperado->s);
+            re = std::regex(esperado->s.str());
           } catch (const std::regex_error&) {
             throw std::runtime_error("metrica 'regex' no caso " + std::to_string(i) +
-                                     ": padrao invalido '" + esperado->s + "'");
+                                     ": padrao invalido '" + esperado->s.str() + "'");
           }
-          if (!std::regex_search(saida.s, re)) {
+          if (!std::regex_search(saida.s.str(), re)) {
             ok = false;
             motivo = "regex: padrao nao casou";
             break;
@@ -8647,9 +9088,11 @@ void Interpreter::run_avaliacao(const Item& decl) {
           casos_detalhes.list_ref()->push_back(std::move(caso));
         }
         detalhes.map_ref()->set("casos", std::move(casos_detalhes));
+        const Value lineage = mlops_lineage(diag_.source(), entry_dir_, cfg, "avaliacao", {});
+        detalhes.map_ref()->set("lineage", lineage);
         const std::string run_id =
-            mlflow_registrar_experimento(rv.s, name, "avaliacao", n_rodar, semente, report,
-                                         &detalhes);
+          mlflow_registrar_experimento(rv.s, name, "avaliacao", n_rodar, semente, report,
+                                         &detalhes, &lineage);
         out_ << "run enviado ao MLflow: " << run_id << "\n";
       } else {
         if (rv.s.size() < 6 || rv.s.compare(rv.s.size() - 5, 5, ".json") != 0) {
@@ -8680,12 +9123,12 @@ void Interpreter::run_avaliacao(const Item& decl) {
           rcs.list_ref()->push_back(std::move(rc));
         }
         doc.map_ref()->set("casos", std::move(rcs));
-        std::ofstream rout(rv.s, std::ios::trunc);
+        std::ofstream rout(rv.s.str(), std::ios::trunc);
         if (!rout)
-          throw std::runtime_error("nao foi possivel gravar '" + rv.s +
+          throw std::runtime_error("nao foi possivel gravar '" + rv.s.str() +
                                    "' (crie o diretorio antes?)");
         rout << rt::json_dump(doc) << "\n";
-        out_ << "run salvo em " << rv.s << "\n";
+        out_ << "run salvo em " << rv.s.str() << "\n";
       }
     }
 
@@ -8836,7 +9279,45 @@ std::string row_text(const Value& item) {
       if (const Value* v = item.map_ref()->find(key); v && v->kind == ValueKind::Texto) return v->s;
     }
   }
-  return item.kind == ValueKind::Texto ? item.s : to_display(item);
+  return item.kind == ValueKind::Texto ? item.s.str() : to_display(item);
+}
+
+struct ContextoCompactado {
+  std::string texto;
+  std::size_t antes = 0;
+  std::size_t depois = 0;
+  bool compactado = false;
+};
+
+ContextoCompactado compactar_contexto(std::string texto, std::size_t limite, bool ativo = true) {
+  ContextoCompactado out;
+  out.antes = texto.size();
+  if (!ativo || limite == 0 || texto.size() <= limite) {
+    out.depois = texto.size();
+    out.texto = std::move(texto);
+    return out;
+  }
+  constexpr std::string_view marcador =
+      "\n[resumo automatico: parte intermediaria do contexto compactada]\n";
+  if (limite <= marcador.size() + 2) {
+    out.texto = texto.substr(0, limite);
+  } else {
+    const std::size_t disponivel = limite - marcador.size();
+    std::size_t frente = disponivel / 2;
+    std::size_t tras = disponivel - frente;
+    while (frente > 0 && !std::isspace(static_cast<unsigned char>(texto[frente - 1]))) --frente;
+    std::size_t inicio_tras = texto.size() - tras;
+    while (inicio_tras < texto.size() &&
+           !std::isspace(static_cast<unsigned char>(texto[inicio_tras])))
+      ++inicio_tras;
+    tras = texto.size() - inicio_tras;
+    out.texto = texto.substr(0, frente) + std::string(marcador) +
+                texto.substr(texto.size() - std::min(tras, texto.size()));
+    if (out.texto.size() > limite) out.texto.resize(limite);
+  }
+  out.depois = out.texto.size();
+  out.compactado = true;
+  return out;
 }
 
 Value default_for_type(const Expr* type_expr) {
@@ -8976,6 +9457,7 @@ rt::LlmConfig Interpreter::llm_config(const std::string& name, Span span) {
   if (cfg.contabilidade.empty()) cfg.contabilidade = field_str(b, "arquivo_contabilidade");
   cfg.observabilidade = field_str(b, "observabilidade");
   if (cfg.observabilidade.empty()) cfg.observabilidade = field_str(b, "arquivo_observabilidade");
+  cfg.otel_exporter = field_str(b, "otel_exporter");
   if (const Item* fobs = find_field(b, "registrar_prompts"); fobs && fobs->value &&
       fobs->value->kind == ExprKind::BoolLit)
     cfg.registrar_prompts = fobs->value->boolean;
@@ -9013,10 +9495,11 @@ std::vector<rt::LlmConfig> Interpreter::cadeia_llm(const std::string& name, Span
 }
 
 rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env, bool fluxo) {
+  rt::LlmContextoGuard llm_contexto("perguntar", "perguntar");
   std::string llm_name;
   if (!call.args.empty() && call.args[0].name.empty()) {
     Value v = eval(*call.args[0].value, env);
-    llm_name = v.kind == ValueKind::Texto ? v.s : "";
+    llm_name = v.kind == ValueKind::Texto ? v.s.str() : "";
   }
 
   rt::ValueMap kw;
@@ -9060,6 +9543,7 @@ rt::Value Interpreter::eval_perguntar(const Expr& call, Env& env, bool fluxo) {
   out.map_ref()->set("tokens", toks);
   out.map_ref()->set("custo", Value::decimal(resp.custo));
   out.map_ref()->set("contabilidade", rt::llm_metricas(cfg));
+  out.map_ref()->set("trace_id", Value::texto(llm_contexto.trace_id()));
   return out;
 }
 
@@ -9276,7 +9760,7 @@ rt::Value Interpreter::eval_indice_method(const std::string& indice_name, const 
     }
     std::size_t k = 5;
     if (const Value* tk = kw.find("top_k")) k = static_cast<std::size_t>(tk->as_number());
-    const std::string qt = q.kind == ValueKind::Texto ? q.s : to_display(q);
+    const std::string qt = q.kind == ValueKind::Texto ? q.s.str() : to_display(q);
     Value out = Value::lista();
     if (qdrant || pgvector || weaviate || pinecone || chroma) {
       if (const Value* mb = kw.find("modo");
@@ -9688,7 +10172,7 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   std::string message;
   if (!call.args.empty()) {
     Value m = eval(*call.args[0].value, env);
-    message = m.kind == ValueKind::Texto ? m.s : to_display(m);
+    message = m.kind == ValueKind::Texto ? m.s.str() : to_display(m);
   }
 
   const std::string papel = field_str(cfg, "papel");
@@ -9715,9 +10199,22 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   const int max_passos_agente = field_int(cfg, "max_passos", 6);
   const int max_passos = policy_steps > 0 ? std::min(max_passos_agente, policy_steps) : max_passos_agente;
   const long long policy_tokens = policy_int("max_tokens", 0);
-  const double policy_cost = policy_num("max_custo", 0.0);
+  const double policy_cost = policy_num("max_custo", policy_num("limite_custo", 0.0));
+  if (policy_tokens < 0 || policy_cost < 0.0)
+    fail(call.span, "agente '" + agent_name + "': limites de tokens/custo devem ser >= 0");
   const bool policy_approval = policy_bool("requer_aprovacao", false);
   const bool policy_shared = policy_bool("compartilhado", false);
+  const int policy_contexto = policy_int("max_contexto", policy_int("contexto_max_chars", 0));
+  const int agente_contexto = field_int(cfg, "max_contexto",
+                                        field_int(cfg, "contexto_max_chars", 12000));
+  if (policy_contexto < 0 || agente_contexto < 0)
+    fail(call.span, "agente '" + agent_name + "': limites de contexto devem ser >= 0");
+  const bool resumo_automatico = policy_bool(
+      "resumo_automatico", field_bool(cfg, "resumo_automatico", true));
+  const std::size_t limite_contexto = static_cast<std::size_t>(
+      policy_contexto > 0 && agente_contexto > 0
+          ? std::min(policy_contexto, agente_contexto)
+          : std::max(policy_contexto, agente_contexto));
 
   // Ferramentas declaradas, ja resolvidas e validadas.
   std::vector<std::pair<std::string, const Item*>> tools;
@@ -9762,13 +10259,18 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   }
 
   std::string prompt = message;
+  ContextoCompactado contexto_prompt;
   if (memoria == "conversa") {
     std::string mem;
     {
       std::lock_guard<std::mutex> lk(agent_memory_mutex_);
       mem = agent_memory_[agent_name];
     }
-    if (!mem.empty()) prompt = mem + "\n" + message;
+    if (!mem.empty()) {
+      contexto_prompt = compactar_contexto(mem + "\n" + message, limite_contexto,
+                                           resumo_automatico);
+      prompt = contexto_prompt.texto;
+    }
   }
   // Memoria vetorial: recupera os turnos mais similares e prefixa no prompt
   // (mesmo ponto onde a conversa entraria; os dois modos sao exclusivos).
@@ -9796,6 +10298,10 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
       prompt = lembretes + "\n" + message;
     }
   }
+  if (contexto_prompt.antes == 0) {
+    contexto_prompt = compactar_contexto(prompt, limite_contexto, resumo_automatico);
+    prompt = contexto_prompt.texto;
+  }
 
   Value rastro = Value::lista();
   std::string answer;
@@ -9813,8 +10319,16 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
       (policy_tokens == 0 && policy_cost == 0.0)
           ? "[agente] limite de tokens da sessao (" + std::to_string(teto_tokens_sessao) + ") atingido"
           : "[agente] limite compartilhado de tokens/custo atingido";
+  const rt::LlmConfig* span_cfg = nullptr;
+  std::unique_ptr<rt::LlmSpanGuard> agente_span;
   auto executar_ferramenta = [&](const Item& decl, const std::string& nome, const rt::ValueMap& a,
                                  bool& negada) -> Value {
+    std::unique_ptr<rt::LlmSpanGuard> span;
+    if (span_cfg) {
+      span = std::make_unique<rt::LlmSpanGuard>(
+          *span_cfg, "agente.ferramenta", "agent.tool",
+          std::vector<std::pair<std::string, std::string>>{{"ferramenta", nome}});
+    }
     negada = false;
     if (policy_approval || (decl.block && field_bool(*decl.block, "requer_aprovacao", false))) {
       std::string motivo;
@@ -9847,6 +10361,16 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
     answer = "[sem llm] " + message;
   } else {
     const std::vector<rt::LlmConfig> cadeia = cadeia_llm(llm_name, call.span);
+    span_cfg = cadeia.empty() ? nullptr : &cadeia.front();
+    if (span_cfg) {
+      agente_span = std::make_unique<rt::LlmSpanGuard>(
+          *span_cfg, "agente.responder", "agent",
+          std::vector<std::pair<std::string, std::string>>{
+              {"agente", agent_name},
+              {"politica", politica_nome},
+              {"limite_tokens", std::to_string(teto_tokens_final)},
+              {"limite_custo", std::to_string(policy_cost)}});
+    }
     auto orcamento_compartilhado_estourado = [&]() {
       if (!policy_shared || cadeia.empty()) return false;
       const Value metricas = rt::llm_metricas(cadeia.front());
@@ -9886,6 +10410,18 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
       }
       std::vector<rt::MensagemLLM> conversa;
       conversa.push_back({"user", prompt, {}, ""});
+      auto compactar_conversa = [&]() {
+        if (limite_contexto == 0 || conversa.size() < 3) return;
+        std::size_t total = 0;
+        for (const auto& item : conversa) total += item.texto.size();
+        if (total <= limite_contexto) return;
+        while (conversa.size() > 2 && total > limite_contexto) {
+          total -= conversa[1].texto.size();
+          conversa.erase(conversa.begin() + 1);
+        }
+        conversa.insert(conversa.begin() + 1,
+                        {"user", "[resumo automatico: mensagens anteriores compactadas]", {}, ""});
+      };
       std::string observations;
       for (int step = 1; step <= max_passos && answer.empty(); ++step) {
         if (orcamento_compartilhado_estourado() ||
@@ -9937,7 +10473,11 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
           if (negada) entry.map_ref()->set("negada", Value::logico(true));
           rastro.list_ref()->push_back(std::move(entry));
           observations += "- " + chamada.nome + ": " + to_display(obs) + "\n";
+          observations = compactar_contexto(std::move(observations), limite_contexto,
+                                            resumo_automatico)
+                             .texto;
           conversa.push_back({"tool", to_display(obs), {}, chamada.id});
+          compactar_conversa();
         }
       }
       if (answer.empty() && teto_estourado) answer = msg_teto;
@@ -10017,6 +10557,9 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
         if (negada) entry.map_ref()->set("negada", Value::logico(true));
         rastro.list_ref()->push_back(std::move(entry));
         observations += "- " + action.tool + ": " + to_display(obs) + "\n";
+        observations = compactar_contexto(std::move(observations), limite_contexto,
+                                          resumo_automatico)
+                           .texto;
       }
 
       if (answer.empty() && teto_estourado) answer = msg_teto;
@@ -10046,6 +10589,7 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
     std::lock_guard<std::mutex> lk(agent_memory_mutex_);
     std::string& mem = agent_memory_[agent_name];
     mem += (mem.empty() ? "" : "\n") + ("usuario: " + message) + "\nagente: " + answer;
+    mem = compactar_contexto(std::move(mem), limite_contexto, resumo_automatico).texto;
   }
   if (memoria == "vetorial" && !mem_vec.empty()) {
     // Guarda o turno com o embedding da pergunta (o mesmo usado na busca).
@@ -10064,6 +10608,22 @@ rt::Value Interpreter::eval_agente_responder(const std::string& agent_name, cons
   out.map_ref()->set("tokens", Value::inteiro(tokens_usados));
   out.map_ref()->set("custo", Value::decimal(custo_usado));
   out.map_ref()->set("trace_id", Value::texto(llm_contexto.trace_id()));
+  Value contexto = Value::mapa();
+  contexto.map_ref()->set("limite", Value::inteiro(static_cast<std::int64_t>(limite_contexto)));
+  contexto.map_ref()->set("compactado", Value::logico(contexto_prompt.compactado));
+  contexto.map_ref()->set("antes", Value::inteiro(static_cast<std::int64_t>(contexto_prompt.antes)));
+  contexto.map_ref()->set("depois", Value::inteiro(static_cast<std::int64_t>(
+      contexto_prompt.depois == 0 ? prompt.size() : contexto_prompt.depois)));
+  contexto.map_ref()->set("resumo_automatico", Value::logico(resumo_automatico));
+  out.map_ref()->set("contexto", std::move(contexto));
+  Value orcamento = Value::mapa();
+  orcamento.map_ref()->set("tokens_limite", Value::inteiro(teto_tokens_final));
+  orcamento.map_ref()->set("tokens_usados", Value::inteiro(tokens_usados));
+  orcamento.map_ref()->set("custo_limite", Value::decimal(policy_cost));
+  orcamento.map_ref()->set("custo_usado", Value::decimal(custo_usado));
+  orcamento.map_ref()->set("estourado", Value::logico(teto_estourado));
+  orcamento.map_ref()->set("compartilhado", Value::logico(policy_shared));
+  out.map_ref()->set("orcamento", std::move(orcamento));
   if (!politica_nome.empty()) out.map_ref()->set("politica", Value::texto(politica_nome));
   out.map_ref()->set("rastro", std::move(rastro));
   return out;
@@ -10073,6 +10633,11 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
   auto it = entities_.find(team_name);
   const ast::Block& cfg = *it->second->block;
   const std::string estrategia = field_word(cfg, "estrategia", "sequencial");
+  const int equipe_contexto = field_int(cfg, "max_contexto",
+                                        field_int(cfg, "contexto_max_chars", 12000));
+  const bool equipe_resumo = field_bool(cfg, "resumo_automatico", true);
+  if (equipe_contexto < 0)
+    fail(call.span, "equipe '" + team_name + "': limite de contexto deve ser >= 0");
 
   std::vector<std::pair<std::string, std::string>> members;  // (rotulo, agente)
   if (const Item* af = find_field(cfg, "agentes"); af && af->block) {
@@ -10091,7 +10656,7 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
   std::string message;
   if (!call.args.empty()) {
     Value m = eval(*call.args[0].value, env);
-    message = m.kind == ValueKind::Texto ? m.s : to_display(m);
+    message = m.kind == ValueKind::Texto ? m.s.str() : to_display(m);
   }
 
   if (estrategia == "supervisor") {
@@ -10129,6 +10694,10 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
       if (!history.empty()) user += "\nResultados ate agora:\n" + history;
       std::string raw;
       try {
+        rt::LlmSpanGuard span(
+            cadeia.front(), "equipe.supervisor.passo", "agent.step",
+            std::vector<std::pair<std::string, std::string>>{{"equipe", team_name},
+                                                              {"passo", std::to_string(step)}});
         raw = rt::llm_chat_cadeia(cadeia, system, user).texto;
       } catch (const std::exception& e) {
         fail(call.span, std::string("equipe '") + team_name + "': supervisor: " + e.what());
@@ -10157,7 +10726,7 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
 
         Value r = eval_agente_responder(mit->second, fake, env);
         std::string texto = (r.kind == ValueKind::Mapa && r.map_ref() && r.map_ref()->find("texto"))
-                                ? r.map_ref()->find("texto")->s
+                                ? r.map_ref()->find("texto")->s.str()
                                 : "";
         Value entry = Value::mapa();
         entry.map_ref()->set("agente", Value::texto(rotulo));
@@ -10165,6 +10734,9 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
         entry.map_ref()->set("texto", Value::texto(texto));
         sup_rastro.list_ref()->push_back(std::move(entry));
         history += "- " + rotulo + ": " + texto + "\n";
+        history = compactar_contexto(std::move(history), static_cast<std::size_t>(equipe_contexto),
+                                     equipe_resumo)
+                      .texto;
         continue;
       }
       if (line.rfind("responder:", 0) == 0) {
@@ -10222,7 +10794,7 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
     for (std::size_t k = 0; k < members.size(); ++k) {
       const Value& r = respostas[k];
       const std::string texto = (r.kind == ValueKind::Mapa && r.map_ref() && r.map_ref()->find("texto"))
-                                    ? r.map_ref()->find("texto")->s
+                                    ? r.map_ref()->find("texto")->s.str()
                                     : "";
       Value entry = Value::mapa();
       entry.map_ref()->set("agente", Value::texto(members[k].first));
@@ -10248,7 +10820,7 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
 
     Value r = eval_agente_responder(agente, fake, env);
     std::string texto = (r.kind == ValueKind::Mapa && r.map_ref() && r.map_ref()->find("texto"))
-                            ? r.map_ref()->find("texto")->s
+                            ? r.map_ref()->find("texto")->s.str()
                             : "";
     Value entry = Value::mapa();
     entry.map_ref()->set("agente", Value::texto(rotulo));
@@ -10270,9 +10842,24 @@ rt::Value Interpreter::eval_equipe_call(const std::string& team_name, const Expr
 namespace {
 
 struct Route {
+  struct Runtime {
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point janela = std::chrono::steady_clock::now();
+    int requisicoes_janela = 0;
+    int em_voo = 0;
+    int erros = 0;
+    bool desativada = false;
+  };
   std::string method;
   std::string version;
   std::string path;
+  std::string variante = "default";
+  int peso = 100;
+  int limite_requisicoes = 0;  // janela fixa de um minuto; 0 = ilimitado
+  int limite_concorrencia = 0; // 0 = ilimitado
+  std::time_t tempo_limite = 0;
+  int rollback_erros = 0;      // erros 5xx consecutivos para desativar a variante
+  std::shared_ptr<Runtime> runtime = std::make_shared<Runtime>();
   const Item* field = nullptr;  // the `rota` Field (has `entrada:` / `passos:`)
 };
 
@@ -10309,6 +10896,31 @@ std::vector<Route> collect_routes(const ast::Block& block) {
                it->header[1]->kind == ExprKind::TextLit) {
       r.path = it->header[1]->text;
     }
+    if (it->block) {
+      r.variante = field_word(*it->block, "variante", "default");
+      if (const Item* vf = find_field(*it->block, "variante");
+          vf && vf->value && vf->value->kind == ExprKind::TextLit)
+        r.variante = vf->value->text;
+      r.peso = field_int(*it->block, "peso",
+                         field_int(*it->block, "weight", field_int(*it->block, "percentual", 100)));
+      if (const Item* cf = find_field(*it->block, "canario");
+          cf && cf->value && cf->value->kind == ExprKind::IntLit)
+        r.peso = field_int(*it->block, "canario", r.peso);
+      if (const Item* cf = find_field(*it->block, "canario");
+          cf && cf->value && cf->value->kind == ExprKind::BoolLit && cf->value->boolean)
+        r.peso = 10;
+      r.limite_requisicoes = field_int(
+          *it->block, "limite_requisicoes",
+          field_int(*it->block, "limite_por_minuto", field_int(*it->block, "limite", 0)));
+      r.limite_concorrencia = field_int(
+          *it->block, "limite_concorrencia", field_int(*it->block, "concorrencia", 0));
+      r.rollback_erros = field_int(
+          *it->block, "rollback_erros", field_int(*it->block, "erros_para_rollback", 0));
+      if (const Item* tl = find_field(*it->block, "tempo_limite");
+          tl && tl->value && tl->value->kind == ExprKind::TextLit) {
+        parse_duracao(tl->value->text, r.tempo_limite);
+      }
+    }
     routes.push_back(std::move(r));
   }
   return routes;
@@ -10342,6 +10954,14 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
     if (!route.version.empty() && !api_version_valida(route.version)) {
       fail(route.field ? route.field->span : svc->span,
            "versao de API invalida '" + route.version + "' (use v1, v2 ou vN)");
+    }
+    if (route.peso < 0 || route.peso > 1000) {
+      fail(route.field ? route.field->span : svc->span,
+           "rota " + route.method + " " + route.path + ": 'peso' deve estar entre 0 e 1000");
+    }
+    if (route.limite_requisicoes < 0 || route.limite_concorrencia < 0 || route.rollback_erros < 0) {
+      fail(route.field ? route.field->span : svc->span,
+           "rota " + route.method + " " + route.path + ": limites devem ser inteiros >= 0");
     }
   }
   std::unordered_set<std::string> ferramentas_http;
@@ -10457,19 +11077,68 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
         const std::string trace_id =
             "req-" + std::to_string(proximo_trace_id_.fetch_add(1, std::memory_order_relaxed));
         const Route* match = nullptr;
+        bool rota_limitada = false;
+        std::vector<const Route*> candidatas;
+        int peso_total = 0;
         for (const Route& r : routes) {
-          if (r.method == req.method && r.path == req.path) {
-            match = &r;
-            break;
+          if (r.method != req.method || r.path != req.path) continue;
+          std::lock_guard<std::mutex> lk(r.runtime->mutex);
+          if (r.runtime->desativada || r.peso <= 0) continue;
+          candidatas.push_back(&r);
+          peso_total += r.peso;
+        }
+        if (!candidatas.empty()) {
+          const std::size_t sorteio = std::hash<std::string>{}(trace_id) %
+                                      static_cast<std::size_t>(std::max(1, peso_total));
+          int acumulado = 0;
+          for (const Route* candidata : candidatas) {
+            acumulado += candidata->peso;
+            if (static_cast<int>(sorteio) < acumulado) {
+              match = candidata;
+              break;
+            }
+          }
+          if (!match) match = candidatas.back();
+          const auto agora_rota = std::chrono::steady_clock::now();
+          std::lock_guard<std::mutex> lk(match->runtime->mutex);
+          if (match->runtime->desativada) {
+            match = nullptr;
+          } else {
+            if (agora_rota - match->runtime->janela >= std::chrono::minutes(1)) {
+              match->runtime->janela = agora_rota;
+              match->runtime->requisicoes_janela = 0;
+            }
+            if ((match->limite_requisicoes > 0 &&
+                 match->runtime->requisicoes_janela >= match->limite_requisicoes) ||
+                (match->limite_concorrencia > 0 &&
+                 match->runtime->em_voo >= match->limite_concorrencia)) {
+              rota_limitada = true;
+            } else {
+              ++match->runtime->requisicoes_janela;
+              ++match->runtime->em_voo;
+            }
           }
         }
+
+        struct RouteLease {
+          std::shared_ptr<Route::Runtime> runtime;
+          ~RouteLease() {
+            if (!runtime) return;
+            std::lock_guard<std::mutex> lk(runtime->mutex);
+            runtime->em_voo = std::max(0, runtime->em_voo - 1);
+          }
+        } lease{match && !rota_limitada ? match->runtime : nullptr};
 
         const bool metricas_prometheus_request =
             req.method == "GET" &&
             (req.path == "/metricas/prometheus" || req.path == "/metricas?formato=prometheus" ||
              req.path == "/metricas?format=prometheus");
         // Rotas implicitas de observabilidade (so GET; rota do usuario vence).
-        if (!match && req.method == "GET" && req.path == "/saude" && tem_saude) {
+        if (rota_limitada) {
+          resp.status = 429;
+          resp.headers.emplace_back("Retry-After", "60");
+          resp.body = R"({"erro":"limite da rota excedido"})";
+        } else if (!match && req.method == "GET" && req.path == "/saude" && tem_saude) {
           Value corpo = Value::mapa();
           corpo.map_ref()->set("status", Value::texto("ok"));
           corpo.map_ref()->set("servico", Value::texto(decl_name(*svc)));
@@ -10511,6 +11180,7 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
           resp.status = 404;
           resp.body = R"({"erro":"rota nao encontrada"})";
         } else {
+          resp.headers.emplace_back("X-Tilt-Variant", match->variante);
           Value parsed = Value::mapa();
           bool bad = false;
           if (!req.body.empty()) {
@@ -10571,21 +11241,38 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
             route_resp_ = &rr;
             const auto* allowlist_anterior = route_tool_allowlist_;
             route_tool_allowlist_ = allowlist_http ? &ferramentas_http : nullptr;
+            std::shared_ptr<Env> env_com_prazo;
             Env env;
-            env.parent = &root_;
-            env.vars["entrada"] = parsed;
+            Env* ambiente = &env;
+            if (match->tempo_limite > 0) {
+              env_com_prazo = std::make_shared<Env>();
+              ambiente = env_com_prazo.get();
+            }
+            ambiente->parent = &root_;
+            ambiente->vars["entrada"] = parsed;
+            ambiente->vars["variante"] = Value::texto(match->variante);
+            ambiente->vars["modelo_versao"] = Value::texto(match->variante);
             const Item* passos = match->field->block ? find_field(*match->field->block, "passos") : nullptr;
             try {
               bool abortado = false;
               for (const Item* meio : meios) {
                 if (!meio->block) continue;
-                exec_block(*meio->block, env);
+                exec_block(*meio->block, *ambiente);
                 if (rr.set) {  // meio respondeu (ex.: recusa de autenticacao)
                   abortado = true;
                   break;
                 }
               }
-              if (!abortado && passos && passos->block) exec_block(*passos->block, env);
+              if (!abortado && passos && passos->block) {
+                if (match->tempo_limite > 0) {
+                  PrazoPasso prazo;
+                  prazo.segundos = match->tempo_limite;
+                  prazo.dono = env_com_prazo;
+                  exec_block(*passos->block, *ambiente, &prazo);
+                } else {
+                  exec_block(*passos->block, *ambiente);
+                }
+              }
               resp.status = rr.set ? rr.status : 200;
               resp.body = json_dump(rr.dados.kind == ValueKind::Nulo ? Value::mapa() : rr.dados);
             } catch (const RuntimeAbort& a) {
@@ -10605,6 +11292,20 @@ int Interpreter::serve(int port_override, int max_requests, int threads) {
                                  std::chrono::steady_clock::now() - inicio_requisicao)
                                  .count();
         const long long latencia_us = std::max<long long>(1, duracao);
+        if (match && !rota_limitada) {
+          std::lock_guard<std::mutex> lk(match->runtime->mutex);
+          if (resp.status >= 500) {
+            ++match->runtime->erros;
+            if (match->rollback_erros > 0 && match->runtime->erros >= match->rollback_erros) {
+              match->runtime->desativada = true;
+              out_ << "[rollout] variante " << match->variante << " desativada apos "
+                   << match->runtime->erros << " erro(s) em " << match->method << " "
+                   << match->path << "\n";
+            }
+          } else if (resp.status < 500) {
+            match->runtime->erros = 0;
+          }
+        }
         auto json_log_escape = [](const std::string& value) {
           std::string escaped;
           escaped.reserve(value.size() + 2);
@@ -11168,7 +11869,7 @@ Value* Interpreter::lookup_lvalue(const Expr& target, Env& env) {
         return &(*base->list_ref())[static_cast<std::size_t>(i)];
       }
       if (base->kind == ValueKind::Mapa && base->map_ref()) {
-        const std::string key = idx.kind == ValueKind::Texto ? idx.s : to_display(idx);
+        const std::string key = idx.kind == ValueKind::Texto ? idx.s.str() : to_display(idx);
         if (Value* slot = base->map_ref()->find(key)) return slot;
         base->map_ref()->items.emplace_back(key, Value::nulo());
         return &base->map_ref()->items.back().second;
@@ -11370,7 +12071,7 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
         return (*base.list_ref())[static_cast<std::size_t>(i)];
       }
       if (base.kind == ValueKind::Mapa && base.map_ref()) {
-        Value* f = base.map_ref()->find(idx.kind == ValueKind::Texto ? idx.s : to_display(idx));
+        Value* f = base.map_ref()->find(idx.kind == ValueKind::Texto ? idx.s.str() : to_display(idx));
         return f ? *f : Value::nulo();
       }
       if (base.kind == ValueKind::Tensor && base.tensor_ref()) {
@@ -12260,7 +12961,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         fail(call.span, std::string("ler_csv: '") + chave + "' deve ser uma lista de textos");
       }
       for (const Value& e : *v->list_ref())
-        destino.push_back(e.kind == ValueKind::Texto ? e.s : to_display(e));
+      destino.push_back(e.kind == ValueKind::Texto ? e.s.str() : to_display(e));
     };
     if (const Value* v = kw.find("separador")) {
       if (v->kind != ValueKind::Texto) fail(call.span, "ler_csv: 'separador' deve ser texto");
@@ -12627,7 +13328,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       sep = v->s == "tab" ? '\t' : v->s[0];
     }
     std::ofstream outf(a[1].s);
-    if (!outf) fail(call.span, "nao foi possivel escrever '" + a[1].s + "'");
+    if (!outf) fail(call.span, "nao foi possivel escrever '" + a[1].s.str() + "'");
     // Campo com separador, aspas ou quebra de linha vai entre aspas (RFC 4180); nulo = vazio.
     const auto campo = [&](const std::string& txt) {
       if (txt.find_first_of(std::string("\"\n\r") + sep) == std::string::npos) return txt;
@@ -12670,7 +13371,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     const Value* codec = kw.find("codec");
     if (codec) {
       if (codec->kind != ValueKind::Texto) {
-        fail(call.span, "escrever_parquet: 'codec' deve ser \"gzip\", \"snappy\" ou \"zstd\"");
+        fail(call.span, "escrever_parquet: 'codec' deve ser \"gzip\", \"snappy\", \"zstd\", \"lz4\" ou \"brotli\"");
       }
       if (codec->s == "gzip") {
         opts.codec = 2;
@@ -12678,9 +13379,13 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         opts.codec = 1;
       } else if (codec->s == "zstd") {
         opts.codec = 6;
+      } else if (codec->s == "lz4" || codec->s == "lz4_raw") {
+        opts.codec = 7;
+      } else if (codec->s == "brotli") {
+        opts.codec = 4;
       } else {
         fail(call.span, "escrever_parquet: codec '" + codec->s +
-                            "' invalido (use \"gzip\", \"snappy\" ou \"zstd\")");
+                            "' invalido (use \"gzip\", \"snappy\", \"zstd\", \"lz4\" ou \"brotli\")");
       }
     }
     const Value* paginas = kw.find("paginas");
@@ -12736,6 +13441,31 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         fail(call.span, "escrever_parquet: 'chave_kms' deve ser texto nao vazio");
       }
       opts.chave_kms = chave_kms->s;
+    }
+    if (const Value* chave_env = kw.find("chave_env")) {
+      if (chave_env->kind != ValueKind::Texto || chave_env->s.empty()) {
+        fail(call.span, "escrever_parquet: 'chave_env' deve ser nome de variavel nao vazio");
+      }
+      opts.chave_env = chave_env->s;
+    }
+    const Value* chave_arquivo = kw.find("chave_arquivo");
+    if (!chave_arquivo) chave_arquivo = kw.find("chave_file");
+    if (chave_arquivo) {
+      if (chave_arquivo->kind != ValueKind::Texto || chave_arquivo->s.empty()) {
+        fail(call.span, "escrever_parquet: 'chave_arquivo' deve ser caminho nao vazio");
+      }
+      opts.chave_arquivo = chave_arquivo->s;
+    }
+    const std::pair<const char*, std::string*> cloud_keys[] = {
+        {"chave_azure", &opts.chave_azure}, {"chave_gcp", &opts.chave_gcp},
+        {"chave_vault", &opts.chave_vault}};
+    for (const auto& [nome, destino] : cloud_keys) {
+      if (const Value* chave_cloud = kw.find(nome)) {
+        if (chave_cloud->kind != ValueKind::Texto || chave_cloud->s.empty()) {
+          fail(call.span, "escrever_parquet: '" + std::string(nome) + "' deve ser texto nao vazio");
+        }
+        *destino = chave_cloud->s;
+      }
     }
     try {
       rt::parquet_write(a[1].s, a[0], nullptr, opts);
@@ -12904,9 +13634,9 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   }
   if (name == "incorporar") {
     auto a = args();
-    const std::string model = !a.empty() && a[0].kind == ValueKind::Texto ? a[0].s : "";
+    const std::string model = !a.empty() && a[0].kind == ValueKind::Texto ? a[0].s.str() : "";
     std::string text;
-    if (a.size() > 1) text = a[1].kind == ValueKind::Texto ? a[1].s : to_display(a[1]);
+    if (a.size() > 1) text = a[1].kind == ValueKind::Texto ? a[1].s.str() : to_display(a[1]);
     try {
       std::vector<float> v = rt::llm_embed(model, text);
       rt::Tensor t;
@@ -12957,7 +13687,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
   if (name == "dividir_texto") {
     auto a = args();
     rt::ValueMap kw = eval_kwargs(call, env);
-    const std::string src = !a.empty() && a[0].kind == ValueKind::Texto ? a[0].s : "";
+    const std::string src = !a.empty() && a[0].kind == ValueKind::Texto ? a[0].s.str() : "";
     std::size_t win = 800;
     std::size_t overlap = 100;
     if (const Value* t = kw.find("tamanho")) win = static_cast<std::size_t>(t->as_number());
@@ -13452,7 +14182,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
           body = rt::avro_confluent_encode(schema->s, static_cast<std::int32_t>(id->i), a[1]);
         }
       }
-      if (body.empty()) body = a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
+      if (body.empty()) body = a[1].kind == ValueKind::Texto ? a[1].s.str() : rt::json_dump(a[1]);
       rt::kafka_produzir(a[0].s, body, static_cast<std::int32_t>(particao), opt, tls);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
@@ -13946,7 +14676,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       const std::string body =
-          a[1].kind == ValueKind::Texto ? a[1].s : rt::json_dump(a[1]);
+          a[1].kind == ValueKind::Texto ? a[1].s.str() : rt::json_dump(a[1]);
       rt::s3_put(a[0].s, body);
     } catch (const std::exception& e) {
       fail(call.span, std::string(e.what()));
@@ -14055,7 +14785,7 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
     }
     try {
       const std::string dados =
-          a[3].kind == ValueKind::Texto ? a[3].s : rt::json_dump(a[3]);
+          a[3].kind == ValueKind::Texto ? a[3].s.str() : rt::json_dump(a[3]);
       return Value::texto(rt::s3_multipart_parte(
           a[0].s, a[1].s, static_cast<int>(a[2].as_number()), dados));
     } catch (const std::exception& e) {
@@ -14411,7 +15141,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
     const Value* por = kw.find("por");
     if (!por && args.size() > 1) por = &args[1];
     const Value* tipo = kw.find("tipo");
-    const std::string tipo_texto = tipo && tipo->kind == ValueKind::Texto ? tipo->s : "interna";
+    const std::string tipo_texto = tipo && tipo->kind == ValueKind::Texto ? tipo->s.str() : "interna";
     if (direita && direita->columnar() && por &&
         (por->kind == ValueKind::Texto || por->kind == ValueKind::Lista) &&
         (tipo_texto == "interna" || tipo_texto == "inner" || tipo_texto == "esquerda" ||
@@ -15016,7 +15746,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
   if (is_table && method == "agrupar_por") {
     if (call.args.size() < 2) fail(call.span, "agrupar_por espera (coluna, agregacoes)");
     Value key_v = eval(*call.args[0].value, env);
-    std::string key_col = key_v.kind == ValueKind::Texto ? key_v.s : "";
+    std::string key_col = key_v.kind == ValueKind::Texto ? key_v.s.str() : "";
     const Expr& aggs = *call.args[1].value;
     if (aggs.kind != ExprKind::MapLit) fail(call.span, "agregacoes devem ser um mapa");
 
@@ -15590,7 +16320,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         if (v == nullptr) return padrao;
         if (v->kind != ValueKind::Texto)
           throw std::runtime_error(method + ": '" + chave + "' deve ser texto");
-        return v->s;
+        return v->s.str();
       };
       if (method == "pivotar") {
         const std::vector<std::string> col = nomes_kw("colunas");

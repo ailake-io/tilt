@@ -13,9 +13,14 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <new>
 #include <vector>
 
 namespace tilt::rt {
+
+GpuTensorStorage::~GpuTensorStorage() {
+  if (runtime && buffer.handle) (void)runtime->release(buffer);
+}
 
 namespace {
 
@@ -149,6 +154,28 @@ void cpu_maxpool2d(const float* input, float* output, int batches, int channels,
     }
 }
 
+bool fake_buffer_valid(const GpuBuffer& buffer, std::size_t bytes) {
+  return buffer.handle && (buffer.backend == GpuBackend::Fake || buffer.backend == GpuBackend::Cpu) &&
+         buffer.bytes >= bytes;
+}
+
+bool fake_ensure_output(GpuBuffer& output, std::size_t bytes) {
+  if (bytes == 0) return false;
+  if (output.handle && (output.backend == GpuBackend::Fake || output.backend == GpuBackend::Cpu) &&
+      output.bytes >= bytes) {
+    output.elements = bytes / sizeof(float);
+    return true;
+  }
+  if (output.handle) delete[] static_cast<float*>(output.handle);
+  output = {};
+  output.handle = new (std::nothrow) float[(bytes + sizeof(float) - 1) / sizeof(float)];
+  if (!output.handle) return false;
+  output.bytes = bytes;
+  output.elements = bytes / sizeof(float);
+  output.backend = GpuBackend::Fake;
+  return true;
+}
+
 // IEEE-754 round-to-nearest-even. Keep the master weights and gradients f32;
 // only GEMM operands are reduced to f16 in mixed precision.
 std::uint16_t to_half(float value) {
@@ -213,6 +240,11 @@ extern "C" __global__ void tilt_gelu(float* D, int n) {
 extern "C" __global__ void tilt_add(const float* A, const float* B, float* C, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < n) C[i] = A[i] + B[i];
+}
+extern "C" __global__ void tilt_add_channel_bias(const float* X, const float* B, float* Y,
+                                                    int total, int channels, int spatial) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < total) Y[i] = X[i] + B[(i / spatial) % channels];
 }
 extern "C" __global__ void tilt_conv2d(const float* X, const float* W, float* Y,
                                           int B, int CI, int H, int Width, int CO,
@@ -502,6 +534,7 @@ struct CudaState {
   void* fn_gemm_mixed = nullptr;
   void* fn_gelu = nullptr;
   void* fn_add = nullptr;
+  void* fn_add_channel_bias = nullptr;
   void* fn_conv2d = nullptr;
   void* fn_batch_gemm = nullptr;
   void* fn_normalize = nullptr;
@@ -709,6 +742,7 @@ struct CudaState {
     if (cuModuleGetFunction(&fn_gemm_mixed, module, "tilt_sgemm_mixed") != 0) return false;
     if (cuModuleGetFunction(&fn_gelu, module, "tilt_gelu") != 0) return false;
     if (cuModuleGetFunction(&fn_add, module, "tilt_add") != 0) return false;
+    if (cuModuleGetFunction(&fn_add_channel_bias, module, "tilt_add_channel_bias") != 0) return false;
     if (cuModuleGetFunction(&fn_conv2d, module, "tilt_conv2d") != 0) return false;
     if (cuModuleGetFunction(&fn_batch_gemm, module, "tilt_batch_gemm") != 0) return false;
     if (cuModuleGetFunction(&fn_normalize, module, "tilt_normalize") != 0) return false;
@@ -882,6 +916,28 @@ struct CudaState {
     if (ok) ok = cuCtxSynchronize() == 0;
     if (ok) ok = cuMemcpyDtoH(y, dy, sy) == 0;
     return ok;
+  }
+
+  bool conv2d_resident(const GpuBuffer& input, const GpuBuffer& weights, GpuBuffer& output,
+                       int batch, int ci, int h, int width, int co, int kh, int kw,
+                       int oh, int ow, int stride, int pad, int dilation) {
+    const std::int64_t total = static_cast<std::int64_t>(batch) * co * oh * ow;
+    if (batch < 0 || ci <= 0 || h <= 0 || width <= 0 || co <= 0 || kh <= 0 || kw <= 0 ||
+        oh < 0 || ow < 0 || stride <= 0 || pad < 0 || dilation <= 0 || total <= 0 ||
+        total > std::numeric_limits<int>::max()) return false;
+    const std::size_t sx = sizeof(float) * static_cast<std::size_t>(batch) * ci * h * width;
+    const std::size_t sw = sizeof(float) * static_cast<std::size_t>(co) * ci * kh * kw;
+    const std::size_t sy = sizeof(float) * static_cast<std::size_t>(total);
+    if (!valid_resident(input, sx) || !valid_resident(weights, sw)) return false;
+    ContextScope scope(*this);
+    if (!scope.active || !ensure_output(output, sy)) return false;
+    void* dx = input.handle; void* dw = weights.handle; void* dy = output.handle;
+    void* params[] = {&dx, &dw, &dy, &batch, &ci, &h, &width, &co, &kh, &kw,
+                      &oh, &ow, &stride, &pad, &dilation};
+    const unsigned threads = 256;
+    if (cuLaunchKernel(fn_conv2d, (static_cast<unsigned>(total) + threads - 1) / threads,
+                       1, 1, threads, 1, 1, 0, nullptr, params, nullptr) != 0) return false;
+    return cuCtxSynchronize() == 0;
   }
 
   bool embedding_backward(const float* indices, const float* grad, float* table,
@@ -1058,6 +1114,162 @@ struct CudaState {
     return true;
   }
 
+  bool ensure_output(GpuBuffer& output, std::size_t bytes) {
+    if (bytes == 0) return false;
+    if (output.handle && output.backend == GpuBackend::Cuda && output.bytes >= bytes) {
+      output.elements = bytes / sizeof(float);
+      return true;
+    }
+    if (output.handle) {
+      if (cuMemFree(output.handle) != 0) return false;
+      output = {};
+    }
+    if (cuMemAlloc(&output.handle, bytes) != 0) return false;
+    output.bytes = bytes;
+    output.elements = bytes / sizeof(float);
+    output.backend = GpuBackend::Cuda;
+    return true;
+  }
+
+  bool valid_resident(const GpuBuffer& buffer, std::size_t bytes) const {
+    return buffer.handle && buffer.backend == GpuBackend::Cuda && buffer.bytes >= bytes;
+  }
+
+  bool unary_resident(GpuBuffer& data, std::size_t count, void* fn) {
+    if (!valid_resident(data, count * sizeof(float)) || !fn ||
+        count > static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
+    ContextScope scope(*this);
+    if (!scope.active) return false;
+    int n = static_cast<int>(count);
+    void* ptr = data.handle;
+    void* params[] = {&ptr, &n};
+    const unsigned threads = 256;
+    if (cuLaunchKernel(fn, (static_cast<unsigned>(n) + threads - 1) / threads, 1, 1,
+                       threads, 1, 1, 0, nullptr, params, nullptr) != 0) return false;
+    return cuCtxSynchronize() == 0;
+  }
+
+  bool add_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c, std::size_t count) {
+    if (!valid_resident(a, count * sizeof(float)) || !valid_resident(b, count * sizeof(float)) ||
+        count > static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
+    ContextScope scope(*this);
+    if (!scope.active || !ensure_output(c, count * sizeof(float))) return false;
+    int n = static_cast<int>(count); void* da = a.handle; void* db = b.handle; void* dc = c.handle;
+    void* params[] = {&da, &db, &dc, &n};
+    const unsigned threads = 256;
+    if (cuLaunchKernel(fn_add, (static_cast<unsigned>(n) + threads - 1) / threads, 1, 1,
+                       threads, 1, 1, 0, nullptr, params, nullptr) != 0) return false;
+    return cuCtxSynchronize() == 0;
+  }
+
+  bool add_channel_bias_resident(const GpuBuffer& input, const GpuBuffer& bias,
+                                 GpuBuffer& output, int batches, int channels, int spatial) {
+    if (batches <= 0 || channels <= 0 || spatial <= 0) return false;
+    const std::size_t total = static_cast<std::size_t>(batches) * channels * spatial;
+    const std::size_t data_bytes = total * sizeof(float);
+    const std::size_t bias_bytes = static_cast<std::size_t>(channels) * sizeof(float);
+    if (total > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        !valid_resident(input, data_bytes) || !valid_resident(bias, bias_bytes)) return false;
+    ContextScope scope(*this);
+    if (!scope.active || !ensure_output(output, data_bytes)) return false;
+    void* dx = input.handle; void* db = bias.handle; void* dy = output.handle;
+    int total_i = static_cast<int>(total);
+    void* params[] = {&dx, &db, &dy, &total_i, &channels, &spatial};
+    const unsigned threads = 256;
+    if (cuLaunchKernel(fn_add_channel_bias, (static_cast<unsigned>(total_i) + threads - 1) / threads,
+                       1, 1, threads, 1, 1, 0, nullptr, params, nullptr) != 0) return false;
+    return cuCtxSynchronize() == 0;
+  }
+
+  bool normalize_resident(const GpuBuffer& input, const GpuBuffer& mean,
+                          const GpuBuffer& variance, const GpuBuffer& gamma,
+                          const GpuBuffer& beta, GpuBuffer& output, int batches,
+                          int channels, int spatial, float epsilon) {
+    if (batches <= 0 || channels <= 0 || spatial <= 0) return false;
+    const std::size_t total = static_cast<std::size_t>(batches) * channels * spatial;
+    const std::size_t data_bytes = total * sizeof(float);
+    const std::size_t channel_bytes = static_cast<std::size_t>(channels) * sizeof(float);
+    if (total > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        !valid_resident(input, data_bytes) || !valid_resident(mean, channel_bytes) ||
+        !valid_resident(variance, channel_bytes) || !valid_resident(gamma, channel_bytes) ||
+        !valid_resident(beta, channel_bytes)) return false;
+    ContextScope scope(*this);
+    if (!scope.active || !ensure_output(output, data_bytes)) return false;
+    void* dx = input.handle; void* dmean = mean.handle; void* dvar = variance.handle;
+    void* dgamma = gamma.handle; void* dbeta = beta.handle; void* dy = output.handle;
+    void* params[] = {&dx, &dmean, &dvar, &dgamma, &dbeta, &dy, &batches, &channels,
+                      &spatial, &epsilon};
+    const unsigned threads = 256;
+    const unsigned blocks = (static_cast<unsigned>(total) + threads - 1) / threads;
+    if (cuLaunchKernel(fn_normalize, blocks, 1, 1, threads, 1, 1, 0, nullptr, params, nullptr) != 0)
+      return false;
+    return cuCtxSynchronize() == 0;
+  }
+
+  bool maxpool2d_resident(const GpuBuffer& input, GpuBuffer& output, int batches, int channels,
+                          int height, int width, int window, int stride) {
+    if (batches < 0 || channels < 0 || height < 0 || width < 0 || window <= 0 || stride <= 0)
+      return false;
+    int out_h = height < window ? 0 : (height - window) / stride + 1;
+    int out_w = width < window ? 0 : (width - window) / stride + 1;
+    const std::int64_t total = static_cast<std::int64_t>(batches) * channels * out_h * out_w;
+    if (total == 0) return true;
+    if (total < 0 || total > std::numeric_limits<int>::max()) return false;
+    const std::size_t input_count = static_cast<std::size_t>(batches) * channels * height * width;
+    if (!valid_resident(input, input_count * sizeof(float))) return false;
+    ContextScope scope(*this);
+    if (!scope.active || !ensure_output(output, static_cast<std::size_t>(total) * sizeof(float))) return false;
+    void* dx = input.handle; void* dy = output.handle; int total_i = static_cast<int>(total);
+    void* params[] = {&dx, &dy, &batches, &channels, &height, &width, &window, &stride,
+                      &out_h, &out_w};
+    const unsigned threads = 256;
+    if (cuLaunchKernel(fn_maxpool2d, (static_cast<unsigned>(total_i) + threads - 1) / threads,
+                       1, 1, threads, 1, 1, 0, nullptr, params, nullptr) != 0) return false;
+    return cuCtxSynchronize() == 0;
+  }
+
+  bool reduce_sum_resident(const GpuBuffer& input, GpuBuffer& output, std::size_t count) {
+    if (!valid_resident(input, count * sizeof(float)) || count == 0 ||
+        count > static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
+    ContextScope scope(*this);
+    if (!scope.active || !ensure_output(output, sizeof(float))) return false;
+    void* dx = input.handle; void* dy = output.handle; int n = static_cast<int>(count);
+    void* params[] = {&dx, &dy, &n};
+    constexpr unsigned threads = 256;
+    if (cuLaunchKernel(fn_reduce_sum, 1, 1, 1, threads, 1, 1,
+                       threads * sizeof(float), nullptr, params, nullptr) != 0) return false;
+    return cuCtxSynchronize() == 0;
+  }
+
+  bool batch_gemm_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c,
+                           int batches, int m, int k, int n) {
+    if (batches < 0 || m < 0 || k < 0 || n < 0 || m > 65535 || n > 65535 || batches == 0)
+      return batches == 0;
+    const std::size_t sa = sizeof(float) * static_cast<std::size_t>(batches) * m * k;
+    const std::size_t sb = sizeof(float) * static_cast<std::size_t>(batches) * k * n;
+    const std::size_t sc = sizeof(float) * static_cast<std::size_t>(batches) * m * n;
+    if (!valid_resident(a, sa) || !valid_resident(b, sb)) return false;
+    ContextScope scope(*this);
+    if (!scope.active || !ensure_output(c, sc)) return false;
+    const std::size_t a_stride = sizeof(float) * static_cast<std::size_t>(m) * k;
+    const std::size_t b_stride = sizeof(float) * static_cast<std::size_t>(k) * n;
+    const std::size_t c_stride = sizeof(float) * static_cast<std::size_t>(m) * n;
+    for (int offset = 0; offset < batches;) {
+      int chunk = std::min(65535, batches - offset);
+      void* da = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(a.handle) + offset * a_stride);
+      void* db = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(b.handle) + offset * b_stride);
+      void* dc = reinterpret_cast<void*>(reinterpret_cast<std::uintptr_t>(c.handle) + offset * c_stride);
+      void* params[] = {&da, &db, &dc, &chunk, &m, &k, &n};
+      const unsigned bx = 16, by = 16;
+      if (cuLaunchKernel(fn_batch_gemm, (static_cast<unsigned>(n) + bx - 1) / bx,
+                         (static_cast<unsigned>(m) + by - 1) / by,
+                         static_cast<unsigned>(chunk), bx, by, 1, 0, nullptr, params, nullptr) != 0)
+        return false;
+      offset += chunk;
+    }
+    return cuCtxSynchronize() == 0;
+  }
+
   bool gemm_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c,
                      int m, int k, int n) {
     if (!a.handle || !b.handle || a.backend != GpuBackend::Cuda || b.backend != GpuBackend::Cuda ||
@@ -1070,6 +1282,7 @@ struct CudaState {
       if (c.handle) (void)release(c);
       if (cuMemAlloc(&c.handle, out_bytes) != 0) return false;
       c.bytes = out_bytes; c.backend = GpuBackend::Cuda;
+      c.elements = out_bytes / sizeof(float);
     }
     if (m == 0 || n == 0) return true;
     if (k == 0) return false;
@@ -1085,7 +1298,21 @@ struct CudaState {
   bool batch_gemm(const float* a, const float* b, float* c, int batches, int m, int k, int n) {
     if (!a || !b || !c || batches < 0 || m < 0 || k < 0 || n < 0 || batches == 0 || m == 0 || n == 0)
       return batches == 0 || m == 0 || n == 0;
-    if (batches > 65535 || m > 65535 || n > 65535 || k > std::numeric_limits<int>::max()) return false;
+    if (m > 65535 || n > 65535 || k > std::numeric_limits<int>::max()) return false;
+    if (batches > 65535) {
+      const std::size_t sa = static_cast<std::size_t>(m) * k;
+      const std::size_t sb = static_cast<std::size_t>(k) * n;
+      const std::size_t sc = static_cast<std::size_t>(m) * n;
+      for (int offset = 0; offset < batches;) {
+        const int chunk = std::min(65535, batches - offset);
+        if (!batch_gemm(a + static_cast<std::size_t>(offset) * sa,
+                        b + static_cast<std::size_t>(offset) * sb,
+                        c + static_cast<std::size_t>(offset) * sc,
+                        chunk, m, k, n)) return false;
+        offset += chunk;
+      }
+      return true;
+    }
     const std::size_t sa = sizeof(float) * static_cast<std::size_t>(batches) * m * k;
     const std::size_t sb = sizeof(float) * static_cast<std::size_t>(batches) * k * n;
     const std::size_t sc = sizeof(float) * static_cast<std::size_t>(batches) * m * n;
@@ -1249,7 +1476,7 @@ bool GpuRuntime::ensure(const std::string& device) {
 
 bool GpuRuntime::gemm(const float* a, const float* b, float* c, int m, int k, int n) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_gemm(a, b, c, m, k, n);
     return true;
   }
@@ -1270,7 +1497,7 @@ bool GpuRuntime::gemm_mixed(const float* a, const float* b, float* c, int m, int
   for (std::size_t i = 0; i < static_cast<std::size_t>(k) * n; ++i) {
     if (!std::isfinite(b[i]) || std::abs(b[i]) > kHalfMax) return false;
   }
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     std::vector<float> ah(static_cast<std::size_t>(m) * k), bh(static_cast<std::size_t>(k) * n);
     for (std::size_t i = 0; i < ah.size(); ++i) ah[i] = from_half(to_half(a[i]));
     for (std::size_t i = 0; i < bh.size(); ++i) bh[i] = from_half(to_half(b[i]));
@@ -1287,7 +1514,7 @@ bool GpuRuntime::gemm_mixed(const float* a, const float* b, float* c, int m, int
 
 bool GpuRuntime::relu(float* data, std::size_t n) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_relu(data, n);
     return true;
   }
@@ -1301,7 +1528,7 @@ bool GpuRuntime::relu(float* data, std::size_t n) {
 
 bool GpuRuntime::gelu(float* data, std::size_t n) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_gelu(data, n);
     return true;
   }
@@ -1315,7 +1542,7 @@ bool GpuRuntime::gelu(float* data, std::size_t n) {
 
 bool GpuRuntime::add(const float* a, const float* b, float* c, std::size_t n) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     for (std::size_t i = 0; i < n; ++i) c[i] = a[i] + b[i];
     return true;
   }
@@ -1330,7 +1557,7 @@ bool GpuRuntime::conv2d(const float* x, const float* weights, float* y, int batc
                         int height, int width, int out_channels, int kh, int kw, int out_h,
                         int out_w, int stride, int padding, int dilation) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_conv2d(x, weights, y, batch, in_channels, height, width, out_channels, kh, kw,
                out_h, out_w, stride, padding, dilation);
     return true;
@@ -1353,7 +1580,7 @@ bool GpuRuntime::conv2d_backward(const float* x, const float* weights, const flo
                                  int out_channels, int kh, int kw, int out_h, int out_w,
                                  int stride, int padding, int dilation) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_conv2d_backward(x, weights, grad_output, grad_input, grad_weights, grad_bias, batch,
                         in_channels, height, width, out_channels, kh, kw, out_h, out_w, stride,
                         padding, dilation);
@@ -1370,7 +1597,7 @@ bool GpuRuntime::embedding_backward(const float* indices, const float* grad_outp
                                     float* grad_table, int index_count, int vocabulary,
                                     int dimension) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     return cpu_embedding_backward(indices, grad_output, grad_table, index_count, vocabulary,
                                   dimension);
   }
@@ -1387,7 +1614,7 @@ bool GpuRuntime::recurrent_backward(
     float* grad_recurrent_weights, float* grad_bias, int kind, int batch, int time,
     int input_size, int hidden_size) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_recurrent_backward(x, weights, recurrent_weights, bias, cache_h, cache_c, cache_gates,
                            grad_output, grad_input, grad_weights, grad_recurrent_weights,
                            grad_bias, kind, batch, time, input_size, hidden_size);
@@ -1403,7 +1630,7 @@ bool GpuRuntime::recurrent_backward(
 
 bool GpuRuntime::batch_gemm(const float* a, const float* b, float* c, int batches, int m, int k, int n) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     const std::size_t sa = static_cast<std::size_t>(m) * k;
     const std::size_t sb = static_cast<std::size_t>(k) * n;
     const std::size_t sc = static_cast<std::size_t>(m) * n;
@@ -1420,37 +1647,45 @@ bool GpuRuntime::normalize(const float* input, const float* mean, const float* v
                            const float* gamma, const float* beta, float* output, int batches,
                            int channels, int spatial, float epsilon) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_normalize(input, mean, variance, gamma, beta, output, batches, channels, spatial, epsilon);
     return true;
   }
   if (backend_ == GpuBackend::Cuda && cuda_ctx_)
     return static_cast<CudaState*>(cuda_ctx_)->normalize(input, mean, variance, gamma, beta,
                                                           output, batches, channels, spatial, epsilon);
+  if (backend_ == GpuBackend::Metal && metal_ctx_)
+    return metal::normalize(metal_ctx_, input, mean, variance, gamma, beta, output,
+                            batches, channels, spatial, epsilon);
   return false;
 }
 
 bool GpuRuntime::maxpool2d(const float* input, float* output, int batches, int channels,
                            int height, int width, int window, int stride) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     cpu_maxpool2d(input, output, batches, channels, height, width, window, stride);
     return true;
   }
   if (backend_ == GpuBackend::Cuda && cuda_ctx_)
     return static_cast<CudaState*>(cuda_ctx_)->maxpool2d(input, output, batches, channels,
                                                            height, width, window, stride);
+  if (backend_ == GpuBackend::Metal && metal_ctx_)
+    return metal::maxpool2d(metal_ctx_, input, output, batches, channels, height, width,
+                            window, stride);
   return false;
 }
 
 bool GpuRuntime::reduce_sum(const float* input, float* output, std::size_t count) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (backend_ == GpuBackend::Fake) {
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
     *output = std::accumulate(input, input + count, 0.0F);
     return true;
   }
   if (backend_ == GpuBackend::Cuda && cuda_ctx_)
     return static_cast<CudaState*>(cuda_ctx_)->reduce_sum(input, output, count);
+  if (backend_ == GpuBackend::Metal && metal_ctx_)
+    return metal::reduce_sum(metal_ctx_, input, output, count);
   return false;
 }
 
@@ -1464,6 +1699,39 @@ bool GpuRuntime::dense_backward(const float* input, const float* weights, const 
     for (int o = 0; o < output_features; ++o)
       weights_transposed[static_cast<std::size_t>(o) * input_features + i] =
           weights[static_cast<std::size_t>(i) * output_features + o];
+
+  // Mantém as ativações e os dois operandos de GEMM no device durante o
+  // backward. Antes deste caminho cada GEMM fazia um upload próprio e cada
+  // componente do bias disparava uma redução com HtoD/DtoH.
+  if (residency_available()) {
+    std::vector<float> input_transposed(static_cast<std::size_t>(input_features) * batches);
+    for (int b = 0; b < batches; ++b)
+      for (int i = 0; i < input_features; ++i)
+        input_transposed[static_cast<std::size_t>(i) * batches + b] =
+            input[static_cast<std::size_t>(b) * input_features + i];
+    GpuBuffer d_go, d_wt, d_it, d_gi, d_gw;
+    auto cleanup = [&] {
+      (void)release(d_go); (void)release(d_wt); (void)release(d_it);
+      (void)release(d_gi); (void)release(d_gw);
+    };
+    const bool uploaded = upload(grad_output, static_cast<std::size_t>(batches) * output_features, d_go) &&
+                          upload(weights_transposed.data(), weights_transposed.size(), d_wt) &&
+                          upload(input_transposed.data(), input_transposed.size(), d_it);
+    if (uploaded && gemm_resident(d_go, d_wt, d_gi, batches, output_features, input_features) &&
+        gemm_resident(d_it, d_go, d_gw, input_features, batches, output_features) &&
+        download(d_gi, grad_input, static_cast<std::size_t>(batches) * input_features) &&
+        download(d_gw, grad_weights, static_cast<std::size_t>(input_features) * output_features)) {
+      for (int o = 0; o < output_features; ++o) {
+        float sum = 0.0F;
+        for (int b = 0; b < batches; ++b) sum += grad_output[static_cast<std::size_t>(b) * output_features + o];
+        grad_bias[o] = sum;
+      }
+      cleanup();
+      return true;
+    }
+    cleanup();
+  }
+
   if (!gemm(grad_output, weights_transposed.data(), grad_input,
             batches, output_features, input_features)) return false;
   std::vector<float> input_transposed(static_cast<std::size_t>(input_features) * batches);
@@ -1486,13 +1754,24 @@ bool GpuRuntime::upload(const float* data, std::size_t count, GpuBuffer& buffer)
   std::lock_guard<std::mutex> lock(mutex_);
   if (count > std::numeric_limits<std::size_t>::max() / sizeof(float)) return false;
   const std::size_t bytes = count * sizeof(float);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    if (!data || count == 0 || !fake_ensure_output(buffer, bytes)) return false;
+    std::memcpy(buffer.handle, data, bytes);
+    buffer.elements = count;
+    if (backend_ == GpuBackend::Cpu) buffer.backend = GpuBackend::Cpu;
+    return true;
+  }
   if (backend_ == GpuBackend::Cuda && cuda_ctx_)
-    return static_cast<CudaState*>(cuda_ctx_)->upload(data, bytes, buffer);
+    if (static_cast<CudaState*>(cuda_ctx_)->upload(data, bytes, buffer)) {
+      buffer.elements = count;
+      return true;
+    }
   if (backend_ == GpuBackend::Metal && metal_ctx_) {
     if (buffer.handle) (void)metal::release_buffer(metal_ctx_, buffer.handle);
     buffer = {};
     if (!metal::upload(metal_ctx_, data, bytes, buffer.handle)) return false;
     buffer.bytes = bytes;
+    buffer.elements = count;
     buffer.backend = GpuBackend::Metal;
     return true;
   }
@@ -1503,6 +1782,8 @@ bool GpuRuntime::download(const GpuBuffer& buffer, float* data, std::size_t coun
   std::lock_guard<std::mutex> lock(mutex_);
   if (count > std::numeric_limits<std::size_t>::max() / sizeof(float)) return false;
   const std::size_t bytes = count * sizeof(float);
+  if (buffer.backend == GpuBackend::Fake || buffer.backend == GpuBackend::Cpu)
+    return fake_buffer_valid(buffer, bytes) && data && (std::memcpy(data, buffer.handle, bytes), true);
   if (buffer.backend == GpuBackend::Cuda && cuda_ctx_)
     return static_cast<CudaState*>(cuda_ctx_)->download(buffer, data, bytes);
   if (buffer.backend == GpuBackend::Metal && metal_ctx_)
@@ -1514,7 +1795,11 @@ bool GpuRuntime::release(GpuBuffer& buffer) {
   std::lock_guard<std::mutex> lock(mutex_);
   if (!buffer.handle) return true;
   bool ok = false;
-  if (buffer.backend == GpuBackend::Cuda && cuda_ctx_)
+  if (buffer.backend == GpuBackend::Fake || buffer.backend == GpuBackend::Cpu) {
+    delete[] static_cast<float*>(buffer.handle);
+    buffer = {};
+    return true;
+  } else if (buffer.backend == GpuBackend::Cuda && cuda_ctx_)
     ok = static_cast<CudaState*>(cuda_ctx_)->release(buffer);
   else if (buffer.backend == GpuBackend::Metal && metal_ctx_)
     ok = metal::release_buffer(metal_ctx_, buffer.handle);
@@ -1531,6 +1816,16 @@ bool GpuRuntime::gemm_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer
       elements > std::numeric_limits<std::size_t>::max() / sizeof(float)) return false;
   if (backend_ == GpuBackend::Cuda && cuda_ctx_)
     return static_cast<CudaState*>(cuda_ctx_)->gemm_resident(a, b, c, m, k, n);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    const std::size_t ab = sizeof(float) * static_cast<std::size_t>(m) * k;
+    const std::size_t bb = sizeof(float) * static_cast<std::size_t>(k) * n;
+    const std::size_t cb = sizeof(float) * static_cast<std::size_t>(m) * n;
+    if (!fake_buffer_valid(a, ab) || !fake_buffer_valid(b, bb) || !fake_ensure_output(c, cb)) return false;
+    cpu_gemm(static_cast<const float*>(a.handle), static_cast<const float*>(b.handle),
+             static_cast<float*>(c.handle), m, k, n);
+    if (backend_ == GpuBackend::Cpu) c.backend = GpuBackend::Cpu;
+    return true;
+  }
   if (backend_ == GpuBackend::Metal && metal_ctx_) {
     const std::size_t bytes = sizeof(float) * elements;
     if (c.handle && (c.backend != GpuBackend::Metal || c.bytes < bytes)) {
@@ -1541,6 +1836,212 @@ bool GpuRuntime::gemm_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer
     c.bytes = bytes;
     c.backend = GpuBackend::Metal;
     return true;
+  }
+  return false;
+}
+
+bool GpuRuntime::batch_gemm_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c,
+                                     int batches, int m, int k, int n) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (batches < 0 || m < 0 || k < 0 || n < 0) return false;
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    const std::size_t sa = sizeof(float) * static_cast<std::size_t>(batches) * m * k;
+    const std::size_t sb = sizeof(float) * static_cast<std::size_t>(batches) * k * n;
+    const std::size_t sc = sizeof(float) * static_cast<std::size_t>(batches) * m * n;
+    if (!fake_buffer_valid(a, sa) || !fake_buffer_valid(b, sb) || !fake_ensure_output(c, sc)) return false;
+    const std::size_t aa = static_cast<std::size_t>(m) * k, bb = static_cast<std::size_t>(k) * n,
+                       cc = static_cast<std::size_t>(m) * n;
+    for (int i = 0; i < batches; ++i)
+      cpu_gemm(static_cast<const float*>(a.handle) + i * aa, static_cast<const float*>(b.handle) + i * bb,
+               static_cast<float*>(c.handle) + i * cc, m, k, n);
+    if (backend_ == GpuBackend::Cpu) c.backend = GpuBackend::Cpu;
+    return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->batch_gemm_resident(a, b, c, batches, m, k, n);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) {
+    const std::size_t bytes = sizeof(float) * static_cast<std::size_t>(batches) * m * n;
+    if (!metal::batch_gemm_resident(metal_ctx_, a.handle, b.handle, c.handle, batches, m, k, n)) return false;
+    c.bytes = bytes; c.elements = bytes / sizeof(float); c.backend = GpuBackend::Metal;
+    return true;
+  }
+  return false;
+}
+
+bool GpuRuntime::conv2d_resident(const GpuBuffer& input, const GpuBuffer& weights,
+                                 GpuBuffer& output, int batch, int in_channels, int height,
+                                 int width, int out_channels, int kh, int kw, int out_h,
+                                 int out_w, int stride, int padding, int dilation) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    const std::size_t sx = sizeof(float) * static_cast<std::size_t>(batch) * in_channels * height * width;
+    const std::size_t sw = sizeof(float) * static_cast<std::size_t>(out_channels) * in_channels * kh * kw;
+    const std::size_t sy = sizeof(float) * static_cast<std::size_t>(batch) * out_channels * out_h * out_w;
+    if (!fake_buffer_valid(input, sx) || !fake_buffer_valid(weights, sw) || !fake_ensure_output(output, sy)) return false;
+    cpu_conv2d(static_cast<const float*>(input.handle), static_cast<const float*>(weights.handle),
+               static_cast<float*>(output.handle), batch, in_channels, height, width, out_channels,
+               kh, kw, out_h, out_w, stride, padding, dilation);
+    if (backend_ == GpuBackend::Cpu) output.backend = GpuBackend::Cpu;
+    return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->conv2d_resident(
+        input, weights, output, batch, in_channels, height, width, out_channels, kh, kw,
+        out_h, out_w, stride, padding, dilation);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) {
+    if (!metal::conv2d_resident(metal_ctx_, input.handle, weights.handle, output.handle, batch,
+                                in_channels, height, width, out_channels, kh, kw, out_h, out_w,
+                                stride, padding, dilation)) return false;
+    output.bytes = sizeof(float) * static_cast<std::size_t>(batch) * out_channels * out_h * out_w;
+    output.elements = output.bytes / sizeof(float); output.backend = GpuBackend::Metal;
+    return true;
+  }
+  return false;
+}
+
+bool GpuRuntime::relu_resident(GpuBuffer& data, std::size_t count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    if (!fake_buffer_valid(data, count * sizeof(float))) return false;
+    cpu_relu(static_cast<float*>(data.handle), count); return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->unary_resident(data, count, static_cast<CudaState*>(cuda_ctx_)->fn_relu);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) return metal::relu_resident(metal_ctx_, data.handle, count);
+  return false;
+}
+
+bool GpuRuntime::gelu_resident(GpuBuffer& data, std::size_t count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    if (!fake_buffer_valid(data, count * sizeof(float))) return false;
+    cpu_gelu(static_cast<float*>(data.handle), count); return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->unary_resident(data, count, static_cast<CudaState*>(cuda_ctx_)->fn_gelu);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) return metal::gelu_resident(metal_ctx_, data.handle, count);
+  return false;
+}
+
+bool GpuRuntime::add_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c, std::size_t count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    if (!fake_buffer_valid(a, count * sizeof(float)) || !fake_buffer_valid(b, count * sizeof(float)) ||
+        !fake_ensure_output(c, count * sizeof(float))) return false;
+    const float* x = static_cast<const float*>(a.handle); const float* y = static_cast<const float*>(b.handle);
+    float* z = static_cast<float*>(c.handle); for (std::size_t i = 0; i < count; ++i) z[i] = x[i] + y[i];
+    if (backend_ == GpuBackend::Cpu) c.backend = GpuBackend::Cpu;
+    return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->add_resident(a, b, c, count);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) {
+    if (!metal::add_resident(metal_ctx_, a.handle, b.handle, c.handle, count)) return false;
+    c.bytes = count * sizeof(float); c.elements = count; c.backend = GpuBackend::Metal; return true;
+  }
+  return false;
+}
+
+bool GpuRuntime::add_channel_bias_resident(const GpuBuffer& input, const GpuBuffer& bias,
+                                           GpuBuffer& output, int batches, int channels,
+                                           int spatial) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (batches <= 0 || channels <= 0 || spatial <= 0) return false;
+  const std::size_t total = static_cast<std::size_t>(batches) * channels * spatial;
+  const std::size_t bias_count = static_cast<std::size_t>(channels);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    if (!fake_buffer_valid(input, total * sizeof(float)) ||
+        !fake_buffer_valid(bias, bias_count * sizeof(float)) ||
+        !fake_ensure_output(output, total * sizeof(float))) return false;
+    const float* x = static_cast<const float*>(input.handle);
+    const float* b = static_cast<const float*>(bias.handle);
+    float* y = static_cast<float*>(output.handle);
+    for (std::size_t i = 0; i < total; ++i) y[i] = x[i] + b[(i / static_cast<std::size_t>(spatial)) % channels];
+    if (backend_ == GpuBackend::Cpu) output.backend = GpuBackend::Cpu;
+    return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->add_channel_bias_resident(
+        input, bias, output, batches, channels, spatial);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) {
+    if (!metal::add_channel_bias_resident(metal_ctx_, input.handle, bias.handle, output.handle,
+                                          batches, channels, spatial)) return false;
+    output.bytes = total * sizeof(float); output.elements = total; output.backend = GpuBackend::Metal;
+    return true;
+  }
+  return false;
+}
+
+bool GpuRuntime::normalize_resident(const GpuBuffer& input, const GpuBuffer& mean,
+                                    const GpuBuffer& variance, const GpuBuffer& gamma,
+                                    const GpuBuffer& beta, GpuBuffer& output, int batches,
+                                    int channels, int spatial, float epsilon) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    const std::size_t total = static_cast<std::size_t>(batches) * channels * spatial;
+    const std::size_t cb = static_cast<std::size_t>(channels) * sizeof(float);
+    if (!fake_buffer_valid(input, total * sizeof(float)) || !fake_buffer_valid(mean, cb) ||
+        !fake_buffer_valid(variance, cb) || !fake_buffer_valid(gamma, cb) || !fake_buffer_valid(beta, cb) ||
+        !fake_ensure_output(output, total * sizeof(float))) return false;
+    cpu_normalize(static_cast<const float*>(input.handle), static_cast<const float*>(mean.handle),
+                  static_cast<const float*>(variance.handle), static_cast<const float*>(gamma.handle),
+                  static_cast<const float*>(beta.handle), static_cast<float*>(output.handle),
+                  batches, channels, spatial, epsilon);
+    if (backend_ == GpuBackend::Cpu) output.backend = GpuBackend::Cpu;
+    return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->normalize_resident(input, mean, variance, gamma, beta,
+                                                                    output, batches, channels, spatial, epsilon);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) {
+    if (!metal::normalize_resident(metal_ctx_, input.handle, mean.handle, variance.handle, gamma.handle,
+                                   beta.handle, output.handle, batches, channels, spatial, epsilon)) return false;
+    const std::size_t bytes = sizeof(float) * static_cast<std::size_t>(batches) * channels * spatial;
+    output.bytes = bytes; output.elements = bytes / sizeof(float); output.backend = GpuBackend::Metal; return true;
+  }
+  return false;
+}
+
+bool GpuRuntime::maxpool2d_resident(const GpuBuffer& input, GpuBuffer& output, int batches,
+                                    int channels, int height, int width, int window, int stride) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    const int oh = height < window ? 0 : (height - window) / stride + 1;
+    const int ow = width < window ? 0 : (width - window) / stride + 1;
+    const std::size_t inb = sizeof(float) * static_cast<std::size_t>(batches) * channels * height * width;
+    const std::size_t outb = sizeof(float) * static_cast<std::size_t>(batches) * channels * oh * ow;
+    if (!fake_buffer_valid(input, inb) || !fake_ensure_output(output, outb)) return false;
+    cpu_maxpool2d(static_cast<const float*>(input.handle), static_cast<float*>(output.handle), batches, channels,
+                  height, width, window, stride); if (backend_ == GpuBackend::Cpu) output.backend = GpuBackend::Cpu; return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->maxpool2d_resident(input, output, batches, channels, height, width,
+                                                                   window, stride);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) {
+    if (!metal::maxpool2d_resident(metal_ctx_, input.handle, output.handle, batches, channels, height, width,
+                                   window, stride)) return false;
+    const int oh = height < window ? 0 : (height - window) / stride + 1;
+    const int ow = width < window ? 0 : (width - window) / stride + 1;
+    output.bytes = sizeof(float) * static_cast<std::size_t>(batches) * channels * oh * ow;
+    output.elements = output.bytes / sizeof(float); output.backend = GpuBackend::Metal; return true;
+  }
+  return false;
+}
+
+bool GpuRuntime::reduce_sum_resident(const GpuBuffer& input, GpuBuffer& output, std::size_t count) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (backend_ == GpuBackend::Fake || backend_ == GpuBackend::Cpu) {
+    if (!fake_buffer_valid(input, count * sizeof(float)) || !fake_ensure_output(output, sizeof(float))) return false;
+    *static_cast<float*>(output.handle) = std::accumulate(static_cast<const float*>(input.handle),
+                                                          static_cast<const float*>(input.handle) + count, 0.0F);
+    if (backend_ == GpuBackend::Cpu) output.backend = GpuBackend::Cpu;
+    return true;
+  }
+  if (backend_ == GpuBackend::Cuda && cuda_ctx_)
+    return static_cast<CudaState*>(cuda_ctx_)->reduce_sum_resident(input, output, count);
+  if (backend_ == GpuBackend::Metal && metal_ctx_) {
+    if (!metal::reduce_sum_resident(metal_ctx_, input.handle, output.handle, count)) return false;
+    output.bytes = sizeof(float); output.elements = 1; output.backend = GpuBackend::Metal; return true;
   }
   return false;
 }

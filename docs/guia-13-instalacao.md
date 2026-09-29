@@ -15,6 +15,7 @@ Release do GitHub).
 | make/ninja | qualquer versão recente |
 
 O `tilt` não tem dependências de link: SQLite, zlib (gzip no Parquet),
+libzstd (ZSTD), liblz4 (LZ4_RAW), libbrotlienc/libbrotlidec (Brotli),
 OpenSSL (TLS) e libpq (Postgres) são carregadas em runtime via `dlopen`
 quando o recurso é usado.
 

@@ -743,6 +743,86 @@ printf '%s\n' "$out"
 confere "3 carla"
 confere "4 davi"
 
+# --- 16b. LZ4_RAW opcional nos dois sentidos -------------------------------
+if python3 -c "import ctypes; ctypes.CDLL('liblz4.so.1')" 2>/dev/null; then
+cat > "$tmp/escrita_lz4.tilt" <<'TILTEOF'
+pipeline escrita_lz4:
+  passos:
+    - t = [{ id: 1, nome: "ana" }, { id: 2, nome: "bruno" }]
+    - escrever_parquet t, "saida_lz4.parquet", codec: "lz4"
+    - v = ler_parquet "saida_lz4.parquet"
+    - imprimir v[1].id, v[1].nome
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_lz4.tilt)
+printf '%s\n' "$out"
+confere "2 bruno"
+python3 - "$tmp/saida_lz4.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+f = pq.ParquetFile(sys.argv[1])
+assert f.metadata.row_group(0).column(0).compression == "LZ4"
+assert f.read().to_pylist() == [{"id": 1, "nome": "ana"}, {"id": 2, "nome": "bruno"}]
+print("pyarrow: LZ4_RAW escrito pelo tilt validado")
+PYEOF
+python3 - "$tmp/entrada_lz4.parquet" <<'PYEOF'
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+pq.write_table(pa.table({"id": [3, 4], "nome": ["carla", "davi"]}), sys.argv[1], compression="lz4")
+PYEOF
+cat > "$tmp/leitura_lz4.tilt" <<'TILTEOF'
+pipeline leitura_lz4:
+  passos:
+    - v = ler_parquet "entrada_lz4.parquet"
+    - imprimir v[0].id, v[1].nome
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_lz4.tilt)
+printf '%s\n' "$out"
+confere "3 davi"
+else
+  echo "LZ4_RAW: liblz4 ausente; teste opcional pulado"
+fi
+
+# --- 16c. Brotli opcional nos dois sentidos --------------------------------
+if python3 -c "import ctypes; ctypes.CDLL('libbrotlienc.so.1'); ctypes.CDLL('libbrotlidec.so.1')" 2>/dev/null; then
+cat > "$tmp/escrita_brotli.tilt" <<'TILTEOF'
+pipeline escrita_brotli:
+  passos:
+    - t = [{ id: 1, nome: "ana" }, { id: 2, nome: "bruno" }]
+    - escrever_parquet t, "saida_brotli.parquet", codec: "brotli"
+    - v = ler_parquet "saida_brotli.parquet"
+    - imprimir v[1].id, v[1].nome
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar escrita_brotli.tilt)
+printf '%s\n' "$out"
+confere "2 bruno"
+python3 - "$tmp/saida_brotli.parquet" <<'PYEOF'
+import sys
+import pyarrow.parquet as pq
+f = pq.ParquetFile(sys.argv[1])
+assert f.metadata.row_group(0).column(0).compression == "BROTLI"
+assert f.read().to_pylist() == [{"id": 1, "nome": "ana"}, {"id": 2, "nome": "bruno"}]
+print("pyarrow: Brotli escrito pelo tilt validado")
+PYEOF
+python3 - "$tmp/entrada_brotli.parquet" <<'PYEOF'
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+pq.write_table(pa.table({"id": [3, 4], "nome": ["carla", "davi"]}), sys.argv[1], compression="brotli")
+PYEOF
+cat > "$tmp/leitura_brotli.tilt" <<'TILTEOF'
+pipeline leitura_brotli:
+  passos:
+    - v = ler_parquet "entrada_brotli.parquet"
+    - imprimir v[0].id, v[1].nome
+TILTEOF
+out=$(cd "$tmp" && "$BIN" executar leitura_brotli.tilt)
+printf '%s\n' "$out"
+confere "3 davi"
+else
+  echo "Brotli: libbrotlienc/libbrotlidec ausentes; teste opcional pulado"
+fi
+
 # --- 17. writer multi-row-group com offsets ajustados --------------------------
 cat > "$tmp/escrita_row_groups.tilt" <<'TILTEOF'
 pipeline escrita_row_groups:

@@ -108,14 +108,17 @@ void print_usage(std::ostream& os) {
      << "  registrar-modelo <nome> <arquivo>  grava artefato versionado no registry local\n"
      << "  listar-modelos [--registro DIR]    lista versões do registry local\n"
      << "  promover-modelo <nome> <versao> <stage>  promove versão (staging/production/archived)\n"
+     << "  rollback-modelo <nome>             reverte production para a versão anterior\n"
+     << "  linhagem-modelo <nome>              exibe a linhagem do artefato resolvido\n"
      << "  resolver-modelo <nome> [--versao V|--stage S]  resolve artefato registrado\n"
      << "  repl                               laco interativo com estado entre linhas\n"
      << "  rpc <arquivo>                      expoe funcoes e pipelines por JSON-lines\n"
      << "  chamar <arquivo> <funcao> [json]   chama uma funcao e imprime o resultado em JSON\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
      << "                                     [--requisicoes N] [--threads N] [--pesos ARQUIVO]\n"
+     << "                                     [--modelo N --versao V|--stage S --registro DIR]\n"
      << "  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via\n"
-     << "                                     REST catalog read-only [--prefixo P]\n"
+     << "                                     REST catalog local [--prefixo P]\n"
      << "                                     [--sem-reecrita-manifests]\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "                                     [--asm] [--arch x86_64|arm64]\n"
@@ -480,7 +483,7 @@ BUILTINS
 CLI
   tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
   tilt servir <a> [--porta N] [--requisicoes N] [--threads N]
-  tilt servir-catalogo <dir> [--porta N] [--prefixo P]  (Iceberg REST read-only;
+  tilt servir-catalogo <dir> [--porta N] [--prefixo P]  (Iceberg REST local;
                                      --sem-reecrita-manifests p/ Spark/Hadoop)
   tilt compilar <a> --saida <bin> [--asm] [--arch x86_64|arm64]
   tilt tokens <a>   referencia   versao
@@ -615,6 +618,10 @@ int cmd_compilar(const std::vector<std::string_view>& args) {
 int cmd_servir(const std::vector<std::string_view>& args) {
   std::string_view path;
   std::string pesos_override;
+  std::string modelo_registro;
+  std::string modelo_versao;
+  std::string modelo_stage;
+  std::string modelo_registry_dir = ".tilt-modelos";
   int port = 0;
   int max_requests = 0;
   int threads = 0;  // 0 = padrao (min(4, cores)); 1 = serial
@@ -627,6 +634,14 @@ int cmd_servir(const std::vector<std::string_view>& args) {
       threads = std::atoi(std::string(args[++k]).c_str());
     } else if (args[k] == "--pesos" && k + 1 < args.size()) {
       pesos_override = std::string(args[++k]);
+    } else if (args[k] == "--modelo" && k + 1 < args.size()) {
+      modelo_registro = std::string(args[++k]);
+    } else if (args[k] == "--versao" && k + 1 < args.size()) {
+      modelo_versao = std::string(args[++k]);
+    } else if (args[k] == "--stage" && k + 1 < args.size()) {
+      modelo_stage = std::string(args[++k]);
+    } else if (args[k] == "--registro" && k + 1 < args.size()) {
+      modelo_registry_dir = std::string(args[++k]);
     } else if (args[k].rfind("--", 0) == 0) {
       std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
       return kUsage;
@@ -635,7 +650,26 @@ int cmd_servir(const std::vector<std::string_view>& args) {
     }
   }
   if (path.empty()) {
-    std::cerr << "tilt: uso: tilt servir <arquivo> [--porta N] [--requisicoes N] [--threads N] [--pesos ARQUIVO]\n";
+    std::cerr << "tilt: uso: tilt servir <arquivo> [--porta N] [--requisicoes N] [--threads N]"
+                 " [--pesos ARQUIVO] [--modelo N --versao V|--stage S --registro DIR]\n";
+    return kUsage;
+  }
+
+  if (!modelo_registro.empty()) {
+    if (!pesos_override.empty()) {
+      std::cerr << "tilt: use --pesos ou --modelo, nao os dois\n";
+      return kUsage;
+    }
+    std::string erro;
+    const auto resolved = resolver_modelo_local(modelo_registro, modelo_versao, modelo_stage,
+                                                modelo_registry_dir, erro);
+    if (!resolved) {
+      std::cerr << "tilt: " << erro << "\n";
+      return kUsage;
+    }
+    pesos_override = *resolved;
+  } else if (!modelo_versao.empty() || !modelo_stage.empty()) {
+    std::cerr << "tilt: --versao/--stage exigem --modelo\n";
     return kUsage;
   }
 
@@ -771,6 +805,8 @@ int run_cli(int argc, char** argv) {
   if (cmd == "registrar-modelo") return cmd_registrar_modelo(args);
   if (cmd == "listar-modelos") return cmd_listar_modelos(args);
   if (cmd == "promover-modelo") return cmd_promover_modelo(args);
+  if (cmd == "rollback-modelo") return cmd_rollback_modelo(args);
+  if (cmd == "linhagem-modelo") return cmd_linhagem_modelo(args);
   if (cmd == "resolver-modelo") return cmd_resolver_modelo(args);
   if (cmd == "repl") return cmd_repl(args);
   if (cmd == "rpc") return cmd_rpc(args);

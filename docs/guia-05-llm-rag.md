@@ -19,6 +19,7 @@ llm gpt:
   custo_saida_mil: 0.0
   contabilidade: "var/llm.jsonl"   # ledger persistente (opcional)
   observabilidade: "var/llm.obs.jsonl" # eventos (opcional)
+  otel_exporter: "file:var/otel.jsonl" # spans estruturados (opcional)
   registrar_prompts: falso          # prompt/resposta somente com opt-in
 
 pipeline declara:
@@ -49,6 +50,12 @@ pipeline declara:
   padrão; `registrar_prompts: verdadeiro` é opt-in para ambientes autorizados.
   Quando omitido, o evento mantém hashes SHA-256 e `trace_id` para correlação
   sem expor o texto.
+- Cada chamada, embedding, etapa de agente e ferramenta gera um span JSONL com
+  `trace_id`, `span_id`, `parent_span_id`, início/fim em nanossegundos,
+  `duracao_us`, status e atributos. `otel_exporter: "file:..."` ou
+  `TILT_OTEL_EXPORTER=file:...` exporta os spans mesmo sem registrar prompts;
+  o formato pode ser ingerido por coletores OpenTelemetry depois de uma
+  transformação para OTLP.
 - `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}, custo, contabilidade}` —
   `modelo` é o que respondeu (útil com `reserva:`), tokens vêm do `usage`
   da API (Anthropic `input/output_tokens`, OpenAI `prompt/completion_tokens`;
@@ -71,6 +78,21 @@ pipeline robusto:
     - imprimir r.modelo
     - imprimir llm_metricas "gpt"  # totais persistentes, custo e chamadas
 ```
+
+### Contexto longo e orçamento de agentes
+
+Agentes com `memoria: conversa` compactam automaticamente o histórico quando
+ele ultrapassa `max_contexto:` (em caracteres; default 12000). A compactação
+preserva o início e o fim e insere um marcador de resumo, sem nova chamada ao
+LLM. `resumo_automatico: falso` desliga essa poda. O mesmo limite é aplicado às
+observações do planner e às mensagens de ferramentas; o retorno de
+`.responder` inclui `contexto` com os tamanhos antes/depois.
+
+`politica` aceita `max_contexto:`/`contexto_max_chars:`,
+`resumo_automatico:` e `max_custo:` (ou `limite_custo:`), além de
+`max_tokens:`. O retorno do agente inclui `orcamento` com limite, uso, custo e
+indicação de estouro; `llm_metricas` também informa custo médio, tokens médios,
+preços configurados e teto de tokens.
 
 Cobertura com HTTP de verdade em `tests/llm_retry_test.sh` (mock local com
 429/500/timeout: retry, fallback, teto e `tempo_limite`).
@@ -386,5 +408,6 @@ avaliacao com_juiz:
 ```
 
 Limites: o juiz não expõe cadeia de pensamento; o multi-juiz usa voto de maioria ou unanimidade, sem pesos por juiz;
-amostra só por contagem (sem fração); o registro MLflow envia métricas e
-parâmetros, mas ainda não publica artefatos ou detalhes de cada caso.
+amostra só por contagem (sem fração); o registro MLflow envia métricas,
+parâmetros e os artefatos `detalhes.json` e `lineage.json` com os casos e os
+hashes dos insumos.

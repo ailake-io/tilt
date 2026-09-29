@@ -200,6 +200,17 @@ void ColumnarColumn::append(Value value) {
   }
 }
 
+void ColumnarColumn::append_ref(const Value& value) {
+  switch (value.kind) {
+    case ValueKind::Nulo: append_null(); break;
+    case ValueKind::Inteiro: append_integer(value.i); break;
+    case ValueKind::Decimal: append_decimal(value.d); break;
+    case ValueKind::Logico: append_boolean(value.b); break;
+    case ValueKind::Texto: append_text(value.s); break;
+    default: append(value); break;
+  }
+}
+
 void ColumnarColumn::append_column(const ColumnarColumn& source) {
   if (source.nulls.empty()) return;
   if (type == Type::Empty) {

@@ -2,12 +2,12 @@
 # Integration test for `tilt servir-catalogo` (fase 30): the fixture writes two
 # Iceberg tables into a temp dir (plain write+append -> v1.metadata.json, and a
 # table partitioned by estado), the catalog server is started in background and
-# a python3 (urllib) client exercises the read-only Iceberg REST subset:
+# a python3 (urllib) client exercises the Iceberg REST subset:
 # config/namespaces/tables listings, loadTable (metadata-location http, snapshot
 # manifest-lists rewritten to this server's URLs), byte-identical downloads of
 # the metadata.json and of a manifest .avro via those URLs, path traversal
 # (../, symlink out of root) -> 403/404, unknown table -> 404
-# NoSuchTableException and read-only writes (createTable/commit/HEAD) -> 501.
+# NoSuchTableException, pagination, HEAD, createTable, transactions e DELETE.
 # Server is killed in the trap.
 set -eu
 
@@ -148,6 +148,13 @@ ids = json.loads(get(base + "/namespaces/default/tables"))["identifiers"]
 nomes = sorted(i["name"] for i in ids)
 if nomes != ["tabela_iceberg", "vendas_part"]:
     falha("tabelas listadas divergem: %r" % nomes)
+pagina1 = json.loads(get(base + "/namespaces/default/tables?page_size=1"))
+if len(pagina1.get("identifiers", [])) != 1 or not pagina1.get("next-page-token"):
+    falha("pagina inicial sem identificador/token: %r" % pagina1)
+pagina2 = json.loads(get(base + "/namespaces/default/tables?page_size=1&page_token=" +
+                       urllib.parse.quote(pagina1["next-page-token"])))
+if len(pagina2.get("identifiers", [])) != 1 or pagina2.get("next-page-token"):
+    falha("pagina final invalida: %r" % pagina2)
 
 # --- loadTable: metadata-location http + manifest-lists reescritas -----------
 load = json.loads(get(base + "/namespaces/default/tables/tabela_iceberg"))
@@ -234,31 +241,56 @@ get(base + "/files?path=" + urllib.parse.quote(root + "/nada.parquet", safe=""),
     expect=(404,))
 get(base + "/files/" + urllib.parse.quote("nada.parquet", safe="/"), expect=(404,))
 
-# --- catalogo read-only: escritas -> 501 ---------------------------------------
-def metodo(url, m):
-    req = urllib.request.Request(url, data=b"{}" if m in ("POST", "PUT") else None, method=m)
-    try:
-        with urllib.request.urlopen(req) as r:
-            falha("%s %s -> %d, esperava 501" % (m, url, r.status))
-    except urllib.error.HTTPError as e:
-        if e.code != 501:
-            falha("%s %s -> %d, esperava 501" % (m, url, e.code))
-        return e.read().decode()
-
-body = metodo(base + "/namespaces/default/tables", "POST")
-if "read-only" not in body:
-    falha("501 sem mensagem read-only: %r" % body)
-body = metodo(base + "/namespaces/default/tables/tabela_iceberg/transactions", "POST")
-if "read-only" not in body:
-    falha("501 (transactions) sem mensagem read-only: %r" % body)
-metodo(base + "/namespaces/default/tables/tabela_iceberg", "HEAD")
-metodo(base + "/namespaces/default/tables/tabela_iceberg", "DELETE")
+# --- createTable/transactions/delete ------------------------------------------
+with open(os.path.join(root, "tabela_iceberg", "metadata", "v0.metadata.json")) as f:
+    md0 = json.load(f)
+schema = md0["schemas"][0]
+create_body = json.dumps({"name": "tabela_iceberg", "location":
+                          "file://" + os.path.join(root, "tabela_iceberg"),
+                          "schema": schema, "properties": {}}).encode()
+req = urllib.request.Request(base + "/namespaces/default/tables", data=create_body,
+                             headers={"Content-Type": "application/json"}, method="POST")
+with urllib.request.urlopen(req) as r:
+    if r.status != 200:
+        falha("createTable -> %d" % r.status)
+commit_body = json.dumps({"requirements": [{"type": "assert-current-snapshot-id",
+                                             "snapshot-id": md0["current-snapshot-id"]}],
+                          "updates": []}).encode()
+req = urllib.request.Request(base + "/namespaces/default/tables/tabela_iceberg/transactions",
+                             data=commit_body, headers={"Content-Type": "application/json"},
+                             method="POST")
+with urllib.request.urlopen(req) as r:
+    if r.status != 200:
+        falha("transactions -> %d" % r.status)
+# Uma precondicao stale precisa ser rejeitada antes de qualquer alteracao.
+stale_body = json.dumps({"requirements": [{"type": "assert-current-snapshot-id",
+                                               "snapshot-id": -987654321}],
+                         "updates": []}).encode()
+req = urllib.request.Request(base + "/namespaces/default/tables/tabela_iceberg/transactions",
+                             data=stale_body, headers={"Content-Type": "application/json"},
+                             method="POST")
+try:
+    urllib.request.urlopen(req)
+    falha("transactions stale nao retornou conflito")
+except urllib.error.HTTPError as e:
+    if e.code != 409:
+        falha("transactions stale -> %d (esperado 409)" % e.code)
+req = urllib.request.Request(base + "/namespaces/default/tables/tabela_iceberg", method="HEAD")
+with urllib.request.urlopen(req) as r:
+    if r.status != 200:
+        falha("HEAD tabela -> %d" % r.status)
+get(base + "/namespaces/default/tables/tabela_fantasma", expect=(404,))
+req = urllib.request.Request(base + "/namespaces/default/tables/tabela_iceberg", method="DELETE")
+with urllib.request.urlopen(req) as r:
+    if r.status != 204:
+        falha("DELETE tabela -> %d" % r.status)
+get(base + "/namespaces/default/tables/tabela_iceberg", expect=(404,))
 
 # rota fora do prefixo -> 404
 get(base + "inexistente", expect=(404,))
 get(base.replace("/v1", "/v2") + "/namespaces", expect=(404,))
 
-print("cliente REST ok: config, namespaces, loadTable, bytes, traversal, read-only")
+print("cliente REST ok: config, namespaces, loadTable, bytes, traversal, create, commit, delete")
 PYEOF
 
 echo "iceberg_catalog_test ok"

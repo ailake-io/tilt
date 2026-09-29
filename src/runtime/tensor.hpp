@@ -3,12 +3,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <new>
 #include <string>
 #include <type_traits>
 #include <vector>
 
 namespace tilt::rt {
+
+struct GpuTensorStorage;
 
 namespace detail {
 
@@ -59,6 +62,23 @@ using TensorData = std::vector<float, TensorBufferAllocator<float>>;
 struct Tensor {
   std::vector<std::int64_t> shape;
   TensorData data;
+  // Cache opcional no device. A cópia de um Tensor copia apenas os dados de
+  // host; o interpretador anexa explicitamente a residência quando o valor
+  // continua no grafo GPU.
+  mutable std::shared_ptr<GpuTensorStorage> gpu;
+
+  Tensor() = default;
+  Tensor(const Tensor& other) : shape(other.shape), data(other.data) {}
+  Tensor& operator=(const Tensor& other) {
+    if (this != &other) {
+      shape = other.shape;
+      data = other.data;
+      gpu.reset();
+    }
+    return *this;
+  }
+  Tensor(Tensor&&) noexcept = default;
+  Tensor& operator=(Tensor&&) noexcept = default;
 
   std::int64_t size() const;
   std::int64_t rank() const { return static_cast<std::int64_t>(shape.size()); }

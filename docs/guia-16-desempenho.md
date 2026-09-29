@@ -142,7 +142,8 @@ Principais otimizações disponíveis no runtime atual.
   capacidades ficam limitadas à maior página decodificada.
 - A rodada de 1 milhão de linhas com gzip, snappy e zstd confirmou que esse
   scratch mantém RSS e pico de row group estáveis, mas não produziu ganho
-  consistente de tempo; um allocator dedicado adicional fica adiado.
+  consistente de tempo; LZ4_RAW e Brotli agora têm o mesmo caminho de scratch,
+  e um allocator dedicado adicional fica adiado.
 - A repetição de 29/09/2026 confirmou redução de 2,6% a 13,3% no tempo de
   leitura colunar com scratch, mantendo RSS entre 123 e 189 MiB; o caminho de
   linhas variou entre processos e ainda precisa de mais repetições. Os dados
@@ -156,6 +157,10 @@ Principais otimizações disponíveis no runtime atual.
   diretamente dos vetores tipados para o writer; listas, structs e colunas
   mistas continuam no caminho geral, que preserva a semântica de nulos e
   nested.
+- Na leitura nested, structs agora anexam folhas escalares por referência e
+  listas de structs não criam um vetor temporário de células por elemento.
+  Em 100 mil linhas, a leitura colunar caiu para 27,066 ms e 16.272 KiB de RSS;
+  o relatório está em `benchmarks/parquet-nested-2026-09-29.md`.
 - `scripts/benchmark_parquet_nested.py <tilt>` mede tempo, RSS e
   `pico_row_group_bytes` para leituras nested em vários row groups.
   Na medição local atual com 100 mil linhas, o modo colunar levou 30,744 ms e
@@ -174,7 +179,9 @@ Principais otimizações disponíveis no runtime atual.
 - `Value` passou de 120 para 112 bytes ao compartilhar o armazenamento dos
   escalares `logico`, `inteiro` e `decimal` em uma união. Na etapa seguinte,
   listas, mapas, tensores, funções e tabelas colunares foram reunidos em um
-  único `ValueStorage`: o objeto agora mede 64 bytes. Escalares não alocam
+  único `ValueStorage`: o objeto agora mede 56 bytes. A string usa
+  `CompactString` de 24 bytes com SSO para textos de até 22 bytes; textos
+  maiores mantêm ownership próprio. Escalares não alocam
   esse bloco e os acessos internos usam referências tipadas (`list_ref`,
   `map_ref`, `tensor_ref` e `payload_ref`). O bloco reúne os slots de
   referência; as estruturas de listas e mapas continuam com ownership próprio.
@@ -193,11 +200,12 @@ Principais otimizações disponíveis no runtime atual.
   removeu o vetor de `Value` por linha e reduziu o processo novo em 36%–51%.
 - `conv2d` grande usa tiles im2col limitados em memória e CBLAS quando disponível;
   a implementação direta permanece para entradas pequenas ou CPU sem BLAS.
-- CUDA e cuBLAS opcionais são carregados em tempo de execução. Os tensores de
-  entrada/saída ainda são sincronizados com o host, mas o operando de pesos do
-  GEMM fica residente entre chamadas quando o ponteiro e o checksum não mudam;
-  uma atualização dos pesos invalida o cache automaticamente. Operações pequenas
-  continuam sujeitas ao custo de transferência.
+- CUDA e cuBLAS opcionais são carregados em tempo de execução. O caminho de
+  alto nível sincroniza o `Tensor` com o host nas fronteiras sem kernel residente,
+  enquanto a API `GpuBuffer`/`GpuGraph` mantém entradas, pesos e saídas no device
+  entre operações. O backward denso usa esse caminho para os dois GEMMs e uma
+  única redução do bias; operações pequenas continuam sujeitas ao custo de
+  transferência quando não são agrupadas em um grafo.
 - O cliente HTTP, inclusive chamadas LLM, usa libcurl nativa, com conexão e cache DNS por thread, se os
   headers de compilação e a biblioteca em runtime estiverem disponíveis.
   `TILT_HTTP_BACKEND=cli` força o caminho por subprocesso `curl`; a escolha
@@ -229,19 +237,19 @@ o próximo salto da lógica pura depende agora de medir o efeito do `ValueStorag
    a fusão para chamadas e operações de objetos.
 5. **DuckDB como motor opcional de `agrupar_por`/`juntar`** em tabelas grandes, com o mesmo
    resultado (ordem e tipos) do caminho nativo.
-6. ~~**Compactação de `Value`**~~ feita em duas etapas: a união dos escalares e o
-   `ValueStorage` único reduziram o objeto de 120 para 64 bytes. A string continua
-   inline para preservar o caminho quente de textos; uma etapa posterior pode
-   movê-la para o storage compartilhado se os benchmarks mostrarem benefício real.
+6. ~~**Compactação de `Value`**~~ feita em três etapas: a união dos escalares,
+   o `ValueStorage` único e `CompactString` reduziram o objeto de 120 para
+   56 bytes. Textos de até 22 bytes não alocam; textos maiores continuam com
+   ownership independente para não aumentar o bloco compartilhado.
 7. ~~**JIT dinâmico ARM64**~~ feito: `executar --jit` gera código AArch64 em
    memória para o subconjunto escalar e recua para a VM em estruturas e builtins
    não suportados.
 
 ## Por que a lógica é lenta
 
-1. **`Value` ainda carrega uma string inline.** A união escalar e o storage de
-   referências já reduziram o objeto para 64 bytes, e escalares não alocam o
-   storage. Textos, listas e mapas ainda têm seus próprios objetos heap-backed;
+1. **`Value` ainda carrega uma string inline.** A união escalar, o storage de
+   referências e `CompactString` já reduziram o objeto para 56 bytes, e textos
+   curtos não alocam. Textos longos, listas e mapas ainda têm seus próprios objetos heap-backed;
    cópias desses valores continuam custando mais que a própria soma em laços
    quentes.
 2. **Variáveis por nome.** `Env` guarda `unordered_map<string, Value>`; cada leitura

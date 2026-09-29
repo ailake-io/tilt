@@ -225,7 +225,7 @@ Value es_query(const std::string& url, const Value& dsl) {
         for (const auto& [chave, valor] : src->map_ref()->items) linha.map_ref()->set(chave, valor);
       }
       const Value* id = hit.map_ref()->find("_id");
-      linha.map_ref()->set("_id", Value::texto(id && id->kind == ValueKind::Texto ? id->s : "?"));
+      linha.map_ref()->set("_id", Value::texto(id && id->kind == ValueKind::Texto ? id->s.str() : "?"));
       linhas.push_back(std::move(linha));
     }
   }

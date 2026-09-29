@@ -60,18 +60,26 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   parcialmente definidos continuam desconhecidos. Por entidade — fora daí o tipo
   vira "desconhecido" e segue sem verificação: campos de `tipo` Registro, campos dinâmicos de tabelas e
   `verificar`/`ao_falhar`.
+- Para importações locais (`de modulo importar ...` e chamadas qualificadas por
+  `importar modulo`), o checker carrega e memoriza as assinaturas das funções
+  exportadas para validar aridade, argumentos nomeados e parâmetros opcionais;
+  módulos ausentes, exports dinâmicos e contratos de tipos entre arquivos ainda
+  ficam para o runtime.
 
 ## Dados
 
 - Parquet é nativo (reader/writer próprio, zero dependências de link): a
   escrita é PLAIN com compressão **gzip** (padrão), **snappy** (`codec:
   "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
+  **zstd**, **LZ4_RAW** (`codec: "lz4"` ou `"lz4_raw"`) e **Brotli**
+  (`codec: "brotli"`),
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
   por padrão ou vários com `row_group:`, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
   RLE),   **listas de escalares** (anotação LIST, elemento Nulo vira OPTIONAL —
   Marco 2 / B3), **structs** (Fase 12-5a), **listas aninhadas**
   (`list<list<...>>`, Marco 2 / B2a, nulos em todos os níveis),
-  **3 níveis de lista** (Fase 12-5a.1, nulos/vazios em todos os níveis) e
+  **3 níveis de lista** (Fase 12-5a.1, nulos/vazios em todos os níveis), além
+  de listas escalares com **4 ou mais níveis** reconstruídas genericamente, e
   **listas de structs** (Marco 2 / B2b, elemento Nulo vira OPTIONAL;
   campos-escalares **e campos-lista** nos elementos, Fase 12-5a.1) — tudo
   validado com pyarrow nos dois sentidos — e estreitamento opt-in `tipos: {col:
@@ -86,15 +94,20 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   timestamp viram texto ISO, decimal vira decimal) e dictionary pages com
   encoding PLAIN ou PLAIN_DICTIONARY, páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
-  gzip/deflate (zlib via `dlopen`), **snappy** (codec próprio) e **ZSTD**
-  (libzstd via `dlopen`). Ainda fora do subconjunto: 4+ níveis de lista e
-  provedores de chaves além de AWS KMS e chave local. Modular Encryption
+  gzip/deflate (zlib via `dlopen`), **snappy** (codec próprio), **ZSTD**
+  (libzstd via `dlopen`), **LZ4_RAW** (liblz4 via `dlopen`) e **Brotli**
+  (libbrotlienc/libbrotlidec via `dlopen`). LZ4 e Brotli são opcionais e
+  geram erro explícito quando a biblioteca não está instalada. Ainda fora do
+  subconjunto: listas de structs com campos compostos em 4+ níveis. Modular Encryption
   `AES_GCM_V1` cobre páginas/footer; a chave local usa `TILT_PARQUET_KEY`,
-  e AWS KMS usa `chave_kms` com permissões `GenerateDataKey`/`Decrypt`.
+  e AWS KMS usa `chave_kms` com permissões `GenerateDataKey`/`Decrypt`; os
+  provedores `chave_env` e `chave_arquivo` atendem secret mounts sem SDK;
+  Azure Key Vault (`chave_azure`), GCP Cloud KMS (`chave_gcp`) e Vault Transit
+  (`chave_vault`) usam APIs HTTP e tokens de ambiente.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
-  single-writer — sem locks/optimistic concurrency). Partições hive-style
+  lock cooperativo e optimistic concurrency na versão do log). Partições hive-style
   suportam **uma ou mais colunas** (`particionar_por: "col"` ou
   `particionar_por: ["c1", "c2"]`, layout `<c1>=<v1>/<c2>=<valor>/part-NNNNN.parquet`,
   colunas reidratadas na leitura) e há **pruning** de partições em
@@ -125,23 +138,25 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
 - Iceberg é de 1ª passada: o catálogo default é **Hadoop** (diretório local).
   Há um **REST catalog opt-in** (fase 29: `ICEBERG_CATALOG=rest` +
   `ICEBERG_URI`) falando o subconjunto `loadTable`/`createTable`/`transactions`
-  do Iceberg REST Open API no namespace `default` — sem paginação, sem OAuth,
-  location `file://` apenas (o tilt grava os arquivos localmente e commita as
-  locations) e single-writer como no Hadoop; sobrescrita de tabela existente
+  do Iceberg REST Open API no namespace `default`, com token Bearer opcional
+  (`ICEBERG_OAUTH_TOKEN`/`ICEBERG_TOKEN`) — location `file://` apenas (o tilt
+  grava os arquivos localmente e commita as locations); sobrescrita de tabela existente
   mantém o partition spec (divergência → erro claro). Sem as env vars o modo
   Hadoop continua, byte a byte. Na direção inversa, `tilt servir-catalogo`
-  (fase 30) expõe as tabelas Hadoop locais como **catálogo REST server
-  read-only** (subconjunto de leitura v1: config/namespaces/tables/loadTable +
-  endpoint de arquivos com proteção contra path traversal; createTable/commit →
-  501) — o metadata servido reescreve as locations para URLs do servidor, mas
+  (fase 30) expõe as tabelas Hadoop locais como **catálogo REST server**
+  (config/namespaces/tables/loadTable, createTable, transactions, DELETE e
+  endpoint de arquivos com proteção contra path traversal; conflitos respondem
+  409; a listagem aceita `page_size`/`page_token` e `HEAD` verifica tabelas) —
+  o metadata servido reescreve as locations para URLs do servidor, mas
   para o Spark/Hadoop (cujo `fs.http` reporta length -1, rejeitado pelo leitor
   Avro do Iceberg) há o modo `--sem-reecrita-manifests`, em que manifest lists,
   manifests e data files seguem `file://` absolutos (o
   `tests/spark_catalog_test.sh` monta o diretório no mesmo path dentro do
-  container). Demais limites: a
+  container). Escritas locais Delta/Iceberg usam `.tilt.lock.d` e falham com
+  conflito se a versão alvo já existir; locks abandonados exigem remoção manual
+  após conferir o arquivo `owner`. Demais limites: a
   leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
-  escritores sem garantia além dele) e single-writer (sem locks nem optimistic
-  concurrency);
+  escritores sem garantia além dele);
   `escrever_iceberg` sobrescreve a tabela (recria a versão 0) e o append é via
   `anexar_iceberg` (novo snapshot por commit atômico de `rename`; o manifest
   do novo snapshot lista os arquivos ativos como EXISTING + o ADD — além da
@@ -351,7 +366,10 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   busca de hiperparâmetros, `pre_processar` só `um_de_n`/`padronizar`/
   `imputar` (sintaxe `- chave: [cols]`; o `->` do esboço original não
   parseia), `f1` ponderado pelo suporte, `registrar_em: mlflow://` envia
-  parâmetros e métricas ao Tracking REST do MLflow.
+  parâmetros e métricas ao Tracking REST do MLflow. Quando o experimento tem
+  um arquivo de código ou dados, o registro local e o MLflow também guardam a
+  linhagem com SHA-256, tamanho e relação com a versão do modelo; a
+  consistência entre execuções depende de manter esses arquivos acessíveis.
 - `pesos: "arquivo"` carrega no formato tilt-pesos (ver guia 04); arquivo
   ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
   tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20
@@ -388,11 +406,16 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
   ao RAM. `exportar_gguf` grava GGUF v3 F32/Q8_0 e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32, ONNX e GGUF; ONNX cobre as camadas exportáveis, inclusive `incorporacao` inicial. Limites: fluxo só modelo 2D;
   AMP limitado a GEMM de camadas densas/residuais.
+- Cluster de treino usa filesystem compartilhado: all-reduce e checkpoints são
+  implementados em arquivos atômicos e exigem que os ranks compartilhem o
+  mesmo diretório. `recuperar`/`tentativas` cobre atrasos transitórios; a
+  recuperação de uma falha definitiva reinicia todos os ranks usando o último
+  `aggregate-epoch-N.json` como `retomar`, preservando uma média consistente.
 - GPU: GEMM FP32/FP16, `conv2d`, ReLU, GELU e soma foram validados em RTX 5050.
   GEMM usa cuBLAS opcionalmente, com fallback NVRTC; buffers CUDA são
-  reutilizados e Tensor Cores são ativados via cuBLAS quando suportados. Metal
+  reutilizados, `GpuGraph` encadeia operações residentes e Tensor Cores são ativados via cuBLAS quando suportados. Metal
   no macOS oferece os mesmos kernels em MSL. A API residente mantém buffers
-  de entrada, pesos e saída no device entre chamadas; o dispatch de modelo
+  de entrada, pesos, convoluções, vieses e saída no device entre chamadas; o dispatch de modelo
   mantém operações pequenas na
   CPU para evitar o custo de transferência. `TILT_GPU=fake` exercita o
   dispatch e a conversão FP16 sem medir desempenho CUDA.
@@ -446,7 +469,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `executar:` por caso com `caso` + `retornar`, métricas `exata`/`contem`/
   `regex`/`tolerancia`/`juiz` (todas precisam passar por caso), gate no
   `limiar:`, `amostra:` + `semente:` determinísticos e `registrar_em:` local ou via MLflow REST. Limites: juiz sem cadeia de pensamento; voto multi-juiz usa maioria ou unanimidade,
-  amostra por contagem, opcionalmente estratificada proporcionalmente por campo; não há frações ou pesos manuais. O MLflow publica `detalhes.json` como artefato, incluindo cada caso avaliado e o relatório do experimento; o servidor precisa expor o endpoint de artifacts.
+  amostra por contagem, opcionalmente estratificada proporcionalmente por campo; não há frações ou pesos manuais. O MLflow publica `detalhes.json` e
+  `lineage.json` como artefatos, incluindo cada caso avaliado, o relatório e
+  hashes dos insumos; o servidor precisa expor o endpoint de artifacts.
 
 ## Agentes
 
@@ -454,10 +479,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `responder: ...`); LLMs reais podem ignorá-lo — a resposta fora do
   protocolo vira a resposta final, sem garantia de que as ferramentas certas
   foram chamadas. No modo `mock` o planner é determinístico (cada ferramenta
-  uma vez, na ordem declarada).
+  uma vez, na ordem declarada). Contextos longos usam compactação extrativa
+  limitada por `max_contexto:`; ainda não há sumarização semântica feita por
+  um segundo modelo.
 - Supervisor delega por rótulo; um rótulo sugerido pelo LLM que não está em
   `agentes:` é erro de execução (`T901`).
 - Serviços HTTP podem restringir chamadas de ferramentas com `ferramentas: [...]`; sem essa lista, rotas mantêm o comportamento aberto. Agentes também podem usar uma `politica Nome:` compartilhada com limites de tokens, custo, passos, aprovação e ferramentas permitidas. `compartilhado: verdadeiro` aplica os tetos de tokens/custo ao ledger do `llm` entre agentes que reutilizam a política; concorrência exige margem, pois a reserva é verificada antes de cada etapa.
+- O rollout A/B/canário, os limites por rota e o rollback após respostas 5xx
+  são mantidos no processo do `servico`: os contadores e variantes desativadas
+  são perdidos ao reiniciar e não são coordenados entre réplicas. Para uma
+  reversão persistente, use `rollback-modelo` no registry local antes de subir
+  novamente o serviço.
 - Ferramentas validam campos obrigatórios, campos desconhecidos e tipos escalares/listas/mapas nas chamadas; registros nomeados são tratados como mapas e não têm validação recursiva de esquema.
 
 ## HTTP

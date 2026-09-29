@@ -36,6 +36,7 @@ struct ColumnarColumn {
   void append_null();
   void append_text(std::string value);
   void append(Value value);
+  void append_ref(const Value& value);
   // Concatena uma coluna tipada sem materializar cada célula em Value.
   void append_column(const ColumnarColumn& source);
   void append_integer(std::int64_t value);

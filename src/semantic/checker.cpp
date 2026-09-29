@@ -1,9 +1,16 @@
 #include "semantic/checker.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <utility>
+
+#include "lexer/lexer.hpp"
+#include "parser/parser.hpp"
 
 namespace tilt {
 
@@ -502,19 +509,70 @@ bool is_builtin_name(std::string_view w) {
   return word_in(w, {"imprimir",   "imprima",     "print",       "registrar",  "log",
                      "env",        "tamanho",     "contar",      "somar",      "media",
                      "min",        "max",         "intervalo",   "ate",        "dividir",
-                     "dividir_texto", "ler_csv",  "ler_json",    "escrever_csv", "escrever_json",
-                     "escrever_parquet", "ler",   "carregador",  "perguntar",  "perguntar_em_fluxo",
-                     "incorporar", "responder",   "responder_em_fluxo", "tensor", "zeros",
-                     "uns",        "aleatorio",   "checar_tilt", "modelo",     "agente",
-                     "ferramenta", "repetir",     "parquet",     "csv",        "json",
-                     "postgres",   "kafka",       "s3",          "verdadeiro", "falso",
-                     "nulo",       "abortar",     "avisar",      "um_de_n",    "padronizar"});
+                     "dividir_texto", "fragmentar", "fragmentar_texto", "chunk", "chunk_texto",
+                     "ler",        "ler_csv",      "ler_json",     "ler_parquet", "ler_delta",
+                     "ler_iceberg", "ler_delta_mudancas", "escrever_csv", "escrever_json",
+                     "escrever_parquet", "escrever_delta", "anexar_delta", "vacuum_delta",
+                     "escrever_iceberg", "anexar_iceberg", "vacuum_iceberg", "apagar_iceberg",
+                     "carregador", "perguntar",   "perguntar_em_fluxo", "incorporar", "responder",
+                     "responder_em_fluxo", "tensor", "zeros", "uns", "aleatorio", "checar_tilt",
+                     "inferir_schema", "schema_inferir", "infer_schema", "perfil", "perfil_tabela",
+                     "profile", "validar_schema", "schema_validar", "validate_schema", "evoluir_schema",
+                     "schema_evoluir", "evolve_schema", "modelo", "agente", "ferramenta", "repetir",
+                     "chamar_python", "executar_sql", "consultar_sql", "transacao", "sql",
+                     "spark_sql", "spark_executar", "http_get_json", "http_post_json", "es_buscar",
+                     "es_executar", "ler_kafka", "escrever_kafka", "transacao_kafka", "ler_redis",
+                     "escrever_redis", "redis_executar", "redis_lote", "mongo_inserir", "mongo_buscar",
+                     "mongo_atualizar", "mongo_deletar", "mongo_criar_indice", "mongo_agregar", "ler_s3",
+                     "escrever_s3", "listar_s3", "apagar_s3", "copiar_s3", "cabecalho_s3",
+                     "s3_iniciar_upload", "s3_enviar_parte", "s3_concluir_upload", "s3_abortar_upload",
+                     "avro_codificar", "avro_decodificar", "avro_registrar", "avro_schema", "llm_metricas",
+                     "metricas_llm", "contabilidade_llm", "reduzir", "todos", "qualquer", "top_k",
+                     "parquet", "csv", "json", "postgres", "kafka", "s3", "verdadeiro", "falso",
+                     "nulo", "abortar", "avisar", "um_de_n", "padronizar"});
 }
 
 // Implicit bindings introduced by the runtime (row predicates, callbacks, ...).
 bool is_magic_name(std::string_view w) {
   return word_in(w, {"linha", "linhas", "entrada", "epoca", "epocas", "metricas", "passo",
-                      "resultado", "caso"});
+                      "resultado", "caso", "variante", "modelo_versao", "trace_id"});
+}
+
+std::size_t name_distance(std::string_view a, std::string_view b, std::size_t stop = 3) {
+  if (a.size() > b.size() + stop || b.size() > a.size() + stop) return stop + 1;
+  std::vector<std::size_t> prev(b.size() + 1), cur(b.size() + 1);
+  for (std::size_t j = 0; j <= b.size(); ++j) prev[j] = j;
+  for (std::size_t i = 1; i <= a.size(); ++i) {
+    cur[0] = i;
+    std::size_t row_min = cur[0];
+    for (std::size_t j = 1; j <= b.size(); ++j) {
+      cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1,
+                         prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)});
+      row_min = std::min(row_min, cur[j]);
+    }
+    if (row_min > stop) return stop + 1;
+    prev.swap(cur);
+  }
+  return prev[b.size()];
+}
+
+std::string nearest_name(std::string_view unknown, const std::unordered_set<std::string>& scope,
+                         const std::unordered_map<std::string, SemanticChecker::Symbol>& globals) {
+  std::string best;
+  std::size_t distance = 3;
+  auto consider = [&](std::string_view candidate) {
+    if (candidate.empty() || candidate == unknown) return;
+    const std::size_t d = name_distance(unknown, candidate);
+    if (d < distance) {
+      distance = d;
+      best = std::string(candidate);
+    }
+  };
+  for (const auto& name : scope) consider(name);
+  for (const auto& [name, symbol] : globals) consider(name);
+  for (const std::string_view name : {"entrada", "resultado", "tamanho", "somar", "media", "imprimir"})
+    consider(name);
+  return best;
 }
 
 bool is_lazy_row_method(std::string_view m) {
@@ -761,6 +819,10 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
        {},
        TypeKind::Lista,
        "dividir_texto texto, tamanho: 4"},
+      {"fragmentar", 1, {TypeKind::Texto}, {}, TypeKind::Lista, "fragmentar texto, tamanho: 1000"},
+      {"fragmentar_texto", 1, {TypeKind::Texto}, {}, TypeKind::Lista, nullptr},
+      {"chunk", 1, {TypeKind::Texto}, {}, TypeKind::Lista, nullptr},
+      {"chunk_texto", 1, {TypeKind::Texto}, {}, TypeKind::Lista, nullptr},
       // tensores
       {"tensor", 0, {}, {}, TypeKind::Tensor, nullptr},
       {"zeros", 0, {}, {}, TypeKind::Tensor, nullptr},
@@ -772,6 +834,7 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
       {"ler_delta", 1, {TypeKind::Texto}, {}, TypeKind::Tabela, nullptr},
       {"ler_iceberg", 1, {TypeKind::Texto}, {}, TypeKind::Tabela, nullptr},
       {"ler_json", 1, {TypeKind::Texto}, {}, TypeKind::Unknown, nullptr},
+      {"ler_delta_mudancas", 1, {TypeKind::Texto}, {}, TypeKind::Tabela, nullptr},
       {"carregador",
        1,
        {TypeKind::Texto},
@@ -818,6 +881,18 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
        nullptr},
       {"vacuum_iceberg", 1, {TypeKind::Texto}, {}, TypeKind::Inteiro, nullptr},
       {"apagar_iceberg", 1, {TypeKind::Texto}, {}, TypeKind::Inteiro, nullptr},
+      {"perfil", 1, {TypeKind::Tabela, TypeKind::Lista}, {}, TypeKind::Mapa, nullptr},
+      {"perfil_tabela", 1, {TypeKind::Tabela, TypeKind::Lista}, {}, TypeKind::Mapa, nullptr},
+      {"profile", 1, {TypeKind::Tabela, TypeKind::Lista}, {}, TypeKind::Mapa, nullptr},
+      {"inferir_schema", 1, {TypeKind::Tabela, TypeKind::Lista}, {}, TypeKind::Mapa, nullptr},
+      {"schema_inferir", 1, {TypeKind::Tabela, TypeKind::Lista}, {}, TypeKind::Mapa, nullptr},
+      {"infer_schema", 1, {TypeKind::Tabela, TypeKind::Lista}, {}, TypeKind::Mapa, nullptr},
+      {"validar_schema", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Mapa}, TypeKind::Mapa, nullptr},
+      {"schema_validar", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Mapa}, TypeKind::Mapa, nullptr},
+      {"validate_schema", 2, {TypeKind::Tabela, TypeKind::Lista}, {TypeKind::Mapa}, TypeKind::Mapa, nullptr},
+      {"evoluir_schema", 2, {TypeKind::Mapa}, {TypeKind::Tabela, TypeKind::Lista}, TypeKind::Mapa, nullptr},
+      {"schema_evoluir", 2, {TypeKind::Mapa}, {TypeKind::Tabela, TypeKind::Lista}, TypeKind::Mapa, nullptr},
+      {"evolve_schema", 2, {TypeKind::Mapa}, {TypeKind::Tabela, TypeKind::Lista}, TypeKind::Mapa, nullptr},
       {"escrever_json",
        2,
        {},
@@ -926,6 +1001,13 @@ const BuiltinSig* find_builtin_sig(std::string_view name) {
        {TypeKind::Texto},
        TypeKind::Unknown,
        "es_executar \"elasticsearch://localhost:9200\", \"PUT\", \"/meuindice\", {}"},
+      {"contabilidade_llm", 0, {}, {}, TypeKind::Mapa, nullptr},
+      {"llm_metricas", 0, {}, {}, TypeKind::Mapa, nullptr},
+      {"metricas_llm", 0, {}, {}, TypeKind::Mapa, nullptr},
+      {"reduzir", 2, {TypeKind::Lista}, {}, TypeKind::Unknown, nullptr},
+      {"todos", 1, {TypeKind::Lista}, {}, TypeKind::Logico, nullptr},
+      {"qualquer", 1, {TypeKind::Lista}, {}, TypeKind::Logico, nullptr},
+      {"top_k", 2, {TypeKind::Lista}, {TypeKind::Inteiro}, TypeKind::Lista, nullptr},
   };
   for (const auto& s : kSigs) {
     if (name == s.name) return &s;
@@ -1408,7 +1490,11 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
     case ExprKind::TextLit: return TypeKind::Texto;
     case ExprKind::BoolLit: return TypeKind::Logico;
     case ExprKind::NullLit: return TypeKind::Nulo;
-    case ExprKind::ListLit: return TypeKind::Lista;
+    case ExprKind::ListLit: {
+      // A lista continua sendo uma colecao, mas os elementos homogeneos ficam
+      // disponiveis para chamadas como `somar [1, 2]` e para `lista[0]`.
+      return TypeKind::Lista;
+    }
     case ExprKind::MapLit: return TypeKind::Mapa;
     case ExprKind::Lambda:
       return TypeKind::Funcao;
@@ -1517,6 +1603,21 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
     case ExprKind::Index: {
       const std::string base = (e.lhs && e.lhs->kind == ExprKind::Name) ? e.lhs->text : "";
       if (word_in(base, {"tensor", "zeros", "uns", "aleatorio"})) return TypeKind::Tensor;
+      if (e.lhs && e.lhs->kind == ExprKind::ListLit && !e.lhs->elems.empty()) {
+        sema::Type element = sema::Type::scalar(TypeKind::Unknown);
+        for (const auto& item : e.lhs->elems) {
+          if (!item) continue;
+          const TypeKind current = infer_type(*item, types);
+          if (element.kind == TypeKind::Unknown) {
+            element.kind = current;
+          } else if (element.kind != current) {
+            const bool numeric = (element.kind == TypeKind::Inteiro || element.kind == TypeKind::Decimal) &&
+                                 (current == TypeKind::Inteiro || current == TypeKind::Decimal);
+            element.kind = numeric ? TypeKind::Decimal : TypeKind::Unknown;
+          }
+        }
+        return element.kind;
+      }
       // C1: `l[i]` com elemento conhecido; resto e dinamico.
       if (!base.empty()) {
         if (auto it = elem_lista_.find(base); it != elem_lista_.end()) {
@@ -1755,17 +1856,26 @@ sema::TypeKind SemanticChecker::infer_type_impl(const Expr& e, const TypeEnv& ty
       // C1: agregacoes sobre lista de elemento conhecido refinam o retorno.
       if ((name == "somar" || name == "min" || name == "max") && npos >= 1) {
         const Expr* arg = first_positional_arg(e);
+        TypeKind element = TypeKind::Unknown;
         if (arg && arg->kind == ExprKind::Name) {
-          if (auto it = elem_lista_.find(arg->text); it != elem_lista_.end()) {
-            if (name == "somar") {
-              if (it->second == TypeKind::Inteiro || it->second == TypeKind::Decimal ||
-                  it->second == TypeKind::Texto) {
-                return it->second;
-              }
-            } else if (it->second != TypeKind::Unknown) {
-              return it->second;
+          if (auto it = elem_lista_.find(arg->text); it != elem_lista_.end()) element = it->second;
+        } else if (arg && arg->kind == ExprKind::ListLit) {
+          for (const auto& item : arg->elems) {
+            if (!item) continue;
+            const TypeKind current = infer_type(*item, types);
+            if (element == TypeKind::Unknown) element = current;
+            else if (element != current) {
+              const bool numeric = (element == TypeKind::Inteiro || element == TypeKind::Decimal) &&
+                                   (current == TypeKind::Inteiro || current == TypeKind::Decimal);
+              element = numeric ? TypeKind::Decimal : TypeKind::Unknown;
             }
           }
+        }
+        if (name == "somar") {
+          if (element == TypeKind::Inteiro || element == TypeKind::Decimal || element == TypeKind::Texto)
+            return element;
+        } else if (element != TypeKind::Unknown) {
+          return element;
         }
       }
       return sig->ret;
@@ -1806,7 +1916,7 @@ void SemanticChecker::check_return(const Expr* value, Span span, const TypeEnv& 
 }
 
 void SemanticChecker::check_funcao_arity(const std::string& name, const std::vector<ast::Arg>& args,
-                                          Span span) {
+                                         Span span) {
   const Item* decl = find_funcao_decl(program_, name);
   if (!decl) return;  // ex.: importada de modulo — sem verificacao
   int npos = 0;
@@ -1874,6 +1984,173 @@ void SemanticChecker::check_funcao_arity(const std::string& name, const std::vec
          "'" + name + "' espera " + esperado + ", encontrou " + std::to_string(found), {nota});
 }
 
+void SemanticChecker::check_imported_funcao_arity(const std::string& local_name,
+                                                  const std::vector<ast::Arg>& args, Span span,
+                                                  std::string module_alias,
+                                                  std::string exported_name) {
+  // Imports `importar modulo` continuam com despacho dinâmico; a forma
+  // `de modulo importar funcao [como alias]` já carrega informação suficiente
+  // para aplicar o mesmo contrato de aridade do módulo local.
+  std::string module_name;
+  if (!module_alias.empty()) {
+    for (const auto& item : program_.items) {
+      if (!item || item->kind != ItemKind::Decl || item->key != "importar") continue;
+      for (const auto& imported : ast::nomes_importados(*item)) {
+        if (imported.alias == module_alias) {
+          module_name = imported.nome;
+          break;
+        }
+      }
+      if (!module_name.empty()) break;
+    }
+  } else {
+    for (const auto& item : program_.items) {
+      if (!item || item->kind != ItemKind::Decl || item->key != "de") continue;
+      const auto imported = ast::nomes_importados(*item);
+      if (imported.size() < 2) continue;
+      for (std::size_t i = 1; i < imported.size(); ++i) {
+        if (imported[i].alias == local_name) {
+          module_name = imported[0].nome;
+          exported_name = imported[i].nome;
+          break;
+        }
+      }
+      if (!module_name.empty()) break;
+    }
+  }
+  if (module_name.empty() || !diag_.source()) return;
+
+  namespace fs = std::filesystem;
+  const fs::path source = diag_.source()->path();
+  std::vector<fs::path> dirs{source.parent_path()};
+  std::error_code ec;
+  fs::path parent = fs::absolute(source.parent_path(), ec);
+  while (!ec && !parent.empty()) {
+    dirs.push_back(parent / "modulos");
+    if (fs::is_regular_file(parent / "tilt.toml", ec)) break;
+    ec.clear();
+    const fs::path next = parent.parent_path();
+    if (next == parent) break;
+    parent = next;
+  }
+  if (const char* env = std::getenv("TILT_STDLIB_PATH")) {
+#if defined(_WIN32)
+    constexpr char separator = ';';
+#else
+    constexpr char separator = ':';
+#endif
+    std::string paths(env);
+    std::size_t begin = 0;
+    while (begin <= paths.size()) {
+      const std::size_t end = paths.find(separator, begin);
+      const std::string part = paths.substr(begin, end - begin);
+      if (!part.empty()) dirs.emplace_back(part);
+      if (end == std::string::npos) break;
+      begin = end + 1;
+    }
+  }
+  dirs.push_back(fs::current_path() / "stdlib");
+  std::replace(module_name.begin(), module_name.end(), '.', fs::path::preferred_separator);
+  fs::path module;
+  for (const auto& dir : dirs) {
+    const fs::path candidate = dir / (module_name + ".tilt");
+    if (fs::is_regular_file(candidate, ec) && !ec) {
+      module = candidate;
+      break;
+    }
+    ec.clear();
+  }
+  if (module.empty()) return;
+  std::error_code canonical_ec;
+  const fs::path cache_path = fs::weakly_canonical(module, canonical_ec);
+  const std::string cache_key = (canonical_ec ? module : cache_path).string() + "#" + exported_name;
+  auto cache_it = imported_signature_cache_.find(cache_key);
+  if (cache_it == imported_signature_cache_.end()) {
+    std::optional<ImportedSignature> signature;
+    std::ifstream file(module);
+    if (file) {
+      const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+      SourceFile imported_source(module.string(), text);
+      DiagnosticEngine imported_diag(&imported_source);
+      Lexer imported_lexer(imported_source, imported_diag);
+      const std::vector<Token> imported_tokens = imported_lexer.tokenize();
+      Parser imported_parser(imported_tokens, imported_diag);
+      ast::Program imported_program;
+      try {
+        imported_program = imported_parser.parse_program();
+        for (const auto& item : imported_program.items) {
+          if (!item || item->kind != ItemKind::Decl || item->key != "funcao" || item->header.empty() ||
+              !item->header[0] || item->header[0]->text != exported_name)
+            continue;
+          ImportedSignature found;
+          found.name = exported_name;
+          found.params.reserve(item->params.size());
+          found.required.reserve(item->params.size());
+          for (const auto& param : item->params) {
+            found.params.push_back(param.name);
+            found.required.push_back(param.optional_annotation.empty() && !param.default_value);
+          }
+          signature = std::move(found);
+          break;
+        }
+      } catch (...) {
+        // A malformed dependency is diagnosed when it is checked directly;
+        // avoid turning an import lookup into a duplicate parser diagnostic.
+      }
+    }
+    cache_it = imported_signature_cache_.emplace(cache_key, std::move(signature)).first;
+  }
+  if (!cache_it->second) return;
+
+  const ImportedSignature& signature = *cache_it->second;
+  const std::size_t total = signature.params.size();
+  std::vector<bool> supplied(total, false);
+  int positional = 0;
+  bool named = false;
+  for (const auto& arg : args) {
+    if (arg.name.empty()) {
+      if (named) {
+        report(DiagCode::TypeMismatch, span,
+               "argumento posicional depois de nomeado em '" + local_name + "'");
+        return;
+      }
+      if (positional < static_cast<int>(total)) supplied[static_cast<std::size_t>(positional)] = true;
+      ++positional;
+    } else {
+      named = true;
+      auto it = std::find(signature.params.begin(), signature.params.end(), arg.name);
+      if (it == signature.params.end()) {
+        report(DiagCode::TypeMismatch, span,
+               "funcao importada '" + local_name + "' nao tem parametro '" + arg.name + "'");
+        return;
+      }
+      const std::size_t index = static_cast<std::size_t>(it - signature.params.begin());
+      if (supplied[index]) {
+        report(DiagCode::TypeMismatch, span,
+               "parametro '" + arg.name + "' recebido mais de uma vez");
+        return;
+      }
+      supplied[index] = true;
+    }
+  }
+  int required = static_cast<int>(std::count(signature.required.begin(), signature.required.end(), true));
+  bool missing = false;
+  for (std::size_t i = 0; i < total; ++i)
+    if (!supplied[i] && signature.required[i]) missing = true;
+  if (missing || positional > static_cast<int>(total)) {
+    const std::string expected = required == static_cast<int>(total)
+                                     ? std::to_string(total) + " argumento(s)"
+                                     : "entre " + std::to_string(required) + " e " + std::to_string(total) +
+                                           " argumentos";
+    const int found = static_cast<int>(std::count(supplied.begin(), supplied.end(), true)) +
+                      std::max(0, positional - static_cast<int>(total));
+    report(DiagCode::TypeMismatch, span,
+           "'" + local_name + "' espera " + expected + ", encontrou " + std::to_string(found),
+           {"assinatura importada: funcao " + exported_name + " (" + std::to_string(total) +
+            " parametro(s))"});
+  }
+}
+
 void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
   switch (e.kind) {
     case ExprKind::Name: {
@@ -1881,7 +2158,11 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
       // C2: '_' e curinga de dimensao simbolica (nunca um nome a resolver).
       if (w == "_") return;
       if (scope.count(w) || globals_.count(w) || is_builtin_name(w) || is_magic_name(w)) return;
-      report(DiagCode::UndefinedName, e.span, "nome '" + w + "' nao definido");
+      std::vector<std::string> notes;
+      if (const std::string sugestao = nearest_name(w, scope, globals_); !sugestao.empty()) {
+        notes.push_back("voce quis dizer '" + sugestao + "'?");
+      }
+      report(DiagCode::UndefinedName, e.span, "nome '" + w + "' nao definido", std::move(notes));
       return;
     }
     case ExprKind::Member:
@@ -1936,6 +2217,11 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
       const bool lazy = e.lhs && e.lhs->kind == ExprKind::Member && is_lazy_row_method(e.lhs->text);
       if (e.lhs && e.lhs->kind == ExprKind::Member) {
         check_expr(*e.lhs->lhs, scope);  // the receiver
+        if (e.lhs->lhs && e.lhs->lhs->kind == ExprKind::Name &&
+            e.lhs->lhs->text != "linha" && e.lhs->lhs->text != "entrada") {
+          check_imported_funcao_arity(e.lhs->lhs->text, e.args, e.span,
+                                      e.lhs->lhs->text, e.lhs->text);
+        }
       }
       // Aridade de `funcao` do usuario (T011): o runtime exige entre
       // obrigatorios e total, inclusive quando os argumentos sao nomeados.
@@ -1943,6 +2229,8 @@ void SemanticChecker::check_expr(const Expr& e, const Scope& scope) {
         const std::string& callee = e.lhs->text;
         if (const Symbol* s = lookup(callee); s && s->kind == "funcao") {
           check_funcao_arity(callee, e.args, e.span);
+        } else {
+          check_imported_funcao_arity(callee, e.args, e.span);
         }
       }
       // callee that is a bare Name is assumed to be a stdlib function; not flagged.

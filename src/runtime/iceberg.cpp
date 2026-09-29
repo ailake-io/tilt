@@ -26,6 +26,7 @@
 #include "runtime/json.hpp"
 #include "runtime/parquet.hpp"
 #include "runtime/snappy_codec.hpp"
+#include "runtime/table_lock.hpp"
 
 namespace tilt::rt {
 
@@ -242,11 +243,11 @@ void avro_encode(std::string& out, const Value& schema, const Value& v) {
     throw std::runtime_error("iceberg: avro: tipo de schema invalido");
   }
   const std::string ty = schema.kind == ValueKind::Texto
-                             ? schema.s
+                             ? schema.s.str()
                              : ([&]() {
                                  if (const Value* t = map_find(schema, "type");
                                      t && t->kind == ValueKind::Texto) {
-                                   return t->s;
+                                   return t->s.str();
                                  }
                                  return std::string();
                                })();
@@ -342,11 +343,11 @@ Value avro_decode(AvroDecoder& dec, const Value& schema) {
     throw std::runtime_error("iceberg: avro: tipo de schema invalido");
   }
   const std::string ty = schema.kind == ValueKind::Texto
-                             ? schema.s
+                             ? schema.s.str()
                              : ([&]() {
                                  if (const Value* t = map_find(schema, "type");
                                      t && t->kind == ValueKind::Texto) {
-                                   return t->s;
+                                   return t->s.str();
                                  }
                                  return std::string();
                                })();
@@ -1498,7 +1499,7 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
             const Value* req = map_find(f, "required");
             Column c;
             c.id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 0;
-            c.name = name && name->kind == ValueKind::Texto ? name->s : "";
+            c.name = name && name->kind == ValueKind::Texto ? name->s.str() : "";
             c.required = req ? (req->kind == ValueKind::Logico ? req->b : true) : true;
             if (type && type->kind == ValueKind::Mapa && type->map_ref()) {
               const Value* st = map_find(*type, "type");
@@ -1511,7 +1512,7 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
                 c.type = "string";
               }
             } else {
-              c.type = type && type->kind == ValueKind::Texto ? type->s : "string";
+              c.type = type && type->kind == ValueKind::Texto ? type->s.str() : "string";
             }
             out.last_column_id = std::max(out.last_column_id, c.id);
             std::function<void(const Column&)> max_filho = [&](const Column& x) {
@@ -1554,10 +1555,10 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     const Value* fid = map_find(f, "field-id");
     const Value* sid = map_find(f, "source-id");
     const Value* tr = map_find(f, "transform");
-    pf.name = name && name->kind == ValueKind::Texto ? name->s : "";
+    pf.name = name && name->kind == ValueKind::Texto ? name->s.str() : "";
     pf.field_id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 1000;
     pf.source_id = sid && sid->kind == ValueKind::Inteiro ? sid->i : 0;
-    const std::string transform = tr && tr->kind == ValueKind::Texto ? tr->s : "";
+    const std::string transform = tr && tr->kind == ValueKind::Texto ? tr->s.str() : "";
     if (transform == "identity" || transform.empty()) {
       pf.transform = "identity";
     } else if (transform.rfind("bucket[", 0) == 0) {
@@ -1820,7 +1821,7 @@ bool partition_less(const Value& a, const Value& b) {
 std::string partition_bound_bytes(const PartitionField& pf, const Value& v) {
   std::string out;
   if (pf.avro_ty == "string") {
-    return v.kind == ValueKind::Texto ? v.s : std::string();
+    return v.kind == ValueKind::Texto ? v.s.str() : std::string();
   }
   if (pf.avro_ty == "boolean") {
     out += (v.kind == ValueKind::Logico && v.b) ? '\1' : '\0';
@@ -2023,6 +2024,10 @@ void commit_metadata(const std::string& dir, std::int64_t version, const std::st
   // segue aceito na leitura (metadata_version_from_name).
   const std::string final_path =
       meta_dir + "/v" + std::to_string(version) + ".metadata.json";
+  if (tilt_file_exists(final_path)) {
+    die("conflito de concorrencia otimista: metadata v" + std::to_string(version) +
+        " ja foi commitado por outro writer");
+  }
   const std::string tmp_path =
       meta_dir + "/.commit-" + std::to_string(tilt::rt::tilt_getpid()) + ".tmp";
   {
@@ -3103,7 +3108,11 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
   cmd += "-w " + tilt_shell_quote("%{http_code}") + " -X " + method;
   // URL (pode ter userinfo) e header vao num arquivo -K 0600, fora do argv.
   std::string cfg_path;
-  if (!tilt_curl_config(url, {"Content-Type: application/json"}, cfg_path)) {
+  std::vector<std::string> headers = {"Content-Type: application/json"};
+  const char* token = std::getenv("ICEBERG_OAUTH_TOKEN");
+  if (!token || !*token) token = std::getenv("ICEBERG_TOKEN");
+  if (token && *token) headers.push_back(std::string("Authorization: Bearer ") + token);
+  if (!tilt_curl_config(url, headers, cfg_path)) {
     die("nao foi possivel montar a configuracao do curl (URL invalida)");
   }
   struct RemoveAoSair {  // die() lanca: o arquivo com URL/header some em qualquer saida
@@ -3514,6 +3523,9 @@ std::int32_t avro_schema_registry_register(const std::string& base_url,
 
 void iceberg_write(const std::string& dir, const Value& tabela,
                    const std::vector<std::string>& part_cols) {
+  const std::string lock_location = abs_path(dir);
+  mkdir_if_missing(lock_location);
+  TableLock table_lock(lock_location, "Iceberg");
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
     iceberg_write_rest(rc, dir, tabela, part_cols);
@@ -3534,6 +3546,8 @@ void iceberg_write(const std::string& dir, const Value& tabela,
 
 void iceberg_append(const std::string& dir, const Value& tabela,
                     const std::vector<std::string>& part_cols_req) {
+  const std::string lock_location = abs_path(dir);
+  TableLock table_lock(lock_location, "Iceberg");
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
     iceberg_append_rest(rc, dir, tabela, part_cols_req);
@@ -3773,6 +3787,8 @@ void iceberg_delete_rest(const RestCfg& rc, const std::string& dir, const Value&
 }
 
 std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igualdade) {
+  const std::string lock_location = abs_path(dir);
+  TableLock table_lock(lock_location, "Iceberg");
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
     std::int64_t apagadas = 0;
@@ -3811,6 +3827,10 @@ std::string optimize_partition_column(const PartitionField& pf) {
 
 void iceberg_optimize(const std::string& dir) {
   const std::string location = abs_path(dir);
+  if (!tilt_is_directory(location)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
+  }
+  TableLock table_lock(location, "Iceberg");
   TableMeta meta;
   latest_metadata_path(location, meta);
   const Value tabela = iceberg_read(dir, nullptr);
@@ -3824,6 +3844,10 @@ void iceberg_optimize(const std::string& dir) {
 
 std::int64_t iceberg_vacuum(const std::string& dir) {
   const std::string location = abs_path(dir);
+  if (!tilt_is_directory(location)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
+  }
+  TableLock table_lock(location, "Iceberg");
   const std::vector<std::string> metadata = list_metadata_files(location + "/metadata");
   if (metadata.empty()) {
     die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");

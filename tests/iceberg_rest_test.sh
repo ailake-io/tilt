@@ -228,6 +228,12 @@ class MockRest(http.server.BaseHTTPRequestHandler):
         except ValueError as e:
             raise Erro("corpo invalido: " + str(e))
 
+    def _auth(self):
+        if self.headers.get("Authorization") != "Bearer teste-rest":
+            self._responder(401, '{"error":{"message":"unauthorized"}}')
+            return False
+        return True
+
     def _load_table(self, nome, status):
         t = tables[nome]
         materializar(t)
@@ -238,6 +244,8 @@ class MockRest(http.server.BaseHTTPRequestHandler):
              "metadata": t["md"], "config": {}}))
 
     def do_GET(self):
+        if not self._auth():
+            return
         prefix = "/v1/namespaces/default/tables/"
         if not self.path.startswith(prefix):
             self._responder(404, '{"error":{"message":"rota nao encontrada","type":"NotFoundException","code":"404"}}')
@@ -253,6 +261,8 @@ class MockRest(http.server.BaseHTTPRequestHandler):
                            "type": "NoSuchTableException", "code": "404"}}))
 
     def do_POST(self):
+        if not self._auth():
+            return
         prefix = "/v1/namespaces/default/tables"
         if self.path == prefix:
             self._create_table()
@@ -328,7 +338,8 @@ done
 PORTA=$(cat "$tmp/porta")
 
 env_rest() {
-  env ICEBERG_CATALOG=rest ICEBERG_URI="http://127.0.0.1:$PORTA" "$@"
+  env ICEBERG_CATALOG=rest ICEBERG_URI="http://127.0.0.1:$PORTA" \
+      ICEBERG_OAUTH_TOKEN=teste-rest "$@"
 }
 
 # --- write + append + read via REST -------------------------------------------

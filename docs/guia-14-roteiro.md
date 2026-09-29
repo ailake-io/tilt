@@ -125,27 +125,31 @@ supervisor.
 
 - **Guardrails**: `max_tokens_sessao`, orçamento monetário, `requer_aprovacao` e
   `ferramentas_permitidas` podem ser definidos em `politica Nome:` e reutilizados
-  por vários agentes; o menor limite local/política vence.
-- **Sem traço estruturado**: `rastro` existe, mas sem spans/tempo por passo
-  exportáveis (OpenTelemetry).
-- **Contexto**: memória vetorial plugada, mas sem compactação/resumo —
-  conversa longa estoura a janela sem aviso.
+  por vários agentes; o menor limite local/política vence. `orcamento` no
+  retorno detalha limite, uso e custo; `llm_metricas` expõe médias e preços.
+- **Traço estruturado**: `rastro` continua sendo a saída funcional; spans por
+  chamada, agente, etapa e ferramenta agora podem ser exportados em JSONL com
+  IDs, parentesco, tempos e status compatíveis com OpenTelemetry.
+- **Contexto**: memória de conversa, observações de planner e mensagens de
+  ferramentas compactam automaticamente por limite configurável e informam
+  tamanhos antes/depois; ainda é um resumo extrativo local, sem sumarização
+  semântica adicional por outro modelo.
 
-## MLOps / servir — deployment frágil
+## MLOps / servir — implementação atual
 
 Funciona: `servico` com epoll, arenas por requisição, rotas paralelas.
 O despacho concorrente reutiliza `tilt::rt::ThreadPool`, com fila protegida, rejeição opcional por limite e desligamento gracioso; o smoke test `thread_pool` cobre submissão, drenagem e shutdown.
 
-- `/saude`, `/metricas` (com latência por rota), graceful shutdown, limite
-  global de requisição de 1 MiB e até 256 conexões existem; faltam limites
-  configuráveis por rota e versionamento de modelo servido (A/B, canário,
-  rollback).
-- O treino pode registrar métricas, parâmetros e o vínculo do modelo em
-  `registrar_em: mlflow://...`. O CLI também oferece um registry local
-  (`registrar-modelo`/`listar-modelos`/`promover-modelo`/`resolver-modelo`) com
-  versões, stages e SHA-256; `servir --pesos` permite conectar uma versão
-  resolvida ao serviço. Ainda faltam lineage completo e rollout A/B, canário ou
-  rollback automático no `servico`.
+- `/saude`, `/metricas` (com latência por rota), graceful shutdown e limite
+  global de requisição de 1 MiB existem. Rotas também aceitam limites de
+  requisições/concorrência, timeout, variantes ponderadas A/B/canário e
+  rollback automático por sequência de 5xx.
+- O treino publica métricas, parâmetros, `detalhes.json` e `lineage.json` no
+  MLflow, com hashes de código e dados. O CLI oferece um registry local
+  (`registrar-modelo`/`listar-modelos`/`promover-modelo`/`rollback-modelo`/
+  `linhagem-modelo`/`resolver-modelo`) com versões, stages, SHA-256 e vínculo
+  de código/dados; `servir --modelo ... --stage ...` resolve a versão antes de
+  iniciar o serviço.
 - `experimento Nome.prever_lote` faz inferência offline em tabela/lista,
   preservando a ordem e reutilizando o modelo ajustado. `modelo
   Nome.prever_lote(tabela, colunas: [...])` executa redes de entrada vetorial
@@ -172,13 +176,19 @@ deterministico sem materializar o arquivo inteiro.
 
 Para treinar em processos separados sobre um filesystem compartilhado, use
 `cluster: { dir: "...", rank: K, mundo: N, timeout: S }` dentro de `treino`.
-Cada rank recebe automaticamente o shard correspondente e, ao fim de cada
-época, publica um checkpoint, aguarda os demais e aplica a média dos pesos,
-biases e estados recorrentes. O rank `0` publica o checkpoint agregado. Todos
-os ranks devem usar o mesmo modelo, hiperparâmetros e diretório compartilhado;
-o `timeout` evita espera infinita. Os momentos do Adam e as estatísticas de
-normalização permanecem locais nesta primeira versão, portanto o modo é uma
-sincronização de parâmetros por época (não um all-reduce de gradientes).
+Cada rank recebe automaticamente o shard correspondente. Antes de cada passo
+do SGD/Adam, o vetor concatenado de gradientes de cada camada passa por
+all-reduce (média) no filesystem compartilhado, de modo que todos os workers
+aplicam a mesma atualização. Ao fim de cada época, o rank `0` agrega pesos,
+biases, estados recorrentes e os seis tensores de estado do Adam (`m`/`v` de
+pesos, biases e recorrência) e publica o checkpoint agregado. Todos os ranks
+devem usar o mesmo modelo, hiperparâmetros e diretório compartilhado.
+`timeout` evita espera infinita; `recuperar: verdadeiro` com `tentativas: N`
+repete barreiras/all-reduces transitórios. Heartbeats por rank e a mensagem de
+timeout identificam o worker ausente. Se um processo morrer, os workers
+encerram de forma determinística; reinicie os ranks a partir do
+`aggregate-epoch-N.json` com `retomar:` para recuperar sem continuar com um
+conjunto parcial de gradientes.
 No fluxo Parquet com pelo menos um row group por rank, o cluster atribui
 grupos inteiros em round-robin e pula os grupos alheios durante as épocas.
 Com menos grupos que ranks, usa a divisão por linha. A primeira passada ainda
@@ -212,16 +222,23 @@ DuckDB (ver "O que já foi feito" no guia 16).
 4. ~~`exportar: onnx`~~ feito (`modelo <Nome>.exportar_onnx "modelo.onnx"`; ver guia 04).
 5. ~~`avaliacao` (evals — fundação de LLMOps)~~ feito em 1ª passada (ver guia 05).
 6. Fechar os contratos de linguagem (tipos, formas e módulos) e eliminar
-   divergências entre checker e runtime. O LSP já navega importações explícitas
-   locais; índice de workspace, referências e rename entre arquivos faltam.
+   divergências entre checker e runtime. O LSP já mantém índice de workspace,
+   navega importações explícitas locais e suporta referências/rename entre
+   arquivos; os próximos ganhos são contratos de tipos exportados por módulo e
+   inferência interprocedural mais completa.
 7. Reduzir materialização de tabelas e custo de `Value`; medir com
    `bench/comparar.py` antes de alterar a representação.
-8. Completar MLOps: stages, lineage e rollout de serviço sobre o registry local
-   e a integração MLflow.
+8. ~~Completar MLOps~~ feito: stages, lineage e rollout de serviço sobre o
+   registry local, com integração de artefatos no MLflow.
 9. Melhorar GPU com residência persistente de tensores e kernels CUDA para
    normalização/treino. O backward denso, de convolução, recorrência e
    embeddings já tem despacho CUDA; Metal e ambientes sem CUDA continuam com
-   fallback CPU. O próximo ganho é reduzir cópias mantendo ativações residentes.
+   fallback CPU. A API residente inclui batching, `GpuGraph`, backward denso
+   sem uploads intermediários e já é usada pelo interpretador em densas,
+   residuais, ativações, conv2d, norma de lote e agrupamento max. Os próximos
+   ganhos são reduzir as materializações entre essas etapas, capturar grafos
+   nativos quando o backend oferecer essa capacidade e calibrar os limiares
+   por dispositivo.
 10. CI/CD: o workflow `ci` executa lint, build e CTest em pushes para `main`/
     `master`, pull requests e disparo manual. O job `performance` roda
     `bench/comparar.py` para detectar regressões relativas ao baseline da mesma

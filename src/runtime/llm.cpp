@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <initializer_list>
 #include <iomanip>
 #include <map>
@@ -140,6 +141,7 @@ struct LlmContexto {
   std::string agente;
   std::string sessao;
   std::string trace_id;
+  std::string span_id;
 };
 thread_local LlmContexto g_contexto;
 std::atomic<unsigned long long> g_trace_seq{0};
@@ -149,6 +151,24 @@ std::string novo_trace_id() {
   std::ostringstream out;
   out << std::hex << std::hash<std::thread::id>{}(std::this_thread::get_id()) << '-' << seq;
   return out.str();
+}
+
+std::string novo_span_id() {
+  const auto seq = ++g_trace_seq;
+  std::ostringstream out;
+  out << std::hex << std::hash<std::thread::id>{}(std::this_thread::get_id()) << '-' << seq;
+  return out.str();
+}
+
+std::string span_exporter(const LlmConfig& cfg) {
+  std::string path = !cfg.otel_exporter.empty() ? cfg.otel_exporter : cfg.observabilidade;
+  if (path.empty()) {
+    const char* env = std::getenv("TILT_OTEL_EXPORTER");
+    if (env) path = env;
+  }
+  if (path.rfind("file:", 0) == 0) path.erase(0, 5);
+  if (path == "none" || path == "stdout" || path == "stderr") return {};
+  return path;
 }
 
 double custo_tokens(const LlmConfig& cfg, long long entrada, long long saida) {
@@ -187,6 +207,7 @@ void persistir_evento(const LlmConfig& cfg, const std::string& operacao, long lo
     if (!g_contexto.agente.empty()) e.map_ref()->set("agente", Value::texto(g_contexto.agente));
     if (!g_contexto.sessao.empty()) e.map_ref()->set("sessao", Value::texto(g_contexto.sessao));
     if (!g_contexto.trace_id.empty()) e.map_ref()->set("trace_id", Value::texto(g_contexto.trace_id));
+    if (!g_contexto.span_id.empty()) e.map_ref()->set("span_id", Value::texto(g_contexto.span_id));
     e.map_ref()->set("entrada", Value::inteiro(entrada));
     e.map_ref()->set("saida", Value::inteiro(saida));
     e.map_ref()->set("custo", Value::decimal(custo));
@@ -206,6 +227,7 @@ void persistir_evento(const LlmConfig& cfg, const std::string& operacao, long lo
     if (!g_contexto.agente.empty()) e.map_ref()->set("agente", Value::texto(g_contexto.agente));
     if (!g_contexto.sessao.empty()) e.map_ref()->set("sessao", Value::texto(g_contexto.sessao));
     if (!g_contexto.trace_id.empty()) e.map_ref()->set("trace_id", Value::texto(g_contexto.trace_id));
+    if (!g_contexto.span_id.empty()) e.map_ref()->set("span_id", Value::texto(g_contexto.span_id));
     e.map_ref()->set("entrada", Value::inteiro(entrada));
     e.map_ref()->set("saida", Value::inteiro(saida));
     e.map_ref()->set("custo", Value::decimal(custo));
@@ -546,6 +568,8 @@ PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std:
 
 // Uma config, com retry/backoff/timeout/teto. Devolve texto + tokens.
 RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std::string& user) {
+  LlmSpanGuard span(cfg, "llm.chat", "client",
+                    {{"operacao", "chat"}, {"prompt_chars", std::to_string(system.size() + user.size())}});
   const std::string cache_key = cfg.cache ? llm_cache_key(cfg, system, user) : std::string();
   if (cfg.cache) {
     RespostaLLM cached;
@@ -810,6 +834,10 @@ RespostaFerramentas resposta_ferramentas(const LlmConfig& cfg, const Value& resp
 RespostaFerramentas ferramentas_uma(const LlmConfig& cfg, const std::string& system,
                                     const std::vector<MensagemLLM>& mensagens,
                                     const std::vector<FerramentaLLM>& ferramentas) {
+  LlmSpanGuard span(cfg, "llm.ferramentas", "client",
+                    {{"operacao", "ferramentas"},
+                     {"mensagens", std::to_string(mensagens.size())},
+                     {"ferramentas", std::to_string(ferramentas.size())}});
   if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
     throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
                              cfg.nome + "'");
@@ -876,6 +904,8 @@ RespostaFerramentas ferramentas_uma(const LlmConfig& cfg, const std::string& sys
 
 RespostaLLM chat_fluxo_uma(const LlmConfig& cfg, const std::string& system,
                            const std::string& user) {
+  LlmSpanGuard span(cfg, "llm.fluxo", "client",
+                    {{"operacao", "fluxo"}, {"prompt_chars", std::to_string(system.size() + user.size())}});
   const std::string cache_key = cfg.cache ? llm_cache_key(cfg, system, user) : std::string();
   if (cfg.cache) {
     RespostaLLM cached;
@@ -1090,6 +1120,8 @@ std::vector<float> llm_embed(const std::string& model, const std::string& text) 
 }
 
 std::vector<float> llm_embed(const LlmConfig& cfg, const std::string& text) {
+  LlmSpanGuard span(cfg, "llm.embedding", "client",
+                    {{"operacao", "embedding"}, {"prompt_chars", std::to_string(text.size())}});
   if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
     throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) +
                              " estourado em '" + cfg.nome + "' antes do embedding");
@@ -1128,7 +1160,17 @@ Value llm_metricas(const LlmConfig& cfg) {
   out.map_ref()->set("total", Value::inteiro(entrada + saida));
   out.map_ref()->set("custo", Value::decimal(custo));
   out.map_ref()->set("chamadas", Value::inteiro(chamadas));
+  out.map_ref()->set("custo_entrada_mil", Value::decimal(cfg.custo_entrada_mil));
+  out.map_ref()->set("custo_saida_mil", Value::decimal(cfg.custo_saida_mil));
+  out.map_ref()->set("teto_tokens", Value::inteiro(cfg.teto_tokens));
+  out.map_ref()->set("custo_medio", Value::decimal(
+      chamadas > 0 ? custo / static_cast<double>(chamadas) : 0.0));
+  out.map_ref()->set("tokens_medio", Value::decimal(
+      chamadas > 0 ? static_cast<double>(entrada + saida) / static_cast<double>(chamadas) : 0.0));
   if (!cfg.contabilidade.empty()) out.map_ref()->set("arquivo", Value::texto(cfg.contabilidade));
+  if (!cfg.observabilidade.empty())
+    out.map_ref()->set("observabilidade", Value::texto(cfg.observabilidade));
+  if (!cfg.otel_exporter.empty()) out.map_ref()->set("otel_exporter", Value::texto(cfg.otel_exporter));
   return out;
 }
 
@@ -1143,6 +1185,67 @@ LlmContextoGuard::LlmContextoGuard(std::string agente, std::string sessao, std::
 LlmContextoGuard::~LlmContextoGuard() {
   if (!ativo_) return;
   g_contexto = {};
+}
+
+LlmSpanGuard::LlmSpanGuard(const LlmConfig& cfg, std::string nome, std::string tipo,
+                           std::vector<std::pair<std::string, std::string>> atributos)
+    : cfg_(cfg), nome_(std::move(nome)), tipo_(std::move(tipo)),
+      atributos_(std::move(atributos)), trace_id_(g_contexto.trace_id),
+      previous_trace_id_(g_contexto.trace_id), parent_span_id_(g_contexto.span_id),
+      previous_span_id_(g_contexto.span_id),
+      inicio_(std::chrono::steady_clock::now()), inicio_wall_(std::chrono::system_clock::now()),
+      uncaught_(std::uncaught_exceptions()), ativo_(true) {
+  if (trace_id_.empty()) trace_id_ = novo_trace_id();
+  span_id_ = novo_span_id();
+  g_contexto.trace_id = trace_id_;
+  g_contexto.span_id = span_id_;
+}
+
+void LlmSpanGuard::erro() { erro_ = true; }
+
+LlmSpanGuard::~LlmSpanGuard() {
+  if (!ativo_) return;
+  if (std::uncaught_exceptions() > uncaught_) erro_ = true;
+  g_contexto.trace_id = previous_trace_id_;
+  g_contexto.span_id = previous_span_id_;
+  const std::string path = span_exporter(cfg_);
+  if (path.empty()) return;
+  const auto fim_wall = std::chrono::system_clock::now();
+  const auto fim_steady = std::chrono::steady_clock::now();
+  const auto inicio_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              inicio_wall_.time_since_epoch())
+                              .count();
+  const auto fim_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          fim_wall.time_since_epoch())
+                          .count();
+  const auto duracao_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                              fim_steady - inicio_)
+                              .count();
+  Value span = Value::mapa();
+  span.map_ref()->set("tipo", Value::texto("span"));
+  span.map_ref()->set("name", Value::texto(nome_));
+  span.map_ref()->set("kind", Value::texto(tipo_));
+  span.map_ref()->set("trace_id", Value::texto(trace_id_));
+  span.map_ref()->set("span_id", Value::texto(span_id_));
+  if (!parent_span_id_.empty()) span.map_ref()->set("parent_span_id", Value::texto(parent_span_id_));
+  span.map_ref()->set("start_time_unix_nano", Value::inteiro(inicio_ns));
+  span.map_ref()->set("end_time_unix_nano", Value::inteiro(fim_ns));
+  span.map_ref()->set("duracao_us", Value::inteiro(duracao_us));
+  span.map_ref()->set("status", Value::texto(erro_ ? "ERROR" : "OK"));
+  span.map_ref()->set("llm", Value::texto(cfg_.nome));
+  span.map_ref()->set("provedor", Value::texto(cfg_.provider));
+  span.map_ref()->set("modelo", Value::texto(cfg_.model));
+  if (!g_contexto.agente.empty()) span.map_ref()->set("agente", Value::texto(g_contexto.agente));
+  if (!g_contexto.sessao.empty()) span.map_ref()->set("sessao", Value::texto(g_contexto.sessao));
+  Value attrs = Value::mapa();
+  for (const auto& [key, value] : atributos_) attrs.map_ref()->set(key, Value::texto(value));
+  span.map_ref()->set("attributes", std::move(attrs));
+  std::lock_guard<std::mutex> lk(g_arquivo_mu);
+  std::error_code ec;
+  const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+  if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+  std::ofstream out(path, std::ios::app);
+  if (out) out << json_dump_compacto(span) << '\n';
 }
 
 }  // namespace tilt::rt

@@ -13,7 +13,8 @@ namespace tilt::rt {
 // - writer: um ou varios row groups, encoding PLAIN; colunas sem nulos sao REQUIRED e
 //   colunas com nulos viram OPTIONAL, com definition levels RLE (valores
 //   nulos omitidos); paginas DATA_PAGE v1 por padrao ou v2 com
-//   `paginas_v2`; compressao gzip (padrao) ou snappy literal-only; strings
+//   `paginas_v2`; compressao gzip (padrao), snappy literal-only, zstd,
+//   LZ4_RAW ou Brotli (estes dois ultimos via bibliotecas opcionais); strings
 //   levam anotacao UTF8; listas de escalares viram campos REPEATED com
 //   anotacao LIST (3-level padrao); cada folha leva um field_id
 //   (thrift SchemaElement[9]) — sequencial por folha, ou o vetor explicito em
@@ -27,9 +28,11 @@ namespace tilt::rt {
 //   escalares e structs aninhados; struct nulo por linha vira grupo OPTIONAL,
 //   chave ausente vira campo OPTIONAL); estreitamento opt-in via
 //   ParquetWriteOpts.tipos ("col" ou "struct.campo" -> "int32"/"float", com
-//   anotacao INTEGER no INT32); listas aninhadas (list<list<...>>), listas
-//   de structs e elementos nulos em lista falham com erro claro;
-//   structs com `field_ids` explicitos (caminho Iceberg) ainda nao suportados;
+//   anotacao INTEGER no INT32); listas aninhadas (list<list<...>>), inclusive
+//   quatro ou mais niveis escalares, listas de structs e elementos nulos em
+//   lista sao suportados nos caminhos previstos; structs compostos dentro de
+//   elementos de lista e `field_ids` explicitos (caminho Iceberg) ainda geram
+//   erro claro;
 // - reader: le todos os row groups (concatena), campos REQUIRED, OPTIONAL e
 //   REPEATED (definition/repetition levels RLE), structs aninhados (grupos
 //   sem anotacao LIST; struct OPTIONAL definido com todos os campos nulos
@@ -39,13 +42,14 @@ namespace tilt::rt {
 //   INTEGER/DATE/TIME/TIMESTAMP/DECIMAL (data/hora/timestamp -> texto ISO,
 //   decimal -> decimal), paginas v1 e v2, PLAIN e
 //   DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e codecs gzip/deflate
-//   (zlib via dlopen("libz.so.1")), snappy (codec proprio) e zstd via dlopen
-//   (libzstd, sem dependencia de link).
+//   (zlib via dlopen("libz.so.1")), snappy (codec proprio), zstd via dlopen
+//   (libzstd), LZ4_RAW via liblz4 e Brotli via libbrotlienc/libbrotlidec
+//   (todos sem dependencia de link).
 //
 // Lanca std::runtime_error com mensagem acionavel em qualquer limite.
 
 // Codecs (mesmos valores do enum parquet): 0 = sem compressao,
-// 1 = snappy, 2 = gzip, 6 = zstd.
+// 1 = snappy, 2 = gzip, 4 = brotli, 6 = zstd, 7 = lz4_raw.
 struct ParquetWriteOpts {
   int codec = 2;          // gzip por padrao
   bool paginas_v2 = false;  // DATA_PAGE v1 por padrao
@@ -62,6 +66,16 @@ struct ParquetWriteOpts {
   // AWS KMS: KeyId para GenerateDataKey (AES_256); o arquivo persiste somente
   // o KeyId resolvido e CiphertextBlob, nunca a data key em claro.
   std::string chave_kms;
+  // Provedores externos simples, sem SDK: o segredo pode vir de uma variavel
+  // de ambiente ou de um arquivo com permissao controlada. O nome/path fica
+  // no metadata; o segredo nunca e gravado no Parquet.
+  std::string chave_env;
+  std::string chave_arquivo;
+  // Provedores cloud sem SDK: Azure Key Vault (URL completa da chave), GCP
+  // Cloud KMS (resource name) e Vault Transit (path da chave).
+  std::string chave_azure;
+  std::string chave_gcp;
+  std::string chave_vault;
   // Numero maximo de linhas por row group. Zero preserva o comportamento de
   // um unico grupo (compatibilidade); valores positivos particionam tabelas
   // grandes e permitem leitura incremental por grupo.

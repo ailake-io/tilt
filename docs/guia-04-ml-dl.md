@@ -170,8 +170,9 @@ regressão `rmse` (default) e `r2`. `registrar_em: "mlflow://host/experimento"`
 usa o Tracking REST do MLflow: localiza/cria o experimento, cria um run, envia
 parâmetros e métricas em `log-batch` e finaliza o run. Para servidores
 protegidos, `MLFLOW_TRACKING_TOKEN` envia Bearer e `MLFLOW_WORKSPACE` envia
-o workspace. `dados:` aceita tabela inline, caminho `.csv`/`.parquet`/`.json`
-ou o valor de `ler_*`.
+o workspace. O run também publica `detalhes.json` e `lineage.json`, com hashes
+do código, dados e pesos quando os arquivos são declarados. `dados:` aceita
+tabela inline, caminho `.csv`/`.parquet`/`.json` ou o valor de `ler_*`.
 
 ## `modelo`
 
@@ -428,6 +429,33 @@ treino Xor:
   retomar: "xor.json"
 ```
 
+### Treino distribuído
+
+Com um filesystem compartilhado, vários processos podem treinar shards do
+mesmo conjunto:
+
+```tilt check
+modelo Xor:
+  entrada: tensor[f32, 2]
+  camadas:
+    - densa: 2
+    - softmax
+
+treino Xor:
+  dados: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  otimizador: adam
+  lote: 2
+  epocas: 4
+  cluster: { dir: "/tmp/tilt-cluster", rank: 0, mundo: 2,
+             timeout: 30, recuperar: verdadeiro, tentativas: 2 }
+```
+
+Troque `rank` em cada processo. O Tilt faz all-reduce dos gradientes antes de
+cada passo e sincroniza pesos e momentos do Adam ao fim da época. Heartbeats,
+barreiras atômicas e retentativas evitam espera silenciosa; depois de uma
+falha definitiva, reinicie todos os ranks com `retomar:` apontando para o
+último `aggregate-epoch-N.json`.
+
 ### Agendador, validação e parada antecipada
 
 ```tilt run
@@ -517,8 +545,8 @@ backward CPU de referência sem alterar o resultado.
 O GEMM usa cuBLAS quando disponível e mantém o kernel NVRTC como fallback;
 buffers CUDA são reutilizados entre chamadas. O modo Tensor Core do cuBLAS é
 ativado quando o driver expõe `cublasSetMathMode`, e `gpu.info()` inclui
-`tensor-cores`. Como os tensores ainda residem
-na CPU, a execução do modelo mantém na CPU operações pequenas (GEMM abaixo
+`tensor-cores`. A API residente mantém os buffers no device entre operações;
+na execução automática do modelo, operações pequenas continuam na CPU (GEMM abaixo
 de 2 milhões de produtos sem BLAS otimizado, ou 64 milhões com ele, e lado
 mínimo de 64; convolução abaixo de 2 milhões de produtos; ReLU/GELU/soma
 abaixo de 262144 elementos) para evitar cópias que custariam mais que o
@@ -533,16 +561,24 @@ fora da faixa finita de FP16 usam GEMM FP32. Sem GPU ativa, a opção produz
 erro explícito; `TILT_GPU=fake` permite exercitar a lógica sem hardware.
 cuBLAS usa Tensor Cores nos dispositivos compatíveis; o fallback NVRTC não usa
 um kernel especializado. O backend Metal compila kernels MSL para GEMM,
-conv2d, ReLU, GELU e soma; nele a acumulação permanece em FP32. A API C++ do
-runtime expõe `upload`, `gemm_resident`, `download` e `release` para manter
-tensores no device entre operações. Ainda não há redução FP16 para convolução
-ou gradientes; desempenho depende do tamanho do tensor e das cópias
-host/device quando a API residente não é usada.
+conv2d, ReLU, GELU, soma, normalização, max pooling e redução; nele a
+acumulação permanece em FP32. A API C++ do
+runtime expõe `upload`, `download`, `release`, `gemm_resident`,
+`batch_gemm_resident`, `conv2d_resident`, ativações, soma, viés por canal,
+normalização, max pooling e redução residentes. `GpuGraph` permite registrar
+GEMMs, lotes, convoluções, vieses e ativações e executá-los em sequência sem cópias intermediárias;
+o backward denso e o forward de camadas densas, residuais, convolucionais,
+norma de lote e agrupamento max reutilizam esses buffers, enquanto os vieses
+compatíveis são calculados no device. A API de alto nível ainda materializa o
+resultado no `Tensor` ao cruzar uma etapa que não tem kernel residente, e o
+fallback CPU permanece automático.
 Em Metal, “Tensor Core” não é uma API NVIDIA: o caminho equivalente usa as
 unidades matriciais do GPU Apple através dos kernels MSL.
 Entradas 3D compatíveis (`[lote, M, K] @ [lote, K, N]`) usam batching
-automático no dispatch CUDA/fake; o runtime também expõe `batch_gemm` para
-integrações nativas.
+automático no dispatch CUDA/fake, inclusive lotes maiores que o limite de uma
+grade CUDA, que são divididos em blocos. O runtime também expõe
+`batch_gemm` para integrações nativas e `batch_gemm_resident` para evitar
+uploads por etapa.
 
 ## stdlib: `nn` e `io`
 

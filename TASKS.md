@@ -36,7 +36,10 @@
 - [x] CPU — CBLAS opcional para GEMM e conv2d grande, mantendo kernels portáteis
 - [x] Inferência offline em lote de tabela para `experimento` e `modelo` vetorial
 - [x] Benchmark detalhado CPU/GPU e comparação local com CPython, pandas e NumPy (`benchmarks/relatorio-2026-09-24.md`)
-- [x] GPU — backend Metal (macOS), buffers de tensores residentes e ativação de Tensor Core via cuBLAS quando disponível; AMD/ROCm permanece fora do escopo atual
+- [x] GPU — backend Metal (macOS), buffers residentes gerais (GEMM, batching,
+  convolução, viés por canal, ativações, normalização, pooling e redução),
+  `GpuGraph`, backward denso sem uploads intermediários e ativação de Tensor
+  Core via cuBLAS quando disponível; AMD/ROCm permanece fora do escopo atual
 
 
 ---
@@ -85,6 +88,12 @@
 - [x] Evolução de schema Delta (fase 27 add-column + widening int->long/float->double)
 - [x] Evolução de schema Iceberg (fase 27 add-column + widening, ids estáveis)
 - [x] Implementar REST catalog do Iceberg (fase 29)
+- [x] Listas escalares Parquet nested com quatro ou mais níveis no leitor genérico
+- [x] Provedores de chave Parquet por variável de ambiente e arquivo (além do AWS KMS)
+- [x] Locks cooperativos e optimistic concurrency local para Delta/Iceberg
+- [x] Paginação, Bearer token e HEAD no servidor REST Iceberg
+- [x] Provedores HTTP Parquet para Azure Key Vault, GCP Cloud KMS e Vault Transit
+- [x] Operações createTable, transactions e DELETE no servidor REST Iceberg
 - [x] Implementar `tilt servir-catalogo` (fase 30)
 - [x] Adicionar deletes (position/equality) para Iceberg (fase 12-5a; leitura
   nativa aplica ambos, pyiceberg aplica position e ainda não suporta equality)
@@ -241,7 +250,7 @@
 
 ### 9.2 Escalabilidade (P3)
 - [x] Implementar sharding de dados para processamento distribuído (num_shards/shard_id round-robin em RAM, CSV e Parquet; validação CTest)
-- [x] Adicionar suporte a cluster mode para treinamento distribuído (filesystem compartilhado, shards automáticos, barreira por época e média de parâmetros; CTest com dois ranks)
+- [x] Adicionar suporte a cluster mode para treinamento distribuído (filesystem compartilhado, shards automáticos, all-reduce de gradientes por passo, estados do Adam sincronizados, heartbeat/retentativas e recuperação por checkpoint; CTest com dois ranks)
 - [x] Implementar query pushdown para conectores SQL (`pushdown.colunas`, `onde` parametrizado e `limite` em SQLite/Postgres/DuckDB/MySQL/ClickHouse; CTest SQLite)
 
 ---
@@ -250,12 +259,16 @@
 
 ### 10.1 IDE/LSP (P2)
 - [x] `goto definition` no LSP (same-file e importações explícitas locais/
-  `TILT_STDLIB_PATH`; índice de workspace futuro)
-- [x] Implementar `find references` no LSP (same-file, com `includeDeclaration` e ranges LSP)
+  `TILT_STDLIB_PATH`; índice de workspace incremental por `rootUri`/`workspaceFolders`)
+- [x] Implementar `find references` no LSP (same-file e cross-file, com
+  `includeDeclaration` e ranges LSP)
 - [x] `hover type` (Sprint 3: assinatura de `funcao`, campos de `tipo`, tipo
   do valor em usos de variável, tipo da expressão sob o cursor com forma de
   tensor; desconhecido cai no texto atual)
-- [x] Implementar `rename symbol` no LSP (same-file, WorkspaceEdit com validação de identificador)
+- [x] Implementar `rename symbol` no LSP (same-file e cross-file, `WorkspaceEdit`
+  agrupado por URI e validação de identificador)
+- [x] Validar aridade de funções importadas no checker (assinaturas locais
+  cacheadas por módulo; argumentos nomeados e opcionais com diagnóstico)
 - [x] Adicionar diagnostics em tempo real (on-type) no LSP (push em `didChange`, pull `textDocument/diagnostic` e cache por conteúdo)
 
 ### 10.2 Formatos (P2)
@@ -442,8 +455,14 @@ continua fora do escopo salvo indicação explícita.
   `saida[i] = expressao` via `TILT_LOOP_PARALLEL=1`, com commit determinístico.
 - [x] Planos lazy para fontes remotas e pushdown Elasticsearch/OpenSearch
   (`_source`, `bool.filter`, `size`), mantendo pushdown SQL parametrizado.
-- [x] MLflow publica `detalhes.json` com relatório e casos individuais como
-  artefato Tracking REST.
+- [x] MLOps: registry local versionado com SHA-256 e linhagem de modelo,
+  código e dados; `linhagem-modelo`/`rollback-modelo`; `servir --modelo` por
+  stage; MLflow publica `detalhes.json` e `lineage.json`; rotas suportam
+  limites, A/B/canário ponderado e rollback automático por 5xx.
+- [x] LLM/agentes: spans JSONL com `trace_id`/`span_id`, parentesco,
+  duração, status e atributos exportáveis por `otel_exporter:`;
+  compactação automática de memória/observações por `max_contexto:`;
+  orçamento detalhado de tokens/custo e médias em `llm_metricas`.
 - [x] CUDA opt-in para residência f32, GEMM em lote, backward denso,
   convolução, recorrência (RNN/LSTM/GRU), embeddings, normalização,
   max-pooling e redução; fallback CPU preservado.
@@ -453,10 +472,10 @@ continua fora do escopo salvo indicação explícita.
   versionados; `scripts/benchmark_data_backends.py` compara agregação, filtros
   e joins com pandas, Polars e DuckDB quando instalados. A rodada de 1 milhão
   de linhas está em `benchmarks/relatorio-2026-09-28.md`.
-- [x] `Value` compacto na segunda etapa: as referências para listas, mapas,
-  tensores, funções e tabelas colunares agora compartilham um único bloco de
-  armazenamento. `sizeof(Value)` caiu de 112 para 64 bytes; escalares continuam
-  sem alocação e a semântica da linguagem permanece igual. Os acessos internos
+- [x] `Value` compacto: as referências para listas, mapas, tensores, funções e
+  tabelas colunares agora compartilham um único bloco de armazenamento e o
+  texto usa `CompactString` com SSO de 22 bytes. `sizeof(Value)` caiu de 112
+  para 56 bytes; textos curtos e escalares não alocam. Os acessos internos
   usam `*_ref()` para manter a migração explícita e segura.
 - [x] Matriz atualizada CSV→groupby→Parquet: Tilt colunar 197,078 ms e pandas 187,471 ms em 1 milhão de linhas; Polars/DuckDB foram marcados como indisponíveis no ambiente, sem tratar ausência como zero.
 - [x] Medição de escrita colunar em 1 milhão de linhas: `row_group: 100000`
@@ -510,8 +529,15 @@ continua fora do escopo salvo indicação explícita.
   diretamente nas colunas, removendo o vetor de `Value` temporário por linha.
   Em 1 milhão de linhas, agrupamento/filtro/junção caíram para 120/132/207 ms
   no processo novo; o roundtrip completo está no relatório de backends.
+- [x] Materialização nested evita cópia escalar adicional em structs e o vetor
+  temporário de células em listas de structs, mantendo o decoder geral apenas
+  para níveis de repetição que exigem remontagem. Em 100 mil linhas, Parquet
+  colunar caiu para 27,066 ms e 16.272 KiB de RSS; detalhes em
+  `benchmarks/parquet-nested-2026-09-29.md`.
+- [x] Ampliar os codecs Parquet para Brotli (4) e LZ4_RAW (7), carregados via
+  `dlopen` quando as bibliotecas opcionais existem; gzip, Snappy e Zstd seguem
+  funcionando sem mudanças de instalação.
 - [ ] Priorizar os próximos ganhos de performance: caminho simples de leitura,
-  compactação adicional de `Value`, `derivar` vetorizado e materialização
-  nested sem decodificação desnecessária.
+  `derivar` vetorizado e materialização nested sem decodificação desnecessária.
 - [ ] Manter AMD/ROCm fora do escopo; preservar fallback CPU para todos os
   caminhos CUDA/Metal.

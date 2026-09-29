@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -31,6 +33,54 @@ namespace {
 constexpr int kOk = 0;
 constexpr int kFalhas = 1;
 constexpr int kUso = 2;
+
+std::string json_escape(std::string_view text) {
+  std::string out;
+  out.reserve(text.size() + 2);
+  for (const unsigned char c : text) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20) {
+          const char hex[] = "0123456789abcdef";
+          out += "\\u00";
+          out.push_back(hex[c >> 4]);
+          out.push_back(hex[c & 0x0f]);
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
+    }
+  }
+  return out;
+}
+
+struct FileLineage {
+  std::string path;
+  std::string sha256;
+  std::uintmax_t bytes = 0;
+};
+
+std::optional<FileLineage> file_lineage(const std::filesystem::path& path) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  if (!fs::is_regular_file(path, ec) || ec) return std::nullopt;
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return std::nullopt;
+  const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (!in.eof() && !in) return std::nullopt;
+  return FileLineage{fs::absolute(path, ec).string(), rt::sha256_hex(bytes), bytes.size()};
+}
+
+void write_lineage_json(std::ostream& out, const char* key, const FileLineage& file,
+                        bool comma) {
+  out << "    \"" << key << "\": {\"path\": \"" << json_escape(file.path)
+      << "\", \"sha256\": \"" << file.sha256 << "\", \"bytes\": " << file.bytes << "}"
+      << (comma ? ",\n" : "\n");
+}
 
 // Arquivos .tilt de cada caminho: o proprio arquivo, ou (diretorio) todos os
 // .tilt abaixo dele em ordem alfabetica, sem entrar em pastas ocultas.
@@ -640,16 +690,23 @@ int cmd_adicionar(const std::vector<std::string_view>& args) {
 int cmd_registrar_modelo(const std::vector<std::string_view>& args) {
   namespace fs = std::filesystem;
   if (args.size() < 3) {
-    std::cerr << "tilt: uso: tilt registrar-modelo <nome> <arquivo> [--versao V] [--registro DIR]\n";
+    std::cerr << "tilt: uso: tilt registrar-modelo <nome> <arquivo> [--versao V] [--registro DIR]"
+                 " [--codigo ARQUIVO] [--dados ARQUIVO] [--parent V]\n";
     return kUso;
   }
   const std::string nome(args[1]);
   const fs::path origem(args[2]);
   std::string versao = "1";
   fs::path registro = ".tilt-modelos";
+  std::optional<fs::path> codigo;
+  std::optional<fs::path> dados;
+  std::string parent;
   for (std::size_t i = 3; i < args.size(); ++i) {
     if (args[i] == "--versao" && i + 1 < args.size()) versao = std::string(args[++i]);
     else if (args[i] == "--registro" && i + 1 < args.size()) registro = fs::path(args[++i]);
+    else if (args[i] == "--codigo" && i + 1 < args.size()) codigo = fs::path(args[++i]);
+    else if (args[i] == "--dados" && i + 1 < args.size()) dados = fs::path(args[++i]);
+    else if (args[i] == "--parent" && i + 1 < args.size()) parent = std::string(args[++i]);
     else {
       std::cerr << "tilt: opcao invalida em registrar-modelo\n";
       return kUso;
@@ -662,7 +719,12 @@ int cmd_registrar_modelo(const std::vector<std::string_view>& args) {
     return std::isalnum(c) != 0 || c == '.' || c == '-' || c == '_';
   });
   std::error_code ec;
-  if (!nome_ok || !versao_ok || !fs::is_regular_file(origem, ec)) {
+  if (!nome_ok || !versao_ok || (!parent.empty() &&
+                                  !std::all_of(parent.begin(), parent.end(), [](unsigned char c) {
+                                    return std::isalnum(c) != 0 || c == '.' || c == '-' || c == '_';
+                                  })) ||
+      !fs::is_regular_file(origem, ec) || (codigo && !fs::is_regular_file(*codigo, ec)) ||
+      (dados && !fs::is_regular_file(*dados, ec))) {
     std::cerr << "tilt: nome, versao ou arquivo de modelo invalido\n";
     return kUso;
   }
@@ -686,7 +748,28 @@ int cmd_registrar_modelo(const std::vector<std::string_view>& args) {
   manifest << "{\n  \"nome\": \"" << nome << "\",\n"
            << "  \"versao\": \"" << versao << "\",\n"
            << "  \"arquivo\": \"" << artefato.filename().string() << "\",\n"
-           << "  \"sha256\": \"" << digest << "\"\n}\n";
+           << "  \"sha256\": \"" << digest << "\",\n"
+           << "  \"tamanho\": " << bytes.size() << ",\n"
+           << "  \"registrado_em\": "
+           << std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::system_clock::now().time_since_epoch())
+                  .count()
+           << ",\n"
+           << "  \"lineage\": {\n";
+  const auto modelo_file = file_lineage(origem);
+  if (modelo_file) write_lineage_json(manifest, "modelo", *modelo_file, codigo || dados || !parent.empty());
+  if (codigo) {
+    const auto codigo_file = file_lineage(*codigo);
+    if (codigo_file) write_lineage_json(manifest, "codigo", *codigo_file, dados || !parent.empty());
+  }
+  if (dados) {
+    const auto dados_file = file_lineage(*dados);
+    if (dados_file) write_lineage_json(manifest, "dados", *dados_file, !parent.empty());
+  }
+  if (!parent.empty()) {
+    manifest << "    \"parent\": \"" << json_escape(parent) << "\"\n";
+  }
+  manifest << "  }\n}\n";
   if (!out || !manifest) {
     std::cerr << "tilt: falha ao gravar o artefato ou manifesto\n";
     return kUso;
@@ -757,8 +840,55 @@ int cmd_promover_modelo(const std::vector<std::string_view>& args) {
   return kOk;
 }
 
-int cmd_resolver_modelo(const std::vector<std::string_view>& args) {
+std::optional<std::string> resolver_modelo_local(const std::string& nome,
+                                                 const std::string& versao,
+                                                 const std::string& stage,
+                                                 const std::string& registro,
+                                                 std::string& erro) {
   namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path escolhido;
+  for (const auto& item : fs::directory_iterator(fs::path(registro) / nome, ec)) {
+    if (ec || !item.is_directory()) continue;
+    if (!versao.empty() && item.path().filename() != versao) continue;
+    const fs::path manifest = item.path() / "manifest.json";
+    std::ifstream in(manifest);
+    if (!in) continue;
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (!stage.empty() && text.find("\"stage\": \"" + stage + "\"") == std::string::npos) continue;
+    // Directory iteration order is unspecified; always choose the greatest
+    // version name so `--stage` is deterministic across filesystems.
+    if (escolhido.empty() || escolhido.filename() < item.path().filename()) {
+      escolhido = item.path();
+    }
+  }
+  if (escolhido.empty()) {
+    erro = "nenhuma versao encontrada para " + nome;
+    return std::nullopt;
+  }
+  std::ifstream in(escolhido / "manifest.json");
+  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::string chave = "\"arquivo\": \"";
+  const std::size_t p = text.find(chave);
+  if (p == std::string::npos) {
+    erro = "manifesto sem arquivo para " + nome + "@" + escolhido.filename().string();
+    return std::nullopt;
+  }
+  const std::size_t begin = p + chave.size();
+  const std::size_t end = text.find('"', begin);
+  if (end == std::string::npos) {
+    erro = "manifesto invalido para " + nome + "@" + escolhido.filename().string();
+    return std::nullopt;
+  }
+  const fs::path artifact = escolhido / text.substr(begin, end - begin);
+  if (!fs::is_regular_file(artifact, ec)) {
+    erro = "artefato ausente para " + nome + "@" + escolhido.filename().string();
+    return std::nullopt;
+  }
+  return artifact.string();
+}
+
+int cmd_resolver_modelo(const std::vector<std::string_view>& args) {
   if (args.size() < 2) {
     std::cerr << "tilt: uso: tilt resolver-modelo <nome> [--versao V|--stage S] [--registro DIR]\n";
     return kUso;
@@ -766,41 +896,133 @@ int cmd_resolver_modelo(const std::vector<std::string_view>& args) {
   const std::string nome(args[1]);
   std::string versao;
   std::string stage;
-  fs::path registro = ".tilt-modelos";
+  std::string registro = ".tilt-modelos";
   for (std::size_t i = 2; i < args.size(); ++i) {
     if ((args[i] == "--versao" || args[i] == "--stage" || args[i] == "--registro") && i + 1 < args.size()) {
       if (args[i] == "--versao") versao = std::string(args[++i]);
       else if (args[i] == "--stage") stage = std::string(args[++i]);
-      else registro = fs::path(args[++i]);
+      else registro = std::string(args[++i]);
     } else return kUso;
   }
-  std::error_code ec;
-  fs::path escolhido;
-  for (const auto& item : fs::directory_iterator(registro / nome, ec)) {
-    if (!item.is_directory()) continue;
-    if (!versao.empty() && item.path().filename() != versao) continue;
-    const fs::path manifest = item.path() / "manifest.json";
-    std::ifstream in(manifest);
-    if (!in) continue;
-    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (!stage.empty() && text.find("\"stage\": \"" + stage + "\"") == std::string::npos) continue;
-    escolhido = item.path();
-    if (!stage.empty()) break;
-    if (escolhido.filename() < item.path().filename()) escolhido = item.path();
-  }
-  if (escolhido.empty()) {
-    std::cerr << "tilt: nenhuma versao encontrada para " << nome << "\n";
+  std::string erro;
+  const auto resolved = resolver_modelo_local(nome, versao, stage, registro, erro);
+  if (!resolved) {
+    std::cerr << "tilt: " << erro << "\n";
     return kUso;
   }
-  std::ifstream in(escolhido / "manifest.json");
-  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  const std::string chave = "\"arquivo\": \"";
-  const std::size_t p = text.find(chave);
-  if (p == std::string::npos) return kUso;
-  const std::size_t begin = p + chave.size();
-  const std::size_t end = text.find('"', begin);
-  if (end == std::string::npos) return kUso;
-  std::cout << (escolhido / text.substr(begin, end - begin)).string() << "\n";
+  std::cout << *resolved << "\n";
+  return kOk;
+}
+
+namespace {
+
+bool alterar_stage_manifest(const std::filesystem::path& manifest, const std::string& stage) {
+  std::ifstream in(manifest, std::ios::binary);
+  if (!in) return false;
+  std::string texto((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const std::string campo = "  \"stage\": ";
+  const std::size_t pos = texto.find(campo);
+  if (pos == std::string::npos) {
+    const std::size_t fim = texto.rfind('}');
+    if (fim == std::string::npos) return false;
+    texto.insert(fim, "  \"stage\": \"" + json_escape(stage) + "\",\n");
+  } else {
+    const std::size_t inicio = pos + campo.size();
+    const std::size_t fim = texto.find('\n', inicio);
+    if (fim == std::string::npos) return false;
+    texto.replace(inicio, fim - inicio, "\"" + json_escape(stage) + "\",");
+  }
+  const std::filesystem::path tmp = manifest.string() + ".tmp";
+  std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+  out << texto;
+  out.close();
+  if (!out) return false;
+  std::error_code ec;
+  std::filesystem::rename(tmp, manifest, ec);
+  if (ec) {
+    std::filesystem::remove(tmp, ec);
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+int cmd_rollback_modelo(const std::vector<std::string_view>& args) {
+  namespace fs = std::filesystem;
+  if (args.size() < 2) {
+    std::cerr << "tilt: uso: tilt rollback-modelo <nome> [--registro DIR]\n";
+    return kUso;
+  }
+  const std::string nome(args[1]);
+  fs::path registro = ".tilt-modelos";
+  for (std::size_t i = 2; i < args.size(); ++i) {
+    if (args[i] == "--registro" && i + 1 < args.size()) registro = fs::path(args[++i]);
+    else {
+      std::cerr << "tilt: opcao invalida em rollback-modelo\n";
+      return kUso;
+    }
+  }
+  std::error_code ec;
+  fs::path atual;
+  std::vector<fs::path> versoes;
+  for (const auto& item : fs::directory_iterator(registro / nome, ec)) {
+    if (ec || !item.is_directory()) continue;
+    if (!fs::is_regular_file(item.path() / "manifest.json", ec)) continue;
+    versoes.push_back(item.path());
+    std::ifstream in(item.path() / "manifest.json");
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (text.find("\"stage\": \"production\"") != std::string::npos) atual = item.path();
+  }
+  std::sort(versoes.begin(), versoes.end(), [](const fs::path& a, const fs::path& b) {
+    return a.filename().string() < b.filename().string();
+  });
+  if (atual.empty()) {
+    std::cerr << "tilt: nenhum modelo em production para " << nome << "\n";
+    return kUso;
+  }
+  auto it = std::find(versoes.begin(), versoes.end(), atual);
+  if (it == versoes.begin()) {
+    std::cerr << "tilt: nao existe versao anterior para rollback de " << nome << "\n";
+    return kUso;
+  }
+  const fs::path anterior = *(it - 1);
+  if (!alterar_stage_manifest(atual / "manifest.json", "archived") ||
+      !alterar_stage_manifest(anterior / "manifest.json", "production")) {
+    std::cerr << "tilt: falha atomica ao alterar stages do rollback\n";
+    return kUso;
+  }
+  std::cout << "rollback concluido: " << nome << " " << atual.filename().string() << " -> "
+            << anterior.filename().string() << "\n";
+  return kOk;
+}
+
+int cmd_linhagem_modelo(const std::vector<std::string_view>& args) {
+  namespace fs = std::filesystem;
+  if (args.size() < 2) {
+    std::cerr << "tilt: uso: tilt linhagem-modelo <nome> [--versao V|--stage S] [--registro DIR]\n";
+    return kUso;
+  }
+  const std::string nome(args[1]);
+  std::string versao;
+  std::string stage;
+  std::string registro = ".tilt-modelos";
+  for (std::size_t i = 2; i < args.size(); ++i) {
+    if ((args[i] == "--versao" || args[i] == "--stage" || args[i] == "--registro") && i + 1 < args.size()) {
+      if (args[i] == "--versao") versao = std::string(args[++i]);
+      else if (args[i] == "--stage") stage = std::string(args[++i]);
+      else registro = std::string(args[++i]);
+    } else return kUso;
+  }
+  std::string erro;
+  const auto artifact = resolver_modelo_local(nome, versao, stage, registro, erro);
+  if (!artifact) {
+    std::cerr << "tilt: " << erro << "\n";
+    return kUso;
+  }
+  std::ifstream in(fs::path(*artifact).parent_path() / "manifest.json", std::ios::binary);
+  if (!in) return kUso;
+  std::cout << std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
   return kOk;
 }
 

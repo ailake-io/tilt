@@ -50,9 +50,9 @@ class Args {
     if (!v_[i].is_number()) tipo_errado(i, "numero");
     return v_[i].as_number();
   }
-  const std::string& txt(std::size_t i) const {
+  std::string txt(std::size_t i) const {
     if (v_[i].kind != ValueKind::Texto) tipo_errado(i, "texto");
-    return v_[i].s;
+    return v_[i].s.str();
   }
   const ValueList& lista(std::size_t i) const {
     if (v_[i].kind != ValueKind::Lista || !v_[i].list_ref()) tipo_errado(i, "lista");

@@ -166,5 +166,7 @@ grep -q 'runs/update' "$tmp/log" || {
   echo "run nao foi finalizado"; cat "$tmp/log"; exit 1; }
 grep -q 'detalhes.json' "$tmp/log" || {
   echo "artefato de detalhes nao foi enviado"; cat "$tmp/log"; exit 1; }
+grep -q 'lineage.json' "$tmp/log" || {
+  echo "artefato de lineage nao foi enviado"; cat "$tmp/log"; exit 1; }
 
 echo "mlflow: ok"

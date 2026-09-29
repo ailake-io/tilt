@@ -46,6 +46,13 @@ add_test(
 )
 
 add_test(
+  NAME cluster_failure
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/cluster_failure_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+
+add_test(
   NAME sql_pushdown
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/sql_pushdown_test.sh
           $<TARGET_FILE:tilt>
@@ -300,6 +307,18 @@ add_test(
   NAME mlflow
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mlflow_test.sh
           $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME llm_observabilidade
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/llm_observabilidade_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/llm_observabilidade.tilt)
+
+add_test(
+  NAME mlops_rollout
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/mlops_rollout_test.sh
+          $<TARGET_FILE:tilt>
+          ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/mlops_rollout.tilt)
 add_test(
   NAME kafka
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/kafka_test.sh
@@ -379,6 +398,26 @@ add_test(
 add_test(
   NAME parquet_kms
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/parquet_kms_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME parquet_nested4
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/parquet_nested4_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME parquet_key_provider
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/parquet_key_provider_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME parquet_cloud_provider
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/parquet_cloud_provider_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME table_lock
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/table_lock_test.sh
           $<TARGET_FILE:tilt>)
 
 add_test(

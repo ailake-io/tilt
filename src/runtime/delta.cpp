@@ -17,6 +17,7 @@
 #include "runtime/compat.hpp"
 #include "runtime/json.hpp"
 #include "runtime/parquet.hpp"
+#include "runtime/table_lock.hpp"
 
 namespace tilt::rt {
 
@@ -323,8 +324,8 @@ std::vector<std::pair<std::string, std::string>> schema_string_fields(const std:
     if (f.kind == ValueKind::Mapa && f.map_ref()) {
       const Value* n = f.map_ref()->find("name");
       const Value* t = f.map_ref()->find("type");
-      fields.emplace_back(n && n->kind == ValueKind::Texto ? n->s : "",
-                          t && t->kind == ValueKind::Texto ? t->s : "string");
+      fields.emplace_back(n && n->kind == ValueKind::Texto ? n->s.str() : "",
+                          t && t->kind == ValueKind::Texto ? t->s.str() : "string");
     }
   }
   return fields;
@@ -1180,6 +1181,7 @@ void delta_write(const std::string& dir, const Value& tabela,
   mkdir_if_missing(dir);
   const std::string log_dir = dir + "/_delta_log";
   mkdir_if_missing(log_dir);
+  TableLock table_lock(log_dir, "Delta");
 
   // 1a passada: tabela nova por escrita. Remove log anterior para nao
   // misturar versoes (sem merge/ACID concorrente), incluindo checkpoints.
@@ -1241,6 +1243,7 @@ void delta_append(const std::string& dir, const Value& tabela,
   if (!tilt_is_directory(log_dir)) {
     die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
   }
+  TableLock table_lock(log_dir, "Delta");
   const std::vector<std::string> versions = list_delta_versions(log_dir);
   if (versions.empty()) {
     die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
@@ -1367,6 +1370,10 @@ void delta_append(const std::string& dir, const Value& tabela,
   char num[32];
   std::snprintf(num, sizeof num, "%020lld", next);
   const std::string final_path = log_dir + "/" + num + ".json";
+  if (tilt_file_exists(final_path)) {
+    die("conflito de concorrencia otimista: a versao " + std::to_string(next) +
+        " ja foi commitada por outro writer");
+  }
 
   Value commit = Value::mapa();
   commit.map_ref()->set("timestamp", Value::inteiro(ts));
@@ -1415,10 +1422,10 @@ void delta_append(const std::string& dir, const Value& tabela,
   // Checkpoint tilt-native a cada 10 versoes (best-effort; o JSON continua
   // autoritativo).
   try {
-    const std::string schema_final = new_schema.empty() && cur_schema_v ? cur_schema_v->s : new_schema;
+    const std::string schema_final = new_schema.empty() && cur_schema_v ? cur_schema_v->s.str() : new_schema;
     const Value* tid = cur_meta.map_ref() ? cur_meta.map_ref()->find("id") : nullptr;
     delta_maybe_checkpoint(dir, log_dir, next, schema_final, existing,
-                           tid && tid->kind == ValueKind::Texto ? tid->s : "");
+                           tid && tid->kind == ValueKind::Texto ? tid->s.str() : "");
   } catch (const std::exception&) {
   }
 }
@@ -1791,6 +1798,10 @@ Value delta_read_changes(const std::string& dir, long long de, long long ate) {
 
 void delta_optimize(const std::string& dir) {
   const std::string log_dir = dir + "/_delta_log";
+  if (!tilt_is_directory(log_dir)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
+  }
+  TableLock table_lock(log_dir, "Delta");
   const std::vector<std::string> versions = list_delta_versions(log_dir);
   if (versions.empty()) die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
   const Value tabela = delta_read(dir, nullptr);
@@ -1802,6 +1813,10 @@ void delta_optimize(const std::string& dir) {
 
 std::int64_t delta_vacuum(const std::string& dir) {
   const std::string log_dir = dir + "/_delta_log";
+  if (!tilt_is_directory(log_dir)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_delta para criar)");
+  }
+  TableLock table_lock(log_dir, "Delta");
   const std::vector<std::string> versions = list_delta_versions(log_dir);
   const std::set<std::string> referenced = delta_logged_files(versions);
   std::vector<std::string> parquet;

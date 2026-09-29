@@ -1,0 +1,10 @@
+servico MLOps:
+  porta: 8481
+  rota post "/predizer":
+    variante: "estavel"
+    peso: 100
+    limite_requisicoes: 1
+    passos:
+      - responder:
+          dados:
+            variante: variante

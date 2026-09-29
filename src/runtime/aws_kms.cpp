@@ -167,7 +167,7 @@ void decode_plaintext(Value& response, std::array<std::uint8_t, 32>& plaintext) 
   }
   std::string decoded;
   const bool valid = base64_decode(field->s, decoded);
-  wipe(field->s);
+  field->s.secure_clear();
   if (!valid || decoded.size() != plaintext.size()) {
     wipe(decoded);
     die("AWS KMS retornou uma data key que nao e AES-256");

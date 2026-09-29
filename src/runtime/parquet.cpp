@@ -1,9 +1,11 @@
 #include "runtime/parquet.hpp"
+#include "runtime/parquet_key_provider.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <deque>
@@ -598,7 +600,17 @@ enum PEncoding : int {
   E_RLE = 3,
   E_RLE_DICTIONARY = 8,
 };
-enum PCodec : int { C_NONE = 0, C_SNAPPY = 1, C_GZIP = 2, C_ZSTD = 6 };
+// Valores definidos pelo enum CompressionCodec do formato Parquet.
+// LZ4_RAW (7) e Brotli (4) sao opcionais porque suas bibliotecas podem nao
+// estar instaladas no ambiente do executavel.
+enum PCodec : int {
+  C_NONE = 0,
+  C_SNAPPY = 1,
+  C_GZIP = 2,
+  C_BROTLI = 4,
+  C_ZSTD = 6,
+  C_LZ4_RAW = 7
+};
 enum PPageType : int { PG_DATA = 0, PG_DICTIONARY = 2, PG_DATA_V2 = 3 };
 
 struct Column {
@@ -2002,6 +2014,160 @@ std::string unzstd_payload(const std::string& in, const std::string& col, std::s
   die("coluna '" + col + "': falha ao descomprimir pagina zstd");
 }
 
+// LZ4_RAW e carregado dinamicamente para manter o binario utilizavel em
+// ambientes que so precisam de gzip/snappy/zstd. O codec Parquet e o formato
+// de bloco cru do LZ4, sem frame LZ4.
+struct Lz4Api {
+  void* lib = nullptr;
+  int (*compress_bound)(int) = nullptr;
+  int (*compress_default)(const char*, char*, int, int) = nullptr;
+  int (*decompress_safe)(const char*, char*, int, int) = nullptr;
+};
+
+const Lz4Api& lz4() {
+  static const Lz4Api instance = [] {
+    Lz4Api a;
+#if defined(_WIN32)
+    a.lib = tilt_dlopen("liblz4.dll");
+    if (!a.lib) a.lib = tilt_dlopen("lz4.dll");
+#else
+    a.lib = tilt_dlopen("liblz4.so.1");
+    if (!a.lib) a.lib = tilt_dlopen("liblz4.so");
+    if (!a.lib) a.lib = tilt_dlopen("liblz4.1.dylib");
+    if (!a.lib) a.lib = tilt_dlopen("liblz4.dylib");
+#endif
+    if (!a.lib) return a;
+    const bool ok = bind_zstdsym(a.lib, a.compress_bound, "LZ4_compressBound") &&
+                    bind_zstdsym(a.lib, a.compress_default, "LZ4_compress_default") &&
+                    bind_zstdsym(a.lib, a.decompress_safe, "LZ4_decompress_safe");
+    if (!ok) {
+      tilt_dlclose(a.lib);
+      a = Lz4Api{};
+    }
+    return a;
+  }();
+  return instance;
+}
+
+std::string lz4_ausente(const std::string& col) {
+  return "coluna '" + col +
+         "': lz4_raw requer liblz4 (liblz4.so.1, liblz4.dylib ou lz4.dll), "
+         "que nao foi encontrada; instale o pacote lz4";
+}
+
+std::string lz4_payload(const std::string& in, const std::string& col) {
+  const Lz4Api& l = lz4();
+  if (!l.lib) die(lz4_ausente(col));
+  if (in.size() > static_cast<std::size_t>(INT_MAX)) {
+    die("coluna '" + col + "': pagina lz4_raw maior que INT_MAX");
+  }
+  const int input_size = static_cast<int>(in.size());
+  const int bound = l.compress_bound(input_size);
+  if (bound <= 0) die("coluna '" + col + "': LZ4_compressBound falhou");
+  std::string out(static_cast<std::size_t>(bound), '\0');
+  const int n = l.compress_default(in.data(), out.data(), input_size, bound);
+  if (n <= 0) die("coluna '" + col + "': falha ao comprimir pagina lz4_raw");
+  out.resize(static_cast<std::size_t>(n));
+  return out;
+}
+
+std::string unlz4_payload(const std::string& in, const std::string& col, std::size_t expected) {
+  const Lz4Api& l = lz4();
+  if (!l.lib) die(lz4_ausente(col));
+  if (expected == 0 || expected > static_cast<std::size_t>(INT_MAX) ||
+      in.size() > static_cast<std::size_t>(INT_MAX)) {
+    die("coluna '" + col + "': tamanho invalido para pagina lz4_raw");
+  }
+  std::string out(expected, '\0');
+  const int n = l.decompress_safe(in.data(), out.data(), static_cast<int>(in.size()),
+                                  static_cast<int>(expected));
+  if (n < 0) die("coluna '" + col + "': pagina lz4_raw invalida");
+  out.resize(static_cast<std::size_t>(n));
+  return out;
+}
+
+// Brotli tambem e opcional. As assinaturas usam apenas tipos C estaveis, sem
+// incluir headers da dependencia no build do Tilt.
+struct BrotliApi {
+  void* enc_lib = nullptr;
+  void* dec_lib = nullptr;
+  std::size_t (*max_compressed_size)(std::size_t) = nullptr;
+  int (*encoder_compress)(int, int, int, std::size_t, const std::uint8_t*,
+                          std::size_t*, std::uint8_t*) = nullptr;
+  int (*decoder_decompress)(std::size_t, const std::uint8_t*, std::size_t*,
+                            std::uint8_t*) = nullptr;
+};
+
+const BrotliApi& brotli() {
+  static const BrotliApi instance = [] {
+    BrotliApi a;
+#if defined(_WIN32)
+    a.enc_lib = tilt_dlopen("brotlienc.dll");
+    a.dec_lib = tilt_dlopen("brotlidec.dll");
+#else
+    a.enc_lib = tilt_dlopen("libbrotlienc.so.1");
+    if (!a.enc_lib) a.enc_lib = tilt_dlopen("libbrotlienc.so");
+    if (!a.enc_lib) a.enc_lib = tilt_dlopen("libbrotlienc.1.dylib");
+    if (!a.enc_lib) a.enc_lib = tilt_dlopen("libbrotlienc.dylib");
+    a.dec_lib = tilt_dlopen("libbrotlidec.so.1");
+    if (!a.dec_lib) a.dec_lib = tilt_dlopen("libbrotlidec.so");
+    if (!a.dec_lib) a.dec_lib = tilt_dlopen("libbrotlidec.1.dylib");
+    if (!a.dec_lib) a.dec_lib = tilt_dlopen("libbrotlidec.dylib");
+#endif
+    const bool ok = a.enc_lib && a.dec_lib &&
+                    bind_zstdsym(a.enc_lib, a.max_compressed_size,
+                                 "BrotliEncoderMaxCompressedSize") &&
+                    bind_zstdsym(a.enc_lib, a.encoder_compress, "BrotliEncoderCompress") &&
+                    bind_zstdsym(a.dec_lib, a.decoder_decompress, "BrotliDecoderDecompress");
+    if (!ok) {
+      if (a.enc_lib) tilt_dlclose(a.enc_lib);
+      if (a.dec_lib) tilt_dlclose(a.dec_lib);
+      a = BrotliApi{};
+    }
+    return a;
+  }();
+  return instance;
+}
+
+std::string brotli_ausente(const std::string& col) {
+  return "coluna '" + col +
+         "': brotli requer libbrotlienc e libbrotlidec, que nao foram "
+         "encontradas; instale o pacote brotli";
+}
+
+std::string brotli_payload(const std::string& in, const std::string& col) {
+  const BrotliApi& b = brotli();
+  if (!b.enc_lib || !b.dec_lib) die(brotli_ausente(col));
+  const std::size_t bound = b.max_compressed_size(in.size());
+  if (bound == 0) die("coluna '" + col + "': BrotliEncoderMaxCompressedSize falhou");
+  std::string out(bound, '\0');
+  std::size_t encoded = bound;
+  // qualidade 5 oferece uma boa relacao entre custo de CPU e tamanho; modo
+  // genérico evita assumir texto ou UTF-8 para colunas binarias.
+  if (!b.encoder_compress(5, 22, 0, in.size(),
+                          reinterpret_cast<const std::uint8_t*>(in.data()), &encoded,
+                          reinterpret_cast<std::uint8_t*>(out.data()))) {
+    die("coluna '" + col + "': falha ao comprimir pagina brotli");
+  }
+  out.resize(encoded);
+  return out;
+}
+
+std::string unbrotli_payload(const std::string& in, const std::string& col, std::size_t expected) {
+  const BrotliApi& b = brotli();
+  if (!b.enc_lib || !b.dec_lib) die(brotli_ausente(col));
+  if (expected == 0) die("coluna '" + col + "': tamanho ausente para pagina brotli");
+  std::string out(expected, '\0');
+  std::size_t decoded = expected;
+  const int result = b.decoder_decompress(
+      in.size(), reinterpret_cast<const std::uint8_t*>(in.data()), &decoded,
+      reinterpret_cast<std::uint8_t*>(out.data()));
+  // BROTLI_DECODER_RESULT_SUCCESS = 1.
+  if (result != 1) die("coluna '" + col + "': pagina brotli invalida");
+  out.resize(decoded);
+  return out;
+}
+
 std::string decompress_payload(std::string payload, int codec, const std::string& col,
                                std::size_t expected = 0) {
   if (codec == C_GZIP) return gunzip_payload(payload, col);
@@ -2012,14 +2178,18 @@ std::string decompress_payload(std::string payload, int codec, const std::string
       die("coluna '" + col + "': stream snappy invalido (" + e.what() + ")");
     }
   }
+  if (codec == C_BROTLI) return unbrotli_payload(payload, col, expected);
   if (codec == C_ZSTD) return unzstd_payload(payload, col, expected);
+  if (codec == C_LZ4_RAW) return unlz4_payload(payload, col, expected);
   return payload;
 }
 
 std::string compress_payload(const std::string& payload, int codec, const std::string& col) {
   if (codec == C_GZIP) return gzip_payload(payload, col);
   if (codec == C_SNAPPY) return snappy_compress_literals(payload);
+  if (codec == C_BROTLI) return brotli_payload(payload, col);
   if (codec == C_ZSTD) return zstd_payload(payload, col);
+  if (codec == C_LZ4_RAW) return lz4_payload(payload, col);
   return payload;
 }
 
@@ -2435,9 +2605,10 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
     else out.push_back(std::move(value));
   };
   const std::string ctx = "coluna '" + cd.name + "'";
-  if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY && cm.codec != C_ZSTD) {
+  if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY &&
+      cm.codec != C_BROTLI && cm.codec != C_ZSTD && cm.codec != C_LZ4_RAW) {
     die(ctx + ": codec " + std::to_string(cm.codec) +
-        " nao suportado (suportados: sem compressao, gzip/deflate, snappy, zstd)");
+        " nao suportado (suportados: sem compressao, gzip/deflate, snappy, brotli, zstd, lz4_raw)");
   }
   const int max_def = cd.max_def;
   const int max_rep = cd.max_rep;
@@ -2755,6 +2926,144 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           emit_row(Value::nulo());
         }
         if (row_def) row_def->push_back(def);
+      }
+      continue;
+    }
+    // Listas escalares com quatro ou mais niveis. Os niveis Dremel sao
+    // regulares: cada grupo LIST acrescenta um nivel pela presenca do grupo
+    // REPEATED e, quando opcional, mais um pela presenca do proprio grupo.
+    // A remontagem abaixo acompanha o caminho de listas corrente em vez de
+    // codificar uma profundidade fixa.
+    if (cd.nesting_depth >= 4 && cd.nested_list) {
+      const int depth = cd.nesting_depth;
+      std::vector<int> base(static_cast<std::size_t>(depth));
+      std::vector<int> empty_def(static_cast<std::size_t>(depth));
+      std::vector<int> present_def(static_cast<std::size_t>(depth));
+      int cur_base = cd.def_base;
+      for (int level = 0; level < depth; ++level) {
+        base[static_cast<std::size_t>(level)] = cur_base;
+        const int optional = cd.nullable_per_level[static_cast<std::size_t>(level)] ? 1 : 0;
+        empty_def[static_cast<std::size_t>(level)] = cur_base + optional;
+        present_def[static_cast<std::size_t>(level)] = cur_base + optional + 1;
+        cur_base = present_def[static_cast<std::size_t>(level)];
+      }
+      const int element_null_def = cd.elem_nullable ? max_def - 1 : -1;
+
+      std::size_t vi = 0;
+      std::size_t k = 0;
+      const std::size_t npg = static_cast<std::size_t>(page_values);
+      bool have_row = false;
+      bool top_finished = false;
+      Value row = Value::lista();
+      int row_max = 0;
+      std::vector<long> path(static_cast<std::size_t>(depth - 1), -1);
+
+      auto list_at = [&](int level) -> ValueList* {
+        if (level < 0 || level >= depth || row.kind != ValueKind::Lista) return nullptr;
+        Value* current = &row;
+        for (int parent = 0; parent < level; ++parent) {
+          const long index = path[static_cast<std::size_t>(parent)];
+          if (index < 0 || !current->list_ref() ||
+              static_cast<std::size_t>(index) >= current->list_ref()->size()) {
+            return nullptr;
+          }
+          current = &(*current->list_ref())[static_cast<std::size_t>(index)];
+          if (current->kind != ValueKind::Lista) return nullptr;
+        }
+        return current->list_ref().get();
+      };
+      auto ensure_path = [&](int deepest) {
+        for (int level = 1; level <= deepest; ++level) {
+          ValueList* parent = list_at(level - 1);
+          if (!parent) die(ctx + ": caminho de lista inconsistente");
+          long& selected = path[static_cast<std::size_t>(level - 1)];
+          if (selected < 0) {
+            parent->push_back(Value::lista());
+            selected = static_cast<long>(parent->size() - 1);
+          }
+        }
+      };
+      auto flush = [&] {
+        if (!have_row) return;
+        emit_row(std::move(row));
+        if (row_def) row_def->push_back(row_max);
+        have_row = false;
+      };
+
+      while (k < npg) {
+        const std::uint32_t rep = reps[k];
+        const int def = static_cast<int>(defs[k]);
+        if (rep == 0) {
+          flush();
+          have_row = true;
+          row = Value::lista();
+          path.assign(static_cast<std::size_t>(depth - 1), -1);
+          top_finished = false;
+          row_max = def;
+        } else if (!have_row || top_finished) {
+          die(ctx + ": repetition level apos uma linha vazia/nula em lista aninhada");
+        }
+        row_max = std::max(row_max, def);
+        if (rep > 0) {
+          if (rep < static_cast<std::uint32_t>(depth)) {
+            std::fill(path.begin() + static_cast<std::ptrdiff_t>(rep - 1), path.end(), -1);
+          }
+        }
+
+        // O primeiro nivel pode ser nulo ou vazio e encerra a linha atual.
+        if (def < present_def[0]) {
+          if (def < empty_def[0]) {
+            if (!cd.nullable_per_level[0]) {
+              die(ctx + ": definition level invalido para lista externa");
+            }
+            row = Value::nulo();
+          } else {
+            row = Value::lista();
+          }
+          top_finished = true;
+          ++k;
+          continue;
+        }
+
+        int deficient = -1;
+        for (int level = 1; level < depth; ++level) {
+          if (def < present_def[static_cast<std::size_t>(level)]) {
+            deficient = level;
+            break;
+          }
+        }
+        if (deficient >= 1) {
+          ensure_path(deficient - 1);
+          ValueList* parent = list_at(deficient - 1);
+          if (!parent) die(ctx + ": caminho de lista inconsistente");
+          const bool is_null = def < empty_def[static_cast<std::size_t>(deficient)];
+          if (is_null && !cd.nullable_per_level[static_cast<std::size_t>(deficient)]) {
+            die(ctx + ": definition level invalido para lista interna");
+          }
+          parent->push_back(is_null ? Value::nulo() : Value::lista());
+          path[static_cast<std::size_t>(deficient - 1)] =
+              static_cast<long>(parent->size() - 1);
+          std::fill(path.begin() + static_cast<std::ptrdiff_t>(deficient), path.end(), -1);
+          ++k;
+          continue;
+        }
+
+        ensure_path(depth - 1);
+        ValueList* leaf_list = list_at(depth - 1);
+        if (!leaf_list) die(ctx + ": caminho de lista folha inconsistente");
+        if (def == max_def) {
+          if (vi >= vals.size()) die(ctx + ": valores definidos insuficientes");
+          leaf_list->push_back(std::move(vals[vi++]));
+        } else if (element_null_def >= 0 && def == element_null_def) {
+          leaf_list->push_back(Value::nulo());
+        } else {
+          die(ctx + ": definition level inesperado em lista aninhada");
+        }
+        ++k;
+      }
+      flush();
+      if (vi != vals.size()) {
+        die(ctx + ": valores definidos excedentes em lista aninhada");
       }
       continue;
     }
@@ -3510,22 +3819,66 @@ void parquet_write_single(const std::string& path, const Value& tabela,
   aplicar_tipos(cols, opts.tipos);
   const std::size_t nrows = cols[0].rows;
   const int codec = opts.codec;
-  if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY && codec != C_ZSTD) {
+  if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY &&
+      codec != C_BROTLI && codec != C_ZSTD && codec != C_LZ4_RAW) {
     die("codec " + std::to_string(codec) +
-        " invalido (use 0=sem compressao, 1=snappy, 2=gzip, 6=zstd)");
+        " invalido (use 0=sem compressao, 1=snappy, 2=gzip, 4=brotli, 6=zstd, 7=lz4_raw)");
   }
 
   ParquetCrypto crypto;
-  if (!opts.chave.empty() && !opts.chave_kms.empty()) {
-    die("use 'chave' ou 'chave_kms', nao ambos");
+  const int key_sources = (!opts.chave.empty() ? 1 : 0) + (!opts.chave_kms.empty() ? 1 : 0) +
+                          (!opts.chave_env.empty() ? 1 : 0) + (!opts.chave_arquivo.empty() ? 1 : 0) +
+                          (!opts.chave_azure.empty() ? 1 : 0) + (!opts.chave_gcp.empty() ? 1 : 0) +
+                          (!opts.chave_vault.empty() ? 1 : 0);
+  if (key_sources > 1) {
+    die("use apenas um provedor entre chave, chave_kms, chave_env, chave_arquivo, "
+        "chave_azure, chave_gcp e chave_vault");
   }
   const bool local_key = !opts.chave.empty();
   const bool kms_key = !opts.chave_kms.empty();
-  const bool encrypted = local_key || kms_key;
+  const bool env_key = !opts.chave_env.empty();
+  const bool file_key = !opts.chave_arquivo.empty();
+  const bool azure_key = !opts.chave_azure.empty();
+  const bool gcp_key = !opts.chave_gcp.empty();
+  const bool vault_key = !opts.chave_vault.empty();
+  const bool encrypted = local_key || kms_key || env_key || file_key || azure_key || gcp_key || vault_key;
   if (encrypted) {
     if (local_key) {
       crypto.key = parquet_key(opts.chave);
       crypto.key_metadata = "tilt-local-key-v1";
+    } else if (env_key) {
+      const char* secret = std::getenv(opts.chave_env.c_str());
+      if (!secret || !*secret) {
+        die("provedor de chave env: variavel '" + opts.chave_env + "' nao definida");
+      }
+      crypto.key = parquet_key(secret);
+      Value metadata = Value::mapa();
+      metadata.map_ref()->set("provider", Value::texto("tilt-env-v1"));
+      metadata.map_ref()->set("env", Value::texto(opts.chave_env));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    } else if (file_key) {
+      std::ifstream key_file(opts.chave_arquivo, std::ios::binary);
+      if (!key_file) die("provedor de chave arquivo: nao foi possivel abrir '" + opts.chave_arquivo + "'");
+      std::string secret((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
+      while (!secret.empty() && (secret.back() == '\n' || secret.back() == '\r')) secret.pop_back();
+      if (secret.empty()) die("provedor de chave arquivo: arquivo vazio");
+      crypto.key = parquet_key(secret);
+      Value metadata = Value::mapa();
+      metadata.map_ref()->set("provider", Value::texto("tilt-file-v1"));
+      metadata.map_ref()->set("path", Value::texto(opts.chave_arquivo));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    } else if (azure_key || gcp_key || vault_key) {
+      const std::string provider = azure_key ? "azure-key-vault-v1" :
+                                   (gcp_key ? "gcp-kms-v1" : "vault-transit-v1");
+      const std::string key_id = azure_key ? opts.chave_azure : (gcp_key ? opts.chave_gcp : opts.chave_vault);
+      std::string ciphertext;
+      std::string resolved_key_id;
+      parquet_cloud_generate(provider, key_id, crypto.key, ciphertext, resolved_key_id);
+      Value metadata = Value::mapa();
+      metadata.map_ref()->set("provider", Value::texto(provider));
+      metadata.map_ref()->set("key_id", Value::texto(resolved_key_id));
+      metadata.map_ref()->set("ciphertext", Value::texto(ciphertext));
+      crypto.key_metadata = json_dump_compacto(metadata);
     } else {
       std::string ciphertext_blob;
       std::string resolved_key_id;
@@ -3858,7 +4211,8 @@ void parquet_write_single(const std::string& path, const Value& tabela,
     fw.struct_end();
   }
   const char* codec_nome = codec == C_GZIP ? "gzip" : codec == C_SNAPPY ? "snappy" :
-                           codec == C_ZSTD ? "zstd" : "sem compressao";
+                           codec == C_BROTLI ? "brotli" : codec == C_ZSTD ? "zstd" :
+                           codec == C_LZ4_RAW ? "lz4_raw" : "sem compressao";
   fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain/dictionary, paginas ") +
                        (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
                        ", opcionais com nulos, listas" +
@@ -4207,7 +4561,15 @@ void append_struct_row(ColumnarColumn& target, const RField& field, std::size_t 
     if (child.is_struct && !child.struct_list && !child.is_map) {
       append_struct_row(out, child, row, columns, coldefs, defined);
     } else {
-      out.append(defined ? montar_no(child, row, columns, coldefs) : Value::nulo());
+      if (!defined) {
+        out.append_null();
+      } else if (!child.is_list && !child.struct_list && !child.is_map && child.leaf_idx >= 0) {
+        const auto& values = columns[static_cast<std::size_t>(child.leaf_idx)];
+        if (row >= values.size()) die("coluna '" + child.name + "' tem menos valores que 'num_rows'");
+        out.append_ref(values[row]);
+      } else {
+        out.append(montar_no(child, row, columns, coldefs));
+      }
     }
   }
 }
@@ -4238,21 +4600,26 @@ void append_struct_list_row(ColumnarColumn& target, const RField& field, std::si
   if (target.offsets.empty()) target.offsets.push_back(0);
   for (std::size_t element = 0; element < tamanho; ++element) {
     bool algum = false;
-    std::vector<Value> cells;
-    cells.reserve(field.children.size());
     for (const RField& child : field.children) {
       const auto& values = columns[static_cast<std::size_t>(child.leaf_idx)];
-      Value value = Value::nulo();
+      const Value* value = nullptr;
       if (row < values.size() && values[row].kind == ValueKind::Lista && values[row].list_ref() &&
           element < values[row].list_ref()->size()) {
-        value = (*values[row].list_ref())[element];
+        value = &(*values[row].list_ref())[element];
       }
-      if (value.kind != ValueKind::Nulo) algum = true;
-      cells.push_back(std::move(value));
+      if (value && value->kind != ValueKind::Nulo) algum = true;
     }
     target.elements->nulls.push_back((field.elem_struct_nullable && !algum) ? 1 : 0);
-    for (std::size_t i = 0; i < cells.size(); ++i)
-      target.elements->fields[i]->append(std::move(cells[i]));
+    for (std::size_t i = 0; i < field.children.size(); ++i) {
+      const RField& child = field.children[i];
+      const auto& values = columns[static_cast<std::size_t>(child.leaf_idx)];
+      if (row < values.size() && values[row].kind == ValueKind::Lista && values[row].list_ref() &&
+          element < values[row].list_ref()->size()) {
+        target.elements->fields[i]->append_ref((*values[row].list_ref())[element]);
+      } else {
+        target.elements->fields[i]->append_null();
+      }
+    }
   }
   target.offsets.push_back(target.offsets.back() + tamanho);
 }
@@ -4326,13 +4693,48 @@ ParsedParquetCrypto parse_crypto_metadata(const std::string& file, std::size_t s
     const Value* provider = metadata.map_ref() ? metadata.map_ref()->find("provider") : nullptr;
     const Value* key_id = metadata.map_ref() ? metadata.map_ref()->find("key_id") : nullptr;
     const Value* blob = metadata.map_ref() ? metadata.map_ref()->find("ciphertext_blob") : nullptr;
+    const Value* cloud_ciphertext = metadata.map_ref() ? metadata.map_ref()->find("ciphertext") : nullptr;
     if (metadata.kind != ValueKind::Mapa || !metadata.map_ref() || !provider ||
-        provider->kind != ValueKind::Texto || provider->s != "aws-kms-v1" || !key_id ||
-        key_id->kind != ValueKind::Texto || key_id->s.empty() || !blob ||
-        blob->kind != ValueKind::Texto || blob->s.empty()) {
-      die("key metadata AWS KMS invalido");
+        provider->kind != ValueKind::Texto) {
+      die("key metadata Parquet invalido");
     }
-    aws_kms_decrypt_data_key(key_id->s, blob->s, out.material.key);
+    if (provider->s == "aws-kms-v1") {
+      if (!key_id || key_id->kind != ValueKind::Texto || key_id->s.empty() || !blob ||
+          blob->kind != ValueKind::Texto || blob->s.empty()) {
+        die("key metadata AWS KMS invalido");
+      }
+      aws_kms_decrypt_data_key(key_id->s, blob->s, out.material.key);
+    } else if (provider->s == "azure-key-vault-v1" || provider->s == "gcp-kms-v1" ||
+               provider->s == "vault-transit-v1") {
+      if (!key_id || key_id->kind != ValueKind::Texto || key_id->s.empty() ||
+          !cloud_ciphertext || cloud_ciphertext->kind != ValueKind::Texto || cloud_ciphertext->s.empty()) {
+        die("key metadata cloud invalido");
+      }
+      parquet_cloud_decrypt(provider->s, key_id->s, cloud_ciphertext->s, out.material.key);
+    } else if (provider->s == "tilt-env-v1") {
+      const Value* env = metadata.map_ref()->find("env");
+      if (!env || env->kind != ValueKind::Texto || env->s.empty()) {
+        die("key metadata env invalido");
+      }
+      const char* secret = std::getenv(env->s.c_str());
+      if (!secret || !*secret) {
+        die("arquivo Parquet criptografado; defina " + env->s + " para ler a chave");
+      }
+      out.material.key = parquet_key(secret);
+    } else if (provider->s == "tilt-file-v1") {
+      const Value* path = metadata.map_ref()->find("path");
+      if (!path || path->kind != ValueKind::Texto || path->s.empty()) {
+        die("key metadata arquivo invalido");
+      }
+      std::ifstream key_file(path->s, std::ios::binary);
+      if (!key_file) die("nao foi possivel abrir o arquivo de chave '" + path->s + "'");
+      std::string secret((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
+      while (!secret.empty() && (secret.back() == '\n' || secret.back() == '\r')) secret.pop_back();
+      if (secret.empty()) die("arquivo de chave vazio");
+      out.material.key = parquet_key(secret);
+    } else {
+      die("provedor de chave Parquet nao suportado: " + provider->s);
+    }
   }
   return out;
 }
@@ -4760,6 +5162,43 @@ LeitorParquet abrir_parquet(const std::string& path) {
       die("coluna '" + col + "': FIXED_LEN_BYTE_ARRAY sem type_length");
     }
   };
+  // Caminha pela arvore LIST/element recursivamente. O leitor historico tinha
+  // branches especiais para duas e tres listas; manter a forma da arvore aqui
+  // permite decodificar qualquer profundidade sem aumentar a tabela de casos.
+  struct ListaEscalarSchema {
+    std::vector<bool> opcionais;
+    int folha = -1;
+    int base_folha = 0;
+  };
+  std::function<void(int, int, ListaEscalarSchema&)> parse_lista_escalar;
+  parse_lista_escalar = [&](int list_idx, int base, ListaEscalarSchema& out) {
+    const SchemaElem& grupo = selem[static_cast<std::size_t>(list_idx)];
+    if (grupo.type >= 0 || (grupo.converted != 3 && !grupo.logical_list)) {
+      die("lista aninhada: grupo LIST esperado");
+    }
+    if (grupo.rep > 1) die("lista aninhada: repetition_type invalido");
+    out.opcionais.push_back(grupo.rep == 1);
+    const std::vector<int> filhos_grupo = children_of(list_idx);
+    if (filhos_grupo.size() != 1) die("lista aninhada: grupo LIST deve ter um filho 'list'");
+    const int list_node = filhos_grupo[0];
+    const SchemaElem& repetido = selem[static_cast<std::size_t>(list_node)];
+    if (repetido.rep != 2) die("lista aninhada: filho 'list' deve ser REPEATED");
+    const std::vector<int> filhos_element = children_of(list_node);
+    if (filhos_element.size() != 1) die("lista aninhada: grupo 'list' deve ter um filho 'element'");
+    const int element_node = filhos_element[0];
+    const SchemaElem& element = selem[static_cast<std::size_t>(element_node)];
+    const int child_base = base + 1 + (grupo.rep == 1 ? 1 : 0);
+    if (element.type >= 0) {
+      check_leaf_type(grupo.name, element.type);
+      out.folha = element_node;
+      out.base_folha = child_base;
+      return;
+    }
+    if (element.converted != 3 && !element.logical_list) {
+      die("lista aninhada: elemento nao e uma lista escalar");
+    }
+    parse_lista_escalar(element_node, child_base, out);
+  };
   // Arvore de campos lidos do schema (Fase 12-5a): escalares, listas e
   // structs aninhados. `max_def/max_rep` acumulam os niveis dos grupos
   // ancestrais (struct OPTIONAL soma 1, como o outer das listas).
@@ -4884,6 +5323,29 @@ LeitorParquet abrir_parquet(const std::string& path) {
         return f;
       }
       if (el.type < 0) {
+        // A partir do quarto nivel, usa a arvore recursiva. A codificacao de
+        // niveis Dremel e a mesma das listas de dois/tres niveis; somente a
+        // remontagem e generica (o branch legado abaixo permanece para manter
+        // exatamente o tratamento de nulos dos formatos antigos).
+        if (el.converted == 3 || el.logical_list) {
+          ListaEscalarSchema shape;
+          parse_lista_escalar(idx, def_base, shape);
+          if (shape.opcionais.size() >= 4) {
+            const SchemaElem& folha = selem[static_cast<std::size_t>(shape.folha)];
+            resolve_conv(e.name, folha, f.leaf_type, f.conv, f.dec_scale, f.fixed_len);
+            f.nesting_depth = static_cast<int>(shape.opcionais.size());
+            f.nullable_per_level = std::move(shape.opcionais);
+            f.nested_list = true;
+            f.max_rep = f.nesting_depth;
+            f.def_base = def_base;
+            f.outer_optional = f.nullable_per_level[0];
+            f.elem_nullable = folha.rep == 1;
+            f.max_def = shape.base_folha + (f.elem_nullable ? 1 : 0);
+            f.inner_nullable = f.nesting_depth > 1 && f.nullable_per_level[1];
+            f.inner2_nullable = f.nesting_depth > 2 && f.nullable_per_level[2];
+            return f;
+          }
+        }
         // Lista de listas (B2a): grupo element com anotacao LIST.
         if (el.rep > 1) {
           die("coluna '" + e.name + "': grupo element com repetition_type invalido");

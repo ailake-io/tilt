@@ -92,9 +92,9 @@ std::vector<VectorHit> pgvector_search(const std::string& url, const std::string
     const Value* id = row.map_ref()->find("id");
     const Value* score = row.map_ref()->find("score");
     const Value* texto = row.map_ref()->find("texto");
-    out.push_back({id && id->kind == ValueKind::Texto ? id->s : "?",
+    out.push_back({id && id->kind == ValueKind::Texto ? id->s.str() : "?",
                    score ? score->as_number() : 0.0,
-                   texto && texto->kind == ValueKind::Texto ? texto->s : ""});
+                   texto && texto->kind == ValueKind::Texto ? texto->s.str() : ""});
   }
   return out;
 }

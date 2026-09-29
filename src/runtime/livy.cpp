@@ -50,7 +50,7 @@ std::string kind_da_lingua(const std::string& lingua) {
 std::string campo_texto(const Value& m, const char* chave) {
   if (m.kind != ValueKind::Mapa || !m.map_ref()) return "";
   const Value* v = m.map_ref()->find(chave);
-  return v && v->kind == ValueKind::Texto ? v->s : "";
+  return v && v->kind == ValueKind::Texto ? v->s.str() : "";
 }
 
 std::int64_t campo_inteiro(const Value& m, const char* chave) {

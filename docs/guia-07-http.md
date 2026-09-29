@@ -108,6 +108,40 @@ Exemplo: servico Seguro com ferramentas: [buscar_documentos] pode chamar
 buscar_documentos(termo: entrada.termo) em suas rotas; outras ferramentas
 recebem erro.
 
+### Limites e rollout por rota
+
+Cada `rota` pode declarar `limite_requisicoes:` (ou `limite_por_minuto:`)
+para limitar requisições por janela de um minuto, `limite_concorrencia:` para
+limitar requisições em voo e `tempo_limite: "5s"` para interromper passos que
+excederem o prazo. Quando o limite é atingido, a resposta é `429` com
+`Retry-After: 60`.
+
+Rotas com o mesmo método e caminho podem formar variantes A/B ou canário:
+
+```tilt check
+servico Predicoes:
+  rota post "/predizer":
+    variante: "estavel"
+    peso: 90
+    passos:
+      - responder:
+          dados: { variante: variante }
+  rota post "/predizer":
+    variante: "canario"
+    peso: 10
+    rollback_erros: 3
+    passos:
+      - responder:
+          dados: { variante: variante }
+```
+
+`peso:` é relativo entre as variantes (0 desativa a variante), e
+`canario: 10` é um atalho para peso 10. A resposta inclui
+`X-Tilt-Variant`. `rollback_erros:` desativa automaticamente a variante após
+esse número de respostas 5xx consecutivas; a próxima seleção usa as variantes
+restantes. O contador é mantido durante a vida do processo e reinicia quando o
+serviço sobe.
+
 ## Subir o serviço
 
 ```bash
@@ -115,6 +149,8 @@ tilt servir servico.tilt --porta 8080
 tilt servir servico.tilt --porta 8080 --requisicoes 3   # atende 3 e sai (testes)
 tilt servir servico.tilt --threads 8                    # pool com 8 workers
 tilt servir servico.tilt --threads 1                    # rotas em série
+tilt servir servico.tilt --modelo churn --stage production \
+  --registro .tilt-modelos                               # pesos do registry local
 ```
 
 No Linux, o servidor usa epoll com sockets não-bloqueantes: várias conexões

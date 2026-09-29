@@ -304,11 +304,15 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   grupos OPTIONAL. Uma coluna só de nulos (ou só de listas vazias) gera
   erro — o tipo não pode ser inferido;
 - **compressão**: `escrever_parquet tabela, "saida.parquet", codec: "gzip"`
-  (padrão), `codec: "snappy"` ou `codec: "zstd"` — o compressor snappy próprio é
+  (padrão), `codec: "snappy"`, `codec: "zstd"`, `codec: "lz4"`/`"lz4_raw"`
+  ou `codec: "brotli"` — o compressor snappy próprio é
   "literal-only" (emite um bloco snappy válido sem matching, sem redução de
   espaço), então qualquer leitor descomprime; a leitura descomprime snappy
   genérico (com matching), gzip/deflate (zlib via `dlopen("libz.so.1")`) e
-  zstd (libzstd via `dlopen`, codec Parquet 6);
+  zstd (libzstd via `dlopen`, codec Parquet 6), LZ4_RAW (liblz4 via `dlopen`,
+  codec Parquet 7) e Brotli (libbrotlienc/libbrotlidec via `dlopen`, codec
+  Parquet 4). LZ4 e Brotli exigem as bibliotecas opcionais no ambiente; sem
+  elas o Tilt informa o pacote ausente e os demais codecs continuam disponíveis;
 - **dictionary**: encoding DICTIONARY automático por coluna quando há
   repetição (dicionário em PLAIN + índices RLE; `dicionario: falso` volta ao
   PLAIN puro);
@@ -327,7 +331,16 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   `AWS_REGION` (padrão `us-east-1`) e, opcionalmente, `AWS_SESSION_TOKEN`;
   a identidade precisa de `kms:GenerateDataKey` e `kms:Decrypt` na chave.
   `KMS_ENDPOINT` permite apontar para um endpoint compatível/local.
-  `chave` e `chave_kms` são mutuamente exclusivas;
+  Para ambientes sem SDK de nuvem, `chave_env: "NOME_DA_VAR"` deriva a chave
+  de uma variável de ambiente e `chave_arquivo: "/run/secrets/parquet.key"`
+  lê um segredo de arquivo; ambos gravam apenas o nome/path do provedor no
+  footer e nunca o segredo. `chave`, `chave_kms`, `chave_env` e
+  `chave_arquivo` são mutuamente exclusivas. Para integrações cloud sem SDK,
+  `chave_azure` recebe a URL completa da chave do Azure Key Vault e usa
+  `AZURE_KEY_VAULT_TOKEN`/`AZURE_ACCESS_TOKEN`; `chave_gcp` recebe o resource
+  name do Cloud KMS e usa `GCP_ACCESS_TOKEN`/`GOOGLE_OAUTH_ACCESS_TOKEN`;
+  `chave_vault` recebe um caminho Transit (por exemplo `transit/minha-chave`)
+  e usa `VAULT_ADDR`/`VAULT_TOKEN`;
 - escrita: encoding **PLAIN** ou **DICTIONARY** (acima). Por padrão há um row
   group; use `row_group: 100_000` (ou `grupo:`) em `escrever_parquet` para
   particionar uma tabela grande em vários grupos no mesmo arquivo. A opção
@@ -341,11 +354,13 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   TIMESTAMP/DECIMAL** (data/hora/timestamp viram texto ISO, decimal vira
   decimal, dictionary pages PLAIN ou PLAIN_DICTIONARY), páginas **PLAIN** e
   **DICTIONARY** (`PLAIN_DICTIONARY`/`RLE_DICTIONARY`) e compressão
-  **gzip/deflate**, **snappy** e **zstd**. Listas com 3+ níveis seguem com
-  erro claro.
+  **gzip/deflate**, **snappy**, **zstd**, **lz4_raw** e **brotli**. Listas
+  escalares nested com quatro ou mais níveis são reconstruídas genericamente;
+  listas de structs com campos compostos continuam limitadas ao caminho
+  suportado pelo leitor.
 
 Exemplo de interoperabilidade com Python (arquivos de outras ferramentas —
-dictionary, gzip/snappy, v2 e listas — são lidos diretamente):
+dictionary, gzip/snappy/zstd/LZ4/Brotli, v2 e listas — são lidos diretamente):
 
 ```python
 import pyarrow as pa, pyarrow.parquet as pq
@@ -425,8 +440,8 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
   sem dictionary e com colunas obrigatórias;
 - limitações: `escrever_delta` sobrescreve a tabela (recria a versão 0);
-  `anexar_delta` pressupõe um único escritor (sem locks nem optimistic
-  concurrency), sem transações concorrentes. **Checkpoint tilt-native (Fase
+  `anexar_delta` usa lock cooperativo e rejeita uma versão já existente, mas
+  não coordena writers externos que não respeitem `.tilt.lock.d`. **Checkpoint tilt-native (Fase
   12-5a)**: a cada 10 versões o append materializa
   `_delta_log/<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` e a leitura
   usa o checkpoint mais recente como base (só os JSONs maiores são
@@ -569,8 +584,7 @@ pipeline iceberg_demo:
   manifest list;
 - limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
   local, sem JDBC), lê o que o tilt escreve (sem garantia de tabelas de
-  outros escritores além do subconjunto validado) e single-writer (sem locks
-  nem optimistic concurrency). No modo REST, `apagar_iceberg` commita via
+  outros escritores além do subconjunto validado). No modo REST, `apagar_iceberg` commita via
   `transactions` (add-snapshot + set-snapshot-ref) como o append.
 
 ### Iceberg REST catalog (opt-in, fase 29)
@@ -626,16 +640,19 @@ operação:
 
 Erros claros: `ICEBERG_URI` ausente com `ICEBERG_CATALOG=rest`, respostas
 não-2xx com o corpo do erro, JSON malformado e tabela inexistente no
-`ler_iceberg` ("tabela `<nome>` não existe no catálogo REST"). Ainda é
-single-writer (sem locks no catálogo) e 1ª passada: sem namespaces além de
-`default`, sem paginação, sem OAuth e com location `file://` apenas. Fluxo
+`ler_iceberg` ("tabela `<nome>` não existe no catálogo REST"). O cliente
+envia `Authorization: Bearer` quando `ICEBERG_OAUTH_TOKEN` (ou
+`ICEBERG_TOKEN`) está definido. Escritas locais usam lock cooperativo
+`.tilt.lock.d` e verificam a versão antes do rename; o requisito
+`assert-current-snapshot-id` do REST fornece a mesma proteção no catálogo.
+Continua sem namespaces além de `default` e com location `file://` apenas. Fluxo
 completo coberto por `tests/iceberg_rest_test.sh` (mock HTTP + validação do
 metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
 
 ### `tilt servir-catalogo`: catálogo REST server (fase 30)
 
 `tilt servir-catalogo <diretorio-raiz> [--porta N] [--prefixo P]` (porta
-default **8191**) sobe um **servidor Iceberg REST Open API read-only** sobre as
+default **8191**) sobe um **servidor Iceberg REST Open API** sobre as
 tabelas Iceberg locais escritas pela tilt (formato Hadoop, subseção acima) —
 uma engine como Spark SQL configura um `SparkCatalog` tipo `rest` com a URI
 apontando para o tilt e lê as tabelas pelo nome, sem HadoopCatalog local:
@@ -647,6 +664,10 @@ tilt servir-catalogo /dados/iceberg --porta 8191
 #   default.vendas_part
 # servir-catalogo: escutando http://127.0.0.1:8191/v1 (root: /dados/iceberg)
 ```
+
+Para exigir autenticação no servidor, defina `ICEBERG_CATALOG_TOKEN`; cada
+requisição precisa trazer `Authorization: Bearer <token>`. O cliente do Tilt
+usa `ICEBERG_OAUTH_TOKEN` ou `ICEBERG_TOKEN` para enviar esse cabeçalho.
 
 ```python
 spark = (SparkSession.builder
@@ -666,8 +687,12 @@ configurável via `--prefixo`, default `/v1`):
 | `GET /v1/config` | `{"defaults":{},"overrides":{}}` |
 | `GET /v1/namespaces` | `[["default"]]` |
 | `GET /v1/namespaces/default` | namespace + properties vazios |
-| `GET /v1/namespaces/default/tables` | identifiers de todas as tabelas |
+| `GET /v1/namespaces/default/tables?page_size=N&page_token=T` | identifiers paginados; a resposta inclui `next-page-token` quando houver mais |
 | `GET /v1/namespaces/default/tables/<tabela>` | loadTable: `metadata-location` + `metadata` do `v<N>.metadata.json` mais recente (mesma regra do modo Hadoop: maior versão parseada do nome) + `config` |
+| `HEAD /v1/namespaces/default/tables/<tabela>` | verifica a existência sem baixar metadata |
+| `POST /v1/namespaces/default/tables` | registra uma tabela cujo metadata já foi gravado no root |
+| `POST /v1/namespaces/default/tables/<tabela>/transactions` | valida `assert-current-snapshot-id` e aceita o commit |
+| `DELETE /v1/namespaces/default/tables/<tabela>` | remove a tabela dentro do root |
 | `GET/HEAD /v1/files/<rel-ao-root>` | bytes do arquivo (metadata.json, manifest `.avro`, data `.parquet`); a forma legada `?path=<abs>` também é aceita |
 
 O loadTable **reescreve** as locations `file://<abs>` do metadata servido
@@ -689,11 +714,13 @@ Spark ler manifest lists pelo FileSystem, suba com **`--sem-reecrita-manifests`*
 (mantém `file://` nas manifest-lists; o caller precisa acessar esses arquivos
 locais, ex.: montando o diretório no mesmo path — como faz
 `tests/spark_catalog_test.sh`). O `metadata-location` continua servido por
-HTTP em todos os casos, e o restante do protocolo REST é idêntico. É **read-only** na 1ª passada: `createTable`/`commit`
-(POST `…/transactions`)/HEAD de tabela respondem **501** com mensagem clara,
+HTTP em todos os casos, e o restante do protocolo REST é idêntico. O servidor
+aceita `createTable`, `transactions` e `DELETE` somente dentro do root e exige
+metadata local válido; conflitos de snapshot respondem HTTP 409. Outras rotas
+de escrita respondem **501** com mensagem clara,
 tabela ou rota inexistente respondem 404 (`NoSuchTableException` /
 `NotFoundException`). Coberto por `tests/iceberg_catalog_test.sh` (cliente
-urllib exercendo o subconjunto + traversal + read-only) e validado com
+urllib exercendo o subconjunto + traversal + escrita controlada) e validado com
 **Spark 3.5 real** via catálogo REST em `tests/spark_catalog_test.sh` (container
 `apache/spark:3.5.3` + `iceberg-spark-runtime`, `--network host` e o dir montado
 no mesmo path absoluto — manifests/data continuam `file://` absolutos).

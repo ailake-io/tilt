@@ -129,7 +129,8 @@ funções que recebam a tabela inteira (não uma linha por vez).
 
 ## PySpark
 
-**1. Arquivos.** O Tilt lê e escreve Parquet (snappy/gzip, listas), Delta e Iceberg,
+**1. Arquivos.** O Tilt lê e escreve Parquet (gzip, snappy, zstd, LZ4_RAW e Brotli,
+quando as bibliotecas opcionais estão disponíveis, além de listas), Delta e Iceberg,
 inclusive particionados, e fala com Spark por Livy (`fonte tipo: spark`). Um pipeline
 Tilt pode alimentar um job Spark, e o contrário, sem nenhum código de ligação:
 

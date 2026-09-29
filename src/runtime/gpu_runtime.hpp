@@ -1,12 +1,16 @@
 #pragma once
 
 #include <cstddef>
+#include <functional>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace tilt::rt {
 
 enum class GpuBackend { Cpu, Cuda, Metal, Fake };
+
+class GpuRuntime;
 
 // Opaque armazenamento persistente no acelerador. O buffer pertence ao
 // GpuRuntime que o criou e deve ser liberado com release(). A API continua
@@ -15,7 +19,18 @@ enum class GpuBackend { Cpu, Cuda, Metal, Fake };
 struct GpuBuffer {
   void* handle = nullptr;
   std::size_t bytes = 0;
+  // Número de elementos float válidos. Mantido separado de bytes para que
+  // operações residentes possam validar dimensões sem repetir metadados.
+  std::size_t elements = 0;
   GpuBackend backend = GpuBackend::Cpu;
+};
+
+struct GpuTensorStorage {
+  GpuBuffer buffer;
+  GpuRuntime* runtime = nullptr;
+  const float* host_data = nullptr;
+  std::size_t host_elements = 0;
+  ~GpuTensorStorage();
 };
 
 // GPU dispatch. The CUDA path binds libcuda + libnvrtc at runtime (tilt_dlopen:
@@ -35,7 +50,9 @@ class GpuRuntime {
   GpuBackend backend() const { return backend_; }
   const std::string& info() const { return info_; }
   bool tensor_core_active() const { return tensor_core_active_; }
-  bool residency_available() const { return backend_ == GpuBackend::Cuda || backend_ == GpuBackend::Metal; }
+  bool residency_available() const {
+    return backend_ == GpuBackend::Cuda || backend_ == GpuBackend::Metal || backend_ == GpuBackend::Fake;
+  }
 
   // Mantém um tensor no device entre operações. O ponteiro de host só é lido
   // durante upload; operações posteriores usam o buffer sem novas cópias.
@@ -44,6 +61,27 @@ class GpuRuntime {
   bool release(GpuBuffer& buffer);
   bool gemm_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c,
                      int m, int k, int n);
+  bool batch_gemm_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c,
+                           int batches, int m, int k, int n);
+  bool conv2d_resident(const GpuBuffer& input, const GpuBuffer& weights, GpuBuffer& output,
+                       int batch, int in_channels, int height, int width, int out_channels,
+                       int kh, int kw, int out_h, int out_w, int stride, int padding,
+                       int dilation);
+  bool relu_resident(GpuBuffer& data, std::size_t count);
+  bool gelu_resident(GpuBuffer& data, std::size_t count);
+  bool add_resident(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c,
+                    std::size_t count);
+  bool add_channel_bias_resident(const GpuBuffer& input, const GpuBuffer& bias,
+                                 GpuBuffer& output, int batches, int channels, int spatial);
+  bool normalize_resident(const GpuBuffer& input, const GpuBuffer& mean,
+                          const GpuBuffer& variance, const GpuBuffer& gamma,
+                          const GpuBuffer& beta, GpuBuffer& output,
+                          int batches, int channels, int spatial, float epsilon);
+  bool maxpool2d_resident(const GpuBuffer& input, GpuBuffer& output,
+                          int batches, int channels, int height, int width,
+                          int window, int stride);
+  bool reduce_sum_resident(const GpuBuffer& input, GpuBuffer& output,
+                           std::size_t count);
   bool batch_gemm(const float* a, const float* b, float* c, int batches, int m, int k, int n);
   bool normalize(const float* input, const float* mean, const float* variance,
                  const float* gamma, const float* beta, float* output,
@@ -97,6 +135,81 @@ class GpuRuntime {
   void* cuda_ctx_ = nullptr;  // opaque CudaState*, allocated by the .cpp
   void* metal_ctx_ = nullptr; // opaque MetalState*, allocated on macOS
   bool tensor_core_active_ = false;
+};
+
+// Grafo pequeno e explícito para encadear operações sem materializar no host.
+// Os buffers pertencem ao chamador e precisam permanecer vivos até execute().
+class GpuGraph {
+ public:
+  explicit GpuGraph(GpuRuntime& runtime = GpuRuntime::instance()) : runtime_(runtime) {}
+  void clear() { operations_.clear(); }
+  std::size_t size() const { return operations_.size(); }
+  void add_relu(GpuBuffer& data, std::size_t count) {
+    operations_.emplace_back([this, &data, count] { return runtime_.relu_resident(data, count); });
+  }
+  void add_gelu(GpuBuffer& data, std::size_t count) {
+    operations_.emplace_back([this, &data, count] { return runtime_.gelu_resident(data, count); });
+  }
+  void add_add(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c, std::size_t count) {
+    operations_.emplace_back([this, &a, &b, &c, count] { return runtime_.add_resident(a, b, c, count); });
+  }
+  void add_gemm(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c, int m, int k, int n) {
+    operations_.emplace_back([this, &a, &b, &c, m, k, n] { return runtime_.gemm_resident(a, b, c, m, k, n); });
+  }
+  void add_batch_gemm(const GpuBuffer& a, const GpuBuffer& b, GpuBuffer& c,
+                      int batches, int m, int k, int n) {
+    operations_.emplace_back([this, &a, &b, &c, batches, m, k, n] {
+      return runtime_.batch_gemm_resident(a, b, c, batches, m, k, n);
+    });
+  }
+  void add_conv2d(const GpuBuffer& input, const GpuBuffer& weights, GpuBuffer& output,
+                  int batch, int in_channels, int height, int width, int out_channels,
+                  int kh, int kw, int out_h, int out_w, int stride, int padding, int dilation) {
+    operations_.emplace_back([this, &input, &weights, &output, batch, in_channels, height, width,
+                              out_channels, kh, kw, out_h, out_w, stride, padding, dilation] {
+      return runtime_.conv2d_resident(input, weights, output, batch, in_channels, height, width,
+                                      out_channels, kh, kw, out_h, out_w, stride, padding,
+                                      dilation);
+    });
+  }
+  void add_channel_bias(const GpuBuffer& input, const GpuBuffer& bias, GpuBuffer& output,
+                        int batches, int channels, int spatial) {
+    operations_.emplace_back([this, &input, &bias, &output, batches, channels, spatial] {
+      return runtime_.add_channel_bias_resident(input, bias, output, batches, channels, spatial);
+    });
+  }
+  void add_normalize(const GpuBuffer& input, const GpuBuffer& mean,
+                     const GpuBuffer& variance, const GpuBuffer& gamma,
+                     const GpuBuffer& beta, GpuBuffer& output, int batches,
+                     int channels, int spatial, float epsilon) {
+    operations_.emplace_back([this, &input, &mean, &variance, &gamma, &beta, &output,
+                              batches, channels, spatial, epsilon] {
+      return runtime_.normalize_resident(input, mean, variance, gamma, beta, output,
+                                         batches, channels, spatial, epsilon);
+    });
+  }
+  void add_maxpool2d(const GpuBuffer& input, GpuBuffer& output, int batches,
+                     int channels, int height, int width, int window, int stride) {
+    operations_.emplace_back([this, &input, &output, batches, channels, height, width,
+                              window, stride] {
+      return runtime_.maxpool2d_resident(input, output, batches, channels, height, width,
+                                         window, stride);
+    });
+  }
+  void add_reduce_sum(const GpuBuffer& input, GpuBuffer& output, std::size_t count) {
+    operations_.emplace_back([this, &input, &output, count] {
+      return runtime_.reduce_sum_resident(input, output, count);
+    });
+  }
+  bool execute() {
+    for (auto& operation : operations_)
+      if (!operation()) return false;
+    return true;
+  }
+
+ private:
+  GpuRuntime& runtime_;
+  std::vector<std::function<bool()>> operations_;
 };
 
 }  // namespace tilt::rt

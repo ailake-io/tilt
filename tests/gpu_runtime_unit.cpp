@@ -9,6 +9,20 @@
 int main() {
   auto& gpu = tilt::rt::GpuRuntime::instance();
   if (gpu.ensure("cpu")) return 1;
+  // O mesmo contrato de grafo deve funcionar antes de qualquer backend GPU.
+  {
+    tilt::rt::GpuBuffer ca, cb, cc;
+    const float cpu_a[] = {-1, 2};
+    const float cpu_b[] = {3, 4};
+    if (!gpu.upload(cpu_a, 2, ca) || !gpu.upload(cpu_b, 2, cb)) return 43;
+    tilt::rt::GpuGraph graph(gpu);
+    graph.add_relu(ca, 2);
+    graph.add_add(ca, cb, cc, 2);
+    if (!graph.execute()) return 44;
+    float cpu_out[2] = {};
+    if (!gpu.download(cc, cpu_out, 2) || cpu_out[0] != 3 || cpu_out[1] != 6 ||
+        !gpu.release(ca) || !gpu.release(cb) || !gpu.release(cc)) return 45;
+  }
   const char* env = std::getenv("TILT_GPU");
   const std::string mode = env ? env : "off";
   if (mode == "metal") {
@@ -84,6 +98,84 @@ int main() {
         !gpu.gemm_resident(da, db, dc, 2, 2, 2) || !gpu.download(dc, rc, 4) ||
         std::abs(rc[0] - 19.0F) > 0.001F || std::abs(rc[3] - 50.0F) > 0.001F ||
         !gpu.release(da) || !gpu.release(db) || !gpu.release(dc)) return 22;
+
+    // Todas as operações abaixo permanecem no device depois do upload. O
+    // mesmo bloco roda no backend fake para garantir que o fallback CPU tenha
+    // exatamente a mesma semântica.
+    tilt::rt::GpuBuffer va, vb, vc, vm, vv, vg, vz, vn, vp, vr;
+    const float ra2[] = {-1, 2, -3, 4};
+    const float rb2[] = {4, 3, 2, 1};
+    const float stats[] = {0, 0};
+    const float vars[] = {1, 1};
+    const float gammas[] = {1, 1};
+    const float betas[] = {0, 0};
+    if (!gpu.upload(ra2, 4, va) || !gpu.upload(rb2, 4, vb) ||
+        !gpu.relu_resident(va, 4) || !gpu.add_resident(va, vb, vc, 4) ||
+        !gpu.upload(stats, 2, vm) || !gpu.upload(vars, 2, vv) ||
+        !gpu.upload(gammas, 2, vg) || !gpu.upload(betas, 2, vz) ||
+        !gpu.normalize_resident(vc, vm, vv, vg, vz, vn, 1, 2, 2, 1e-5F) ||
+        !gpu.reduce_sum_resident(vn, vr, 4)) return 35;
+    float resident_sum = 0;
+    if (!gpu.download(vr, &resident_sum, 1) || std::abs(resident_sum - 16.0F) > 0.001F) return 36;
+    for (auto* buffer : {&va, &vb, &vc, &vm, &vv, &vg, &vz, &vn, &vr})
+      if (!gpu.release(*buffer)) return 37;
+
+    tilt::rt::GpuBuffer pool_in, pool_out;
+    const float pool_values[] = {1, 3, 2, 4, 5, 0, 7, 6, 2, 8, 1, 9, 4, 3, 2, 1};
+    if (!gpu.upload(pool_values, 16, pool_in) ||
+        !gpu.maxpool2d_resident(pool_in, pool_out, 1, 1, 4, 4, 2, 2)) return 43;
+    float pool_result[4] = {};
+    if (!gpu.download(pool_out, pool_result, 4) || pool_result[0] != 5 || pool_result[3] != 9 ||
+        !gpu.release(pool_in) || !gpu.release(pool_out)) return 44;
+
+    tilt::rt::GpuBuffer conv_in, conv_weights, conv_out, conv_bias, conv_biased;
+    const float conv_bias_value[] = {1.0F};
+    if (!gpu.upload(image, 9, conv_in) || !gpu.upload(filter, 4, conv_weights) ||
+        !gpu.conv2d_resident(conv_in, conv_weights, conv_out, 1, 1, 3, 3, 1, 2, 2, 2, 2, 1, 0,
+                             1) ||
+        !gpu.upload(conv_bias_value, 1, conv_bias) ||
+        !gpu.add_channel_bias_resident(conv_out, conv_bias, conv_biased, 1, 1, 4)) return 46;
+    float conv_resident_result[4] = {};
+    if (!gpu.download(conv_biased, conv_resident_result, 4) ||
+        std::abs(conv_resident_result[0] + 3.0F) > 0.001F ||
+        std::abs(conv_resident_result[3] + 3.0F) > 0.001F || !gpu.release(conv_in) ||
+        !gpu.release(conv_weights) || !gpu.release(conv_out) || !gpu.release(conv_bias) ||
+        !gpu.release(conv_biased)) return 47;
+
+    tilt::rt::GpuBuffer ba_dev, bb_dev, bc_dev;
+    const float bat_a[] = {1, 2, 3, 4, 5, 6, 7, 8};
+    const float bat_b[] = {1, 0, 0, 1, 2, 0, 0, 2};
+    if (!gpu.upload(bat_a, 8, ba_dev) || !gpu.upload(bat_b, 8, bb_dev) ||
+        !gpu.batch_gemm_resident(ba_dev, bb_dev, bc_dev, 2, 2, 2, 2)) return 38;
+    float bat_out[8] = {};
+    if (!gpu.download(bc_dev, bat_out, 8) || bat_out[0] != 1 || bat_out[3] != 4 ||
+        bat_out[4] != 10 || bat_out[7] != 16 || !gpu.release(ba_dev) ||
+        !gpu.release(bb_dev) || !gpu.release(bc_dev)) return 39;
+
+    tilt::rt::GpuBuffer ga, gb, gc;
+    const float graph_a[] = {-2, 1, 3, -4};
+    const float graph_b[] = {5, 6, 7, 8};
+    if (!gpu.upload(graph_a, 4, ga) || !gpu.upload(graph_b, 4, gb)) return 40;
+    tilt::rt::GpuGraph graph(gpu);
+    graph.add_relu(ga, 4);
+    graph.add_add(ga, gb, gc, 4);
+    if (graph.size() != 2 || !graph.execute()) return 41;
+    float graph_out[4] = {};
+    if (!gpu.download(gc, graph_out, 4) || graph_out[0] != 5 || graph_out[3] != 8 ||
+        !gpu.release(ga) || !gpu.release(gb) || !gpu.release(gc)) return 42;
+
+    tilt::rt::GpuBuffer gconv_in, gconv_weights, gconv_out, gconv_bias, gconv_biased;
+    if (!gpu.upload(image, 9, gconv_in) || !gpu.upload(filter, 4, gconv_weights) ||
+        !gpu.upload(conv_bias_value, 1, gconv_bias)) return 48;
+    tilt::rt::GpuGraph conv_graph(gpu);
+    conv_graph.add_conv2d(gconv_in, gconv_weights, gconv_out, 1, 1, 3, 3, 1, 2, 2, 2, 2, 1, 0, 1);
+    conv_graph.add_channel_bias(gconv_out, gconv_bias, gconv_biased, 1, 1, 4);
+    if (conv_graph.size() != 2 || !conv_graph.execute()) return 49;
+    float graph_conv_out[4] = {};
+    if (!gpu.download(gconv_biased, graph_conv_out, 4) ||
+        std::abs(graph_conv_out[0] + 3.0F) > 0.001F || !gpu.release(gconv_in) ||
+        !gpu.release(gconv_weights) || !gpu.release(gconv_out) || !gpu.release(gconv_bias) ||
+        !gpu.release(gconv_biased)) return 50;
   }
   float ba[] = {1, 2, 3, 4, 5, 6, 7, 8};
   float bb[] = {1, 0, 0, 1, 2, 0, 0, 2};

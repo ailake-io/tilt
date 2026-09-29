@@ -197,11 +197,11 @@ std::vector<VectorHit> weaviate_search(const std::string& base, const std::strin
     if (!add || add->kind != ValueKind::Mapa || !add->map_ref()) continue;
     const Value* id = add->map_ref()->find("id");
     const Value* dist = add->map_ref()->find("distance");
-    const std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
+    const std::string id_s = id && id->kind == ValueKind::Texto ? id->s.str() : "?";
     const double d = dist && dist->is_number() ? dist->as_number() : 0.0;
     const Value* txt = hit.map_ref()->find("texto");
     // score = 1 - distancia de cosseno
-    out.push_back({id_s, 1.0 - d, txt && txt->kind == ValueKind::Texto ? txt->s : ""});
+    out.push_back({id_s, 1.0 - d, txt && txt->kind == ValueKind::Texto ? txt->s.str() : ""});
   }
   return out;
 }

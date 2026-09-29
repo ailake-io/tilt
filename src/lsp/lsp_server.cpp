@@ -1,5 +1,6 @@
 #include "lsp/lsp_server.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -16,6 +17,7 @@
 #include "diagnostics/diagnostic.hpp"
 #include "lexer/lexer.hpp"
 #include "lsp/completion.hpp"
+#include "lsp/workspace_index.hpp"
 #include "parser/parser.hpp"
 #include "parser/ast.hpp"
 #include "runtime/json.hpp"
@@ -292,6 +294,7 @@ void publish_diagnostics(std::ostream& out, const std::string& uri, const Value&
 
 int run_lsp(std::istream& in, std::ostream& out) {
   std::unordered_map<std::string, std::string> docs;
+  WorkspaceIndex workspace;
   struct DiagnosticCache {
     std::string text;
     Value diagnostics = Value::lista();
@@ -321,6 +324,25 @@ int run_lsp(std::istream& in, std::ostream& out) {
     const Value* params = member(msg, "params");
 
     if (method == "initialize") {
+      if (params) {
+        std::vector<std::string> roots;
+        if (const Value* root_uri = member(*params, "rootUri");
+            root_uri && root_uri->kind == rt::ValueKind::Texto) {
+          roots.push_back(root_uri->s);
+        } else if (const Value* root_path = member(*params, "rootPath");
+                   root_path && root_path->kind == rt::ValueKind::Texto) {
+          roots.push_back("file://" + root_path->s);
+        }
+        if (const Value* folders = member(*params, "workspaceFolders");
+            folders && folders->kind == rt::ValueKind::Lista && folders->list_ref()) {
+          for (const Value& folder : *folders->list_ref()) {
+            if (const Value* folder_uri = member(folder, "uri");
+                folder_uri && folder_uri->kind == rt::ValueKind::Texto)
+              roots.push_back(folder_uri->s);
+          }
+        }
+        workspace.set_roots(std::move(roots));
+      }
       Value caps = Value::mapa();
       caps.map_ref()->set("textDocumentSync", Value::inteiro(1));  // full sync
       Value comp = Value::mapa();
@@ -334,7 +356,7 @@ int run_lsp(std::istream& in, std::ostream& out) {
       caps.map_ref()->set("referencesProvider", Value::logico(true));
       caps.map_ref()->set("renameProvider", Value::logico(true));
       Value diagnostic_provider = Value::mapa();
-      diagnostic_provider.map_ref()->set("interFileDependencies", Value::logico(false));
+      diagnostic_provider.map_ref()->set("interFileDependencies", Value::logico(true));
       diagnostic_provider.map_ref()->set("workspaceDiagnostics", Value::logico(false));
       caps.map_ref()->set("diagnosticProvider", std::move(diagnostic_provider));
       caps.map_ref()->set("documentFormattingProvider", Value::logico(true));
@@ -356,6 +378,7 @@ int run_lsp(std::istream& in, std::ostream& out) {
       if (td) {
         const std::string uri = member_str(*td, "uri");
         docs[uri] = member_str(*td, "text");
+        workspace.upsert(uri, docs[uri]);
         publish_diagnostics(out, uri, diagnostics_for(uri));
       }
     } else if (method == "textDocument/didChange" && params) {
@@ -365,7 +388,15 @@ int run_lsp(std::istream& in, std::ostream& out) {
           !changes->list_ref()->empty()) {
         const std::string uri = member_str(*td, "uri");
         docs[uri] = member_str((*changes->list_ref())[0], "text");
+        workspace.upsert(uri, docs[uri]);
         publish_diagnostics(out, uri, diagnostics_for(uri));
+      }
+    } else if (method == "textDocument/didClose" && params) {
+      const Value* td = member(*params, "textDocument");
+      if (td) {
+        const std::string uri = member_str(*td, "uri");
+        docs.erase(uri);
+        workspace.remove(uri);
       }
     } else if (method == "textDocument/diagnostic" && params) {
       const Value* td = member(*params, "textDocument");
@@ -384,7 +415,33 @@ int run_lsp(std::istream& in, std::ostream& out) {
       const auto items = complete(src, static_cast<std::uint32_t>(l + 1),
                                   static_cast<std::uint32_t>(ch + 1));
       Value arr = Value::lista();
-      for (const auto& it : items) {
+      std::vector<CompletionItem> all_items = items;
+      workspace.refresh();
+      const std::string_view completion_line = src.line_text(static_cast<std::uint32_t>(l + 1));
+      std::size_t completion_pos = static_cast<std::size_t>(std::max<long>(0, ch));
+      if (completion_pos > completion_line.size()) completion_pos = completion_line.size();
+      std::size_t completion_start = completion_pos;
+      while (completion_start > 0) {
+        const unsigned char c = static_cast<unsigned char>(completion_line[completion_start - 1]);
+        if (!(std::isalnum(c) || c == '_')) break;
+        --completion_start;
+      }
+      const std::string completion_prefix(completion_line.substr(
+          completion_start, completion_pos - completion_start));
+      for (const std::string& name : workspace.exported_names()) {
+        if (!completion_prefix.empty() &&
+            (name.size() < completion_prefix.size() ||
+             !std::equal(completion_prefix.begin(), completion_prefix.end(), name.begin(),
+                         [](char a, char b) {
+                           return std::tolower(static_cast<unsigned char>(a)) ==
+                                  std::tolower(static_cast<unsigned char>(b));
+                         })))
+          continue;
+        bool present = false;
+        for (const auto& item : all_items) if (item.label == name) present = true;
+        if (!present) all_items.push_back({name, "name", "simbolo exportado do workspace"});
+      }
+      for (const auto& it : all_items) {
         Value ci = Value::mapa();
         ci.map_ref()->set("label", Value::texto(it.label));
         ci.map_ref()->set("kind", Value::inteiro(completion_kind(it.kind)));
@@ -421,15 +478,23 @@ int run_lsp(std::istream& in, std::ostream& out) {
       const long l = pos ? member_int(*pos, "line") : 0;
       const long ch = pos ? member_int(*pos, "character") : 0;
       SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
+      workspace.refresh();
+      const bool external_symbol = workspace.external_symbol_at(
+          uri, static_cast<std::uint32_t>(l + 1), static_cast<std::uint32_t>(ch + 1));
+      const auto indexed = workspace.definition(uri, static_cast<std::uint32_t>(l + 1),
+                                                static_cast<std::uint32_t>(ch + 1));
       const auto external = imported_definition(uri, std::string(src.text()), l, ch, docs);
-      const Span def = external ? external->span
-          : definition(src, static_cast<std::uint32_t>(l + 1),
-                       static_cast<std::uint32_t>(ch + 1));
+      const bool use_index = indexed && (external_symbol || indexed->uri != uri);
+      const Span def = use_index
+                           ? indexed->span
+                           : (external ? external->span
+                                       : definition(src, static_cast<std::uint32_t>(l + 1),
+                                                     static_cast<std::uint32_t>(ch + 1)));
       if (def.length == 0 && def.line == 0) {
         write_message(out, make_response(id, Value::nulo()));
       } else {
         Value result = Value::mapa();
-        result.map_ref()->set("uri", Value::texto(external ? external->uri : uri));
+        result.map_ref()->set("uri", Value::texto(use_index ? indexed->uri : (external ? external->uri : uri)));
         result.map_ref()->set("range", span_to_range(def));
         write_message(out, make_response(id, std::move(result)));
       }
@@ -446,14 +511,37 @@ int run_lsp(std::istream& in, std::ostream& out) {
         include_declaration = include && include->kind == rt::ValueKind::Logico && include->b;
       }
       SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
-      const auto refs = references(src, static_cast<std::uint32_t>(l + 1),
-                                   static_cast<std::uint32_t>(ch + 1), include_declaration);
+      workspace.refresh();
+      const auto indexed_refs = workspace.references(uri, static_cast<std::uint32_t>(l + 1),
+                                                     static_cast<std::uint32_t>(ch + 1),
+                                                     include_declaration);
+      const bool indexed_cross_file = std::any_of(
+          indexed_refs.begin(), indexed_refs.end(), [&](const WorkspaceLocation& ref) {
+            return ref.uri != uri;
+          });
+      std::vector<WorkspaceLocation> cross_refs;
+      if (indexed_cross_file || workspace.external_symbol_at(
+                                   uri, static_cast<std::uint32_t>(l + 1),
+                                   static_cast<std::uint32_t>(ch + 1))) {
+        cross_refs = indexed_refs;
+      }
       Value result = Value::lista();
-      for (const Span& ref : refs) {
-        Value location = Value::mapa();
-        location.map_ref()->set("uri", Value::texto(uri));
-        location.map_ref()->set("range", span_to_range(ref));
-        result.list_ref()->push_back(std::move(location));
+      if (!cross_refs.empty()) {
+        for (const auto& ref : cross_refs) {
+          Value location = Value::mapa();
+          location.map_ref()->set("uri", Value::texto(ref.uri));
+          location.map_ref()->set("range", span_to_range(ref.span));
+          result.list_ref()->push_back(std::move(location));
+        }
+      } else {
+        const auto refs = references(src, static_cast<std::uint32_t>(l + 1),
+                                     static_cast<std::uint32_t>(ch + 1), include_declaration);
+        for (const Span& ref : refs) {
+          Value location = Value::mapa();
+          location.map_ref()->set("uri", Value::texto(uri));
+          location.map_ref()->set("range", span_to_range(ref));
+          result.list_ref()->push_back(std::move(location));
+        }
       }
       write_message(out, make_response(id, std::move(result)));
     } else if (method == "textDocument/rename" && params) {
@@ -464,13 +552,26 @@ int run_lsp(std::istream& in, std::ostream& out) {
       const long l = pos ? member_int(*pos, "line") : 0;
       const long ch = pos ? member_int(*pos, "character") : 0;
       SourceFile src(uri_to_path(uri), docs.count(uri) ? docs[uri] : std::string());
-      const auto refs = valid_identifier(new_name)
-                            ? references(src, static_cast<std::uint32_t>(l + 1),
-                                         static_cast<std::uint32_t>(ch + 1), true)
-                            : std::vector<Span>();
-      if (refs.empty()) {
-        write_message(out, make_response(id, Value::nulo()));
-      } else {
+      workspace.refresh();
+      const auto indexed_refs = valid_identifier(new_name)
+                                     ? workspace.references(uri, static_cast<std::uint32_t>(l + 1),
+                                                            static_cast<std::uint32_t>(ch + 1), true)
+                                     : std::vector<WorkspaceLocation>();
+      const bool indexed_cross_file = std::any_of(
+          indexed_refs.begin(), indexed_refs.end(), [&](const WorkspaceLocation& ref) {
+            return ref.uri != uri;
+          });
+      if (indexed_refs.empty() || (!indexed_cross_file && !workspace.external_symbol_at(
+                                                          uri, static_cast<std::uint32_t>(l + 1),
+                                                          static_cast<std::uint32_t>(ch + 1)))) {
+        const auto refs = valid_identifier(new_name)
+                              ? references(src, static_cast<std::uint32_t>(l + 1),
+                                           static_cast<std::uint32_t>(ch + 1), true)
+                              : std::vector<Span>();
+        if (refs.empty()) {
+          write_message(out, make_response(id, Value::nulo()));
+          continue;
+        }
         Value edits = Value::lista();
         for (const Span& ref : refs) {
           Value edit = Value::mapa();
@@ -480,6 +581,22 @@ int run_lsp(std::istream& in, std::ostream& out) {
         }
         Value changes = Value::mapa();
         changes.map_ref()->set(uri, std::move(edits));
+        Value result = Value::mapa();
+        result.map_ref()->set("changes", std::move(changes));
+        write_message(out, make_response(id, std::move(result)));
+      } else {
+        Value changes = Value::mapa();
+        for (const auto& ref : indexed_refs) {
+          Value edit = Value::mapa();
+          edit.map_ref()->set("range", span_to_range(ref.span));
+          edit.map_ref()->set("newText", Value::texto(new_name));
+          Value* file_edits = changes.map_ref()->find(ref.uri);
+          if (!file_edits) {
+            changes.map_ref()->set(ref.uri, Value::lista());
+            file_edits = changes.map_ref()->find(ref.uri);
+          }
+          file_edits->list_ref()->push_back(std::move(edit));
+        }
         Value result = Value::mapa();
         result.map_ref()->set("changes", std::move(changes));
         write_message(out, make_response(id, std::move(result)));

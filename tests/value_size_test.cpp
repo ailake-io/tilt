@@ -23,6 +23,18 @@ int main() {
   assert(escalar.kind == ValueKind::Inteiro);
   assert(!escalar.storage);
 
+  Value curto = Value::texto("tilt sso");
+  assert(curto.s.size() == 8);
+  assert(curto.s == "tilt sso");
+  Value longo = Value::texto("texto suficientemente longo para sair do SSO");
+  assert(longo.s.size() > 22);
+  assert(longo.s.find("SSO") != std::string::npos);
+  Value copia = longo;
+  assert(copia.s == longo.s);
+  longo.s.secure_clear();
+  assert(longo.s.empty());
+  assert(!copia.s.empty());
+
   std::cout << sizeof(Value) << "\n";
   return 0;
 }

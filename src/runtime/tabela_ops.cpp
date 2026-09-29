@@ -114,7 +114,7 @@ const Value* schema_campo(const Value& campos, const std::string& nome) {
 std::string campo_tipo(const Value& campo) {
   if (campo.kind != ValueKind::Mapa || !campo.map_ref()) return "texto";
   const Value* tipo = campo.map_ref()->find("tipo");
-  return tipo && tipo->kind == ValueKind::Texto ? tipo->s : "texto";
+  return tipo && tipo->kind == ValueKind::Texto ? tipo->s.str() : "texto";
 }
 
 bool campo_nulavel(const Value& campo) {

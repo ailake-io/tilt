@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "runtime/value.hpp"
@@ -26,6 +28,7 @@ struct LlmConfig {
   double custo_saida_mil = 0.0;
   std::string contabilidade;        // ledger persistente de uso/custo
   std::string observabilidade;       // eventos de prompt/resposta
+  std::string otel_exporter;         // arquivo JSONL de spans (opcional)
   bool registrar_prompts = false;    // opt-in para nao vazar dados sensiveis
 };
 
@@ -117,6 +120,35 @@ class LlmContextoGuard {
  private:
   bool ativo_ = false;
   std::string trace_id_;
+};
+
+// Span estruturado no formato comum aos exporters OpenTelemetry. O arquivo
+// JSONL e opt-in por `observabilidade:`, `otel_exporter:` ou
+// `TILT_OTEL_EXPORTER=file:/caminho`; nenhum dado de prompt e gravado aqui.
+class LlmSpanGuard {
+ public:
+  LlmSpanGuard(const LlmConfig& cfg, std::string nome, std::string tipo = "llm",
+               std::vector<std::pair<std::string, std::string>> atributos = {});
+  ~LlmSpanGuard();
+  LlmSpanGuard(const LlmSpanGuard&) = delete;
+  LlmSpanGuard& operator=(const LlmSpanGuard&) = delete;
+  void erro();
+  const std::string& span_id() const { return span_id_; }
+ private:
+  LlmConfig cfg_;
+  std::string nome_;
+  std::string tipo_;
+  std::vector<std::pair<std::string, std::string>> atributos_;
+  std::string trace_id_;
+  std::string span_id_;
+  std::string previous_trace_id_;
+  std::string parent_span_id_;
+  std::string previous_span_id_;
+  std::chrono::steady_clock::time_point inicio_;
+  std::chrono::system_clock::time_point inicio_wall_;
+  int uncaught_ = 0;
+  bool erro_ = false;
+  bool ativo_ = false;
 };
 
 bool llm_is_mock();

@@ -117,7 +117,7 @@ tilt servir api.tilt --pesos "$(tilt resolver-modelo churn --stage production)"
 
 ## `tilt servir-catalogo <diretorio-raiz> [--porta N] [--prefixo P]`
 
-Sobe um **catálogo Iceberg REST Open API read-only** (porta default 8191,
+Sobe um **catálogo Iceberg REST Open API** (porta default 8191,
 prefixo default `/v1`) expondo as tabelas Iceberg locais — subdiretórios de
 `<diretorio-raiz>` que contêm `metadata/` — no namespace `default`. Engines
 como Spark SQL configuram `SparkCatalog` tipo `rest` com a URI do servidor e
@@ -125,7 +125,8 @@ lêem pelo nome (`spark.read.table("catalogo.default.tabela")`). Lista as
 tabelas servidas ao subir. O loadTable devolve o metadata mais recente com as
 locations reescritas para URLs deste servidor; `/v1/files/<rel>` serve os
 arquivos (metadata.json, manifests, data files) validando que o path fica
-dentro do root (traversal → 403). Escrita (createTable/commit) → 501.
+dentro do root (traversal → 403). `createTable`, `transactions` e `DELETE`
+ são aceitos somente para tabelas dentro do root; conflitos de snapshot → 409.
 `--sem-reecrita-manifests` mantém `file://` nas manifest-lists — necessário
 para o Spark/Hadoop (o `fs.http` reporta length -1 e o leitor Avro do Iceberg
 rejeita); nesse modo o leitor precisa acessar os arquivos locais.
@@ -150,10 +151,10 @@ Servidor Language Server por stdio (JSON-RPC, framing `Content-Length`):
 `initialize`, `textDocument/didOpen` e `didChange` → `publishDiagnostics`,
 `textDocument/diagnostic` (pull com cache por conteúdo),
 `completion` (gatilhos `.` e `:`), `hover` (docs + tipos do checker),
-`definition`, `references` e `rename` (same-file), `signatureHelp`, `formatting`,
-`shutdown`/`exit`. `references` aceita `context.includeDeclaration` conforme
-o LSP e devolve locations no mesmo documento; `rename` devolve um
-`WorkspaceEdit` para todos os usos e a declaração.
+`definition`, `references` e `rename` (com índice de workspace), `signatureHelp`,
+`formatting`, `shutdown`/`exit`. `references` aceita `context.includeDeclaration`
+conforme o LSP e devolve locations entre documentos; `rename` devolve um
+`WorkspaceEdit` agrupado por arquivo.
 
 ## `tilt referencia`
 
@@ -172,7 +173,9 @@ Despejam a árvore sintática (S-expression) e o fluxo de tokens. Debug.
 
 `tilt registrar-modelo <nome> <arquivo> [--versao V] [--registro DIR]` copia
 um artefato de pesos para um registry local, grava seu SHA-256 e cria um
-manifesto. O diretório padrão é `.tilt-modelos`.
+manifesto. `--codigo ARQUIVO` e `--dados ARQUIVO` adicionam os hashes e
+tamanhos dos insumos à linhagem; `--parent V` registra a versão de origem. O
+diretório padrão é `.tilt-modelos`.
 
 ```sh
 tilt registrar-modelo churn modelos/churn.safetensors --versao 1
@@ -183,8 +186,12 @@ Use `--registro` para compartilhar o diretório entre processos ou serviços.
 `tilt promover-modelo <nome> <versao> <stage>` grava o stage `staging`,
 `production` ou `archived` no manifesto; isso permite selecionar e reverter
 versões antes de conectá-las a um `servico`.
-O comando não publica o arquivo na rede nem altera o modelo carregado; ele
-fornece versionamento e integridade local para a próxima etapa de rollout.
+`tilt linhagem-modelo <nome> [--versao V|--stage S]` exibe o manifesto e seus
+vínculos de código, dados e artefato. `tilt rollback-modelo <nome>` arquiva a
+versão em `production` e promove a versão anterior de forma atômica.
+`tilt servir --modelo <nome> --stage production --registro DIR` resolve os
+pesos diretamente no registry antes de iniciar o serviço. O arquivo não é
+publicado na rede: o registry mantém integridade local por SHA-256.
 
 ## Variáveis de ambiente
 

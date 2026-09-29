@@ -5,7 +5,7 @@
 
 namespace tilt::rt {
 
-// Servidor Iceberg REST Open API read-only (fase 30): expoe as tabelas
+// Servidor Iceberg REST Open API (fase 30): expoe e registra operações nas tabelas
 // Iceberg locais (formato Hadoop, escritas pela tilt — ver iceberg.hpp) para
 // engines como Spark SQL configurarem um SparkCatalog tipo "rest" com a URI
 // apontando para este servidor. Reaproveita o HttpServer epoll do `tilt
@@ -15,15 +15,20 @@ namespace tilt::rt {
 //   GET  <prefixo>/config                          -> defaults/overrides vazios
 //   GET  <prefixo>/namespaces                      -> [["default"]]
 //   GET  <prefixo>/namespaces/default              -> namespace + properties
-//   GET  <prefixo>/namespaces/default/tables       -> lista de tabelas
+//   GET  <prefixo>/namespaces/default/tables       -> lista paginada de tabelas
 //   GET  <prefixo>/namespaces/default/tables/<nome> -> loadTable (metadata com
 //                                                     locations reescritas)
+//   HEAD <prefixo>/namespaces/default/tables/<nome> -> verifica existencia
+//   POST <prefixo>/namespaces/default/tables     -> registra createTable
+//   POST <prefixo>/namespaces/default/tables/<nome>/transactions -> commit com
+//                                                     optimistic concurrency
+//   DELETE <prefixo>/namespaces/default/tables/<nome> -> remove a tabela local
 //   GET/HEAD <prefixo>/files/<rel-ao-root>           -> bytes do arquivo
 //       (metadata.json, manifest .avro, data .parquet) sob o root. Forma
 //       path-style de proposito: o Hadoop Path (cliente Spark) re-encodea
 //       query strings. A forma legada ?path=<abs> tambem e aceita.
-// Escrita (createTable/commit), HEAD de tabela e demais rotas: 501/404 com
-// erro claro — o catalogo e read-only na 1a passada.
+// Escritas validam o root, metadata local e assert-current-snapshot-id; demais
+// rotas respondem 501/404 com erro claro.
 //
 // Tabela Iceberg = subdiretorio direto do root que contem metadata/. O
 // loadTable resolve o v<N>.metadata.json mais recente (mesma regra do modo

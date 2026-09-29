@@ -1,0 +1,21 @@
+llm gpt:
+  provedor: "openai"
+  modelo: "mock-model"
+  chave: env "K"
+  custo_entrada_mil: 1.0
+  custo_saida_mil: 2.0
+  contabilidade: "ledger.jsonl"
+  observabilidade: "observabilidade.jsonl"
+
+agente Memoria:
+  llm: gpt
+  memoria: conversa
+  max_contexto: 100
+  resumo_automatico: verdadeiro
+
+pipeline p:
+  passos:
+    - a = Memoria.responder "primeira mensagem longa para preencher o historico de conversa"
+    - b = Memoria.responder "segunda mensagem longa para acionar o resumo automatico"
+    - imprimir b.contexto.compactado
+    - imprimir b.orcamento.custo_usado

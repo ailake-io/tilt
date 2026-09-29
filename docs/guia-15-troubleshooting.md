@@ -88,8 +88,9 @@ vazia por desenho; use outro grupo para reprocessar o histórico. Sem grupo,
 - Livy: confirme `url`, `lingua` e que a sessão Spark chegou a `idle`.
 - Iceberg REST: use `ICEBERG_CATALOG=rest` e `ICEBERG_URI`; sem essas variáveis,
   o modo Hadoop local continua ativo.
-- Delta/Iceberg: verifique permissões e writers concorrentes; a implementação é
-  single-writer.
+- Delta/Iceberg: verifique permissões e writers concorrentes; o Tilt usa
+  `.tilt.lock.d` e aguarda até `TILT_TABLE_LOCK_TIMEOUT_MS` (30 s por padrão).
+  Em caso de processo interrompido, confira `owner` antes de remover o lock.
 
 ## LLM, RAG e agentes
 

@@ -17,14 +17,17 @@ comandos:
   registrar-modelo <nome> <arquivo>  grava artefato versionado no registry local
   listar-modelos [--registro DIR]    lista versões do registry local
   promover-modelo <nome> <versao> <stage>  promove versão (staging/production/archived)
+  rollback-modelo <nome>             reverte production para a versão anterior
+  linhagem-modelo <nome>              exibe a linhagem do artefato resolvido
   resolver-modelo <nome> [--versao V|--stage S]  resolve artefato registrado
   repl                               laco interativo com estado entre linhas
   rpc <arquivo>                      expoe funcoes e pipelines por JSON-lines
   chamar <arquivo> <funcao> [json]   chama uma funcao e imprime o resultado em JSON
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
                                      [--requisicoes N] [--threads N] [--pesos ARQUIVO]
+                                     [--modelo N --versao V|--stage S --registro DIR]
   servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via
-                                     REST catalog read-only [--prefixo P]
+                                     REST catalog local [--prefixo P]
                                      [--sem-reecrita-manifests]
   compilar <arquivo> --saida <bin>   gera binario nativo
                                      [--asm] [--arch x86_64|arm64]

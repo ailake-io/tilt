@@ -38,6 +38,8 @@ politica OperacaoSegura:
   max_tokens: 4000
   max_custo: 0.50
   max_passos: 6
+  max_contexto: 12000
+  resumo_automatico: verdadeiro
   compartilhado: verdadeiro       # orçamento global do llm entre agentes
   requer_aprovacao: verdadeiro
   ferramentas_permitidas: [eco]
@@ -85,12 +87,17 @@ Retorna (ilustração da forma; ver exemplo executável no fim do guia):
 ```tilt skip
 { texto: "...",
   tokens: 123, custo: 0.01, politica: "OperacaoSegura",
+  contexto: { limite: 12000, compactado: falso, antes: 0, depois: 0 },
+  orcamento: { tokens_limite: 4000, tokens_usados: 123,
+               custo_limite: 0.50, custo_usado: 0.01 },
   rastro: [ { passo: 1, ferramenta: "busca_documentos",
               argumentos: {...}, observacao: "..." } ] }
 ```
 
 `memoria: conversa` mantém um histórico por agente, prefixado no prompt das
-chamadas seguintes. `memoria: vetorial` guarda cada turno (pergunta+resposta)
+chamadas seguintes. `max_contexto:` limita esse histórico, as observações e as
+mensagens de ferramentas; `resumo_automatico:` preserva o início/fim e marca a
+parte intermediária compactada. `memoria: vetorial` guarda cada turno (pergunta+resposta)
 num índice em memória e prefixa os 3 mais similares (`Lembretes relevantes:`)
 — usa `embeddings:` do agente (default `text-embedding-3-small`; no mock,
 vetores determinísticos de 16 dimensões). Sem poda: acima de 200 turnos por
@@ -125,10 +132,15 @@ formatos).
   `[agente] limite compartilhado de tokens/custo atingido`. `0`/ausente = sem teto.
 - `politica Nome:` pode ser compartilhada por vários agentes. Seus campos
   `max_tokens`, `max_custo`, `max_passos`, `requer_aprovacao` e
-  `ferramentas_permitidas` são combinados com os limites locais (o menor limite
-  vence). Com `compartilhado: verdadeiro`, `max_tokens` e `max_custo` consultam
+  `ferramentas_permitidas`, `max_contexto` e `resumo_automatico` são combinados
+  com os limites locais (o menor limite vence). Com `compartilhado: verdadeiro`,
+  `max_tokens` e `max_custo` consultam
   também o ledger acumulado do primeiro `llm` da cadeia e valem para os agentes
-  que reutilizam essa política. O resultado inclui tokens, custo e `trace_id`.
+  que reutilizam essa política. O resultado inclui tokens, custo, `trace_id`,
+  `contexto` e `orcamento`; `llm_metricas` informa médias e preços.
+- Spans de chamadas, etapas e ferramentas podem ser exportados pelo
+  `otel_exporter:` do bloco `llm` ou `TILT_OTEL_EXPORTER=file:...`, com
+  duração, status, atributos e parentesco sem registrar prompts.
 
 ## `equipe`
 

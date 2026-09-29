@@ -154,7 +154,7 @@ std::vector<VectorHit> pinecone_search(const std::string& base, const std::strin
     if (hit.kind != ValueKind::Mapa || !hit.map_ref()) continue;
     const Value* id = hit.map_ref()->find("id");
     const Value* score = hit.map_ref()->find("score");
-    const std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
+    const std::string id_s = id && id->kind == ValueKind::Texto ? id->s.str() : "?";
     // score do Pinecone ja e similaridade de cosseno (maior = melhor).
     const double sc = score && score->is_number() ? score->as_number() : 0.0;
     std::string texto;

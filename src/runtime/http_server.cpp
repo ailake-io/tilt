@@ -73,6 +73,7 @@ const char* status_text(int code) {
     case 400: return "Bad Request";
     case 403: return "Forbidden";
     case 404: return "Not Found";
+    case 409: return "Conflict";
     case 405: return "Method Not Allowed";
     case 411: return "Length Required";
     case 500: return "Internal Server Error";
@@ -125,6 +126,7 @@ ParseResult parse_request(std::string& in, TiltArena& arena, HttpRequest& req) {
   bool connection_close = false;
   bool connection_keep_alive = false;
   std::string host_header;
+  std::string authorization_header;
 
   std::size_t pos = l1 == std::string::npos ? head.size() : l1 + 2;
   while (pos < head.size()) {
@@ -148,6 +150,8 @@ ParseResult parse_request(std::string& in, TiltArena& arena, HttpRequest& req) {
           if (v == "keep-alive") connection_keep_alive = true;
         } else if (k == "host") {
           host_header = v;
+        } else if (k == "authorization") {
+          authorization_header = v;
         }
       }
     }
@@ -163,6 +167,7 @@ ParseResult parse_request(std::string& in, TiltArena& arena, HttpRequest& req) {
   req.path = path;
   req.body = in.substr(header_end + 4, content_length);
   req.host = host_header;
+  req.authorization = authorization_header;
   in.erase(0, total);
 
   // HTTP/1.1 mantem a conexao por padrao; HTTP/1.0 so com keep-alive explicito.
@@ -174,6 +179,12 @@ ParseResult parse_request(std::string& in, TiltArena& arena, HttpRequest& req) {
 std::string build_response(const HttpResponse& resp, bool keep_alive) {
   std::string out = "HTTP/1.1 " + std::to_string(resp.status) + " " + status_text(resp.status) + "\r\n";
   out += "Content-Type: " + resp.content_type + "\r\n";
+  for (const auto& [name, value] : resp.headers) {
+    if (name.empty() || name.find('\r') != std::string::npos || name.find('\n') != std::string::npos ||
+        value.find('\r') != std::string::npos || value.find('\n') != std::string::npos)
+      continue;
+    out += name + ": " + value + "\r\n";
+  }
   out += "Content-Length: " + std::to_string(resp.body.size()) + "\r\n";
   out += keep_alive ? "Connection: keep-alive\r\n\r\n" : "Connection: close\r\n\r\n";
   out += resp.body;
