@@ -176,6 +176,20 @@ Principais otimizações disponíveis no runtime atual.
   CSV→Parquet de 1 milhão de linhas com duas
   derivações aritméticas, `derivar` levou 0,32 s e o processo ficou em 70.236
   KiB de RSS.
+- O caminho simples de `ler_csv` agora percorre spans diretamente no buffer e
+  usa `from_chars` para inteiros e decimais, sem criar uma string por célula;
+  aspas, nulos, tipos explícitos e projeções fora de ordem continuam no parser
+  geral. Em `derivar`, expressões aritméticas entre colunas ou escalares usam
+  `ColumnarColumn::binary_numeric`, com AVX2 no caminho denso.
+- A ordenação de colunas inteiras usa radix sort estável tanto ascendente como
+  descendente. Structs Parquet planos e obrigatórios decodificam cada folha
+  diretamente no campo colunar, mantendo o decoder geral apenas para nested
+  opcional ou com repetição.
+- Em 2 milhões de linhas, `scripts/benchmark_columnar_large.py` mediu
+  220,581 ms para `derivar`, 401,053 ms para ordenação e 200,187 ms para
+  agregação. A matriz reproduzível contra pandas, Polars e DuckDB está em
+  `benchmarks/data-backends-2026-09-30-2m.md`; a rodada Parquet com 2 milhões
+  de linhas e três codecs está em `benchmarks/parquet-large-2026-09-30-2m.md`.
 - `Value` passou de 120 para 112 bytes ao compartilhar o armazenamento dos
   escalares `logico`, `inteiro` e `decimal` em uma união. Na etapa seguinte,
   listas, mapas, tensores, funções e tabelas colunares foram reunidos em um
@@ -229,9 +243,9 @@ o próximo salto da lógica pura depende agora de medir o efeito do `ValueStorag
    listas e structs nested são concatenados em lote, sem converter cada célula
    novamente em `Value`.
 3. ~~**`derivar`**~~ feita para expressões aritméticas colunares simples: colunas
-   existentes são copiadas por bloco e o literal é avaliado uma vez, sem `Value`
-   temporário por linha. Paralelização por faixas permanece como ganho futuro para
-   expressões mais complexas.
+   existentes são copiadas por bloco, o literal é avaliado uma vez e a operação
+   é executada diretamente nos vetores tipados, com SIMD quando disponível. A
+   avaliação de expressões mais complexas ainda passa pela VM.
 4. ~~**VM**~~ feita: superinstruções para operações locais e tags escalares paralelas
    no frame. Comparar o ganho em laços maiores continua recomendado antes de ampliar
    a fusão para chamadas e operações de objetos.

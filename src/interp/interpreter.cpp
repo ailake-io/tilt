@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -2645,6 +2646,84 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas(
   return table;
 }
 
+// Caminho sem aspas para CSVs analiticos comuns. Em vez de criar um
+// std::string para cada célula e depois chamar strtoll/strtod, percorre os
+// spans diretamente no buffer e usa from_chars. Textos ainda são copiados
+// para o dicionário, mas números não passam por uma alocação intermediária.
+std::shared_ptr<rt::ColumnarTable> csv_colunas_simples(
+    const char* buf, std::size_t ini, std::size_t fim, char sep,
+    const std::vector<std::string>& headers, const std::vector<std::size_t>& indices) {
+  auto table = std::make_shared<rt::ColumnarTable>(headers);
+  auto append_field = [](rt::ColumnarColumn& column, const char* first, const char* last) {
+    if (last > first && last[-1] == '\r') --last;
+    if (first == last) {
+      column.append_text(std::string());
+      return;
+    }
+    std::int64_t integer = 0;
+    const auto int_result = std::from_chars(first, last, integer);
+    if (int_result.ec == std::errc{} && int_result.ptr == last) {
+      column.append_integer(integer);
+      return;
+    }
+    double decimal = 0.0;
+    const auto decimal_result = std::from_chars(first, last, decimal);
+    if (decimal_result.ec == std::errc{} && decimal_result.ptr == last) {
+      column.append_decimal(decimal);
+      return;
+    }
+    // Preserve the legacy strtoll/strtod behavior for uncommon fields such
+    // as a leading sign, whitespace or non-finite literals. The allocation is
+    // limited to this fallback; ordinary numeric cells stay zero-copy.
+    std::string value(first, last);
+    char* end = nullptr;
+    const long long legacy_integer = std::strtoll(value.c_str(), &end, 10);
+    if (end && *end == '\0') {
+      column.append_integer(static_cast<std::int64_t>(legacy_integer));
+      return;
+    }
+    const double legacy_decimal = std::strtod(value.c_str(), &end);
+    if (end && *end == '\0') {
+      column.append_decimal(legacy_decimal);
+      return;
+    }
+    column.append_text(std::move(value));
+  };
+  std::size_t pos = ini;
+  while (pos < fim) {
+    const void* nl = std::memchr(buf + pos, '\n', fim - pos);
+    const std::size_t line_end = nl ? static_cast<std::size_t>(static_cast<const char*>(nl) - buf) : fim;
+    if (line_end == pos) {
+      pos = line_end + 1;
+      continue;
+    }
+    std::size_t field = 0;
+    std::size_t selected = 0;
+    const char* start = buf + pos;
+    const char* cursor = start;
+    const char* end = buf + line_end;
+    while (true) {
+      const char* delimiter = static_cast<const char*>(std::memchr(cursor, sep,
+                                                                    static_cast<std::size_t>(end - cursor)));
+      const char* field_end = delimiter ? delimiter : end;
+      while (selected < indices.size() && indices[selected] == field) {
+        append_field(table->columns[selected], cursor, field_end);
+        ++selected;
+      }
+      if (!delimiter) break;
+      cursor = delimiter + 1;
+      ++field;
+    }
+    while (selected < indices.size()) {
+      table->columns[selected].append_null();
+      ++selected;
+    }
+    ++table->rows;
+    pos = line_end < fim ? line_end + 1 : fim;
+  }
+  return table;
+}
+
 std::shared_ptr<rt::ColumnarTable> csv_colunas_paralelo(
     const char* buf, std::size_t ini, std::size_t fim, char sep,
     const std::vector<std::string>& headers, const std::vector<std::size_t>& indices,
@@ -2653,10 +2732,23 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_paralelo(
     const std::string& fuso_destino) {
   constexpr std::size_t kBytesPorThread = std::size_t{4} << 20;
   const std::size_t util = fim - ini;
+  const bool sem_opcoes_complexas = tipos == nullptr && nulos.empty() &&
+                                    std::is_sorted(indices.begin(), indices.end());
+  bool sem_aspas = sem_opcoes_complexas;
+  if (sem_aspas) {
+    sem_aspas = std::memchr(buf + ini, '"', util) == nullptr;
+  }
+  if (sem_aspas && (sep == ',' || sep == ';' || sep == '\t' || sep == '|')) {
+    // Ainda divide em faixas grandes; cada faixa usa spans sem alocação.
+    // O cálculo de cortes abaixo mantém as linhas inteiras em cada worker.
+  } else {
+    sem_aspas = false;
+  }
   const std::size_t max_threads = std::min<std::size_t>(
       std::max(1u, std::thread::hardware_concurrency()), 8);
   const std::size_t desejadas = std::min(max_threads, std::max<std::size_t>(1, util / kBytesPorThread));
   if (desejadas <= 1) {
+    if (sem_aspas) return csv_colunas_simples(buf, ini, fim, sep, headers, indices);
     return csv_colunas(buf, ini, fim, sep, headers, indices, incluir, nulos, tipos,
                        fuso_origem, fuso_destino);
   }
@@ -2675,8 +2767,10 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_paralelo(
   workers.reserve(faixas);
   for (std::size_t f = 0; f < faixas; ++f) {
     workers.emplace_back([&, f] {
-      partes[f] = csv_colunas(buf, cortes[f], cortes[f + 1], sep, headers, indices,
-                              incluir, nulos, tipos, fuso_origem, fuso_destino);
+      partes[f] = sem_aspas
+                      ? csv_colunas_simples(buf, cortes[f], cortes[f + 1], sep, headers, indices)
+                      : csv_colunas(buf, cortes[f], cortes[f + 1], sep, headers, indices,
+                                    incluir, nulos, tipos, fuso_origem, fuso_destino);
     });
   }
   for (auto& worker : workers) worker.join();
@@ -15650,60 +15744,38 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       std::vector<std::string> names = receiver.columnar()->names;
       for (const auto& entry : spec.entries) names.push_back(entry.key);
       auto result = std::make_shared<rt::ColumnarTable>(std::move(names));
-      std::vector<Value> literais;
-      literais.reserve(spec.entries.size());
-      for (const auto& entry : spec.entries) {
-        const Expr& expression = *entry.value;
-        literais.push_back(expression.rhs->kind == ExprKind::Member
-                               ? Value::nulo()
-                               : eval(*expression.rhs, env));
-      }
       for (std::size_t col = 0; col < receiver.columnar()->columns.size(); ++col)
         result->columns[col].append_column(receiver.columnar()->columns[col]);
-      const auto nulo = [](const rt::ColumnarColumn& column, std::size_t row) {
-        return row >= column.nulls.size() || column.nulls[row];
-      };
-      for (std::size_t row = 0; row < receiver.columnar()->rows; ++row) {
-        for (std::size_t k = 0; k < spec.entries.size(); ++k) {
-          const auto& entry = spec.entries[k];
-          const Expr& expression = *entry.value;
-          const auto* column = receiver.columnar()->find(expression.lhs->text);
-          const rt::ColumnarColumn* right_column =
-              expression.rhs->kind == ExprKind::Member
-                  ? receiver.columnar()->find(expression.rhs->text)
-                  : nullptr;
-          if (nulo(*column, row) ||
-              (right_column && nulo(*right_column, row)) ||
-              (!right_column && literais[k].kind == ValueKind::Nulo)) {
-            result->columns[result->columns.size() - spec.entries.size() + k].append(
-                Value::nulo());
-            continue;
-          }
-          const std::size_t derived_index =
-              result->columns.size() - spec.entries.size() + k;
-          const double left = column->number_at(row);
-          const double right = right_column
-                                   ? right_column->number_at(row)
-                                   : literais[k].as_number();
-          double value = 0.0;
-          if (expression.text == "+") value = left + right;
-          else if (expression.text == "-") value = left - right;
-          else if (expression.text == "*") value = left * right;
-          else value = right == 0.0 ? 0.0 : left / right;
-          const bool inteiro =
-              expression.text != "/" &&
-              column->type == rt::ColumnarColumn::Type::Integer &&
-              (right_column ? right_column->type == rt::ColumnarColumn::Type::Integer
-                            : literais[k].kind == ValueKind::Inteiro);
-          if (inteiro) result->columns[derived_index].append_integer(
-              static_cast<std::int64_t>(value));
-          else result->columns[derived_index].append_decimal(value);
+      const std::size_t derived_base = receiver.columnar()->columns.size();
+      for (std::size_t k = 0; k < spec.entries.size(); ++k) {
+        const Expr& expression = *spec.entries[k].value;
+        const auto* column = receiver.columnar()->find(expression.lhs->text);
+        const rt::ColumnarColumn* right_column = expression.rhs->kind == ExprKind::Member
+                                                      ? receiver.columnar()->find(expression.rhs->text)
+                                                      : nullptr;
+        double scalar = 0.0;
+        bool scalar_is_integer = false;
+        bool scalar_is_null = false;
+        if (!right_column) {
+          const Value literal = eval(*expression.rhs, env);
+          scalar = literal.as_number();
+          scalar_is_integer = literal.kind == ValueKind::Inteiro;
+          scalar_is_null = literal.kind == ValueKind::Nulo;
         }
+        result->columns[derived_base + k] = column->binary_numeric(
+            right_column, scalar, scalar_is_integer, expression.text.front(), scalar_is_null);
       }
       result->rows = receiver.columnar()->rows;
       return Value::tabela_colunar(std::move(result));
     }
   }
+
+  // Expressões fora do subconjunto aritmético colunar continuam usando a VM
+  // por linha. Materializar aqui mantém a semântica de `derivar`/`mapear`
+  // para funções, condicionais e acessos nested em tabelas colunares, em vez
+  // de cair no caminho de linhas com um receiver sem lista.
+  if (receiver.columnar() && (method == "derivar" || method == "mapear"))
+    receiver.materialize_rows();
 
   if (is_table && method == "filtrar") {
     if (call.args.empty()) fail(call.span, "filtrar espera uma condicao");

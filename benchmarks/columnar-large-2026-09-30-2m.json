@@ -1,0 +1,9 @@
+{
+  "config": {"tilt": "build/bin/tilt", "rows": 2000000, "repetitions": 3},
+  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "results": [
+    {"operation": "derivar", "median_ms": 220.581},
+    {"operation": "ordenar", "median_ms": 401.053},
+    {"operation": "agrupar", "median_ms": 200.187}
+  ]
+}

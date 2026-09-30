@@ -40,6 +40,12 @@ An isolated environment is enough to install them without changing the project:
     /tmp/tilt-bench-venv/bin/python scripts/benchmark_data_backends.py \
         build/release/bin/tilt --rows 1000000 --repetitions 5
 
+For a larger local run, `python3 scripts/benchmark_columnar_large.py
+/path/to/tilt --rows 2000000 --repetitions 3` measures `derivar`, radix sort
+and grouped aggregation. The 2-million-row data matrix and Parquet run are
+kept in `data-backends-2026-09-30-2m.md`, `columnar-large-2026-09-30-2m.md`
+and `parquet-large-2026-09-30-2m.md`.
+
 The pandas/Polars/DuckDB timings exclude Python import time, while Tilt timings
 include process startup. Compare changes within a backend before interpreting
 cross-backend ratios.

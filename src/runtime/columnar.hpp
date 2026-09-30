@@ -52,6 +52,12 @@ struct ColumnarColumn {
   double sum_squares_numeric() const;
   double sum_numeric_range(std::size_t begin, std::size_t end) const;
   double sum_squares_numeric_range(std::size_t begin, std::size_t end) const;
+  // Avalia uma expressão numérica entre duas colunas (ou uma coluna e um
+  // escalar) sem materializar células Value. O caminho contínuo usa SIMD
+  // quando disponível e preserva inteiros em +, - e *.
+  ColumnarColumn binary_numeric(const ColumnarColumn* rhs, double scalar,
+                                bool scalar_is_integer, char operation,
+                                bool scalar_is_null = false) const;
   std::string key_at(std::size_t row) const;
   std::size_t memory_bytes() const;
 };

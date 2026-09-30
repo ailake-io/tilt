@@ -5803,6 +5803,39 @@ Value parquet_read(const std::string& path, const std::vector<std::string>& sele
         std::vector<std::vector<Value>> local_columns(ncols);
         std::vector<std::vector<int>> local_defs(ncols);
         ParquetRowGroupAllocator allocator;
+        // Structs planos (sem repeticao e sem optional no grupo pai) podem
+        // permanecer colunares de ponta a ponta. O decodificador escreve cada
+        // folha diretamente no campo destino, evitando vetores de Value e a
+        // remontagem geral por linha.
+        bool structo_plano = field.is_struct && !field.optional && !field.struct_list &&
+                             !field.is_map;
+        if (structo_plano) {
+          for (const RField& child : field.children) {
+            if (child.is_struct || child.is_list || child.struct_list || child.is_map ||
+                child.nesting_depth > 0 || child.leaf_idx < 0) {
+              structo_plano = false;
+              break;
+            }
+          }
+        }
+        ColumnarColumn& local = grupos_nested[rg];
+        if (structo_plano) {
+          local.type = ColumnarColumn::Type::Struct;
+          local.field_names.reserve(field.children.size());
+          local.fields.reserve(field.children.size());
+          local.nulls.assign(static_cast<std::size_t>(rg_num_rows[rg]), 0);
+          for (const RField& child : field.children) {
+            local.field_names.push_back(child.name);
+            local.fields.push_back(std::make_unique<ColumnarColumn>());
+            const std::size_t li = static_cast<std::size_t>(child.leaf_idx);
+            std::vector<Value> unused;
+            decode_chunk(file, row_groups[rg][li], cols_desc[li], rg_num_rows[rg], unused,
+                         nullptr, &lp.crypto, static_cast<std::uint32_t>(li),
+                         local.fields.back().get(), &allocator);
+          }
+          picos_nested[rg] = allocator.capacity_bytes();
+          return;
+        }
         for (int leaf_index : field.sub_leaves) {
           const std::size_t li = static_cast<std::size_t>(leaf_index);
           local_columns[li].reserve(static_cast<std::size_t>(rg_num_rows[rg]));
@@ -5818,7 +5851,6 @@ Value parquet_read(const std::string& path, const std::vector<std::string>& sele
           pico_row_group += local_defs[li].capacity() * sizeof(int);
         }
         picos_nested[rg] = pico_row_group;
-        ColumnarColumn& local = grupos_nested[rg];
         for (std::int64_t row = 0; row < rg_num_rows[rg]; ++row) {
           if (field.is_struct && !field.struct_list && !field.is_map) {
             append_struct_row(local, field, static_cast<std::size_t>(row),

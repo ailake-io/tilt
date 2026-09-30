@@ -1084,15 +1084,16 @@ Value tabela_ordenar_colunar(const Value& t, const std::vector<std::string>& col
     const auto comparar = [&](std::size_t a, std::size_t b) {
       return decrescente ? menor(b, a) : menor(a, b);
     };
-    const bool todas_inteiras = !decrescente && std::all_of(
+    const bool todas_inteiras = std::all_of(
         colunas.begin(), colunas.end(), [&](const std::string& nome) {
           const ColumnarColumn* c = table->find(nome);
           return c && c->type == ColumnarColumn::Type::Integer;
         });
     if (todas_inteiras && column->type == ColumnarColumn::Type::Integer) {
       // LSD radix estável: transforma a ordem assinada em unsigned preservando
-      // negativos antes dos positivos. Nulos ficam no início, como no
-      // comparador colunar, e não participam das passagens de radix.
+      // negativos antes dos positivos. Nulos não participam das passagens de
+      // radix e mantêm a posição definida pelo comparador (início ascendente,
+      // fim descendente).
       std::vector<std::size_t> nulos;
       std::vector<std::size_t> valores;
       valores.reserve(ordem.size());
@@ -1104,7 +1105,8 @@ Value tabela_ordenar_colunar(const Value& t, const std::vector<std::string>& col
       for (unsigned deslocamento = 0; deslocamento < 64; deslocamento += 8) {
         std::size_t contagem[256] = {};
         for (std::size_t row : valores) {
-          const auto chave = static_cast<std::uint64_t>(column->integers[row]) ^ (1ULL << 63);
+          std::uint64_t chave = static_cast<std::uint64_t>(column->integers[row]) ^ (1ULL << 63);
+          if (decrescente) chave = ~chave;
           ++contagem[(chave >> deslocamento) & 0xFFu];
         }
         std::size_t acumulado = 0;
@@ -1114,14 +1116,20 @@ Value tabela_ordenar_colunar(const Value& t, const std::vector<std::string>& col
           acumulado += atual;
         }
         for (std::size_t row : valores) {
-          const auto chave = static_cast<std::uint64_t>(column->integers[row]) ^ (1ULL << 63);
+          std::uint64_t chave = static_cast<std::uint64_t>(column->integers[row]) ^ (1ULL << 63);
+          if (decrescente) chave = ~chave;
           temporario[contagem[(chave >> deslocamento) & 0xFFu]++] = row;
         }
         valores.swap(temporario);
       }
       ordem.clear();
-      ordem.insert(ordem.end(), nulos.begin(), nulos.end());
-      ordem.insert(ordem.end(), valores.begin(), valores.end());
+      if (!decrescente) {
+        ordem.insert(ordem.end(), nulos.begin(), nulos.end());
+        ordem.insert(ordem.end(), valores.begin(), valores.end());
+      } else {
+        ordem.insert(ordem.end(), valores.begin(), valores.end());
+        ordem.insert(ordem.end(), nulos.begin(), nulos.end());
+      }
       continue;
     }
     const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());

@@ -40,6 +40,33 @@ __attribute__((target("avx2"))) double soma_quadrados_avx2(const double* values,
   for (; i < count; ++i) result += values[i] * values[i];
   return result;
 }
+
+__attribute__((target("avx2"))) void binary_avx2(const double* left, const double* right,
+                                                   double scalar, bool has_right, char operation,
+                                                   double* out, std::size_t count) {
+  const __m256d constant = _mm256_set1_pd(scalar);
+  std::size_t i = 0;
+  for (; i + 4 <= count; i += 4) {
+    const __m256d a = _mm256_loadu_pd(left + i);
+    const __m256d b = has_right ? _mm256_loadu_pd(right + i) : constant;
+    __m256d value;
+    switch (operation) {
+      case '+': value = _mm256_add_pd(a, b); break;
+      case '-': value = _mm256_sub_pd(a, b); break;
+      case '*': value = _mm256_mul_pd(a, b); break;
+      default: value = _mm256_div_pd(a, b); break;
+    }
+    _mm256_storeu_pd(out + i, value);
+  }
+  for (; i < count; ++i) {
+    const double a = left[i];
+    const double b = has_right ? right[i] : scalar;
+    if (operation == '+') out[i] = a + b;
+    else if (operation == '-') out[i] = a - b;
+    else if (operation == '*') out[i] = a * b;
+    else out[i] = b == 0.0 ? 0.0 : a / b;
+  }
+}
 #endif
 
 ColumnarColumn::Type type_of(const Value& value) {
@@ -492,6 +519,63 @@ double ColumnarColumn::number_at(std::size_t row) const {
     case Type::Mixed: return mixed[row].as_number();
     default: return 0.0;
   }
+}
+
+ColumnarColumn ColumnarColumn::binary_numeric(const ColumnarColumn* rhs, double scalar,
+                                              bool scalar_is_integer, char operation,
+                                              bool scalar_is_null) const {
+  ColumnarColumn out;
+  const std::size_t count = rhs ? std::min(nulls.size(), rhs->nulls.size()) : nulls.size();
+  if (scalar_is_null) {
+    out.type = Type::Decimal;
+    out.nulls.assign(count, 1);
+    out.decimals.assign(count, 0.0);
+    return out;
+  }
+  const bool left_integer = type == Type::Integer;
+  const bool right_integer = rhs ? rhs->type == Type::Integer : scalar_is_integer;
+  const bool integer_result = operation != '/' && left_integer && right_integer;
+  out.type = integer_result ? Type::Integer : Type::Decimal;
+  out.nulls.resize(count, 0);
+  if (integer_result) out.integers.resize(count, 0);
+  else out.decimals.resize(count, 0.0);
+
+  bool dense = true;
+  for (std::size_t row = 0; row < count; ++row) {
+    if (nulls[row] || (rhs && rhs->nulls[row])) {
+      out.nulls[row] = 1;
+      dense = false;
+    }
+  }
+
+  // The common CSV path is Decimal/Decimal (or Decimal/scalar). Keep the
+  // loop over raw arrays and let AVX2 evaluate four values per iteration.
+  const bool left_decimal = type == Type::Decimal;
+  const bool right_decimal = rhs && rhs->type == Type::Decimal;
+  const bool scalar_decimal = !rhs && !scalar_is_integer;
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+  if (!integer_result && operation != '/' && dense && left_decimal &&
+      (right_decimal || scalar_decimal) &&
+      count >= 64 && __builtin_cpu_supports("avx2")) {
+    binary_avx2(decimals.data(), right_decimal ? rhs->decimals.data() : nullptr,
+                scalar, right_decimal, operation, out.decimals.data(), count);
+    return out;
+  }
+#endif
+
+  for (std::size_t row = 0; row < count; ++row) {
+    if (out.nulls[row]) continue;
+    const double left = number_at(row);
+    const double right = rhs ? rhs->number_at(row) : scalar;
+    double value = 0.0;
+    if (operation == '+') value = left + right;
+    else if (operation == '-') value = left - right;
+    else if (operation == '*') value = left * right;
+    else value = right == 0.0 ? 0.0 : left / right;
+    if (integer_result) out.integers[row] = static_cast<std::int64_t>(value);
+    else out.decimals[row] = value;
+  }
+  return out;
 }
 
 double ColumnarColumn::sum_numeric() const {

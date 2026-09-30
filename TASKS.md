@@ -537,7 +537,15 @@ continua fora do escopo salvo indicação explícita.
 - [x] Ampliar os codecs Parquet para Brotli (4) e LZ4_RAW (7), carregados via
   `dlopen` quando as bibliotecas opcionais existem; gzip, Snappy e Zstd seguem
   funcionando sem mudanças de instalação.
-- [ ] Priorizar os próximos ganhos de performance: caminho simples de leitura,
-  `derivar` vetorizado e materialização nested sem decodificação desnecessária.
+- [x] Caminho simples de leitura CSV usa spans e `from_chars` para números,
+  preservando o parser geral para aspas, tipos explícitos, nulos e projeções
+  fora de ordem; `derivar` usa `binary_numeric` colunar com AVX2 quando
+  disponível; structs Parquet planos escrevem folhas diretamente nas colunas.
+- [x] Radix sort colunar também cobre chaves inteiras descendentes. A rodada
+  de 2 milhões de linhas mediu `derivar` em 220,581 ms, ordenação em 401,053 ms
+  e agregação em 200,187 ms (`benchmarks/columnar-large-2026-09-30-2m.md`).
+- [x] Repetição da matriz contra pandas, Polars e DuckDB em 2 milhões de linhas
+  está em `benchmarks/data-backends-2026-09-30-2m.md`; a leitura Parquet com
+  gzip, Snappy e Zstd está em `benchmarks/parquet-large-2026-09-30-2m.md`.
 - [ ] Manter AMD/ROCm fora do escopo; preservar fallback CPU para todos os
   caminhos CUDA/Metal.
