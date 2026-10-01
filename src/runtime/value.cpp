@@ -118,7 +118,9 @@ void Value::materialize_rows() {
     // Cópias de Value compartilham o bloco para reduzir custo de cópia, mas a
     // materialização troca o ponteiro do slot. Separe somente nesse caso para
     // preservar a semântica anterior de cópia por ponteiro.
-    if (storage && !storage.unique()) storage = std::make_shared<ValueStorage>(*storage);
+    // `shared_ptr::unique()` foi removido no C++20 e não existe no libc++/MSVC.
+    // O contador mantém a mesma semântica sem depender da extensão da STL.
+    if (storage && storage.use_count() != 1) storage = std::make_shared<ValueStorage>(*storage);
     list_ref() = columns->rows_materialized();
   }
 }
