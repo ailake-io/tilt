@@ -21,9 +21,11 @@ Durante a série `0.2.x`:
   estáveis.
 
 O suporte mínimo desta beta é CMake 3.20, compilador C++20 (GCC 11+ ou Clang
-14+) e um sistema de 64 bits. Linux x86_64, macOS arm64/x86_64 e Windows x64
-são as plataformas empacotadas oficialmente. Outras arquiteturas podem compilar, mas
-não fazem parte da matriz de binários publicados.
+14+) e um sistema de 64 bits. Linux x86_64, macOS x86_64 e Windows x64
+são as plataformas empacotadas oficialmente nesta beta. O código ARM64 compila
+e é validado pelo job de codegen, mas o artefato macOS arm64 ainda não é
+publicado. Outras arquiteturas podem compilar, mas não fazem parte da matriz de
+binários publicados.
 
 Para atualizar, valide o checksum do artefato e execute a suíte de regressão
 antes de promover um pipeline de produção. Para relatar uma quebra, inclua a

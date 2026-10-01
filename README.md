@@ -80,7 +80,7 @@ Requisitos: `cmake >= 3.20`, compilador C++20 (GCC 11+ / Clang 14+). Instala
 
 Cada tag `v*` publica `tilt-<versao>-<os>-<arch>.tar.gz` (+ `.sha256`) em
 [Releases](https://github.com/ailake-io/tilt/releases): Linux x86_64, macOS
-arm64 e Windows x64 (MSI/ZIP). A beta é publicada com a tag
+x86_64 e Windows x64 (MSI/ZIP). A beta é publicada com a tag
 `v0.2.0-beta.1`; o nome numérico dos pacotes CPack permanece `0.2.0` para
 compatibilidade com DEB/RPM/MSI. Extraia e ponha `bin/tilt` no
 `PATH`. `curl` é necessário em runtime apenas para chamadas HTTP externas

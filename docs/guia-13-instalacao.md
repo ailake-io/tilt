@@ -177,7 +177,7 @@ git push origin v0.2.0-beta.1
 ```
 
 Ele compila em release, roda a suíte de testes e gera/anexa por
-plataforma (Linux x86_64, macOS arm64/x86_64 e Windows x64):
+plataforma (Linux x86_64, macOS x86_64 e Windows x64 nesta beta):
 
 - `tilt-*.tar.gz` + `.sha256` (todas as plataformas);
 - `tilt-*.sigstore.json` (Linux, bundles Cosign/Sigstore keyless para os
@@ -190,6 +190,9 @@ plataforma (Linux x86_64, macOS arm64/x86_64 e Windows x64):
 - `tilt_*.snap` (job `snap`, via `snapcraft` em `snap/snapcraft.yaml` —
   publica na Snap Store automaticamente se o secret `SNAPCRAFT_TOKEN`
   estiver configurado, senão só anexa o arquivo);
+
+O backend ARM64 continua disponível para compilação nativa e é exercitado no
+CI, mas o instalador macOS arm64 será publicado em uma atualização posterior.
 - `tilt-<versao>.flatpak` + `.sha256` (job `flatpak` — bundle instalável
   gerado com `flatpak build-bundle` após o `flatpak-builder`);
 - `tilt-*.vsix` (extensão VS Code);
