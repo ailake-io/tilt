@@ -2671,11 +2671,16 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_simples(
       return;
     }
     double decimal = 0.0;
+#if !defined(__APPLE__)
+    // O libc++ dos runners macOS ainda declara a sobrecarga flutuante, mas a
+    // marca como deletada em alguns SDKs. Nesses SDKs o fallback strtod abaixo
+    // mantém a leitura correta; Linux e MSVC continuam no caminho sem cópia.
     const auto decimal_result = std::from_chars(first, last, decimal);
     if (decimal_result.ec == std::errc{} && decimal_result.ptr == last) {
       column.append_decimal(decimal);
       return;
     }
+#endif
     // Preserve the legacy strtoll/strtod behavior for uncommon fields such
     // as a leading sign, whitespace or non-finite literals. The allocation is
     // limited to this fallback; ordinary numeric cells stay zero-copy.
