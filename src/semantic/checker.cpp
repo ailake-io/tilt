@@ -2050,7 +2050,9 @@ void SemanticChecker::check_imported_funcao_arity(const std::string& local_name,
     }
   }
   dirs.push_back(fs::current_path() / "stdlib");
-  std::replace(module_name.begin(), module_name.end(), '.', fs::path::preferred_separator);
+  const char path_separator =
+      fs::path::preferred_separator == static_cast<fs::path::value_type>('/') ? '/' : '\\';
+  std::replace(module_name.begin(), module_name.end(), '.', path_separator);
   fs::path module;
   for (const auto& dir : dirs) {
     const fs::path candidate = dir / (module_name + ".tilt");

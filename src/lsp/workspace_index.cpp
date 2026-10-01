@@ -150,7 +150,11 @@ struct WorkspaceIndex::Impl {
     }
     dirs.push_back(fs::current_path() / "stdlib");
     std::string rel = name;
-    std::replace(rel.begin(), rel.end(), '.', fs::path::preferred_separator);
+    // `path::preferred_separator` is wchar_t on MSVC, while the module name
+    // is UTF-8/char. Use the platform separator with the matching type.
+    const char path_separator =
+        fs::path::preferred_separator == static_cast<fs::path::value_type>('/') ? '/' : '\\';
+    std::replace(rel.begin(), rel.end(), '.', path_separator);
     for (const fs::path& dir : dirs) {
       for (const fs::path& candidate : {dir / (rel + ".tilt"), dir / name / "__init__.tilt"}) {
         if (fs::is_regular_file(candidate, ec) && !ec) return fs::absolute(candidate, ec);
