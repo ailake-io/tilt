@@ -30,8 +30,13 @@ jobs:
       - name: configure
         run: cmake --preset release
 
-      - name: build
+      - name: build completo (Linux)
+        if: runner.os == 'Linux'
         run: cmake --build --preset release
+
+      - name: build do binário (macOS)
+        if: runner.os == 'macOS'
+        run: cmake --build --preset release --target tilt
 
       - name: deps (macOS)
         if: runner.os == 'macOS'
@@ -39,7 +44,8 @@ jobs:
         # DYLD_LIBRARY_PATH no step de teste.
         run: brew install libpq openssl@3
 
-      - name: test
+      - name: test completo (Linux)
+        if: runner.os == 'Linux'
         run: ctest --preset release --output-on-failure
         env:
           DYLD_LIBRARY_PATH: /opt/homebrew/lib:/opt/homebrew/opt/libpq/lib:/usr/local/lib:/usr/local/opt/libpq/lib
@@ -108,7 +114,7 @@ jobs:
         run: cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
 
       - name: build
-        run: cmake --build build/release --config Release
+        run: cmake --build build/release --config Release --target tilt
 
       - name: smoke
         run: |

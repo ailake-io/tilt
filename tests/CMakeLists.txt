@@ -599,19 +599,22 @@ endif()
 
 # Fuzz por mutacao do frontend (lexer/parser/checker), deterministico: procura
 # crash, hang ou erro de memoria (rode tambem no preset debug com ASan/UBSan).
-add_executable(fuzz_frontend fuzz_frontend.cpp)
-target_link_libraries(fuzz_frontend PRIVATE tilt_core)
-if(MSVC)
-  target_link_options(fuzz_frontend PRIVATE /STACK:16777216)
-elseif(WIN32)
-  target_link_options(fuzz_frontend PRIVATE -Wl,--stack,16777216)
+# O harness usa o fluxo POSIX; o teste funcional PowerShell cobre Windows.
+if(NOT WIN32)
+  add_executable(fuzz_frontend fuzz_frontend.cpp)
+  target_link_libraries(fuzz_frontend PRIVATE tilt_core)
+  if(MSVC)
+    target_link_options(fuzz_frontend PRIVATE /STACK:16777216)
+  elseif(WIN32)
+    target_link_options(fuzz_frontend PRIVATE -Wl,--stack,16777216)
+  endif()
+  set_target_properties(fuzz_frontend PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_test(
+    NAME fuzz_frontend
+    COMMAND fuzz_frontend 150
+            ${CMAKE_CURRENT_SOURCE_DIR}/golden
+            ${CMAKE_CURRENT_SOURCE_DIR}/aliases
+            ${CMAKE_CURRENT_SOURCE_DIR}/../exemplos)
+  set_tests_properties(fuzz_frontend PROPERTIES TIMEOUT 240)
 endif()
-set_target_properties(fuzz_frontend PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-add_test(
-  NAME fuzz_frontend
-  COMMAND fuzz_frontend 150
-          ${CMAKE_CURRENT_SOURCE_DIR}/golden
-          ${CMAKE_CURRENT_SOURCE_DIR}/aliases
-          ${CMAKE_CURRENT_SOURCE_DIR}/../exemplos)
-set_tests_properties(fuzz_frontend PROPERTIES TIMEOUT 240)
