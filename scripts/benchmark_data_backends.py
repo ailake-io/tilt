@@ -77,8 +77,8 @@ class TiltRpcSession:
             self.process.wait()
 
 
-def make_data(directory: Path, rows: int) -> None:
-    regions = ["norte", "sul", "leste", "oeste", "centro"]
+def make_data(directory: Path, rows: int, groups: int) -> None:
+    regions = [f"regiao_{i}" for i in range(groups)]
     with (directory / "vendas.csv").open("w", newline="") as out:
         writer = csv.writer(out)
         writer.writerow(["id", "regiao", "valor"])
@@ -116,11 +116,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tilt", type=Path)
     parser.add_argument("--rows", type=int, default=200_000)
+    parser.add_argument("--groups", type=int, default=5,
+                        help="number of distinct regiao keys in the generated data")
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    if args.rows < 1 or args.repetitions < 1:
-        parser.error("--rows and --repetitions must be >= 1")
+    if args.rows < 1 or args.groups < 1 or args.repetitions < 1:
+        parser.error("--rows, --groups and --repetitions must be >= 1")
 
     available = {name: importlib.util.find_spec(name) is not None
                  for name in ("pandas", "polars", "duckdb")}
@@ -130,11 +132,11 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="tilt-data-backends-") as tmp:
         work = Path(tmp)
-        make_data(work, args.rows)
+        make_data(work, args.rows, args.groups)
         write_tilt_programs(work)
 
         tilt_bin = str(args.tilt.resolve())
-        regions = ["norte", "sul", "leste", "oeste", "centro"]
+        regions = [f"regiao_{i}" for i in range(args.groups)]
         filter_groups = len({regions[i % len(regions)] for i in range(args.rows)
                              if (i * 17) % 500 >= 250})
 

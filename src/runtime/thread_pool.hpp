@@ -3,9 +3,13 @@
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <atomic>
+#include <algorithm>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -61,6 +65,8 @@ class ThreadPool {
     return tasks_.size();
   }
 
+  std::size_t size() const { return workers_.size(); }
+
  private:
   void worker_loop() {
     while (true) {
@@ -90,5 +96,54 @@ class ThreadPool {
   std::vector<std::thread> workers_;
   bool stopping_ = false;
 };
+
+// Pool compartilhado pelos operadores analíticos. A criação única evita o
+// custo de criar/destruir threads em cada filtro, join ou agregação grande.
+inline ThreadPool& compute_pool() {
+  static ThreadPool pool([] {
+    const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+    return static_cast<std::size_t>(std::min(hardware, 16u));
+  }());
+  return pool;
+}
+
+// Executa faixas independentes em workers reutilizáveis. O callback recebe
+// [begin,end) e deve escrever apenas na memória associada à sua faixa.
+template <typename Fn>
+void parallel_for(std::size_t count, Fn&& fn, std::size_t grain = 65536) {
+  if (count == 0) return;
+  grain = std::max<std::size_t>(1, grain);
+  ThreadPool& pool = compute_pool();
+  const std::size_t parts = (count + grain - 1) / grain;
+  if (parts <= 1 || pool.size() <= 1) {
+    fn(0, count);
+    return;
+  }
+  auto callback = std::make_shared<std::decay_t<Fn>>(std::forward<Fn>(fn));
+  std::mutex done_mu;
+  std::condition_variable done;
+  std::size_t remaining = parts;
+  std::exception_ptr error;
+  for (std::size_t part = 0; part < parts; ++part) {
+    const std::size_t begin = part * grain;
+    const std::size_t end = std::min(count, begin + grain);
+    auto task = [callback, begin, end, &done_mu, &done, &remaining, &error] {
+      try {
+        (*callback)(begin, end);
+      } catch (...) {
+        std::lock_guard<std::mutex> lock(done_mu);
+        if (!error) error = std::current_exception();
+      }
+      {
+        std::lock_guard<std::mutex> lock(done_mu);
+        if (--remaining == 0) done.notify_one();
+      }
+    };
+    if (!pool.submit(std::move(task))) task();
+  }
+  std::unique_lock<std::mutex> lock(done_mu);
+  done.wait(lock, [&] { return remaining == 0; });
+  if (error) std::rethrow_exception(error);
+}
 
 }  // namespace tilt::rt

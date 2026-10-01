@@ -19,7 +19,7 @@ for arg in "$@"; do
     --check) CHECK_ONLY=1 ;;
     --force) FORCE=1 ;;
     -h|--help)
-      echo "uso: $0 [--check] [--force] [--prefix=DIR] [--repo=ORG/REPO] [--version=vX.Y.Z]"
+      echo "uso: $0 [--check] [--force] [--prefix=DIR] [--repo=ORG/REPO] [--version=vX.Y.Z[-beta.N]]"
       exit 0
       ;;
     *) echo "opcao desconhecida: $arg" >&2; exit 2 ;;
@@ -66,7 +66,10 @@ print(tag)
 PY
 )
 VERSION=${TAG#v}
-ASSET="tilt-${VERSION}-${OS}-${ARCH}.tar.gz"
+# CPack recebe a versão numérica (0.2.0) mesmo quando a tag é um pre-release
+# semver (0.2.0-beta.1). O binário continua exibindo a versão completa.
+PACKAGE_VERSION=${VERSION%%-*}
+ASSET="tilt-${PACKAGE_VERSION}-${OS}-${ARCH}.tar.gz"
 
 ASSET_URL=$(python3 - "$META" "$ASSET" <<'PY'
 import json, sys

@@ -48,6 +48,7 @@
 #include "runtime/cluster.hpp"
 #include "runtime/compat.hpp"
 #include "runtime/delta.hpp"
+#include "tilt/version.hpp"
 #include "runtime/duckdb.hpp"
 #include "runtime/elasticsearch.hpp"
 #include "runtime/gguf.hpp"
@@ -78,6 +79,7 @@
 #include "runtime/stdlib.hpp"
 #include "runtime/fuso.hpp"
 #include "runtime/tabela_ops.hpp"
+#include "runtime/thread_pool.hpp"
 #include "runtime/vectorstore.hpp"
 #include "runtime/weaviate.hpp"
 #include "semantic/checker.hpp"
@@ -463,7 +465,7 @@ Value mlops_lineage(const SourceFile* source, const std::string& entry_dir, cons
     dados.map_ref()->set("linhas", Value::inteiro(static_cast<std::int64_t>(rows.size())));
   }
   lineage.map_ref()->set("dados", std::move(dados));
-  lineage.map_ref()->set("tilt_versao", Value::texto("0.1.0"));
+  lineage.map_ref()->set("tilt_versao", Value::texto(kVersion));
   return lineage;
 }
 
@@ -2587,7 +2589,7 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas(
     const std::vector<std::string>& headers, const std::vector<std::size_t>& indices,
     const std::vector<char>* incluir, const std::vector<std::string>& nulos,
     const std::vector<CsvTipoInferido>* tipos, const std::string& fuso_origem,
-    const std::string& fuso_destino) {
+    const std::string& fuso_destino, std::size_t limite = 0) {
   auto table = std::make_shared<rt::ColumnarTable>(headers);
   std::vector<std::string> cells;
   const auto append_value = [](rt::ColumnarColumn& column, Value value) {
@@ -2642,6 +2644,7 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas(
       }
     }
     ++table->rows;
+    if (limite > 0 && table->rows >= limite) break;
   }
   return table;
 }
@@ -2652,7 +2655,8 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas(
 // para o dicionário, mas números não passam por uma alocação intermediária.
 std::shared_ptr<rt::ColumnarTable> csv_colunas_simples(
     const char* buf, std::size_t ini, std::size_t fim, char sep,
-    const std::vector<std::string>& headers, const std::vector<std::size_t>& indices) {
+    const std::vector<std::string>& headers, const std::vector<std::size_t>& indices,
+    std::size_t limite = 0) {
   auto table = std::make_shared<rt::ColumnarTable>(headers);
   auto append_field = [](rt::ColumnarColumn& column, const char* first, const char* last) {
     if (last > first && last[-1] == '\r') --last;
@@ -2719,6 +2723,7 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_simples(
       ++selected;
     }
     ++table->rows;
+    if (limite > 0 && table->rows >= limite) break;
     pos = line_end < fim ? line_end + 1 : fim;
   }
   return table;
@@ -2729,7 +2734,7 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_paralelo(
     const std::vector<std::string>& headers, const std::vector<std::size_t>& indices,
     const std::vector<char>* incluir, const std::vector<std::string>& nulos,
     const std::vector<CsvTipoInferido>* tipos, const std::string& fuso_origem,
-    const std::string& fuso_destino) {
+    const std::string& fuso_destino, std::size_t limite = 0) {
   constexpr std::size_t kBytesPorThread = std::size_t{4} << 20;
   const std::size_t util = fim - ini;
   const bool sem_opcoes_complexas = tipos == nullptr && nulos.empty() &&
@@ -2746,11 +2751,12 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_paralelo(
   }
   const std::size_t max_threads = std::min<std::size_t>(
       std::max(1u, std::thread::hardware_concurrency()), 8);
-  const std::size_t desejadas = std::min(max_threads, std::max<std::size_t>(1, util / kBytesPorThread));
+  std::size_t desejadas = std::min(max_threads, std::max<std::size_t>(1, util / kBytesPorThread));
+  if (limite > 0) desejadas = 1;
   if (desejadas <= 1) {
-    if (sem_aspas) return csv_colunas_simples(buf, ini, fim, sep, headers, indices);
+    if (sem_aspas) return csv_colunas_simples(buf, ini, fim, sep, headers, indices, limite);
     return csv_colunas(buf, ini, fim, sep, headers, indices, incluir, nulos, tipos,
-                       fuso_origem, fuso_destino);
+                       fuso_origem, fuso_destino, limite);
   }
   std::vector<std::size_t> cortes{ini};
   for (std::size_t k = 1; k < desejadas; ++k) {
@@ -2768,9 +2774,9 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_paralelo(
   for (std::size_t f = 0; f < faixas; ++f) {
     workers.emplace_back([&, f] {
       partes[f] = sem_aspas
-                      ? csv_colunas_simples(buf, cortes[f], cortes[f + 1], sep, headers, indices)
+                      ? csv_colunas_simples(buf, cortes[f], cortes[f + 1], sep, headers, indices, limite)
                       : csv_colunas(buf, cortes[f], cortes[f + 1], sep, headers, indices,
-                                    incluir, nulos, tipos, fuso_origem, fuso_destino);
+                                    incluir, nulos, tipos, fuso_origem, fuso_destino, limite);
     });
   }
   for (auto& worker : workers) worker.join();
@@ -2904,9 +2910,15 @@ Value Interpreter::read_csv_file(const std::string& path, Span span, const CsvOp
   }
 
   if (op.colunar) {
-    return Value::tabela_colunar(csv_colunas_paralelo(
+    auto table = csv_colunas_paralelo(
         dados, pos, n, sep, headers, indices, incluir.empty() ? nullptr : &incluir, op.nulos,
-        op.inferir ? &tipos_inferidos : nullptr, op.fuso_origem, op.fuso_destino));
+        op.inferir ? &tipos_inferidos : nullptr, op.fuso_origem, op.fuso_destino, op.limite);
+    if (op.limite > 0 && table->rows > op.limite) {
+      std::vector<std::size_t> positions(op.limite);
+      std::iota(positions.begin(), positions.end(), std::size_t{0});
+      table = table->take_rows(positions);
+    }
+    return Value::tabela_colunar(std::move(table));
   }
 
   // Faixas alinhadas a '\n': uma por thread (arquivo pequeno = uma faixa so).
@@ -2947,7 +2959,10 @@ Value Interpreter::read_csv_file(const std::string& path, Span span, const CsvOp
     }
     for (std::thread& t : threads) t.join();
   }
-  if (nfaixas == 1) return Value::tabela(std::move(partes[0]));
+  if (nfaixas == 1) {
+    if (op.limite > 0 && partes[0].size() > op.limite) partes[0].resize(op.limite);
+    return Value::tabela(std::move(partes[0]));
+  }
   std::size_t total = 0;
   for (const auto& p : partes) total += p.size();
   rt::ValueList rows;
@@ -2956,10 +2971,12 @@ Value Interpreter::read_csv_file(const std::string& path, Span span, const CsvOp
     for (Value& v : p) rows.push_back(std::move(v));
     rt::ValueList().swap(p);
   }
+  if (op.limite > 0 && rows.size() > op.limite) rows.resize(op.limite);
   return Value::tabela(std::move(rows));
 }
 
-Value Interpreter::read_fonte(const std::string& name, Span span, bool allow_lazy) {
+Value Interpreter::read_fonte(const std::string& name, Span span, bool allow_lazy,
+                              const rt::ColumnarTable::LazyPlan* lazy_plan) {
   const Item* decl = entities_.at(name);
   if (!decl->block) fail(span, "fonte '" + name + "' sem configuracao");
 
@@ -2972,16 +2989,34 @@ Value Interpreter::read_fonte(const std::string& name, Span span, bool allow_laz
   if (path.rfind("file://", 0) == 0) path = path.substr(7);
   if (tipo == "duckdb" && path.rfind("duckdb://", 0) == 0) path = path.substr(9);
   if (tipo == "sqlite" && path.rfind("sqlite://", 0) == 0) path = path.substr(9);
-  if (allow_lazy && tipo != "csv" && tipo != "json" && tipo != "parquet" && tipo != "delta") {
+  const bool lazy_table_connector = tipo == "sqlite" || tipo == "postgres" || tipo == "duckdb" ||
+                                    tipo == "mysql" || tipo == "clickhouse" ||
+                                    tipo == "elasticsearch" || tipo == "opensearch" || tipo == "spark";
+  if (allow_lazy && lazy_table_connector) {
     if (const Item* lf = find_field(*decl->block, "lazy"); lf && lf->value) {
       if (lf->value->kind != ExprKind::BoolLit)
         fail(lf->span, "fonte '" + name + "': 'lazy' deve ser logico");
       if (lf->value->boolean) {
         auto plano = std::make_shared<rt::ColumnarTable>(std::vector<std::string>{});
-        plano->set_lazy_loader([this, name, span]() {
-          Value loaded = read_fonte(name, span, false);
-          return tabela_colunar_de_value(std::move(loaded));
-        });
+        const bool source_handles_plan = tipo == "sqlite" || tipo == "postgres" || tipo == "duckdb" ||
+                                         tipo == "mysql" || tipo == "clickhouse" ||
+                                         tipo == "elasticsearch" || tipo == "opensearch" || tipo == "spark";
+        plano->set_lazy_planner([this, name, span, source_handles_plan](const rt::ColumnarTable::LazyPlan& plan) {
+          Value loaded = read_fonte(name, span, false, &plan);
+          auto result = tabela_colunar_de_value(std::move(loaded));
+          if (source_handles_plan) return result;
+          // Conectores sem tradução específica continuam corretos: o plano
+          // é executado como residual depois da leitura remota.
+          if (plan.predicate.kind != ValueKind::Nulo)
+            result = result->filter_predicate(plan.predicate);
+          if (!plan.projection.empty()) result = result->project_columns(plan.projection);
+          if (plan.limit_set && result->rows > plan.limit) {
+            std::vector<std::size_t> positions(plan.limit);
+            std::iota(positions.begin(), positions.end(), std::size_t{0});
+            result = result->take_rows(positions);
+          }
+          return result;
+        }, {});
         return Value::tabela_colunar(std::move(plano));
       }
     }
@@ -3140,6 +3175,102 @@ Value Interpreter::read_fonte(const std::string& name, Span span, bool allow_laz
       if (limit > 0) pushed += " LIMIT " + std::to_string(limit);
       sql = std::move(pushed);
     }
+    bool lazy_predicate_pushed = false;
+    bool lazy_limit_pushed = false;
+    bool lazy_projection_pushed = false;
+    if (lazy_plan && (!lazy_plan->projection.empty() || lazy_plan->predicate.kind != ValueKind::Nulo ||
+                      lazy_plan->limit_set)) {
+      const auto identifier = [&](const std::string& value) {
+        return is_sql_identifier(value);
+      };
+      std::function<bool(const Value&, std::string&, std::vector<rt::SqlParam>&)> pred_sql;
+      pred_sql = [&](const Value& pred, std::string& out,
+                     std::vector<rt::SqlParam>& params) -> bool {
+        if (pred.kind != ValueKind::Mapa || !pred.map_ref() || pred.map_ref()->items.empty()) return false;
+        std::vector<std::string> parts;
+        for (const auto& [name, expected] : pred.map_ref()->items) {
+          if ((name == "e" || name == "ou") && expected.kind == ValueKind::Lista && expected.list_ref()) {
+            std::vector<std::string> nested;
+            for (const Value& part : *expected.list_ref()) {
+              std::string item;
+              if (!pred_sql(part, item, params)) return false;
+              nested.push_back("(" + item + ")");
+            }
+            if (nested.empty()) return false;
+            std::string combined = "(";
+            for (std::size_t i = 0; i < nested.size(); ++i) {
+              if (i) combined += name == "e" ? " AND " : " OR ";
+              combined += nested[i];
+            }
+            combined += ")";
+            parts.push_back(std::move(combined));
+            continue;
+          }
+          if (!identifier(name)) return false;
+          std::string op = "=";
+          const Value* rhs = &expected;
+          if (expected.kind == ValueKind::Mapa && expected.map_ref() && expected.map_ref()->items.size() == 1) {
+            const auto& candidate = expected.map_ref()->items.front();
+            if (candidate.first != "==" && candidate.first != "!=" && candidate.first != "<" &&
+                candidate.first != "<=" && candidate.first != ">" && candidate.first != ">=") return false;
+            op = candidate.first == "==" ? "=" : candidate.first == "!=" ? "<>" : candidate.first;
+            rhs = &candidate.second;
+          }
+          const rt::SqlParam param = rt::param_de_valor(*rhs, "lazy predicate");
+          if (param.tipo == rt::SqlParam::Tipo::Nulo) {
+            parts.push_back(name + (op == "<>" ? " IS NOT NULL" : " IS NULL"));
+          } else {
+            parts.push_back(name + " " + op + " ?");
+            params.push_back(param);
+          }
+        }
+        if (parts.empty()) return false;
+        out = "(";
+        for (std::size_t i = 0; i < parts.size(); ++i) {
+          if (i) out += " AND ";
+          out += parts[i];
+        }
+        out += ")";
+        return true;
+      };
+      std::string predicate_sql;
+      std::vector<rt::SqlParam> dynamic_params;
+      const bool has_predicate = lazy_plan->predicate.kind != ValueKind::Nulo;
+      const bool predicate_ok = !has_predicate || pred_sql(lazy_plan->predicate, predicate_sql, dynamic_params);
+      if (predicate_ok) {
+        std::vector<std::string> inner_columns = lazy_plan->projection;
+        for (const std::string& column : lazy_plan->predicate_columns) {
+          if (!identifier(column)) {
+            dynamic_params.clear();
+            break;
+          }
+          if (std::find(inner_columns.begin(), inner_columns.end(), column) == inner_columns.end())
+            inner_columns.push_back(column);
+        }
+        if (dynamic_params.size() || !has_predicate || predicate_sql.size()) {
+          std::string wrapped = "SELECT ";
+          if (inner_columns.empty()) wrapped += "*";
+          else {
+            for (std::size_t i = 0; i < inner_columns.size(); ++i) {
+              if (i) wrapped += ", ";
+              wrapped += inner_columns[i];
+            }
+          }
+          wrapped += " FROM (" + sql + ") AS tilt_lazy";
+          if (has_predicate) {
+            wrapped += " WHERE " + predicate_sql;
+            pushdown_params.insert(pushdown_params.end(), dynamic_params.begin(), dynamic_params.end());
+            lazy_predicate_pushed = true;
+          }
+          if (lazy_plan->limit_set) {
+            wrapped += " LIMIT " + std::to_string(lazy_plan->limit);
+            lazy_limit_pushed = true;
+          }
+          sql = std::move(wrapped);
+          lazy_projection_pushed = !lazy_plan->projection.empty();
+        }
+      }
+    }
     auto run_query = [&](const std::string& query) {
       if (tipo == "duckdb") {
         return pushdown_params.empty() ? rt::duckdb_query(path, query)
@@ -3163,7 +3294,18 @@ Value Interpreter::read_fonte(const std::string& name, Span span, bool allow_laz
     try {
       Value t = run_query(sql);
       t.kind = ValueKind::Tabela;
-      return t;
+      if (!lazy_plan) return t;
+      auto result = tabela_colunar_de_value(std::move(t));
+      if (lazy_plan && lazy_plan->predicate.kind != ValueKind::Nulo && !lazy_predicate_pushed)
+        result = result->filter_predicate(lazy_plan->predicate);
+      if (lazy_plan && !lazy_plan->projection.empty() && !lazy_projection_pushed)
+        result = result->project_columns(lazy_plan->projection);
+      if (lazy_plan && lazy_plan->limit_set && !lazy_limit_pushed && result->rows > lazy_plan->limit) {
+        std::vector<std::size_t> positions(lazy_plan->limit);
+        std::iota(positions.begin(), positions.end(), std::size_t{0});
+        result = result->take_rows(positions);
+      }
+      return Value::tabela_colunar(std::move(result));
     } catch (const std::exception& e) {
       fail(span, std::string(e.what()));
     }
@@ -3222,7 +3364,111 @@ Value Interpreter::read_fonte(const std::string& name, Span span, bool allow_laz
           dsl.map_ref()->set("size", *limit);
         }
       }
-      return rt::es_query(path, dsl);
+      bool lazy_predicate_pushed = false;
+      bool lazy_limit_pushed = false;
+      bool lazy_projection_pushed = false;
+      if (lazy_plan && !lazy_plan->projection.empty()) {
+        Value source = Value::lista();
+        for (const std::string& column : lazy_plan->projection)
+          source.list_ref()->push_back(Value::texto(column));
+        dsl.map_ref()->set("_source", std::move(source));
+        lazy_projection_pushed = true;
+      }
+      if (lazy_plan && lazy_plan->predicate.kind != ValueKind::Nulo) {
+        std::function<bool(const Value&, Value&)> clause;
+        clause = [&](const Value& pred, Value& out) -> bool {
+          if (pred.kind != ValueKind::Mapa || !pred.map_ref() || pred.map_ref()->items.empty()) return false;
+          Value filters = Value::lista();
+          for (const auto& [name, expected] : pred.map_ref()->items) {
+            if ((name == "e" || name == "ou") && expected.kind == ValueKind::Lista && expected.list_ref()) {
+              Value bool_body = Value::mapa();
+              Value children = Value::lista();
+              for (const Value& part : *expected.list_ref()) {
+                Value child;
+                if (!clause(part, child)) return false;
+                children.list_ref()->push_back(std::move(child));
+              }
+              bool_body.map_ref()->set(name == "e" ? "must" : "should", std::move(children));
+              out = Value::mapa();
+              out.map_ref()->set("bool", std::move(bool_body));
+              return true;
+            }
+            if (name == "e" || name == "ou" || name.empty()) return false;
+            Value body = Value::mapa();
+            if (expected.kind == ValueKind::Mapa && expected.map_ref() && expected.map_ref()->items.size() == 1) {
+              const auto& candidate = expected.map_ref()->items.front();
+              if (candidate.first != "==" && candidate.first != "!=" && candidate.first != "<" &&
+                  candidate.first != "<=" && candidate.first != ">" && candidate.first != ">=") return false;
+              if (candidate.first == "==") {
+                body.map_ref()->set(name, candidate.second);
+                Value item = Value::mapa();
+                item.map_ref()->set("term", std::move(body));
+                filters.list_ref()->push_back(std::move(item));
+              } else if (candidate.first != "!=") {
+                Value bounds = Value::mapa();
+                bounds.map_ref()->set(candidate.first, candidate.second);
+                Value range = Value::mapa();
+                range.map_ref()->set(name, std::move(bounds));
+                Value item = Value::mapa();
+                item.map_ref()->set("range", std::move(range));
+                filters.list_ref()->push_back(std::move(item));
+              } else {
+                return false;
+              }
+            } else {
+              body.map_ref()->set(name, expected);
+              Value item = Value::mapa();
+              item.map_ref()->set("term", std::move(body));
+              filters.list_ref()->push_back(std::move(item));
+            }
+          }
+          if (filters.list_ref()->size() == 1) {
+            out = (*filters.list_ref())[0];
+            return true;
+          }
+          Value bool_body = Value::mapa();
+          bool_body.map_ref()->set("filter", std::move(filters));
+          out = Value::mapa();
+          out.map_ref()->set("bool", std::move(bool_body));
+          return true;
+        };
+        Value dynamic_clause;
+        if (clause(lazy_plan->predicate, dynamic_clause)) {
+          Value existing = Value::nulo();
+          if (const Value* query = dsl.map_ref()->find("query")) existing = *query;
+          Value bool_body = Value::mapa();
+          if (existing.kind != ValueKind::Nulo) {
+            Value must = Value::lista();
+            must.list_ref()->push_back(std::move(existing));
+            bool_body.map_ref()->set("must", std::move(must));
+          }
+          Value filters = Value::lista();
+          filters.list_ref()->push_back(std::move(dynamic_clause));
+          bool_body.map_ref()->set("filter", std::move(filters));
+          Value query = Value::mapa();
+          query.map_ref()->set("bool", std::move(bool_body));
+          dsl.map_ref()->set("query", std::move(query));
+          lazy_predicate_pushed = true;
+        }
+      }
+      if (lazy_plan && lazy_plan->limit_set &&
+          (lazy_plan->predicate.kind == ValueKind::Nulo || lazy_predicate_pushed)) {
+        dsl.map_ref()->set("size", Value::inteiro(static_cast<std::int64_t>(lazy_plan->limit)));
+        lazy_limit_pushed = true;
+      }
+      Value result = rt::es_query(path, dsl);
+      if (!lazy_plan) return result;
+      auto table = tabela_colunar_de_value(std::move(result));
+      if (lazy_plan->predicate.kind != ValueKind::Nulo && !lazy_predicate_pushed)
+        table = table->filter_predicate(lazy_plan->predicate);
+      if (!lazy_plan->projection.empty() && !lazy_projection_pushed)
+        table = table->project_columns(lazy_plan->projection);
+      if (lazy_plan->limit_set && !lazy_limit_pushed && table->rows > lazy_plan->limit) {
+        std::vector<std::size_t> positions(lazy_plan->limit);
+        std::iota(positions.begin(), positions.end(), std::size_t{0});
+        table = table->take_rows(positions);
+      }
+      return Value::tabela_colunar(std::move(table));
     } catch (const std::exception& e) {
       fail(span, std::string(e.what()));
     }
@@ -3249,10 +3495,161 @@ Value Interpreter::read_fonte(const std::string& name, Span span, bool allow_laz
       }
     }
     try {
-      Value t = rt::livy_sql(path, c->value->text, lingua,
+      std::string consulta = c->value->text;
+      bool lazy_predicate_pushed = false;
+      bool lazy_projection_pushed = false;
+      bool lazy_limit_pushed = false;
+      if (lazy_plan && (!lazy_plan->projection.empty() ||
+                        lazy_plan->predicate.kind != ValueKind::Nulo || lazy_plan->limit_set)) {
+        const auto identifier = [&](const std::string& value) {
+          if (value.empty() || !(std::isalpha(static_cast<unsigned char>(value[0])) || value[0] == '_'))
+            return false;
+          for (std::size_t i = 1; i < value.size(); ++i) {
+            const unsigned char ch = static_cast<unsigned char>(value[i]);
+            if (!(std::isalnum(ch) || value[i] == '_')) return false;
+          }
+          return true;
+        };
+        const auto literal = [&](const Value& value, std::string& out) {
+          switch (value.kind) {
+            case ValueKind::Nulo:
+              out = "NULL";
+              return true;
+            case ValueKind::Logico:
+              out = value.b ? "TRUE" : "FALSE";
+              return true;
+            case ValueKind::Inteiro:
+              out = std::to_string(value.i);
+              return true;
+            case ValueKind::Decimal:
+              out = std::to_string(value.d);
+              return true;
+            case ValueKind::Texto: {
+              out = "'";
+              for (char ch : value.s) {
+                if (ch == '\'') out += "''";
+                else out += ch;
+              }
+              out += "'";
+              return true;
+            }
+            default:
+              return false;
+          }
+        };
+        std::function<bool(const Value&, std::string&)> pred_sql;
+        pred_sql = [&](const Value& pred, std::string& out) -> bool {
+          if (pred.kind != ValueKind::Mapa || !pred.map_ref() || pred.map_ref()->items.empty()) return false;
+          std::vector<std::string> parts;
+          for (const auto& [name, expected] : pred.map_ref()->items) {
+            if ((name == "e" || name == "ou") && expected.kind == ValueKind::Lista && expected.list_ref()) {
+              std::vector<std::string> nested;
+              for (const Value& part : *expected.list_ref()) {
+                std::string item;
+                if (!pred_sql(part, item)) return false;
+                nested.push_back("(" + item + ")");
+              }
+              if (nested.empty()) return false;
+              std::string combined = "(";
+              for (std::size_t i = 0; i < nested.size(); ++i) {
+                if (i) combined += name == "e" ? " AND " : " OR ";
+                combined += nested[i];
+              }
+              combined += ")";
+              parts.push_back(std::move(combined));
+              continue;
+            }
+            if (!identifier(name)) return false;
+            std::string op = "=";
+            const Value* rhs = &expected;
+            if (expected.kind == ValueKind::Mapa && expected.map_ref() && expected.map_ref()->items.size() == 1) {
+              const auto& candidate = expected.map_ref()->items.front();
+              if (candidate.first != "==" && candidate.first != "!=" && candidate.first != "<" &&
+                  candidate.first != "<=" && candidate.first != ">" && candidate.first != ">=") return false;
+              op = candidate.first == "==" ? "=" : candidate.first == "!=" ? "<>" : candidate.first;
+              rhs = &candidate.second;
+            }
+            std::string value;
+            if (!literal(*rhs, value)) return false;
+            if (rhs->kind == ValueKind::Nulo)
+              parts.push_back(name + (op == "<>" ? " IS NOT NULL" : " IS NULL"));
+            else
+              parts.push_back(name + " " + op + " " + value);
+          }
+          if (parts.empty()) return false;
+          out = "(";
+          for (std::size_t i = 0; i < parts.size(); ++i) {
+            if (i) out += " AND ";
+            out += parts[i];
+          }
+          out += ")";
+          return true;
+        };
+
+        std::string predicate_sql;
+        const bool has_predicate = lazy_plan->predicate.kind != ValueKind::Nulo;
+        const bool predicate_ok = !has_predicate || pred_sql(lazy_plan->predicate, predicate_sql);
+        std::vector<std::string> inner_columns = lazy_plan->projection;
+        bool columns_ok = true;
+        for (const std::string& column : lazy_plan->predicate_columns) {
+          if (!identifier(column)) {
+            columns_ok = false;
+            break;
+          }
+          if (std::find(inner_columns.begin(), inner_columns.end(), column) == inner_columns.end())
+            inner_columns.push_back(column);
+        }
+        for (const std::string& column : inner_columns)
+          if (!identifier(column)) columns_ok = false;
+        if (predicate_ok && columns_ok) {
+          std::string base = consulta;
+          while (!base.empty() && std::isspace(static_cast<unsigned char>(base.back()))) base.pop_back();
+          if (!base.empty() && base.back() == ';') base.pop_back();
+          std::string wrapped = "SELECT ";
+          if (inner_columns.empty()) wrapped += "*";
+          else {
+            for (std::size_t i = 0; i < inner_columns.size(); ++i) {
+              if (i) wrapped += ", ";
+              wrapped += inner_columns[i];
+            }
+          }
+          wrapped += " FROM (" + base + ") AS tilt_lazy";
+          if (has_predicate) {
+            wrapped += " WHERE " + predicate_sql;
+            lazy_predicate_pushed = true;
+          }
+          if (lazy_plan->limit_set) {
+            wrapped += " LIMIT " + std::to_string(lazy_plan->limit);
+            lazy_limit_pushed = true;
+          }
+          if (!lazy_plan->projection.empty() && inner_columns != lazy_plan->projection) {
+            std::string projected = "SELECT ";
+            for (std::size_t i = 0; i < lazy_plan->projection.size(); ++i) {
+              if (i) projected += ", ";
+              projected += lazy_plan->projection[i];
+            }
+            projected += " FROM (" + wrapped + ") AS tilt_projection";
+            wrapped = std::move(projected);
+          }
+          consulta = std::move(wrapped);
+          lazy_projection_pushed = !lazy_plan->projection.empty();
+        }
+      }
+      Value t = rt::livy_sql(path, consulta, lingua,
                              conf.kind == ValueKind::Mapa ? &conf : nullptr);
       t.kind = ValueKind::Tabela;
-      return t;
+      if (!lazy_plan) return t;
+      auto result = tabela_colunar_de_value(std::move(t));
+      if (lazy_plan->predicate.kind != ValueKind::Nulo && !lazy_predicate_pushed)
+        result = result->filter_predicate(lazy_plan->predicate);
+      if (!lazy_plan->projection.empty() && !lazy_projection_pushed)
+        result = result->project_columns(lazy_plan->projection);
+      if (lazy_plan->limit_set && !lazy_limit_pushed && result->rows > lazy_plan->limit) {
+        std::vector<std::size_t> positions(lazy_plan->limit);
+        std::iota(positions.begin(), positions.end(), std::size_t{0});
+        result = result->take_rows(positions);
+      }
+      return Value::tabela_colunar(std::move(result));
     } catch (const std::exception& e) {
       fail(span, std::string(e.what()));
     }
@@ -11541,7 +11938,7 @@ void Interpreter::exec_block_parallel(const ast::Block& block, Env& env) {
         }
       });
     }
-    for (auto& worker : workers) worker.join();
+  for (auto& worker : workers) worker.join();
     for (const auto& erro : erros)
       if (erro) std::rethrow_exception(erro);
     for (std::size_t i = 0; i < grupo.size(); ++i) {
@@ -12116,8 +12513,13 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
       }
       if (expr.text == "tamanho") {
         if (base.kind == ValueKind::Lista || base.kind == ValueKind::Tabela) {
-          return Value::inteiro(base.list_ref() ? static_cast<std::int64_t>(base.list_ref()->size()) :
-                                base.columnar() ? static_cast<std::int64_t>(base.columnar()->rows) : 0);
+          if (base.list_ref())
+            return Value::inteiro(static_cast<std::int64_t>(base.list_ref()->size()));
+          if (rt::ColumnarTable* col = base.columnar()) {
+            col->materialize_view();
+            return Value::inteiro(static_cast<std::int64_t>(col->rows));
+          }
+          return Value::inteiro(0);
         }
         if (base.kind == ValueKind::Texto) {
           return Value::inteiro(static_cast<std::int64_t>(base.s.size()));
@@ -12854,8 +13256,10 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       if (!found) { v = std::move(current); found = true; }
     }
     if (!found) return Value::inteiro(0);
-    if (v.columnar())
+    if (v.columnar()) {
+      v.columnar()->materialize_view();
       return Value::inteiro(static_cast<std::int64_t>(v.columnar()->rows));
+    }
     if (v.kind == ValueKind::Lista || v.kind == ValueKind::Tabela) {
       return Value::inteiro(v.list_ref() ? static_cast<std::int64_t>(v.list_ref()->size()) : 0);
     }
@@ -13076,6 +13480,11 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       op.colunar = v->b;
     }
     if (const Value* v = kw.find("pular")) op.pular = static_cast<std::size_t>(v->as_number());
+    if (const Value* v = kw.find("limite")) {
+      if (v->kind != ValueKind::Inteiro || v->i < 0)
+        fail(call.span, "ler_csv: 'limite' deve ser inteiro >= 0");
+      op.limite = static_cast<std::size_t>(v->i);
+    }
     nomes("colunas", op.colunas);
     nomes("selecionar", op.selecionar);
     if (const Value* selected = kw.find("selecionar")) {
@@ -13137,16 +13546,47 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
       const std::string caminho = a[0].s;
       const CsvOpcoes opcoes = op;
       const Value tipos_copia = tipos ? *tipos : Value::nulo();
+      rt::ColumnarTable::LazyPlan plano_inicial;
+      plano_inicial.projection = op.selecionar;
+      plano_inicial.limit = op.limite;
+      plano_inicial.limit_set = kw.find("limite") != nullptr;
       auto plano = std::make_shared<rt::ColumnarTable>(std::vector<std::string>{});
-      plano->set_lazy_loader([this, caminho, opcoes, tipos_copia, span = call.span]() mutable {
-        CsvOpcoes carga = opcoes;
-        Value tabela = read_csv_file(caminho, span, &carga);
-        if (tipos_copia.kind != ValueKind::Nulo) {
-          if (tabela.columnar()) tabela.columnar()->convert_types(tipos_copia);
-          else tabela = rt::tabela_converter(tabela, tipos_copia);
-        }
-        return tabela_colunar_de_value(std::move(tabela));
-      });
+      plano->set_lazy_planner(
+          [this, caminho, opcoes, tipos_copia, span = call.span](const rt::ColumnarTable::LazyPlan& plan) mutable {
+          CsvOpcoes carga = opcoes;
+            if (!plan.projection.empty()) {
+              carga.selecionar = plan.projection;
+              for (const std::string& name : plan.predicate_columns)
+                if (std::find(carga.selecionar.begin(), carga.selecionar.end(), name) ==
+                    carga.selecionar.end()) carga.selecionar.push_back(name);
+            }
+            // Um limite só pode entrar no parser antes do filtro quando não
+            // há predicado: `filtrar(...).limite(n)` limita as linhas aceitas,
+            // não as primeiras linhas físicas do arquivo.
+            carga.limite = plan.limit_set && plan.predicate.kind == ValueKind::Nulo
+                                ? plan.limit
+                                : 0;
+            Value tabela = read_csv_file(caminho, span, &carga);
+            if (tipos_copia.kind != ValueKind::Nulo) {
+              if (tabela.columnar()) tabela.columnar()->convert_types(tipos_copia);
+              else tabela = rt::tabela_converter(tabela, tipos_copia);
+            }
+            auto result = tabela_colunar_de_value(std::move(tabela));
+            if (plan.predicate.kind != ValueKind::Nulo) result = result->filter_predicate(plan.predicate);
+            if (!plan.projection.empty() && plan.predicate_columns.size() > 0) {
+              result = result->project_columns(plan.projection);
+            }
+            if (plan.limit_set && result->rows > plan.limit) {
+              std::vector<std::size_t> positions(plan.limit);
+              std::iota(positions.begin(), positions.end(), std::size_t{0});
+              result = result->take_rows(positions);
+            }
+            return result;
+          },
+          std::move(plano_inicial));
+      // Predicados adicionados depois da leitura são anexados pelo método
+      // `filtrar`; a leitura CSV também pode receber um predicado declarado
+      // futuramente sem perder a projeção solicitada.
       return Value::tabela_colunar(std::move(plano));
     }
     Value t = read_csv_file(a[0].s, call.span, &op);
@@ -13219,11 +13659,29 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         const std::vector<std::string> projecao = selecionar;
         const Value filtro = onde ? *onde : Value::nulo();
         auto plano = std::make_shared<rt::ColumnarTable>(std::vector<std::string>{});
-        plano->set_lazy_loader([caminho, projecao, filtro]() mutable {
-          Value tabela = rt::parquet_read(
-              caminho, projecao, true, filtro.kind == ValueKind::Nulo ? nullptr : &filtro);
-          return tabela_colunar_de_value(std::move(tabela));
-        });
+        rt::ColumnarTable::LazyPlan plano_inicial;
+        plano_inicial.projection = projecao;
+        plano->set_lazy_planner([caminho](const rt::ColumnarTable::LazyPlan& plan) mutable {
+          const Value* pred = plan.predicate.kind == ValueKind::Nulo ? nullptr : &plan.predicate;
+          std::vector<std::string> leitura = plan.projection;
+          for (const std::string& name : plan.predicate_columns)
+            if (std::find(leitura.begin(), leitura.end(), name) == leitura.end()) leitura.push_back(name);
+          const std::size_t limite_fisico = plan.limit_set && plan.predicate.kind == ValueKind::Nulo
+                                                ? plan.limit
+                                                : 0;
+          Value tabela = rt::parquet_read(caminho, leitura, true, pred, limite_fisico);
+          auto result = tabela_colunar_de_value(std::move(tabela));
+            if (plan.limit_set && result->rows > plan.limit) {
+            std::vector<std::size_t> positions(plan.limit);
+            std::iota(positions.begin(), positions.end(), std::size_t{0});
+            result = result->take_rows(positions);
+          }
+          // parquet_read já aplica o predicado com pruning/residual. O
+          // fallback só é necessário para predicados introduzidos depois da
+          // abertura quando a implementação da fonte não os reconhece.
+          return result;
+        }, std::move(plano_inicial));
+        if (filtro.kind != ValueKind::Nulo) plano->add_lazy_predicate(filtro);
         return Value::tabela_colunar(std::move(plano));
       }
       Value t = rt::parquet_read(a[0].s, selecionar, colunar, onde);
@@ -13262,11 +13720,48 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
         const std::string caminho = a[0].s;
         const Value filtro = onde ? *onde : Value::nulo();
         auto plano = std::make_shared<rt::ColumnarTable>(std::vector<std::string>{});
-        plano->set_lazy_loader([caminho, filtro, versao]() mutable {
-          Value tabela = rt::delta_read(
-              caminho, filtro.kind == ValueKind::Nulo ? nullptr : &filtro, versao);
-          return tabela_colunar_de_value(std::move(tabela));
-        });
+        rt::ColumnarTable::LazyPlan plano_inicial;
+        plano->set_lazy_planner([caminho, versao](const rt::ColumnarTable::LazyPlan& plan) mutable {
+          // Delta faz pruning e filtro residual para igualdade simples. Mapas
+          // compostos/comparadores ficam no executor colunar para não reduzir
+          // incorretamente o snapshot.
+          std::function<bool(const Value&)> delta_pushable = [&](const Value& item) {
+            if (item.kind != ValueKind::Mapa || !item.map_ref()) return false;
+            for (const auto& [name, value] : item.map_ref()->items) {
+              if (name == "e" || name == "ou") return false;
+              if (value.kind == ValueKind::Mapa) return false;
+            }
+            return true;
+          };
+          const bool pushable = plan.predicate.kind == ValueKind::Nulo || delta_pushable(plan.predicate);
+          const Value* pred = pushable && plan.predicate.kind != ValueKind::Nulo
+                                  ? &plan.predicate
+                                  : nullptr;
+          Value tabela = rt::delta_read(caminho, pred, versao);
+          auto result = tabela_colunar_de_value(std::move(tabela));
+          if (!pushable && plan.predicate.kind != ValueKind::Nulo)
+            result = result->filter_predicate(plan.predicate);
+          if (plan.limit_set && result->rows > plan.limit) {
+            std::vector<std::size_t> positions(plan.limit);
+            std::iota(positions.begin(), positions.end(), std::size_t{0});
+            result = result->take_rows(positions);
+          }
+          if (!plan.projection.empty() && !plan.predicate_columns.empty())
+            result = result->project_columns(plan.projection);
+          if (!plan.projection.empty()) {
+            // Delta ainda devolve o schema completo; a projeção é anexada
+            // como visão para não copiar as colunas selecionadas.
+            auto projected = std::make_shared<rt::ColumnarTable>(plan.projection);
+            projected->rows = result->rows;
+            projected->view_parent = result;
+            projected->view_rows = std::make_shared<std::vector<std::size_t>>(result->rows);
+            std::iota(projected->view_rows->begin(), projected->view_rows->end(), std::size_t{0});
+            projected->view_identity = true;
+            result = std::move(projected);
+          }
+          return result;
+        }, std::move(plano_inicial));
+        if (filtro.kind != ValueKind::Nulo) plano->add_lazy_predicate(filtro);
         return Value::tabela_colunar(std::move(plano));
       }
       Value t = rt::delta_read(a[0].s, onde, versao);
@@ -14960,10 +15455,253 @@ Value Interpreter::eval_builtin(const std::string& name, const Expr& call, Env& 
 
 Value Interpreter::eval_method(const std::string& method, Value receiver, const Expr& call,
                                Env& env) {
-  if (receiver.columnar() && method == "filtrar" && !call.args.empty() &&
+  if (receiver.columnar(false) && method == "selecionar") {
+    const auto selected = eval_args(call, env);
+    std::vector<std::string> names;
+    names.reserve(selected.size());
+    for (const Value& value : selected) {
+      if (value.kind != ValueKind::Texto)
+        fail(call.span, "selecionar espera nomes de coluna em texto");
+      names.push_back(value.s.str());
+    }
+    rt::ColumnarTable& source = *receiver.columnar(false);
+    if (source.is_lazy()) {
+      if (!source.add_lazy_projection(names)) {
+        source.ensure_loaded();
+      } else {
+        return receiver;
+      }
+    }
+    auto result = std::make_shared<rt::ColumnarTable>(names);
+    for (const std::string& name : names) {
+      bool existe = source.find(name) != nullptr;
+      if (!existe && source.has_pending_filter()) {
+        for (const auto& derivada : source.pending_derived)
+          if (derivada.name == name) { existe = true; break; }
+      }
+      if (!existe) fail(call.span, "selecionar: coluna inexistente '" + name + "'");
+    }
+    // A projeção pode ser anexada ao plano de filtro sem criar uma visão com
+    // índices. O agregador terminal consumirá apenas os campos selecionados,
+    // enquanto o predicado continua apontando para o parent físico.
+    if (source.has_pending_filter()) {
+      try {
+        result->rows = source.rows;
+        result->view_parent = source.view_parent;
+        result->pending_filter = source.pending_filter;
+        result->pending_derived = source.pending_derived;
+        result->view_identity = false;
+        return Value::tabela_colunar(std::move(result));
+      } catch (const std::bad_weak_ptr&) {
+        source.materialize_view();
+      }
+    }
+    // A projeção sobre uma tabela compartilhada vira uma visão: não copia
+    // colunas nem materializa células. A seleção de linhas é achatada para o
+    // parent físico quando a origem já é uma visão filtrada.
+    try {
+      result->rows = source.rows;
+      if (source.is_view()) {
+        result->view_parent = source.view_parent;
+        result->view_rows = std::make_shared<std::vector<std::size_t>>();
+        result->view_identity = source.view_identity;
+        result->view_rows->reserve(source.rows);
+        for (std::size_t row = 0; row < source.rows; ++row)
+          result->view_rows->push_back(source.physical_row(row));
+      } else {
+        result->view_parent = source.shared_from_this();
+        result->view_rows = std::make_shared<std::vector<std::size_t>>(source.rows);
+        std::iota(result->view_rows->begin(), result->view_rows->end(), 0);
+        result->view_identity = true;
+      }
+      return Value::tabela_colunar(std::move(result));
+    } catch (const std::bad_weak_ptr&) {
+      // Tabelas criadas na pilha por extensões antigas não podem manter um
+      // parent compartilhado; preserva o caminho de cópia compatível.
+      std::vector<std::size_t> physical;
+      if (source.is_view()) {
+        physical.reserve(source.rows);
+        for (std::size_t row = 0; row < source.rows; ++row)
+          physical.push_back(source.physical_row(row));
+      }
+      for (std::size_t col = 0; col < names.size(); ++col) {
+        const rt::ColumnarColumn* input = source.find(names[col]);
+        if (source.is_view()) result->columns[col] = input->take_rows(physical);
+        else result->columns[col].append_column(*input);
+      }
+      result->rows = source.rows;
+      return Value::tabela_colunar(std::move(result));
+    }
+  }
+  if (receiver.columnar(false) && (method == "limite" || method == "primeiros")) {
+    auto args_limit = eval_args(call, env);
+    const std::int64_t n = args_limit.empty() ? 0 : static_cast<std::int64_t>(args_limit[0].as_number());
+    if (n < 0) fail(call.span, method + " espera um limite >= 0");
+    rt::ColumnarTable& table = *receiver.columnar(false);
+    if (table.is_lazy() && table.add_lazy_limit(static_cast<std::size_t>(n))) return receiver;
+    table.ensure_loaded();
+  }
+  // Filtros colunares retornam uma visão com seleção tardia. O agrupamento
+  // consome essa seleção diretamente; os demais métodos precisam de buffers
+  // próprios e materializam a visão apenas neste ponto.
+  if (method != "agrupar_por" && method != "derivar" && method != "mapear" &&
+      method != "filtrar" && method != "selecionar" && receiver.columnar())
+    receiver.columnar()->materialize_view();
+  if (receiver.columnar(false) && method == "filtrar" && !call.args.empty() &&
       call.args[0].value) {
     const Expr& condition = *call.args[0].value;
+    rt::ColumnarTable& lazy_source = *receiver.columnar(false);
+    if (lazy_source.is_lazy()) {
+      std::function<bool(const Expr&, Value&)> compilar_plano;
+      compilar_plano = [&](const Expr& expr, Value& out) -> bool {
+        if (expr.kind == ExprKind::Binary && expr.lhs && expr.rhs &&
+            (expr.text == "e" || expr.text == "ou")) {
+          Value left;
+          Value right;
+          if (!compilar_plano(*expr.lhs, left) || !compilar_plano(*expr.rhs, right)) return false;
+          Value parts = Value::lista();
+          parts.list_ref()->push_back(std::move(left));
+          parts.list_ref()->push_back(std::move(right));
+          out = Value::mapa();
+          out.map_ref()->set(expr.text, std::move(parts));
+          return true;
+        }
+        if (!(expr.kind == ExprKind::Binary && expr.lhs && expr.rhs &&
+              expr.lhs->kind == ExprKind::Member && expr.lhs->lhs &&
+              expr.lhs->lhs->kind == ExprKind::Name && expr.lhs->lhs->text == "linha" &&
+              !expr.lhs->optional && word_in(expr.text, {"==", "!=", "<", "<=", ">", ">="})))
+          return false;
+        const Expr& literal = *expr.rhs;
+        Value rhs;
+        try {
+          if (literal.kind == ExprKind::IntLit) rhs = Value::inteiro(std::stoll(literal.text));
+          else if (literal.kind == ExprKind::DecimalLit) rhs = Value::decimal(std::stod(literal.text));
+          else if (literal.kind == ExprKind::TextLit) rhs = Value::texto(literal.text);
+          else if (literal.kind == ExprKind::BoolLit) rhs = Value::logico(literal.boolean);
+          else if (literal.kind == ExprKind::NullLit) rhs = Value::nulo();
+          else return false;
+        } catch (...) {
+          return false;
+        }
+        out = Value::mapa();
+        if (expr.text == "==") {
+          out.map_ref()->set(expr.lhs->text, std::move(rhs));
+        } else {
+          Value comparison = Value::mapa();
+          comparison.map_ref()->set(expr.text, std::move(rhs));
+          out.map_ref()->set(expr.lhs->text, std::move(comparison));
+        }
+        return true;
+      };
+      Value predicate;
+      if (compilar_plano(condition, predicate) && lazy_source.add_lazy_predicate(predicate))
+        return receiver;
+      lazy_source.ensure_loaded();
+    }
     const rt::ColumnarTable& table = *receiver.columnar();
+    // Compile predicados colunares simples/compostos para uma função pequena
+    // que pode ser consumida pelo agregador sem construir `positions`. Se a
+    // origem já é uma visão, materializamos somente essa visão anterior para
+    // manter o parent do plano em uma tabela física estável.
+    if (table.has_pending_filter() || table.is_view()) {
+      receiver.columnar()->materialize_view();
+    }
+    const rt::ColumnarTable& filtro_source = *receiver.columnar();
+    std::shared_ptr<const rt::ColumnarTable> filtro_parent;
+    try {
+      filtro_parent = filtro_source.shared_from_this();
+    } catch (const std::bad_weak_ptr&) {
+      filtro_parent.reset();
+    }
+    if (filtro_parent) {
+      using RowFilter = rt::ColumnarTable::RowFilter;
+      std::function<bool(const Expr&, RowFilter&)> compilar_filtro;
+      compilar_filtro = [&](const Expr& expr, RowFilter& out) -> bool {
+        if (expr.kind == ExprKind::Binary && expr.lhs && expr.rhs &&
+            (expr.text == "e" || expr.text == "ou")) {
+          RowFilter esquerda, direita;
+          if (!compilar_filtro(*expr.lhs, esquerda) || !compilar_filtro(*expr.rhs, direita))
+            return false;
+          if (expr.text == "e") {
+            out = [esquerda = std::move(esquerda), direita = std::move(direita)](std::size_t row) {
+              return esquerda(row) && direita(row);
+            };
+          } else {
+            out = [esquerda = std::move(esquerda), direita = std::move(direita)](std::size_t row) {
+              return esquerda(row) || direita(row);
+            };
+          }
+          return true;
+        }
+        if (!(expr.kind == ExprKind::Binary && expr.lhs && expr.rhs &&
+              expr.lhs->kind == ExprKind::Member && expr.lhs->lhs &&
+              expr.lhs->lhs->kind == ExprKind::Name && expr.lhs->lhs->text == "linha" &&
+              !expr.lhs->optional && word_in(expr.text, {"==", "!=", "<", "<=", ">", ">="}) &&
+              (expr.rhs->kind == ExprKind::IntLit || expr.rhs->kind == ExprKind::DecimalLit ||
+               expr.rhs->kind == ExprKind::TextLit || expr.rhs->kind == ExprKind::BoolLit ||
+               expr.rhs->kind == ExprKind::NullLit))) {
+          return false;
+        }
+        const rt::ColumnarColumn* column = filtro_parent->find(expr.lhs->text);
+        if (!column) return false;
+        const Value target = eval(*expr.rhs, env);
+        const std::string op = expr.text;
+        std::uint32_t alvo_codigo = 0;
+        bool alvo_codigo_encontrado = false;
+        if (target.kind == ValueKind::Texto &&
+            column->type == rt::ColumnarColumn::Type::Text &&
+            (op == "==" || op == "!=")) {
+          const auto it = column->dictionary_index.find(target.s);
+          if (it != column->dictionary_index.end()) {
+            alvo_codigo = it->second;
+            alvo_codigo_encontrado = true;
+          }
+        }
+        const auto compara = [op](double esquerda, double direita) {
+          return op == "==" ? esquerda == direita : op == "!=" ? esquerda != direita
+                 : op == "<" ? esquerda < direita : op == "<=" ? esquerda <= direita
+                 : op == ">" ? esquerda > direita : esquerda >= direita;
+        };
+        out = [column, target, op, compara, alvo_codigo, alvo_codigo_encontrado](std::size_t row) {
+          if (row >= column->nulls.size() || column->nulls[row]) {
+            bool ok = false;
+            return rt::apply_binop(op, Value::nulo(), target, &ok).truthy();
+          }
+          if (target.is_number() && column->type == rt::ColumnarColumn::Type::Integer)
+            return compara(static_cast<double>(column->integers[row]), target.as_number());
+          if (target.is_number() && column->type == rt::ColumnarColumn::Type::Decimal)
+            return compara(column->decimals[row], target.as_number());
+          if (target.kind == ValueKind::Logico && column->type == rt::ColumnarColumn::Type::Boolean)
+            return compara(column->booleans[row] != 0, target.b ? 1.0 : 0.0);
+          if (target.kind == ValueKind::Texto && column->type == rt::ColumnarColumn::Type::Text) {
+            if (op == "==" || op == "!=")
+              return alvo_codigo_encontrado ? column->codes[row] == alvo_codigo : op == "!=";
+            const std::string& lhs = column->dictionary[column->codes[row]];
+            return op == "==" ? lhs == target.s : op == "!=" ? lhs != target.s
+                   : op == "<" ? lhs < target.s : op == "<=" ? lhs <= target.s
+                   : op == ">" ? lhs > target.s : lhs >= target.s;
+          }
+          if (target.kind == ValueKind::Texto && column->type == rt::ColumnarColumn::Type::TextPlain) {
+            const std::string& lhs = column->texts[row];
+            return op == "==" ? lhs == target.s : op == "!=" ? lhs != target.s
+                   : op == "<" ? lhs < target.s : op == "<=" ? lhs <= target.s
+                   : op == ">" ? lhs > target.s : lhs >= target.s;
+          }
+          bool ok = false;
+          return rt::apply_binop(op, column->at(row), target, &ok).truthy();
+        };
+        return true;
+      };
+      RowFilter filtro;
+      if (compilar_filtro(condition, filtro)) {
+        auto plano = std::make_shared<rt::ColumnarTable>(filtro_source.names);
+        plano->rows = filtro_source.rows;
+        plano->view_parent = filtro_parent;
+        plano->pending_filter = std::make_shared<RowFilter>(std::move(filtro));
+        plano->view_identity = false;
+        return Value::tabela_colunar(std::move(plano));
+      }
+    }
     // Caminho rápido para predicados simples: resolve o literal uma vez e
     // percorre os vetores tipados sem criar Value por célula. O caminho
     // recursivo abaixo continua cobrindo expressões compostas.
@@ -14977,43 +15715,78 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       if (const rt::ColumnarColumn* column = table.find(condition.lhs->text)) {
         const Value target = eval(*condition.rhs, env);
         const std::string& op = condition.text;
-        std::vector<std::size_t> positions;
-        positions.reserve(table.rows / 2 + 1);
+        std::uint32_t target_code = 0;
+        bool target_code_found = false;
+        if (target.kind == ValueKind::Texto &&
+            column->type == rt::ColumnarColumn::Type::Text &&
+            (op == "==" || op == "!=")) {
+          const auto it = column->dictionary_index.find(target.s);
+          if (it != column->dictionary_index.end()) {
+            target_code = it->second;
+            target_code_found = true;
+          }
+        }
         const auto compare = [&](double lhs, double rhs) {
           return op == "==" ? lhs == rhs : op == "!=" ? lhs != rhs
                  : op == "<" ? lhs < rhs : op == "<=" ? lhs <= rhs
                  : op == ">" ? lhs > rhs : lhs >= rhs;
         };
-        for (std::size_t row = 0; row < table.rows; ++row) {
-          const bool nulo = row >= column->nulls.size() || column->nulls[row];
-          bool keep = false;
-          if (nulo) {
-            bool ok = false;
-            keep = rt::apply_binop(op, Value::nulo(), target, &ok).truthy();
-          } else if (target.is_number() && column->type == rt::ColumnarColumn::Type::Integer) {
-            keep = compare(static_cast<double>(column->integers[row]), target.as_number());
-          } else if (target.is_number() && column->type == rt::ColumnarColumn::Type::Decimal) {
-            keep = compare(column->decimals[row], target.as_number());
-          } else if (target.kind == ValueKind::Logico &&
-                     column->type == rt::ColumnarColumn::Type::Boolean) {
-            keep = compare(column->booleans[row] != 0, target.b ? 1.0 : 0.0);
-          } else if (target.kind == ValueKind::Texto && column->type == rt::ColumnarColumn::Type::Text) {
-            const std::string& lhs = column->dictionary[column->codes[row]];
-            keep = op == "==" ? lhs == target.s : op == "!=" ? lhs != target.s
-                   : op == "<" ? lhs < target.s : op == "<=" ? lhs <= target.s
-                   : op == ">" ? lhs > target.s : lhs >= target.s;
-          } else if (target.kind == ValueKind::Texto &&
-                     column->type == rt::ColumnarColumn::Type::TextPlain) {
-            const std::string& lhs = column->texts[row];
-            keep = op == "==" ? lhs == target.s : op == "!=" ? lhs != target.s
-                   : op == "<" ? lhs < target.s : op == "<=" ? lhs <= target.s
-                   : op == ">" ? lhs > target.s : lhs >= target.s;
-          } else {
-            bool ok = false;
-            keep = rt::apply_binop(op, column->at(row), target, &ok).truthy();
+        const auto scan = [&](std::size_t begin, std::size_t end,
+                              std::vector<std::size_t>& out) {
+          out.reserve((end - begin) / 2 + 1);
+          for (std::size_t row = begin; row < end; ++row) {
+            const bool nulo = row >= column->nulls.size() || column->nulls[row];
+            bool keep = false;
+            if (nulo) {
+              bool ok = false;
+              keep = rt::apply_binop(op, Value::nulo(), target, &ok).truthy();
+            } else if (target.is_number() && column->type == rt::ColumnarColumn::Type::Integer) {
+              keep = compare(static_cast<double>(column->integers[row]), target.as_number());
+            } else if (target.is_number() && column->type == rt::ColumnarColumn::Type::Decimal) {
+              keep = compare(column->decimals[row], target.as_number());
+            } else if (target.kind == ValueKind::Logico &&
+                       column->type == rt::ColumnarColumn::Type::Boolean) {
+              keep = compare(column->booleans[row] != 0, target.b ? 1.0 : 0.0);
+            } else if (target.kind == ValueKind::Texto && column->type == rt::ColumnarColumn::Type::Text) {
+              if (op == "==" || op == "!=") {
+                keep = target_code_found ? (column->codes[row] == target_code)
+                                         : (op == "!=");
+              } else {
+                const std::string& lhs = column->dictionary[column->codes[row]];
+                keep = op == "<" ? lhs < target.s : op == "<=" ? lhs <= target.s
+                       : op == ">" ? lhs > target.s : lhs >= target.s;
+              }
+            } else if (target.kind == ValueKind::Texto &&
+                       column->type == rt::ColumnarColumn::Type::TextPlain) {
+              const std::string& lhs = column->texts[row];
+              keep = op == "==" ? lhs == target.s : op == "!=" ? lhs != target.s
+                     : op == "<" ? lhs < target.s : op == "<=" ? lhs <= target.s
+                     : op == ">" ? lhs > target.s : lhs >= target.s;
+            } else {
+              bool ok = false;
+              keep = rt::apply_binop(op, column->at(row), target, &ok).truthy();
+            }
+            if (keep) out.push_back(row);
           }
-          if (keep) positions.push_back(row);
+        };
+        constexpr std::size_t kBatch = 8192;
+        const std::size_t batches = (table.rows + kBatch - 1) / kBatch;
+        std::vector<std::vector<std::size_t>> local(batches);
+        if (table.rows < 131072 || batches <= 1) {
+          if (!local.empty()) scan(0, table.rows, local[0]);
+        } else {
+          rt::parallel_for(table.rows,
+                           [&](std::size_t begin, std::size_t end) {
+                             scan(begin, end, local[begin / kBatch]);
+                           },
+                           kBatch);
         }
+        std::vector<std::size_t> positions;
+        std::size_t kept = 0;
+        for (const auto& part : local) kept += part.size();
+        positions.reserve(kept);
+        for (auto& part : local)
+          positions.insert(positions.end(), part.begin(), part.end());
         return Value::tabela_colunar(table.take_rows(positions));
       }
     }
@@ -15048,6 +15821,17 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       if (!column) { ok = false; return {}; }
       const Value target = eval(*expr.rhs, env);
       const std::string& op = expr.text;
+      std::uint32_t target_code = 0;
+      bool target_code_found = false;
+      if (target.kind == ValueKind::Texto &&
+          column->type == rt::ColumnarColumn::Type::Text &&
+          (op == "==" || op == "!=")) {
+        const auto it = column->dictionary_index.find(target.s);
+        if (it != column->dictionary_index.end()) {
+          target_code = it->second;
+          target_code_found = true;
+        }
+      }
       const auto cmp = [&](double a, double b) {
         return op == "==" ? a == b : op == "!=" ? a != b : op == "<" ? a < b
                : op == "<=" ? a <= b : op == ">" ? a > b : a >= b;
@@ -15071,9 +15855,14 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
             } else if (target.kind == ValueKind::Logico && column->type == rt::ColumnarColumn::Type::Boolean) {
               keep = cmp(column->booleans[row] != 0, target.b ? 1.0 : 0.0);
             } else if (target.kind == ValueKind::Texto && column->type == rt::ColumnarColumn::Type::Text) {
-              const std::string& lhs = column->dictionary[column->codes[row]];
-              keep = op == "==" ? lhs == target.s : op == "!=" ? lhs != target.s : op == "<" ? lhs < target.s
-                     : op == "<=" ? lhs <= target.s : op == ">" ? lhs > target.s : lhs >= target.s;
+              if (op == "==" || op == "!=") {
+                keep = target_code_found ? (column->codes[row] == target_code)
+                                         : (op == "!=");
+              } else {
+                const std::string& lhs = column->dictionary[column->codes[row]];
+                keep = op == "<" ? lhs < target.s : op == "<=" ? lhs <= target.s
+                       : op == ">" ? lhs > target.s : lhs >= target.s;
+              }
             } else if (target.kind == ValueKind::Texto && column->type == rt::ColumnarColumn::Type::TextPlain) {
               const std::string& lhs = column->texts[row];
               keep = op == "==" ? lhs == target.s : op == "!=" ? lhs != target.s : op == "<" ? lhs < target.s
@@ -15087,19 +15876,11 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           result[word] = bits;
         }
       };
-      const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
-      if (table.rows < 131072 || hardware < 2) {
+      if (table.rows < 131072) {
         scan_words(0, words);
       } else {
-        const unsigned count = static_cast<unsigned>(std::min<std::size_t>(hardware, words));
-        std::vector<std::thread> workers;
-        workers.reserve(count);
-        for (unsigned worker = 0; worker < count; ++worker) {
-          const std::size_t begin = words * worker / count;
-          const std::size_t end = words * (worker + 1) / count;
-          workers.emplace_back(scan_words, begin, end);
-        }
-        for (auto& worker : workers) worker.join();
+        constexpr std::size_t kMaskBatch = 2048;
+        rt::parallel_for(words, scan_words, kMaskBatch);
       }
       return result;
     };
@@ -15280,11 +16061,41 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           extras.push_back(j);
         }
         std::vector<char> direita_casou(direita_colunar.rows, 0);
+        // Dicionarios de texto podem diferir entre os lados do join.  Uma
+        // numeracao canonica por join permite usar uma chave fixa de 32 bits
+        // em vez de copiar o texto inteiro para cada linha.
+        std::vector<std::vector<std::uint32_t>> codigos_esquerda(chaves.size());
+        std::vector<std::vector<std::uint32_t>> codigos_direita(chaves.size());
+        bool join_texto_compacto = false;
+        for (std::size_t k = 0; k < chaves.size(); ++k) {
+          const auto* esquerda_coluna = le_chaves[k];
+          const auto* direita_coluna = ld_chaves[k];
+          if (esquerda_coluna->type != rt::ColumnarColumn::Type::Text ||
+              direita_coluna->type != rt::ColumnarColumn::Type::Text)
+            continue;
+          std::unordered_map<std::string, std::uint32_t> ids;
+          ids.reserve(esquerda_coluna->dictionary.size() + direita_coluna->dictionary.size());
+          const auto atribui = [&](const std::vector<std::string>& dicionario,
+                                   std::vector<std::uint32_t>& saida) {
+            saida.resize(dicionario.size());
+            for (std::size_t i = 0; i < dicionario.size(); ++i) {
+              auto [it, inserido] = ids.emplace(
+                  dicionario[i], static_cast<std::uint32_t>(ids.size() + 1));
+              (void)inserido;
+              saida[i] = it->second;
+            }
+          };
+          atribui(esquerda_coluna->dictionary, codigos_esquerda[k]);
+          atribui(direita_coluna->dictionary, codigos_direita[k]);
+          join_texto_compacto = true;
+        }
         const auto chave_linha = [&](const std::vector<const rt::ColumnarColumn*>& cols,
-                                     std::size_t row) {
+                                     std::size_t row,
+                                     const std::vector<std::vector<std::uint32_t>>& codigos) {
           std::string key;
-          key.reserve(cols.size() * 16);
-          for (const auto* col : cols) {
+          key.reserve(cols.size() * 8);
+          for (std::size_t k = 0; k < cols.size(); ++k) {
+            const auto* col = cols[k];
             if (row >= col->nulls.size() || col->nulls[row]) return std::string();
             key.push_back(static_cast<char>(col->type));
             switch (col->type) {
@@ -15302,10 +16113,16 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
                 key.push_back(static_cast<char>(col->booleans[row]));
                 break;
               case rt::ColumnarColumn::Type::Text: {
-                const std::string& value = col->dictionary[col->codes[row]];
-                const std::uint64_t size = value.size();
-                key.append(reinterpret_cast<const char*>(&size), sizeof(size));
-                key.append(value);
+                if (k < codigos.size() && !codigos[k].empty() &&
+                    col->codes[row] < codigos[k].size()) {
+                  const std::uint32_t value = codigos[k][col->codes[row]];
+                  key.append(reinterpret_cast<const char*>(&value), sizeof(value));
+                } else {
+                  const std::string& value = col->dictionary[col->codes[row]];
+                  const std::uint64_t size = value.size();
+                  key.append(reinterpret_cast<const char*>(&size), sizeof(size));
+                  key.append(value);
+                }
                 break;
               }
               case rt::ColumnarColumn::Type::TextPlain: {
@@ -15369,6 +16186,19 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         for (const std::string& chave : chaves) {
           cache_key.append(chave);
           cache_key.push_back('\0');
+        }
+        if (join_texto_compacto) {
+          // A numeracao canonica dos textos depende do dicionario do lado
+          // probe.  Este sufixo torna o indice cacheado valido apenas para
+          // esse conjunto de dicionarios.
+          for (std::size_t k = 0; k < chaves.size(); ++k) {
+            if (codigos_esquerda[k].empty()) continue;
+            for (const std::string& valor : le_chaves[k]->dictionary) {
+              cache_key.append(valor);
+              cache_key.push_back('\0');
+            }
+            cache_key.push_back('\1');
+          }
         }
         const bool merge_tipo = tipo_texto == "interna" || tipo_texto == "inner" ||
                                 tipo_texto == "esquerda" || tipo_texto == "left";
@@ -15472,7 +16302,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
               indice_ptr = std::make_shared<rt::ColumnarTable::JoinIndex>();
               indice_ptr->reserve(esquerda.rows * 2 + 1);
               for (std::size_t row = 0; row < esquerda.rows; ++row) {
-                const std::string key = chave_linha(le_chaves, row);
+                const std::string key = chave_linha(le_chaves, row, codigos_esquerda);
                 if (!key.empty()) indice_ptr->add(key, row);
               }
               indice_ptr->finalize();
@@ -15483,7 +16313,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           std::vector<std::vector<std::size_t>> direitos_por_esquerda(esquerda.rows);
           std::vector<char> direita_casou(direita_colunar.rows, 0);
           for (std::size_t direita_row = 0; direita_row < direita_colunar.rows; ++direita_row) {
-            const std::string key = chave_linha(ld_chaves, direita_row);
+            const std::string key = chave_linha(ld_chaves, direita_row, codigos_direita);
             const auto encontrados = key.empty() ? indice_ptr->buckets.end() : indice_ptr->buckets.find(key);
             if (encontrados != indice_ptr->buckets.end()) {
               direita_casou[direita_row] = 1;
@@ -15542,22 +16372,17 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
                                               std::min<std::size_t>(hardware,
                                                                    direita_colunar.rows / 65536 + 1));
             std::vector<rt::ColumnarTable::JoinIndex> locais(partes);
-            std::vector<std::thread> workers;
-            workers.reserve(partes);
-            for (unsigned parte = 0; parte < partes; ++parte) {
-              const std::size_t inicio = direita_colunar.rows * parte / partes;
-              const std::size_t fim = direita_colunar.rows * (parte + 1) / partes;
-              workers.emplace_back([&, parte, inicio, fim] {
+            const std::size_t faixa = (direita_colunar.rows + partes - 1) / partes;
+            rt::parallel_for(direita_colunar.rows, [&](std::size_t inicio, std::size_t fim) {
+                const unsigned parte = static_cast<unsigned>(inicio / faixa);
                 auto& local = locais[parte];
                 local.reserve((fim - inicio) * 2 + 1);
                 for (std::size_t row = inicio; row < fim; ++row) {
-                  const std::string key = chave_linha(ld_chaves, row);
+                  const std::string key = chave_linha(ld_chaves, row, codigos_direita);
                   if (!key.empty()) local.add(key, row);
                 }
                 local.finalize();
-              });
-            }
-            for (auto& worker : workers) worker.join();
+              }, faixa);
             for (const auto& local : locais) indice_ptr->append(local);
             indice_ptr->finalize();
             guarda_cache(direita_colunar, cache_key, indice_ptr);
@@ -15566,7 +16391,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         const auto& indice = *indice_ptr;
         auto resultado = std::make_shared<rt::ColumnarTable>(std::move(nomes));
         for (std::size_t row = 0; row < esquerda.rows; ++row) {
-          const std::string key = chave_linha(le_chaves, row);
+          const std::string key = chave_linha(le_chaves, row, codigos_esquerda);
           auto encontrados = key.empty() ? indice.buckets.end() : indice.buckets.find(key);
           if (encontrados == indice.buckets.end() && tipo_texto != "esquerda" && tipo_texto != "left" &&
               tipo_texto != "completa" && tipo_texto != "full" && tipo_texto != "outer")
@@ -15685,6 +16510,71 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
 
   const bool is_table = receiver.kind == ValueKind::Tabela || receiver.kind == ValueKind::Lista;
 
+  // Mantém expressões aritméticas simples como colunas virtuais quando o
+  // receiver ainda carrega um filtro adiado. O agregador poderá calcular a
+  // expressão no mesmo passe do scan, sem materializar a seleção.
+  if (receiver.columnar(false) && receiver.columnar(false)->has_pending_filter() &&
+      (method == "derivar" || method == "mapear") && !call.args.empty() &&
+      call.args[0].value && call.args[0].value->kind == ExprKind::MapLit) {
+    rt::ColumnarTable& source = *receiver.columnar();
+    const Expr& spec = *call.args[0].value;
+    bool virtualizavel = !spec.entries.empty() && source.pending_derived.empty();
+    std::vector<rt::ColumnarTable::DerivedColumn> derivados;
+    derivados.reserve(spec.entries.size());
+    for (const auto& entry : spec.entries) {
+      const Expr* value = entry.value.get();
+      if (!value || value->kind != ExprKind::Binary || !value->lhs || !value->rhs ||
+          !value->lhs->lhs || value->lhs->kind != ExprKind::Member ||
+          value->lhs->lhs->kind != ExprKind::Name || value->lhs->lhs->text != "linha" ||
+          value->lhs->optional || !word_in(value->text, {"+", "-", "*", "/"}) ||
+          (value->rhs->kind != ExprKind::IntLit && value->rhs->kind != ExprKind::DecimalLit &&
+           !(value->rhs->kind == ExprKind::Member && value->rhs->lhs &&
+             value->rhs->lhs->kind == ExprKind::Name && value->rhs->lhs->text == "linha" &&
+             !value->rhs->optional))) {
+        virtualizavel = false;
+        break;
+      }
+      const std::string esquerda = value->lhs->text;
+      const bool direita_coluna = value->rhs->kind == ExprKind::Member;
+      const std::string direita = direita_coluna ? value->rhs->text : std::string{};
+      if (!source.find(esquerda) || (direita_coluna && !source.find(direita))) {
+        virtualizavel = false;
+        break;
+      }
+      rt::ColumnarTable::DerivedColumn derivada;
+      derivada.name = entry.key;
+      derivada.left = esquerda;
+      derivada.right = direita;
+      derivada.operation = value->text.front();
+      derivada.right_is_column = direita_coluna;
+      if (!direita_coluna) {
+        const Value literal = eval(*value->rhs, env);
+        derivada.scalar = literal.as_number();
+        derivada.scalar_is_integer = literal.kind == ValueKind::Inteiro;
+        derivada.scalar_is_null = literal.kind == ValueKind::Nulo;
+      }
+      derivados.push_back(std::move(derivada));
+    }
+    if (virtualizavel) {
+      std::vector<std::string> names = source.names;
+      names.reserve(names.size() + derivados.size());
+      for (const auto& derivada : derivados) names.push_back(derivada.name);
+      auto result = std::make_shared<rt::ColumnarTable>(std::move(names));
+      result->rows = source.rows;
+      result->view_parent = source.view_parent;
+      result->pending_filter = source.pending_filter;
+      result->pending_derived = std::move(derivados);
+      return Value::tabela_colunar(std::move(result));
+    }
+  }
+
+  // Derivacoes que não cabem no subconjunto virtualizado ainda precisam de
+  // uma tabela de linhas estável para preservar a semântica geral de `linha`.
+  if (receiver.columnar() && receiver.columnar()->has_pending_filter() &&
+      (method == "derivar" || method == "mapear")) {
+    receiver.columnar()->materialize_view();
+  }
+
   // Derivacao de projecoes diretas permanece colunar. O caminho geral abaixo
   // continua avaliando expressoes arbitrarias sobre mapas, mas aliases simples
   // nao precisam materializar uma linha inteira por registro.
@@ -15707,17 +16597,31 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       }
     }
     if (direto) {
-      std::vector<std::string> names = receiver.columnar()->names;
+      const rt::ColumnarTable& source = *receiver.columnar();
+      std::vector<std::size_t> physical;
+      if (source.is_view()) {
+        physical.reserve(source.rows);
+        for (std::size_t row = 0; row < source.rows; ++row)
+          physical.push_back(source.physical_row(row));
+      }
+      const auto copy_source = [&](rt::ColumnarColumn& destination,
+                                   const rt::ColumnarColumn& input) {
+        if (source.is_view()) destination = input.take_rows(physical);
+        else destination.append_column(input);
+      };
+      std::vector<std::string> names = source.names;
       names.reserve(names.size() + spec.entries.size());
       for (const auto& entry : spec.entries) names.push_back(entry.key);
       auto result = std::make_shared<rt::ColumnarTable>(std::move(names));
-      for (std::size_t col = 0; col < receiver.columnar()->columns.size(); ++col)
-        result->columns[col].append_column(receiver.columnar()->columns[col]);
-      for (std::size_t k = 0; k < spec.entries.size(); ++k) {
-        const auto* source = receiver.columnar()->find(spec.entries[k].value->text);
-        result->columns[receiver.columnar()->columns.size() + k].append_column(*source);
+      for (std::size_t col = 0; col < source.names.size(); ++col) {
+        const auto* input = source.find(source.names[col]);
+        if (input) copy_source(result->columns[col], *input);
       }
-      result->rows = receiver.columnar()->rows;
+      for (std::size_t k = 0; k < spec.entries.size(); ++k) {
+        const auto* input = source.find(spec.entries[k].value->text);
+        if (input) copy_source(result->columns[source.names.size() + k], *input);
+      }
+      result->rows = source.rows;
       return Value::tabela_colunar(std::move(result));
     }
     // Forma vetorizavel adicional: `linha.coluna <op> literal`. Ela cobre
@@ -15741,18 +16645,32 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         aritmetico = false;
     }
     if (aritmetico) {
-      std::vector<std::string> names = receiver.columnar()->names;
+      const rt::ColumnarTable& source = *receiver.columnar();
+      std::vector<std::size_t> physical;
+      if (source.is_view()) {
+        physical.reserve(source.rows);
+        for (std::size_t row = 0; row < source.rows; ++row)
+          physical.push_back(source.physical_row(row));
+      }
+      const auto copy_source = [&](rt::ColumnarColumn& destination,
+                                   const rt::ColumnarColumn& input) {
+        if (source.is_view()) destination = input.take_rows(physical);
+        else destination.append_column(input);
+      };
+      std::vector<std::string> names = source.names;
       for (const auto& entry : spec.entries) names.push_back(entry.key);
       auto result = std::make_shared<rt::ColumnarTable>(std::move(names));
-      for (std::size_t col = 0; col < receiver.columnar()->columns.size(); ++col)
-        result->columns[col].append_column(receiver.columnar()->columns[col]);
-      const std::size_t derived_base = receiver.columnar()->columns.size();
+      for (std::size_t col = 0; col < source.names.size(); ++col) {
+        const auto* input = source.find(source.names[col]);
+        if (input) copy_source(result->columns[col], *input);
+      }
+      const std::size_t derived_base = source.names.size();
       for (std::size_t k = 0; k < spec.entries.size(); ++k) {
         const Expr& expression = *spec.entries[k].value;
-        const auto* column = receiver.columnar()->find(expression.lhs->text);
-        const rt::ColumnarColumn* right_column = expression.rhs->kind == ExprKind::Member
-                                                      ? receiver.columnar()->find(expression.rhs->text)
-                                                      : nullptr;
+        const auto* column = source.find(expression.lhs->text);
+        const auto* right_column = expression.rhs->kind == ExprKind::Member
+                                       ? source.find(expression.rhs->text)
+                                       : nullptr;
         double scalar = 0.0;
         bool scalar_is_integer = false;
         bool scalar_is_null = false;
@@ -15762,10 +16680,22 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           scalar_is_integer = literal.kind == ValueKind::Inteiro;
           scalar_is_null = literal.kind == ValueKind::Nulo;
         }
-        result->columns[derived_base + k] = column->binary_numeric(
-            right_column, scalar, scalar_is_integer, expression.text.front(), scalar_is_null);
+        if (source.is_view()) {
+          auto selected_left = column->take_rows(physical);
+          if (right_column) {
+            auto selected_right = right_column->take_rows(physical);
+            result->columns[derived_base + k] = selected_left.binary_numeric(
+                &selected_right, scalar, scalar_is_integer, expression.text.front(), scalar_is_null);
+          } else {
+            result->columns[derived_base + k] = selected_left.binary_numeric(
+                nullptr, scalar, scalar_is_integer, expression.text.front(), scalar_is_null);
+          }
+        } else {
+          result->columns[derived_base + k] = column->binary_numeric(
+              right_column, scalar, scalar_is_integer, expression.text.front(), scalar_is_null);
+        }
       }
-      result->rows = receiver.columnar()->rows;
+      result->rows = source.rows;
       return Value::tabela_colunar(std::move(result));
     }
   }
@@ -15813,8 +16743,8 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       for (const auto& en : spec.entries) nr.map_ref()->set(en.key, eval(*en.value, inner));
       out.push_back(std::move(nr));
     }
-    return Value::tabela(std::move(out));
-  }
+  return Value::tabela(std::move(out));
+}
   if (is_table && method == "agrupar_por") {
     if (call.args.size() < 2) fail(call.span, "agrupar_por espera (coluna, agregacoes)");
     Value key_v = eval(*call.args[0].value, env);
@@ -15850,7 +16780,20 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       specs.push_back(std::move(agg));
     }
 
-    if (receiver.columnar() && delegar_analitico_duckdb(receiver.columnar()->rows)) {
+    const std::size_t no_slot = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> distinct_slot(specs.size(), no_slot);
+    std::vector<std::size_t> sample_slot(specs.size(), no_slot);
+    std::size_t distinct_states = 0;
+    std::size_t sample_states = 0;
+    for (std::size_t j = 0; j < specs.size(); ++j) {
+      if (specs[j].fn == "distintos") distinct_slot[j] = distinct_states++;
+      if (specs[j].fn == "mediana" || specs[j].fn == "quantil" ||
+          specs[j].fn == "mediana_aproximada" || specs[j].fn == "quantil_aproximado")
+        sample_slot[j] = sample_states++;
+    }
+
+    if (receiver.columnar() && !receiver.columnar()->has_pending_filter() &&
+        delegar_analitico_duckdb(receiver.columnar()->rows)) {
       bool suportado = !key_col.empty() && receiver.columnar()->find(key_col) != nullptr;
       std::vector<rt::DuckdbAggSpec> duck_specs;
       duck_specs.reserve(specs.size());
@@ -15878,6 +16821,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       std::vector<double> acc;
       std::vector<double> sum_sq;
       std::vector<std::unordered_set<std::string>> distinct;
+      std::vector<std::unordered_set<std::uint32_t>> distinct_codes;
       std::vector<std::vector<double>> samples;
       std::vector<std::size_t> sample_seen;
     };
@@ -15886,45 +16830,278 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       g.key = std::move(chave);
       g.acc.assign(specs.size(), 0.0);
       g.sum_sq.assign(specs.size(), 0.0);
-      g.distinct.resize(specs.size());
-      g.samples.resize(specs.size());
-      g.sample_seen.assign(specs.size(), 0);
+      g.distinct.resize(distinct_states);
+      g.distinct_codes.resize(distinct_states);
+      g.samples.resize(sample_states);
+      g.sample_seen.assign(sample_states, 0);
       return g;
     };
     std::vector<Group> groups;
     std::unordered_map<std::string, std::size_t> indices;
+    std::vector<bool> distinct_code_specs(specs.size(), false);
     if (receiver.columnar() && !receiver.list_ref()) {
-      const rt::ColumnarTable& table = *receiver.columnar();
-      const rt::ColumnarColumn* key = table.find(key_col);
+    const rt::ColumnarTable& table = *receiver.columnar();
+      const bool fused_filter = table.has_pending_filter() && table.view_parent && table.pending_filter;
+      // Visões filtradas já guardam índices físicos achatados. Resolve o
+      // parent e o vetor uma vez para que o loop quente não atravesse
+      // shared_ptrs nem invoque physical_row a cada registro.
+      const rt::ColumnarTable* base_table = table.view_parent ? table.view_parent.get() : &table;
+      const std::vector<std::size_t>* selected_rows =
+          table.view_parent && !table.view_identity ? table.view_rows.get() : nullptr;
+      const rt::ColumnarColumn* key = base_table->find(key_col);
+      const bool identity_rows = !table.is_view() || table.is_identity_view();
+      const auto physical_row = [&](std::size_t row) {
+        if (fused_filter) return row;
+        if (identity_rows) return row;
+        if (selected_rows && row < selected_rows->size()) return (*selected_rows)[row];
+        return table.physical_row(row);
+      };
       std::vector<const rt::ColumnarColumn*> source_columns;
+      std::vector<const rt::ColumnarTable::DerivedColumn*> source_derived;
       source_columns.reserve(specs.size());
-      for (const Agg& agg : specs) source_columns.push_back(table.find(agg.col));
+      source_derived.reserve(specs.size());
+      for (const Agg& agg : specs) {
+        const rt::ColumnarColumn* physical = base_table->find(agg.col);
+        const rt::ColumnarTable::DerivedColumn* derived = nullptr;
+        if (!physical) {
+          for (const auto& candidate : table.pending_derived) {
+            if (candidate.name == agg.col) {
+              derived = &candidate;
+              break;
+            }
+          }
+        }
+        source_columns.push_back(physical);
+        source_derived.push_back(derived);
+      }
+      const rt::ColumnarTable::DerivedColumn* key_derived = nullptr;
+      if (!key) {
+        for (const auto& candidate : table.pending_derived) {
+          if (candidate.name == key_col) {
+            key_derived = &candidate;
+            break;
+          }
+        }
+      }
+      const auto derived_null = [&](const rt::ColumnarTable::DerivedColumn& derived,
+                                    std::size_t row) {
+        const rt::ColumnarColumn* left = base_table->find(derived.left);
+        if (!left || left->null_at(row) || derived.scalar_is_null) return true;
+        if (derived.right_is_column) {
+          const rt::ColumnarColumn* right = base_table->find(derived.right);
+          if (!right || right->null_at(row)) return true;
+        }
+        return false;
+      };
+      const auto derived_number = [&](const rt::ColumnarTable::DerivedColumn& derived,
+                                      std::size_t row) {
+        const rt::ColumnarColumn* left = base_table->find(derived.left);
+        const double lhs = left ? left->number_at(row) : 0.0;
+        const double rhs = derived.right_is_column
+                               ? (base_table->find(derived.right)
+                                      ? base_table->find(derived.right)->number_at(row)
+                                      : 0.0)
+                               : derived.scalar;
+        if (derived.operation == '+') return lhs + rhs;
+        if (derived.operation == '-') return lhs - rhs;
+        if (derived.operation == '*') return lhs * rhs;
+        return rhs == 0.0 ? 0.0 : lhs / rhs;
+      };
+      const auto source_null = [&](std::size_t j, std::size_t row) {
+        if (source_columns[j]) return source_columns[j]->null_at(row);
+        return source_derived[j] ? derived_null(*source_derived[j], row) : true;
+      };
+      const auto source_number = [&](std::size_t j, std::size_t row) {
+        if (source_columns[j]) return source_columns[j]->number_at(row);
+        return source_derived[j] ? derived_number(*source_derived[j], row) : 0.0;
+      };
+      for (std::size_t j = 0; j < specs.size(); ++j)
+        distinct_code_specs[j] = specs[j].fn == "distintos" && source_columns[j] &&
+                                 source_columns[j]->type == rt::ColumnarColumn::Type::Text;
+
+      // Spill opcional para agregações numéricas com cardinalidade alta. O
+      // modo `auto` estima a cardinalidade pela dictionary ou por uma amostra;
+      // cargas pequenas continuam em memória para não pagar por I/O.
+      const char* spill_env = std::getenv("TILT_AGG_SPILL");
+      const std::string spill_mode = spill_env ? spill_env : "";
+      bool spill_supported = !fused_filter && table.rows >= 131072 && !specs.empty();
+      for (const Agg& agg : specs) {
+        if (!word_in(agg.fn, {"contar", "somar", "media", "min", "max", "variancia"})) {
+          spill_supported = false;
+          break;
+        }
+      }
+      bool spill_enabled = spill_mode == "1";
+      if (spill_mode == "auto" && spill_supported) {
+        std::size_t estimated_groups = 1;
+        if (key && key->type == rt::ColumnarColumn::Type::Text) {
+          estimated_groups = key->dictionary.size();
+        } else if (key && table.rows > 0) {
+          const std::size_t sample_rows = std::min<std::size_t>(table.rows, 65536);
+          std::unordered_set<std::string> sample_keys;
+          sample_keys.reserve(sample_rows / 2 + 1);
+          for (std::size_t sample = 0; sample < sample_rows; ++sample) {
+            const std::size_t row = sample * table.rows / sample_rows;
+            sample_keys.insert(key->key_at(physical_row(row)));
+          }
+          estimated_groups = std::min<std::size_t>(
+              table.rows, static_cast<std::size_t>(
+                              std::ceil(static_cast<double>(sample_keys.size()) * table.rows /
+                                        static_cast<double>(sample_rows))));
+        }
+        std::size_t minimum_groups = 100000;
+        if (const char* configured = std::getenv("TILT_AGG_SPILL_MIN_GROUPS")) {
+          try { minimum_groups = std::max<std::size_t>(1, std::stoull(configured)); }
+          catch (...) { /* mantém o limite padrão */ }
+        }
+        // A partir de ~25% de cardinalidade e pelo menos 100 mil grupos, o
+        // benchmark de 2 milhões de linhas mostrou vantagem de RSS/tempo.
+        spill_enabled = estimated_groups >= minimum_groups &&
+                        estimated_groups >= (table.rows + 3) / 4;
+      }
+      if (spill_enabled && spill_supported) {
+        struct SpillGroup {
+          std::size_t first = std::numeric_limits<std::size_t>::max();
+          std::size_t count = 0;
+          std::vector<double> acc;
+          std::vector<double> sum_sq;
+        };
+        struct SpillResult {
+          std::size_t first = 0;
+          std::string key;
+          SpillGroup group;
+        };
+        constexpr std::size_t kPartitions = 8;
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        const auto base = std::filesystem::temp_directory_path() /
+                          ("tilt-agg-" + std::to_string(stamp) + "-" +
+                           std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())));
+        std::vector<std::filesystem::path> paths;
+        std::vector<std::ofstream> files;
+        paths.reserve(kPartitions);
+        files.reserve(kPartitions);
+        for (std::size_t p = 0; p < kPartitions; ++p) {
+          paths.push_back(base.string() + "-" + std::to_string(p) + ".bin");
+          files.emplace_back(paths.back(), std::ios::binary | std::ios::trunc);
+          if (!files.back()) throw std::runtime_error("agrupar_por: nao foi possivel criar spill temporario");
+        }
+        for (std::size_t row = 0; row < table.rows; ++row) {
+          const std::size_t source_row = physical_row(row);
+          const std::string key_value = key ? key->key_at(source_row) : "";
+          const std::size_t partition = std::hash<std::string>{}(key_value) % kPartitions;
+          auto& out = files[partition];
+          const std::uint64_t ordinal = static_cast<std::uint64_t>(row);
+          const std::uint32_t length = static_cast<std::uint32_t>(key_value.size());
+          out.write(reinterpret_cast<const char*>(&ordinal), sizeof(ordinal));
+          out.write(reinterpret_cast<const char*>(&length), sizeof(length));
+          out.write(key_value.data(), static_cast<std::streamsize>(key_value.size()));
+          for (std::size_t j = 0; j < specs.size(); ++j) {
+            const double value = source_columns[j] ? source_columns[j]->number_at(source_row) : 0.0;
+            out.write(reinterpret_cast<const char*>(&value), sizeof(value));
+          }
+        }
+        for (auto& file : files) file.close();
+        std::vector<SpillResult> results;
+        for (const auto& path : paths) {
+          std::ifstream in(path, std::ios::binary);
+          std::unordered_map<std::string, SpillGroup> partial;
+          while (true) {
+            std::uint64_t ordinal = 0;
+            std::uint32_t length = 0;
+            if (!in.read(reinterpret_cast<char*>(&ordinal), sizeof(ordinal))) break;
+            if (!in.read(reinterpret_cast<char*>(&length), sizeof(length)))
+              throw std::runtime_error("agrupar_por: spill truncado");
+            std::string key_value(length, '\0');
+            if (!in.read(key_value.data(), static_cast<std::streamsize>(length)))
+              throw std::runtime_error("agrupar_por: spill truncado");
+            auto [it, inserted] = partial.try_emplace(key_value);
+            SpillGroup& group = it->second;
+            if (inserted) {
+              group.first = static_cast<std::size_t>(ordinal);
+              group.acc.assign(specs.size(), 0.0);
+              group.sum_sq.assign(specs.size(), 0.0);
+            }
+            const bool first = group.count == 0;
+            for (std::size_t j = 0; j < specs.size(); ++j) {
+              double value = 0.0;
+              if (!in.read(reinterpret_cast<char*>(&value), sizeof(value)))
+                throw std::runtime_error("agrupar_por: spill truncado");
+              if (first) group.acc[j] = value;
+              else if (specs[j].fn == "somar" || specs[j].fn == "media" ||
+                       specs[j].fn == "variancia") group.acc[j] += value;
+              else if (specs[j].fn == "min") group.acc[j] = std::min(group.acc[j], value);
+              else if (specs[j].fn == "max") group.acc[j] = std::max(group.acc[j], value);
+              if (specs[j].fn == "variancia") group.sum_sq[j] += value * value;
+            }
+            ++group.count;
+          }
+          for (auto& [key_value, group] : partial)
+            results.push_back({group.first, std::move(key_value), std::move(group)});
+          std::error_code ignored;
+          std::filesystem::remove(path, ignored);
+        }
+        std::sort(results.begin(), results.end(),
+                  [](const SpillResult& a, const SpillResult& b) { return a.first < b.first; });
+        rt::ValueList out;
+        out.reserve(results.size());
+        for (const SpillResult& result : results) {
+          Value record = Value::mapa();
+          record.map_ref()->set(key_col.empty() ? "grupo" : key_col, Value::texto(result.key));
+          for (std::size_t j = 0; j < specs.size(); ++j) {
+            const Agg& agg = specs[j];
+            double value = agg.fn == "contar" ? static_cast<double>(result.group.count)
+                                                : result.group.acc[j];
+            if (agg.fn == "media" && result.group.count > 0)
+              value /= static_cast<double>(result.group.count);
+            if (agg.fn == "variancia" && result.group.count > 0) {
+              const double mean = result.group.acc[j] / static_cast<double>(result.group.count);
+              value = result.group.sum_sq[j] / static_cast<double>(result.group.count) - mean * mean;
+              if (value < 0.0 && value > -1e-12) value = 0.0;
+            }
+            if (agg.fn != "media" && std::isfinite(value) &&
+                value >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
+                value < static_cast<double>(std::numeric_limits<std::int64_t>::max()) &&
+                value == static_cast<double>(static_cast<std::int64_t>(value)))
+              record.map_ref()->set(agg.nome, Value::inteiro(static_cast<std::int64_t>(value)));
+            else record.map_ref()->set(agg.nome, Value::decimal(value));
+          }
+          out.push_back(std::move(record));
+        }
+        return Value::tabela(std::move(out));
+      }
       const auto accumulate = [&](Group& group, std::size_t row) {
+        const std::size_t source_row = physical_row(row);
         const bool first = group.count == 0;
         for (std::size_t j = 0; j < specs.size(); ++j) {
           const Agg& agg = specs[j];
           if (agg.fn == "contar") continue;
           if (agg.fn == "mediana" || agg.fn == "quantil" ||
               agg.fn == "mediana_aproximada" || agg.fn == "quantil_aproximado") {
-            if (source_columns[j] && !source_columns[j]->nulls[row]) {
-              const double value = source_columns[j]->number_at(row);
+            if ((source_columns[j] || source_derived[j]) && !source_null(j, source_row)) {
+              const double value = source_number(j, source_row);
               if (agg.fn == "mediana_aproximada" || agg.fn == "quantil_aproximado") {
-                const std::size_t seen = group.sample_seen[j]++;
-                if (group.samples[j].size() < 4096) group.samples[j].push_back(value);
+                const std::size_t slot = sample_slot[j];
+                const std::size_t seen = group.sample_seen[slot]++;
+                if (group.samples[slot].size() < 4096) group.samples[slot].push_back(value);
                 else {
                   const std::size_t hash = seen * 2654435761u + 1013904223u;
-                  if (hash % (seen + 1) < 4096) group.samples[j][hash % 4096] = value;
+                  if (hash % (seen + 1) < 4096) group.samples[slot][hash % 4096] = value;
                 }
-              } else group.samples[j].push_back(value);
+              } else group.samples[sample_slot[j]].push_back(value);
             }
             continue;
           }
           if (agg.fn == "distintos") {
-            if (source_columns[j] && !source_columns[j]->nulls[row])
-              group.distinct[j].insert(source_columns[j]->key_at(row));
+            if ((source_columns[j] || source_derived[j]) && !source_null(j, source_row)) {
+              const std::size_t slot = distinct_slot[j];
+              if (distinct_code_specs[j]) group.distinct_codes[slot].insert(source_columns[j]->codes[source_row]);
+              else group.distinct[slot].insert(source_columns[j]
+                                                   ? source_columns[j]->key_at(source_row)
+                                                   : to_display(Value::decimal(source_number(j, source_row))));
+            }
             continue;
           }
-          const double number = source_columns[j] ? source_columns[j]->number_at(row) : 0.0;
+          const double number = source_number(j, source_row);
           double& acc = group.acc[j];
           if (first) acc = number;
           else if (agg.fn == "somar" || agg.fn == "media") acc += number;
@@ -15935,16 +17112,56 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         }
         ++group.count;
       };
-      if (table.rows >= 131072) {
+      if (fused_filter) {
+        // Fusão terminal: percorre o parent físico uma única vez, aplica o
+        // predicado e alimenta os acumuladores no mesmo loop. A projeção já
+        // foi incorporada aos nomes do plano; `source_columns` e
+        // `source_derived` apontam somente para os valores usados pelas
+        // agregações.
+        const std::size_t scan_rows = base_table->rows;
+        const auto& filter = *table.pending_filter;
+        const rt::ColumnarColumn* fused_key = base_table->find(key_col);
+        for (std::size_t row = 0; row < scan_rows; ++row) {
+          if (!filter(row)) continue;
+          std::string group_key;
+          if (fused_key) {
+            group_key = fused_key->key_at(row);
+          } else if (key_derived && !derived_null(*key_derived, row)) {
+            group_key = to_display(Value::decimal(derived_number(*key_derived, row)));
+          }
+          auto [it, inserted] = indices.try_emplace(group_key, groups.size());
+          if (inserted) groups.push_back(novo_grupo(group_key));
+          accumulate(groups[it->second], row);
+        }
+      } else if (table.rows >= 131072) {
         // Descobre os grupos uma vez, preservando a ordem da primeira
         // ocorrência; depois cada thread acumula somente sua faixa.
         std::vector<std::size_t> grupo_por_linha(table.rows);
-        for (std::size_t row = 0; row < table.rows; ++row) {
-          const std::string grupo_key = key ? key->key_at(row) : "";
-          auto [it, inserted] = indices.try_emplace(grupo_key, groups.size());
-          if (inserted)
-            groups.push_back(novo_grupo(grupo_key));
-          grupo_por_linha[row] = it->second;
+        if (key && key->type == rt::ColumnarColumn::Type::Text) {
+          const std::size_t ausente = std::numeric_limits<std::size_t>::max();
+          std::vector<std::size_t> por_codigo(key->dictionary.size() + 1, ausente);
+          const std::size_t codigo_nulo = key->dictionary.size();
+          for (std::size_t row = 0; row < table.rows; ++row) {
+            const std::size_t source_row = physical_row(row);
+            const std::size_t codigo = source_row >= key->nulls.size() || key->nulls[source_row]
+                                           ? codigo_nulo
+                                           : key->codes[source_row];
+            std::size_t& grupo = por_codigo[codigo];
+            if (grupo == ausente) {
+              grupo = groups.size();
+              groups.push_back(novo_grupo(codigo == codigo_nulo ? ""
+                                                                  : key->dictionary[codigo]));
+            }
+            grupo_por_linha[row] = grupo;
+          }
+        } else {
+          for (std::size_t row = 0; row < table.rows; ++row) {
+            const std::string grupo_key = key ? key->key_at(physical_row(row)) : "";
+            auto [it, inserted] = indices.try_emplace(grupo_key, groups.size());
+            if (inserted)
+              groups.push_back(novo_grupo(grupo_key));
+            grupo_por_linha[row] = it->second;
+          }
         }
         const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
         const unsigned partes = static_cast<unsigned>(
@@ -15957,44 +17174,47 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
           for (Group& group : faixa) {
             group.acc.assign(specs.size(), 0.0);
             group.sum_sq.assign(specs.size(), 0.0);
-            group.distinct.resize(specs.size());
-            group.samples.resize(specs.size());
-            group.sample_seen.assign(specs.size(), 0);
+            group.distinct.resize(distinct_states);
+            group.distinct_codes.resize(distinct_states);
+            group.samples.resize(sample_states);
+            group.sample_seen.assign(sample_states, 0);
           }
-        std::vector<std::thread> workers;
-        workers.reserve(partes);
-        for (unsigned parte = 0; parte < partes; ++parte) {
-          const std::size_t begin = table.rows * parte / partes;
-          const std::size_t end = table.rows * (parte + 1) / partes;
-          workers.emplace_back([&, parte, begin, end] {
+        const std::size_t faixa = (table.rows + partes - 1) / partes;
+        rt::parallel_for(table.rows, [&](std::size_t begin, std::size_t end) {
+            const unsigned parte = static_cast<unsigned>(begin / faixa);
             auto& destino = locais[parte];
             for (std::size_t row = begin; row < end; ++row) {
               Group& group = destino[grupo_por_linha[row]];
+              const std::size_t source_row = physical_row(row);
               const bool first = group.count == 0;
               for (std::size_t j = 0; j < specs.size(); ++j) {
                 const Agg& agg = specs[j];
                 if (agg.fn == "contar") continue;
                 if (agg.fn == "mediana" || agg.fn == "quantil" ||
                     agg.fn == "mediana_aproximada" || agg.fn == "quantil_aproximado") {
-                  if (source_columns[j] && !source_columns[j]->nulls[row]) {
-                    const double value = source_columns[j]->number_at(row);
+                  if (source_columns[j] && !source_columns[j]->nulls[source_row]) {
+                    const double value = source_columns[j]->number_at(source_row);
                     if (agg.fn == "mediana_aproximada" || agg.fn == "quantil_aproximado") {
-                      const std::size_t seen = group.sample_seen[j]++;
-                      if (group.samples[j].size() < 4096) group.samples[j].push_back(value);
+                      const std::size_t slot = sample_slot[j];
+                      const std::size_t seen = group.sample_seen[slot]++;
+                      if (group.samples[slot].size() < 4096) group.samples[slot].push_back(value);
                       else {
                         const std::size_t hash = seen * 2654435761u + 1013904223u;
-                        if (hash % (seen + 1) < 4096) group.samples[j][hash % 4096] = value;
+                        if (hash % (seen + 1) < 4096) group.samples[slot][hash % 4096] = value;
                       }
-                    } else group.samples[j].push_back(value);
+                    } else group.samples[sample_slot[j]].push_back(value);
                   }
                   continue;
                 }
                 if (agg.fn == "distintos") {
-                  if (source_columns[j] && !source_columns[j]->nulls[row])
-                    group.distinct[j].insert(source_columns[j]->key_at(row));
+                  if (source_columns[j] && !source_columns[j]->nulls[source_row]) {
+                    const std::size_t slot = distinct_slot[j];
+                    if (distinct_code_specs[j]) group.distinct_codes[slot].insert(source_columns[j]->codes[source_row]);
+                    else group.distinct[slot].insert(source_columns[j]->key_at(source_row));
+                  }
                   continue;
                 }
-                const double number = source_columns[j] ? source_columns[j]->number_at(row) : 0.0;
+                const double number = source_columns[j] ? source_columns[j]->number_at(source_row) : 0.0;
                 double& acc = group.acc[j];
                 if (first) acc = number;
                 else if (agg.fn == "somar" || agg.fn == "media") acc += number;
@@ -16005,9 +17225,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
               }
               ++group.count;
             }
-          });
-        }
-        for (auto& worker : workers) worker.join();
+          }, faixa);
         for (std::size_t g = 0; g < groups.size(); ++g) {
           for (const auto& faixa : locais) {
             const Group& parcial = faixa[g];
@@ -16018,14 +17236,18 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
               if (specs[j].fn == "contar") continue;
               if (specs[j].fn == "mediana" || specs[j].fn == "quantil" ||
                   specs[j].fn == "mediana_aproximada" || specs[j].fn == "quantil_aproximado") {
-                total.samples[j].insert(total.samples[j].end(), parcial.samples[j].begin(),
-                                        parcial.samples[j].end());
-                total.sample_seen[j] += parcial.sample_seen[j];
-                if (total.samples[j].size() > 4096) total.samples[j].resize(4096);
+                const std::size_t slot = sample_slot[j];
+                total.samples[slot].insert(total.samples[slot].end(), parcial.samples[slot].begin(),
+                                           parcial.samples[slot].end());
+                total.sample_seen[slot] += parcial.sample_seen[slot];
+                if (total.samples[slot].size() > 4096) total.samples[slot].resize(4096);
                 continue;
               }
               if (specs[j].fn == "distintos") {
-                total.distinct[j].insert(parcial.distinct[j].begin(), parcial.distinct[j].end());
+                const std::size_t slot = distinct_slot[j];
+                total.distinct[slot].insert(parcial.distinct[slot].begin(), parcial.distinct[slot].end());
+                total.distinct_codes[slot].insert(parcial.distinct_codes[slot].begin(),
+                                                  parcial.distinct_codes[slot].end());
                 continue;
               }
               if (first) total.acc[j] = parcial.acc[j];
@@ -16045,7 +17267,10 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         for (std::size_t code = 0; code < key->dictionary.size(); ++code)
           if (key->dictionary[code].empty()) { null_code = code; break; }
         for (std::size_t row = 0; row < table.rows; ++row) {
-          const std::size_t code = key->nulls[row] ? null_code : key->codes[row];
+          const std::size_t source_row = physical_row(row);
+          const std::size_t code = source_row >= key->nulls.size() || key->nulls[source_row]
+                                       ? null_code
+                                       : key->codes[source_row];
           std::size_t& group_index = by_code[code];
           if (group_index == missing) {
             group_index = groups.size();
@@ -16055,7 +17280,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
         }
       } else {
         for (std::size_t row = 0; row < table.rows; ++row) {
-          std::string group_key = key ? key->key_at(row) : "";
+          std::string group_key = key ? key->key_at(physical_row(row)) : "";
           auto [it, inserted] = indices.try_emplace(group_key, groups.size());
           if (inserted)
             groups.push_back(novo_grupo(std::move(group_key)));
@@ -16065,7 +17290,7 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       // Uma única chave permite reduzir a coluna inteira sem o custo de uma
       // chamada por linha. O runtime escolhe AVX2 para decimais quando a CPU
       // oferece o conjunto de instruções e mantém o fallback escalar.
-      if (groups.size() == 1) {
+      if (groups.size() == 1 && identity_rows) {
         for (std::size_t j = 0; j < specs.size(); ++j) {
           if (!source_columns[j]) continue;
           if (specs[j].fn == "somar" || specs[j].fn == "media" || specs[j].fn == "variancia")
@@ -16074,7 +17299,8 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
             groups[0].sum_sq[j] = source_columns[j]->sum_squares_numeric();
         }
       }
-      const bool chave_ordenada = std::find(table.sorted_by.begin(), table.sorted_by.end(),
+      const bool chave_ordenada = identity_rows &&
+                                  std::find(table.sorted_by.begin(), table.sorted_by.end(),
                                             std::vector<std::string>{key_col}) != table.sorted_by.end();
       if (chave_ordenada && groups.size() > 1 && key && !indices.empty()) {
         const auto reduz_intervalo = [&](std::size_t grupo, std::size_t inicio,
@@ -16117,18 +17343,20 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
             if (cell && cell->kind != ValueKind::Nulo) {
               const double value = cell->as_number();
               if (agg.fn == "mediana_aproximada" || agg.fn == "quantil_aproximado") {
-                const std::size_t seen = group.sample_seen[j]++;
-                if (group.samples[j].size() < 4096) group.samples[j].push_back(value);
+                const std::size_t slot = sample_slot[j];
+                const std::size_t seen = group.sample_seen[slot]++;
+                if (group.samples[slot].size() < 4096) group.samples[slot].push_back(value);
                 else {
                   const std::size_t hash = seen * 2654435761u + 1013904223u;
-                  if (hash % (seen + 1) < 4096) group.samples[j][hash % 4096] = value;
+                  if (hash % (seen + 1) < 4096) group.samples[slot][hash % 4096] = value;
                 }
-              } else group.samples[j].push_back(value);
+              } else group.samples[sample_slot[j]].push_back(value);
             }
             continue;
           }
           if (agg.fn == "distintos") {
-            if (cell && cell->kind != ValueKind::Nulo) group.distinct[j].insert(to_display(*cell));
+            if (cell && cell->kind != ValueKind::Nulo)
+              group.distinct[distinct_slot[j]].insert(to_display(*cell));
             continue;
           }
           const double number = cell ? cell->as_number() : 0.0;
@@ -16152,11 +17380,15 @@ Value Interpreter::eval_method(const std::string& method, Value receiver, const 
       for (std::size_t j = 0; j < specs.size(); ++j) {
         const Agg& agg = specs[j];
         double acc = agg.fn == "contar" ? static_cast<double>(group.count) : group.acc[j];
-        if (agg.fn == "distintos") acc = static_cast<double>(group.distinct[j].size());
+        if (agg.fn == "distintos") {
+          const std::size_t slot = distinct_slot[j];
+          acc = static_cast<double>(distinct_code_specs[j] ? group.distinct_codes[slot].size()
+                                                            : group.distinct[slot].size());
+        }
         if ((agg.fn == "mediana" || agg.fn == "quantil" ||
              agg.fn == "mediana_aproximada" || agg.fn == "quantil_aproximado") &&
-            !group.samples[j].empty()) {
-          auto valores = group.samples[j];
+            !group.samples[sample_slot[j]].empty()) {
+          auto valores = group.samples[sample_slot[j]];
           const double pos = (agg.fn == "mediana" || agg.fn == "mediana_aproximada"
                                   ? 0.5 : agg.quantil) * (valores.size() - 1);
           const std::size_t inferior = static_cast<std::size_t>(pos);

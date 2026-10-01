@@ -126,7 +126,9 @@ tabelas servidas ao subir. O loadTable devolve o metadata mais recente com as
 locations reescritas para URLs deste servidor; `/v1/files/<rel>` serve os
 arquivos (metadata.json, manifests, data files) validando que o path fica
 dentro do root (traversal → 403). `createTable`, `transactions` e `DELETE`
- são aceitos somente para tabelas dentro do root; conflitos de snapshot → 409.
+ são aceitos somente para tabelas dentro do root; uma tabela nova recebe
+ `metadata/v0.metadata.json` a partir do schema REST; conflitos de snapshot →
+ 409. Métodos não permitidos usam 405 e o header `Allow`.
 `--sem-reecrita-manifests` mantém `file://` nas manifest-lists — necessário
 para o Spark/Hadoop (o `fs.http` reporta length -1 e o leitor Avro do Iceberg
 rejeita); nesse modo o leitor precisa acessar os arquivos locais.

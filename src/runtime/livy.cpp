@@ -23,6 +23,17 @@ std::string truncar(const std::string& s, std::size_t n) {
   return s.size() <= n ? s : s.substr(0, n);
 }
 
+// A sessao Scala do Livy imprime expressoes como `res0: String = [...]` no
+// output text/plain. O mock usado nos testes devolve somente o JSON, entao
+// aceitamos os dois formatos sem depender da versao do REPL.
+std::string payload_json_livy(const std::string& texto) {
+  const std::size_t inicio = texto.find('[');
+  const std::size_t fim = texto.rfind(']');
+  if (inicio == std::string::npos || fim == std::string::npos || fim < inicio)
+    return texto;
+  return texto.substr(inicio, fim - inicio + 1);
+}
+
 // Erros do http_client chegam com prefixo "http: "; reemite com o prefixo
 // do conector para o capturar do tilt mostrar a origem.
 template <typename F>
@@ -188,7 +199,7 @@ Value livy_sql(const std::string& url, const std::string& codigo_sql, const std:
   const Statement st = executar_statement(base, codigo, lingua, conf);
   Value parsed;
   try {
-    parsed = json_parse(st.texto);
+    parsed = json_parse(payload_json_livy(st.texto));
   } catch (const std::exception& e) {
     die("saida do Spark nao e um JSON valido: " + std::string(e.what()) +
         " (recebido: " + truncar(st.texto, 120) + ")");

@@ -9,7 +9,7 @@
 # Instalacao pelo usuario final:
 #   winget install ailake-io.tilt
 PackageIdentifier: ailake-io.tilt
-PackageVersion: 0.1.0
+PackageVersion: 0.2.0
 PackageLocale: pt-BR
 Publisher: ailake-io
 PublisherUrl: https://github.com/ailake-io
@@ -33,7 +33,7 @@ ReleaseNotesUrl: https://github.com/ailake-io/tilt/releases
 Installers:
   - Architecture: x64
     InstallerType: wix
-    InstallerUrl: https://github.com/ailake-io/tilt/releases/download/v0.1.0/tilt-0.1.0-win64.msi
+    InstallerUrl: https://github.com/ailake-io/tilt/releases/download/v0.2.0-beta.1/tilt-0.2.0-win64.msi
     InstallerSha256: TROCAR_PELA_SHA256_DO_MSI_DA_RELEASE
 ManifestType: singleton
 ManifestVersion: 1.6.0

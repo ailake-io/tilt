@@ -89,7 +89,8 @@ void parquet_write(const std::string& path, const Value& tabela,
 Value parquet_read(const std::string& path,
                    const std::vector<std::string>& selecionar = {},
                    bool colunar = false,
-                   const Value* onde = nullptr);  // -> tabela
+                   const Value* onde = nullptr,
+                   std::size_t limite = 0);  // -> tabela; limite 0 = sem limite
 
 // Streaming por row group (treino em arquivos grandes): abre uma vez e
 // decodifica grupo a grupo, sem materializar o arquivo todo.

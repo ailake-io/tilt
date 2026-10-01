@@ -17,6 +17,7 @@
 #include "diagnostics/diagnostic.hpp"
 #include "parser/ast.hpp"
 #include "runtime/gpu_runtime.hpp"
+#include "runtime/columnar.hpp"
 #include "runtime/llm.hpp"
 #include "runtime/tensor.hpp"
 #include "runtime/value.hpp"
@@ -304,6 +305,7 @@ class Interpreter {
     std::vector<std::string> colunas;  // nomes das colunas (substituem/definem o cabecalho)
     std::vector<std::string> selecionar;  // projecao: le/materializa so estas colunas
     std::size_t pular = 0;             // linhas ignoradas no inicio
+    std::size_t limite = 0;             // limite de linhas aplicado durante a leitura
     std::vector<std::string> nulos;    // textos lidos como nulo (ex.: "NA", "-")
     bool inferir = false;              // infere tipos em uma amostra antes da leitura
     std::size_t amostra_tipos = 1000;  // numero maximo de linhas usadas na inferencia
@@ -311,7 +313,8 @@ class Interpreter {
     std::string fuso_destino = "UTC";  // fuso da representacao normalizada
   };
   rt::Value read_csv_file(const std::string& path, Span span, const CsvOpcoes* opcoes = nullptr);
-  rt::Value read_fonte(const std::string& name, Span span, bool allow_lazy = true);
+  rt::Value read_fonte(const std::string& name, Span span, bool allow_lazy = true,
+                       const rt::ColumnarTable::LazyPlan* lazy_plan = nullptr);
 
   // Deep learning.
   struct Layer {

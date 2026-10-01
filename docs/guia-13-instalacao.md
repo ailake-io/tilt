@@ -106,8 +106,8 @@ cpack -G DEB          # pacote Debian: tilt-<versao>-<os>-<arch>.deb
 `share/tilt/exemplos` e a documentação. Instalação manual:
 
 ```bash
-tar xzf tilt-0.1.0-Linux-x86_64.tar.gz
-sudo cp -r tilt-0.1.0-Linux-x86_64/{bin,share} /usr/local/
+tar xzf tilt-0.2.0-Linux-x86_64.tar.gz
+sudo cp -r tilt-0.2.0-Linux-x86_64/{bin,share} /usr/local/
 ```
 
 O binário Linux é portável: linka `libstdc++`/`libgcc` estaticamente
@@ -123,29 +123,29 @@ cd build/release && cpack     # .tar.gz + .deb + .rpm de uma vez
 
 - **Debian** (`tilt-<versao>-<os>-<arch>.deb`) — `Depends: libc6, curl`:
   ```bash
-  sudo dpkg -i tilt-0.1.0-Linux-x86_64.deb
+  sudo dpkg -i tilt-0.2.0-Linux-x86_64.deb
   sudo apt -f install        # se faltar alguma dependência
   sudo dpkg -r tilt          # desinstala
   ```
 - **RPM** (`tilt-<versao>-<os>-<arch>.rpm`) — `Requires: glibc, curl`:
   ```bash
-  sudo dnf install tilt-0.1.0-Linux-x86_64.rpm   # Fedora/RHEL
-  sudo zypper install tilt-0.1.0-Linux-x86_64.rpm # openSUSE
+  sudo dnf install tilt-0.2.0-Linux-x86_64.rpm   # Fedora/RHEL
+  sudo zypper install tilt-0.2.0-Linux-x86_64.rpm # openSUSE
   sudo rpm -e tilt                                 # desinstala
   ```
 
 **Checksum** (para publicar o pacote):
 
 ```bash
-sha256sum tilt-0.1.0-Linux-x86_64.tar.gz > tilt-0.1.0-Linux-x86_64.tar.gz.sha256
+sha256sum tilt-0.2.0-Linux-x86_64.tar.gz > tilt-0.2.0-Linux-x86_64.tar.gz.sha256
 ```
 
 Para verificar a assinatura Sigstore de um artefato Linux (instale o
 [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) antes):
 
 ```bash
-cosign verify-blob tilt-0.1.0-Linux-x86_64.tar.gz \
-  --bundle tilt-0.1.0-Linux-x86_64.tar.gz.sigstore.json \
+cosign verify-blob tilt-0.2.0-Linux-x86_64.tar.gz \
+  --bundle tilt-0.2.0-Linux-x86_64.tar.gz.sigstore.json \
   --certificate-identity-regexp \
     '^https://github.com/ailake-io/tilt/.github/workflows/release.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
@@ -165,19 +165,19 @@ tilt-atualizar               # atualiza ~/.local (prefixo padrão)
 tilt-atualizar --prefix=/usr/local  # pode exigir sudo
 ```
 
-A atualização aceita `--version=vX.Y.Z` para fixar uma release e `--force` para
+A atualização aceita `--version=vX.Y.Z[-beta.N]` para fixar uma release e `--force` para
 reinstalar a versão atual. O updater é POSIX (Linux/macOS); no Windows, use o
 MSI/winget publicado na Release.
 
 O workflow `.github/workflows/release.yml` faz isso sozinho a cada tag `v*`:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0-beta.1
+git push origin v0.2.0-beta.1
 ```
 
 Ele compila em release, roda a suíte de testes e gera/anexa por
-plataforma (Linux x86_64 e macOS arm64):
+plataforma (Linux x86_64, macOS arm64/x86_64 e Windows x64):
 
 - `tilt-*.tar.gz` + `.sha256` (todas as plataformas);
 - `tilt-*.sigstore.json` (Linux, bundles Cosign/Sigstore keyless para os
@@ -231,7 +231,7 @@ Instalação pelo usuário final:
 ```powershell
 winget install ailake-io.tilt     # apos o PR de manifestos no winget-pkgs
 # ou, com o .msi baixado da Release:
-msiexec /i tilt-0.1.0-win64.msi
+msiexec /i tilt-0.2.0-win64.msi
 ```
 
 Os manifestos winget moram em `packaging/winget/`. O job `winget` do release

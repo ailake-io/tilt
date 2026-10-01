@@ -44,6 +44,7 @@ struct ColumnarColumn {
   void append_boolean(bool value);
   void append_from(const ColumnarColumn& source, std::size_t row);
   Value at(std::size_t row) const;
+  bool null_at(std::size_t row) const;
   // Seleciona linhas preservando o armazenamento tipado. O caminho antigo
   // chamava at() para cada célula, materializando listas e structs inteiros.
   ColumnarColumn take_rows(const std::vector<std::size_t>& positions) const;
@@ -62,8 +63,35 @@ struct ColumnarColumn {
   std::size_t memory_bytes() const;
 };
 
-struct ColumnarTable {
+struct ColumnarTable : std::enable_shared_from_this<ColumnarTable> {
   using LazyLoader = std::function<std::shared_ptr<ColumnarTable>()>;
+  // Requisição acumulada enquanto uma fonte ainda não foi lida. A fonte pode
+  // usar esses campos para evitar decodificar colunas/linhas que o plano não
+  // consumirá. Quando não houver suporte, o carregador pode ignorá-los e o
+  // executor nativo preserva a semântica original.
+  struct LazyPlan {
+    std::vector<std::string> projection;
+    std::vector<std::string> predicate_columns;
+    Value predicate = Value::nulo();
+    std::size_t limit = 0;
+    bool limit_set = false;
+  };
+  using LazyPlanner = std::function<std::shared_ptr<ColumnarTable>(const LazyPlan&)>;
+  // Predicado adiado para o plano scan -> filtro -> projecao -> agregacao.
+  // O indice recebido e relativo ao parent (que permanece materializavel),
+  // permitindo que o agregador aplique o filtro no mesmo passe em que reduz
+  // os grupos, sem criar o vetor de linhas selecionadas.
+  using RowFilter = std::function<bool(std::size_t)>;
+  struct DerivedColumn {
+    std::string name;
+    std::string left;
+    std::string right;
+    double scalar = 0.0;
+    char operation = '+';
+    bool right_is_column = false;
+    bool scalar_is_integer = false;
+    bool scalar_is_null = false;
+  };
   struct JoinIndex {
     struct Bucket {
       std::size_t offset = 0;
@@ -123,15 +151,43 @@ struct ColumnarTable {
   mutable std::size_t peak_row_group_bytes = 0;
   mutable std::mutex lazy_mutex;
   mutable LazyLoader lazy_loader;
+  mutable LazyPlanner lazy_planner;
+  mutable LazyPlan lazy_plan;
+  // Visão filtrada: mantém o parent vivo e guarda somente as linhas aceitas.
+  // Operadores analíticos podem percorrer a seleção sem copiar as colunas;
+  // APIs que exigem buffers próprios chamam materialize_view().
+  std::shared_ptr<const ColumnarTable> view_parent;
+  std::shared_ptr<std::vector<std::size_t>> view_rows;
+  std::shared_ptr<RowFilter> pending_filter;
+  std::vector<DerivedColumn> pending_derived;
+  // Projeção sem filtro: os índices são identidade e podem usar as reduções
+  // do parent sem percorrer um vetor de seleção.
+  bool view_identity = false;
 
   explicit ColumnarTable(std::vector<std::string> column_names);
   void set_lazy_loader(LazyLoader loader);
+  void set_lazy_planner(LazyPlanner planner, LazyPlan plan);
+  bool is_lazy() const;
+  // Retorna falso quando a tabela já foi materializada; nesse caso o chamador
+  // deve executar a operação normalmente.
+  bool add_lazy_projection(const std::vector<std::string>& names);
+  bool add_lazy_predicate(const Value& predicate);
+  bool add_lazy_limit(std::size_t limit);
+  // Aplica um predicado representado pelo mesmo mapa aceito por `onde:`.
+  // Usado como residual quando a fonte não consegue fazer o pushdown.
+  std::shared_ptr<ColumnarTable> filter_predicate(const Value& predicate) const;
+  std::shared_ptr<ColumnarTable> project_columns(const std::vector<std::string>& names) const;
   void ensure_loaded() const;
   void append(std::vector<Value>& values);
   ValueList materialize() const;
   std::shared_ptr<ValueList> rows_materialized() const;
   const ColumnarColumn* find(const std::string& name) const;
   std::shared_ptr<ColumnarTable> take_rows(const std::vector<std::size_t>& positions) const;
+  bool is_view() const { return static_cast<bool>(view_parent); }
+  bool has_pending_filter() const { return static_cast<bool>(pending_filter); }
+  bool is_identity_view() const { return view_identity; }
+  std::size_t physical_row(std::size_t row) const;
+  void materialize_view();
   void convert_types(const Value& types);
   Value join_metrics() const;
   Value memory_metrics() const;

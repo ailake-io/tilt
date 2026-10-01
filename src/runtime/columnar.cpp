@@ -1,6 +1,7 @@
 #include "runtime/columnar.hpp"
 
 #include <stdexcept>
+#include <numeric>
 #include <utility>
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -79,6 +80,51 @@ ColumnarColumn::Type type_of(const Value& value) {
     case ValueKind::Mapa: return ColumnarColumn::Type::Struct;
     default: return ColumnarColumn::Type::Mixed;
   }
+}
+
+const Value* nested_value(const Value& root, const std::string& path) {
+  const Value* current = &root;
+  std::size_t begin = 0;
+  while (begin <= path.size()) {
+    const std::size_t end = path.find('.', begin);
+    const std::string part = path.substr(begin, end == std::string::npos ? std::string::npos
+                                                                          : end - begin);
+    if (!current || current->kind != ValueKind::Mapa || !current->map_ref()) return nullptr;
+    current = current->map_ref()->find(part);
+    if (end == std::string::npos) return current;
+    begin = end + 1;
+  }
+  return current;
+}
+
+bool matches_predicate(const Value& predicate, const Value& row) {
+  if (predicate.kind != ValueKind::Mapa || !predicate.map_ref() || predicate.map_ref()->items.empty())
+    return true;
+  for (const auto& [name, expected] : predicate.map_ref()->items) {
+    if ((name == "e" || name == "ou") && expected.kind == ValueKind::Lista && expected.list_ref()) {
+      bool result = name == "e";
+      for (const Value& part : *expected.list_ref()) {
+        const bool current = matches_predicate(part, row);
+        result = name == "e" ? result && current : result || current;
+      }
+      if (!result) return false;
+      continue;
+    }
+    const Value* cell = nested_value(row, name);
+    const Value* rhs = &expected;
+    std::string op = "==";
+    if (expected.kind == ValueKind::Mapa && expected.map_ref() && expected.map_ref()->items.size() == 1) {
+      const auto& candidate = expected.map_ref()->items.front();
+      if (candidate.first == "==" || candidate.first == "!=" || candidate.first == "<" ||
+          candidate.first == "<=" || candidate.first == ">" || candidate.first == ">=") {
+        op = candidate.first;
+        rhs = &candidate.second;
+      }
+    }
+    bool ok = false;
+    if (!apply_binop(op, cell ? *cell : Value::nulo(), *rhs, &ok).truthy()) return false;
+  }
+  return true;
 }
 
 }  // namespace
@@ -413,6 +459,10 @@ Value ColumnarColumn::at(std::size_t row) const {
   return Value::nulo();
 }
 
+bool ColumnarColumn::null_at(std::size_t row) const {
+  return row >= nulls.size() || nulls[row] != 0;
+}
+
 ColumnarColumn ColumnarColumn::take_rows(
     const std::vector<std::size_t>& positions) const {
   ColumnarColumn out;
@@ -684,17 +734,92 @@ ColumnarTable::ColumnarTable(std::vector<std::string> column_names)
 void ColumnarTable::set_lazy_loader(LazyLoader loader) {
   std::lock_guard<std::mutex> lock(lazy_mutex);
   lazy_loader = std::move(loader);
+  lazy_planner = {};
+  lazy_plan = {};
+}
+
+void ColumnarTable::set_lazy_planner(LazyPlanner planner, LazyPlan plan) {
+  std::lock_guard<std::mutex> lock(lazy_mutex);
+  lazy_planner = std::move(planner);
+  lazy_plan = std::move(plan);
+  lazy_loader = {};
+}
+
+bool ColumnarTable::is_lazy() const {
+  std::lock_guard<std::mutex> lock(lazy_mutex);
+  return static_cast<bool>(lazy_loader) || static_cast<bool>(lazy_planner);
+}
+
+bool ColumnarTable::add_lazy_projection(const std::vector<std::string>& requested) {
+  if (requested.empty()) return true;
+  std::lock_guard<std::mutex> lock(lazy_mutex);
+  if (!lazy_planner) return false;
+  if (lazy_plan.projection.empty()) {
+    lazy_plan.projection = requested;
+    return true;
+  }
+  std::vector<std::string> merged;
+  merged.reserve(requested.size());
+  for (const std::string& name : requested) {
+    if (std::find(lazy_plan.projection.begin(), lazy_plan.projection.end(), name) !=
+        lazy_plan.projection.end())
+      merged.push_back(name);
+  }
+  lazy_plan.projection = std::move(merged);
+  return true;
+}
+
+bool ColumnarTable::add_lazy_predicate(const Value& predicate) {
+  if (predicate.kind == ValueKind::Nulo) return true;
+  std::lock_guard<std::mutex> lock(lazy_mutex);
+  if (!lazy_planner) return false;
+  if (lazy_plan.predicate.kind == ValueKind::Nulo) {
+    lazy_plan.predicate = predicate;
+  } else {
+    // Preserva a semântica de filtros encadeados: ambos precisam ser verdadeiros.
+    Value combinado = Value::mapa();
+    Value partes = Value::lista();
+    partes.list_ref()->push_back(lazy_plan.predicate);
+    partes.list_ref()->push_back(predicate);
+    combinado.map_ref()->set("e", std::move(partes));
+    lazy_plan.predicate = std::move(combinado);
+  }
+  std::function<void(const Value&)> coletar = [&](const Value& item) {
+    if (item.kind != ValueKind::Mapa || !item.map_ref()) return;
+    for (const auto& [name, value] : item.map_ref()->items) {
+      if ((name == "e" || name == "ou") && value.kind == ValueKind::Lista && value.list_ref()) {
+        for (const Value& part : *value.list_ref()) coletar(part);
+      } else if (std::find(lazy_plan.predicate_columns.begin(), lazy_plan.predicate_columns.end(), name) ==
+                 lazy_plan.predicate_columns.end()) {
+        lazy_plan.predicate_columns.push_back(name);
+      }
+    }
+  };
+  coletar(predicate);
+  return true;
+}
+
+bool ColumnarTable::add_lazy_limit(std::size_t limit) {
+  std::lock_guard<std::mutex> lock(lazy_mutex);
+  if (!lazy_planner) return false;
+  if (!lazy_plan.limit_set || lazy_plan.limit == 0) lazy_plan.limit = limit;
+  else lazy_plan.limit = std::min(lazy_plan.limit, limit);
+  lazy_plan.limit_set = true;
+  return true;
 }
 
 void ColumnarTable::ensure_loaded() const {
   std::lock_guard<std::mutex> lock(lazy_mutex);
-  if (!lazy_loader) return;
+  if (!lazy_loader && !lazy_planner) return;
   LazyLoader loader = std::move(lazy_loader);
+  LazyPlanner planner = std::move(lazy_planner);
+  const LazyPlan plan = lazy_plan;
   std::shared_ptr<ColumnarTable> loaded;
   try {
-    loaded = loader();
+    loaded = planner ? planner(plan) : loader();
   } catch (...) {
     lazy_loader = std::move(loader);
+    lazy_planner = std::move(planner);
     throw;
   }
   if (!loaded) throw std::runtime_error("plano colunar: carregador devolveu tabela nula");
@@ -705,6 +830,52 @@ void ColumnarTable::ensure_loaded() const {
   self->sorted_by = std::move(loaded->sorted_by);
   self->peak_memory_bytes = loaded->peak_memory_bytes;
   self->peak_row_group_bytes = loaded->peak_row_group_bytes;
+  self->view_parent = std::move(loaded->view_parent);
+  self->view_rows = std::move(loaded->view_rows);
+  self->view_identity = loaded->view_identity;
+  self->pending_filter = std::move(loaded->pending_filter);
+  self->pending_derived = std::move(loaded->pending_derived);
+  self->lazy_loader = {};
+  self->lazy_planner = {};
+  self->lazy_plan = {};
+}
+
+std::shared_ptr<ColumnarTable> ColumnarTable::filter_predicate(const Value& predicate) const {
+  ensure_loaded();
+  std::vector<std::size_t> positions;
+  positions.reserve(rows / 2 + 1);
+  for (std::size_t row = 0; row < rows; ++row) {
+    Value record = Value::mapa();
+    record.map_ref()->items.reserve(names.size());
+    for (const std::string& name : names) {
+      const ColumnarColumn* column = find(name);
+      record.map_ref()->items.emplace_back(name, column ? column->at(physical_row(row)) : Value::nulo());
+    }
+    if (matches_predicate(predicate, record)) positions.push_back(row);
+  }
+  return take_rows(positions);
+}
+
+std::shared_ptr<ColumnarTable> ColumnarTable::project_columns(
+    const std::vector<std::string>& requested) const {
+  ensure_loaded();
+  auto result = std::make_shared<ColumnarTable>(requested);
+  result->rows = rows;
+  try {
+    result->view_parent = shared_from_this();
+    result->view_rows = std::make_shared<std::vector<std::size_t>>(rows);
+    std::iota(result->view_rows->begin(), result->view_rows->end(), std::size_t{0});
+    result->view_identity = true;
+    for (const std::string& name : requested)
+      if (!find(name)) throw std::runtime_error("projecao colunar: coluna inexistente '" + name + "'");
+    return result;
+  } catch (const std::bad_weak_ptr&) {
+    for (std::size_t i = 0; i < requested.size(); ++i) {
+      const ColumnarColumn* source = find(requested[i]);
+      if (source) result->columns[i].append_column(*source);
+    }
+    return result;
+  }
 }
 
 void columnar_ensure_loaded(ColumnarTable* table) {
@@ -723,8 +894,21 @@ void ColumnarTable::append(std::vector<Value>& values) {
 }
 
 ValueList ColumnarTable::materialize() const {
+  // Consumidores de linhas (impressao, interoperabilidade e APIs legadas)
+  // precisam resolver um filtro adiado antes de seguir a cadeia de views.
+  if (pending_filter) const_cast<ColumnarTable*>(this)->materialize_view();
   ValueList out;
   out.reserve(rows);
+  const auto get_value = [&](const std::string& name, std::size_t row) {
+    const ColumnarTable* base = this;
+    std::size_t physical = row;
+    while (base->view_parent) {
+      physical = base->view_parent->physical_row((*base->view_rows)[physical]);
+      base = base->view_parent.get();
+    }
+    const ColumnarColumn* column = base->find(name);
+    return column ? column->at(physical) : Value::nulo();
+  };
   for (std::size_t row = 0; row < rows; ++row) {
     // Batch materialization allocates and releases all row maps together.
     // The global synchronized object pool regresses this path (see the
@@ -736,7 +920,7 @@ ValueList ColumnarTable::materialize() const {
     for (std::size_t col = 0; col < names.size(); ++col)
       // As colunas têm nomes únicos por contrato; emplace evita a busca
       // linear de mapa feita por set() para cada célula materializada.
-      record.map_ref()->items.emplace_back(names[col], columns[col].at(row));
+      record.map_ref()->items.emplace_back(names[col], get_value(names[col], row));
     out.push_back(std::move(record));
   }
   return out;
@@ -749,13 +933,140 @@ std::shared_ptr<ValueList> ColumnarTable::rows_materialized() const {
 }
 
 const ColumnarColumn* ColumnarTable::find(const std::string& name) const {
+  if (view_parent) return view_parent->find(name);
   for (std::size_t i = names.size(); i-- > 0;)
     if (names[i] == name) return &columns[i];
   return nullptr;
 }
 
+std::size_t ColumnarTable::physical_row(std::size_t row) const {
+  if (!view_parent) return row;
+  if (view_identity) return row;
+  if (!view_rows || row >= view_rows->size())
+    throw std::out_of_range("indice fora da visao colunar");
+  return view_parent->physical_row((*view_rows)[row]);
+}
+
+void ColumnarTable::materialize_view() {
+  // Um filtro adiado só materializa quando uma operação realmente precisa
+  // das linhas ou quando o consumidor não pode executar o plano colunar.
+  // Mantemos o parent vivo e copiamos apenas as posições aceitas.
+  if (pending_filter) {
+    if (!view_parent) {
+      throw std::runtime_error("filtro colunar sem tabela de origem");
+    }
+    std::vector<std::size_t> selected;
+    selected.reserve(rows / 2 + 1);
+    const RowFilter filter = *pending_filter;
+    for (std::size_t row = 0; row < view_parent->rows; ++row)
+      if (filter(row)) selected.push_back(row);
+    std::shared_ptr<const ColumnarTable> parent = std::move(view_parent);
+    std::vector<ColumnarColumn> materialized;
+    materialized.reserve(names.size());
+    for (const std::string& name : names) {
+      const ColumnarColumn* source = parent->find(name);
+      if (source) {
+        materialized.push_back(source->take_rows(selected));
+        continue;
+      }
+      const DerivedColumn* derived = nullptr;
+      for (const DerivedColumn& candidate : pending_derived) {
+        if (candidate.name == name) {
+          derived = &candidate;
+          break;
+        }
+      }
+      if (!derived) {
+        materialized.push_back(ColumnarColumn{});
+        continue;
+      }
+      const ColumnarColumn* left = parent->find(derived->left);
+      if (!left) {
+        materialized.push_back(ColumnarColumn{});
+        continue;
+      }
+      ColumnarColumn left_selected = left->take_rows(selected);
+      if (derived->right_is_column) {
+        const ColumnarColumn* right = parent->find(derived->right);
+        if (!right) {
+          materialized.push_back(ColumnarColumn{});
+          continue;
+        }
+        ColumnarColumn right_selected = right->take_rows(selected);
+        materialized.push_back(left_selected.binary_numeric(
+            &right_selected, derived->scalar, derived->scalar_is_integer,
+            derived->operation, derived->scalar_is_null));
+      } else {
+        materialized.push_back(left_selected.binary_numeric(
+            nullptr, derived->scalar, derived->scalar_is_integer,
+            derived->operation, derived->scalar_is_null));
+      }
+    }
+    columns = std::move(materialized);
+    rows = selected.size();
+    view_rows.reset();
+    view_identity = false;
+    pending_filter.reset();
+    pending_derived.clear();
+    sorted_by = parent->sorted_by;
+    return;
+  }
+  if (!view_parent) return;
+  std::shared_ptr<const ColumnarTable> parent = std::move(view_parent);
+  std::shared_ptr<std::vector<std::size_t>> selected = std::move(view_rows);
+  if (!selected) throw std::runtime_error("visao colunar sem selecao");
+  std::vector<std::size_t> physical;
+  physical.reserve(selected->size());
+  for (std::size_t row : *selected) physical.push_back(parent->physical_row(row));
+  std::vector<ColumnarColumn> materialized;
+  materialized.reserve(names.size());
+  for (const std::string& name : names) {
+    const ColumnarColumn* source = parent->find(name);
+    materialized.push_back(source ? source->take_rows(physical) : ColumnarColumn{});
+  }
+  columns = std::move(materialized);
+  rows = physical.size();
+  view_identity = false;
+}
+
 std::shared_ptr<ColumnarTable> ColumnarTable::take_rows(
     const std::vector<std::size_t>& positions) const {
+  // Filtros que aceitam todas as linhas não precisam criar uma nova visão.
+  // Preserva a identidade compartilhada e elimina um objeto intermediário no
+  // plano scan -> filtro -> agregação.
+  if (positions.size() == rows) {
+    bool identidade = true;
+    for (std::size_t row = 0; row < positions.size(); ++row) {
+      if (positions[row] != row) {
+        identidade = false;
+        break;
+      }
+    }
+    if (identidade) {
+      try {
+        return std::const_pointer_cast<ColumnarTable>(shared_from_this());
+      } catch (const std::bad_weak_ptr&) {
+        // Instâncias de stack continuam no caminho de cópia abaixo.
+      }
+    }
+  }
+  if (view_parent || rows > 0) {
+    try {
+      auto result = std::make_shared<ColumnarTable>(names);
+      result->rows = positions.size();
+      result->sorted_by = sorted_by;
+      result->view_parent = view_parent ? view_parent : shared_from_this();
+      result->view_rows = std::make_shared<std::vector<std::size_t>>();
+      result->view_identity = false;
+      result->view_rows->reserve(positions.size());
+      for (std::size_t row : positions)
+        result->view_rows->push_back(view_parent ? physical_row(row) : row);
+      return result;
+    } catch (const std::bad_weak_ptr&) {
+      // Instancias criadas na pilha (por código embutido/testes antigos) ainda
+      // usam o caminho de cópia seguro.
+    }
+  }
   auto result = std::make_shared<ColumnarTable>(names);
   result->rows = positions.size();
   result->sorted_by = sorted_by;
@@ -810,7 +1121,17 @@ Value ColumnarTable::join_metrics() const {
 
 Value ColumnarTable::memory_metrics() const {
   std::size_t current = 0;
-  for (const ColumnarColumn& column : columns) current += column.memory_bytes();
+  if (view_parent) {
+    const Value parent_metrics = view_parent->memory_metrics();
+    if (parent_metrics.map_ref()) {
+      if (const Value* bytes = parent_metrics.map_ref()->find("bytes");
+          bytes && bytes->kind == ValueKind::Inteiro)
+        current = static_cast<std::size_t>(std::max<std::int64_t>(0, bytes->i));
+    }
+    if (view_rows) current += view_rows->capacity() * sizeof(std::size_t);
+  } else {
+    for (const ColumnarColumn& column : columns) current += column.memory_bytes();
+  }
   std::size_t cache = 0;
   {
     std::lock_guard<std::mutex> lock(join_cache_mutex);

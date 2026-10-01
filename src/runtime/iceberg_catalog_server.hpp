@@ -27,8 +27,9 @@ namespace tilt::rt {
 //       (metadata.json, manifest .avro, data .parquet) sob o root. Forma
 //       path-style de proposito: o Hadoop Path (cliente Spark) re-encodea
 //       query strings. A forma legada ?path=<abs> tambem e aceita.
-// Escritas validam o root, metadata local e assert-current-snapshot-id; demais
-// rotas respondem 501/404 com erro claro.
+// Escritas validam o root e assert-current-snapshot-id. createTable materializa
+// metadata v0 a partir do schema REST quando a tabela ainda nao existe; metodos
+// fora das rotas implementadas respondem 405/404 com erro claro.
 //
 // Tabela Iceberg = subdiretorio direto do root que contem metadata/. O
 // loadTable resolve o v<N>.metadata.json mais recente (mesma regra do modo

@@ -12,6 +12,22 @@ from http.server import ThreadingHTTPServer
 port_file = sys.argv[1]
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args): pass
+    def do_GET(self):
+        if self.path.startswith("/azure-token") and self.headers.get("Metadata") == "true":
+            out = {"access_token": "x", "expires_in": 60}
+        elif self.path.startswith("/computeMetadata/v1/instance/service-accounts/default/token") and \
+                self.headers.get("Metadata-Flavor") == "Google":
+            out = {"access_token": "x", "expires_in": 60}
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        raw = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
     def do_POST(self):
         n = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(n) or b"{}")
@@ -58,6 +74,8 @@ srv=$!
 for _ in $(seq 1 50); do [ -s "$PORT_FILE" ] && break; sleep .1; done
 [ -s "$PORT_FILE" ]
 PORT=$(cat "$PORT_FILE")
+printf 'x\n' >"$TMP/azure.token"
+printf 'x\n' >"$TMP/vault.token"
 cat >"$TMP/cloud.tilt" <<EOF
 pipeline cloud:
   passos:
@@ -70,7 +88,12 @@ pipeline cloud:
     - v = ler_parquet "vault.parquet"
     - imprimir a[0].id, g[0].id, v[0].id
 EOF
-(cd "$TMP" && AZURE_KEY_VAULT_TOKEN=x GCP_ACCESS_TOKEN=x GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
-  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN=x "$BIN" executar cloud.tilt) >"$TMP/out"
+(cd "$TMP" && AZURE_ACCESS_TOKEN_FILE="$TMP/azure.token" GCP_ACCESS_TOKEN=x GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
+  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN_FILE="$TMP/vault.token" "$BIN" executar cloud.tilt) >"$TMP/out"
 grep -F '9 9 9' "$TMP/out" >/dev/null
+rm -f "$TMP/azure.token" "$TMP/vault.token"
+(cd "$TMP" && AZURE_IMDS_ENDPOINT="http://127.0.0.1:$PORT/azure-token" \
+  GCP_METADATA_HOST="http://127.0.0.1:$PORT" GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
+  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN=x "$BIN" executar cloud.tilt) >"$TMP/out-discovery"
+grep -F '9 9 9' "$TMP/out-discovery" >/dev/null
 echo "parquet_cloud_provider_test ok"

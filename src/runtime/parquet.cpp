@@ -14,6 +14,7 @@
 #include <functional>
 #include <iostream>
 #include <iterator>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -27,6 +28,7 @@
 #include "runtime/json.hpp"
 #include "runtime/sha256.hpp"
 #include "runtime/snappy_codec.hpp"
+#include "tilt/version.hpp"
 
 namespace tilt::rt {
 
@@ -4213,7 +4215,8 @@ void parquet_write_single(const std::string& path, const Value& tabela,
   const char* codec_nome = codec == C_GZIP ? "gzip" : codec == C_SNAPPY ? "snappy" :
                            codec == C_BROTLI ? "brotli" : codec == C_ZSTD ? "zstd" :
                            codec == C_LZ4_RAW ? "lz4_raw" : "sem compressao";
-  fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain/dictionary, paginas ") +
+  fw.field_str(6, std::string("tilt ") + kVersion +
+                       " (parquet: plain/dictionary, paginas " +
                        (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
                        ", opcionais com nulos, listas" +
                        (encrypted ? ", AES_GCM_V1 local)" : ")"));
@@ -5569,7 +5572,7 @@ LeitorParquet abrir_parquet(const std::string& path) {
 }
 
 Value parquet_read(const std::string& path, const std::vector<std::string>& selecionar,
-                   bool colunar, const Value* onde) {
+                   bool colunar, const Value* onde, std::size_t limite) {
   LeitorParquet lp = abrir_parquet(path);
   const std::string& file = lp.file;
   const std::vector<RField>& top = lp.top;
@@ -5767,6 +5770,25 @@ Value parquet_read(const std::string& path, const std::vector<std::string>& sele
         if (grupo_ativo[rg]) linhas_ativas += rg_num_rows[rg];
       }
     }
+    // Sem predicado, o limite pode descartar grupos inteiros antes da
+    // descompressão. Com filtro, não é seguro parar cedo: as primeiras linhas
+    // aceitas podem estar em grupos posteriores.
+    if (limite > 0 && (!onde || onde->kind != ValueKind::Mapa || !onde->map_ref() ||
+                       onde->map_ref()->items.empty())) {
+      std::size_t restante = limite;
+      for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
+        if (!grupo_ativo[rg]) continue;
+        if (restante == 0) {
+          grupo_ativo[rg] = 0;
+          continue;
+        }
+        const std::size_t linhas = static_cast<std::size_t>(rg_num_rows[rg]);
+        restante = linhas >= restante ? 0 : restante - linhas;
+      }
+      linhas_ativas = 0;
+      for (std::size_t rg = 0; rg < row_groups.size(); ++rg)
+        if (grupo_ativo[rg]) linhas_ativas += rg_num_rows[rg];
+    }
     std::vector<std::string> names;
     names.reserve(projetados.size());
     for (const RField* field : projetados) names.push_back(field->name);
@@ -5955,6 +5977,11 @@ Value parquet_read(const std::string& path, const std::vector<std::string>& sele
       for (std::size_t row = 0; row < table->rows; ++row) {
         if (corresponde(*onde, row)) positions.push_back(row);
       }
+      table = table->take_rows(positions);
+    }
+    if (limite > 0 && table->rows > limite) {
+      std::vector<std::size_t> positions(limite);
+      std::iota(positions.begin(), positions.end(), std::size_t{0});
       table = table->take_rows(positions);
     }
     return Value::tabela_colunar(std::move(table));

@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(tilt VERSION 0.1.0 LANGUAGES CXX)
+project(tilt VERSION 0.2.0 LANGUAGES CXX)
+
+# Versao de produto exibida por `tilt versao`. O numero CMake continua
+# estavel para que DEB/RPM/MSI aceitem a versao, enquanto o sufixo semver
+# identifica o pre-release beta.
+set(TILT_VERSION "${PROJECT_VERSION}-beta.1" CACHE STRING "Versao exibida pelo Tilt")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

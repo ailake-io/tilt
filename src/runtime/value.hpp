@@ -271,7 +271,9 @@ struct Value {
   const char* type_name() const;
   Closure* closure() const;
   std::shared_ptr<Closure> closure_shared() const;
-  ColumnarTable* columnar() const;
+  // Por padrão resolve um plano lazy. Operadores que apenas estendem o plano
+  // podem pedir o ponteiro sem disparar a leitura.
+  ColumnarTable* columnar(bool carregar = true) const;
   void materialize_rows();
 };
 

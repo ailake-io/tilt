@@ -24,3 +24,8 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 16 | [Desempenho](guia-16-desempenho.md) | medições reais (lógica e dados), por que é lento e o plano para acelerar, como medir com `bench/rodar.sh` |
 | 17 | [Interoperabilidade](guia-17-interoperabilidade.md) | `tilt rpc` (JSON-lines e HTTP), `tilt chamar`, pacote Python `tilt`, `chamar_python`, PySpark (`tilt.spark`), Kof nas duas direções |
 | 18 | [Palavras em inglês](guia-18-palavras-em-ingles.md) | `if`/`for each`/`steps`/`print`/`filter`... em inglês, como o idioma é escolhido, o que não é traduzido, tabela completa |
+
+Para a beta pública, consulte também a [matriz de recursos](matriz-recursos-beta.md),
+os [exemplos reproduzíveis](exemplos-beta.md), o
+[relatório de validação](validacao-beta-2026-10-01.md) e o
+[guia de benchmarks](../benchmarks/beta-2026-10-01.md).

@@ -156,6 +156,16 @@ add_test(
           $<TARGET_FILE:tilt>)
 
 add_test(
+  NAME columnar_fused_plan
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/columnar_fused_plan_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
+  NAME lazy_pushdown
+  COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/lazy_pushdown_test.sh
+          $<TARGET_FILE:tilt>)
+
+add_test(
   NAME analytic_engine
   COMMAND sh ${CMAKE_CURRENT_SOURCE_DIR}/analytic_engine_test.sh
           $<TARGET_FILE:tilt>)

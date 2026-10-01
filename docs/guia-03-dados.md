@@ -40,6 +40,14 @@ colunar sem ler as linhas; a leitura acontece quando uma operação consulta o
 resultado. `colunar: verdadeiro`, `selecionar`, `onde` e `tipos` continuam
 valendo dentro do carregamento adiado.
 
+Operações encadeadas também permanecem no plano: `filtrar`, `selecionar` e
+`limite` são acumulados antes da leitura em CSV, Parquet e Delta locais. A
+projeção inclui as colunas necessárias ao predicado e devolve somente as
+colunas solicitadas; quando a fonte não reconhece um predicado, o filtro
+residual é aplicado pelo executor colunar. Fontes SQL, Elasticsearch/OpenSearch
+e Spark via Livy também recebem esse plano no backend; os demais conectores usam
+o mesmo fallback residual.
+
 Um pipeline pode declarar `paralelo: verdadeiro` para executar em conjunto
 atribuições simples que não dependem umas das outras:
 
@@ -337,10 +345,14 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   footer e nunca o segredo. `chave`, `chave_kms`, `chave_env` e
   `chave_arquivo` são mutuamente exclusivas. Para integrações cloud sem SDK,
   `chave_azure` recebe a URL completa da chave do Azure Key Vault e usa
-  `AZURE_KEY_VAULT_TOKEN`/`AZURE_ACCESS_TOKEN`; `chave_gcp` recebe o resource
-  name do Cloud KMS e usa `GCP_ACCESS_TOKEN`/`GOOGLE_OAUTH_ACCESS_TOKEN`;
+  `AZURE_KEY_VAULT_TOKEN`/`AZURE_ACCESS_TOKEN`, arquivo de token,
+  client credentials (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+  `AZURE_CLIENT_SECRET`) ou Azure IMDS; `chave_gcp` recebe o resource
+  name do Cloud KMS e usa `GCP_ACCESS_TOKEN`/`GOOGLE_OAUTH_ACCESS_TOKEN`,
+  arquivo de token ou GCP metadata;
   `chave_vault` recebe um caminho Transit (por exemplo `transit/minha-chave`)
-  e usa `VAULT_ADDR`/`VAULT_TOKEN`;
+  e usa `VAULT_ADDR`/`VAULT_TOKEN` ou `VAULT_TOKEN_FILE`, renovando o token
+  com `auth/token/renew-self` após expiração;
 - escrita: encoding **PLAIN** ou **DICTIONARY** (acima). Por padrão há um row
   group; use `row_group: 100_000` (ou `grupo:`) em `escrever_parquet` para
   particionar uma tabela grande em vários grupos no mesmo arquivo. A opção
@@ -690,7 +702,7 @@ configurável via `--prefixo`, default `/v1`):
 | `GET /v1/namespaces/default/tables?page_size=N&page_token=T` | identifiers paginados; a resposta inclui `next-page-token` quando houver mais |
 | `GET /v1/namespaces/default/tables/<tabela>` | loadTable: `metadata-location` + `metadata` do `v<N>.metadata.json` mais recente (mesma regra do modo Hadoop: maior versão parseada do nome) + `config` |
 | `HEAD /v1/namespaces/default/tables/<tabela>` | verifica a existência sem baixar metadata |
-| `POST /v1/namespaces/default/tables` | registra uma tabela cujo metadata já foi gravado no root |
+| `POST /v1/namespaces/default/tables` | cria a tabela e materializa `metadata/v0.metadata.json` a partir do schema REST quando necessário |
 | `POST /v1/namespaces/default/tables/<tabela>/transactions` | valida `assert-current-snapshot-id` e aceita o commit |
 | `DELETE /v1/namespaces/default/tables/<tabela>` | remove a tabela dentro do root |
 | `GET/HEAD /v1/files/<rel-ao-root>` | bytes do arquivo (metadata.json, manifest `.avro`, data `.parquet`); a forma legada `?path=<abs>` também é aceita |
@@ -715,9 +727,10 @@ Spark ler manifest lists pelo FileSystem, suba com **`--sem-reecrita-manifests`*
 locais, ex.: montando o diretório no mesmo path — como faz
 `tests/spark_catalog_test.sh`). O `metadata-location` continua servido por
 HTTP em todos os casos, e o restante do protocolo REST é idêntico. O servidor
-aceita `createTable`, `transactions` e `DELETE` somente dentro do root e exige
-metadata local válido; conflitos de snapshot respondem HTTP 409. Outras rotas
-de escrita respondem **501** com mensagem clara,
+aceita `createTable`, `transactions` e `DELETE` somente dentro do root; quando o
+metadata ainda não existe, `createTable` cria a estrutura inicial e grava
+`metadata/v0.metadata.json` a partir do schema enviado. Conflitos de snapshot
+respondem HTTP 409. Métodos não permitidos respondem **405** com `Allow`,
 tabela ou rota inexistente respondem 404 (`NoSuchTableException` /
 `NotFoundException`). Coberto por `tests/iceberg_catalog_test.sh` (cliente
 urllib exercendo o subconjunto + traversal + escrita controlada) e validado com

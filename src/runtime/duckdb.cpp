@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "runtime/compat.hpp"
+#include "runtime/columnar.hpp"
 #include "runtime/json.hpp"
 #include "runtime/sql_params.hpp"
 #include "runtime/sql_pool.hpp"
@@ -85,6 +86,21 @@ struct DuckdbApi {
   int (*append_int64)(void*, std::int64_t) = nullptr;
   int (*append_double)(void*, double) = nullptr;
   int (*append_varchar)(void*, const char*) = nullptr;
+  // Data chunks (opcional): permite carregar tabelas colunares em blocos,
+  // sem uma chamada ao appender por linha.
+  bool chunk_ok = false;
+  void* (*create_logical_type)(int) = nullptr;
+  void (*destroy_logical_type)(void**) = nullptr;
+  void* (*create_data_chunk)(void**, std::uint64_t) = nullptr;
+  void (*destroy_data_chunk)(void**) = nullptr;
+  void (*data_chunk_reset)(void*) = nullptr;
+  void (*data_chunk_set_size)(void*, std::uint64_t) = nullptr;
+  void* (*data_chunk_get_vector)(void*, std::uint64_t) = nullptr;
+  void* (*vector_get_data)(void*) = nullptr;
+  std::uint64_t* (*vector_get_validity)(void*) = nullptr;
+  void (*vector_ensure_validity_writable)(void*) = nullptr;
+  void (*vector_assign_string_element)(void*, std::uint64_t, const char*) = nullptr;
+  int (*append_data_chunk)(void*, void*) = nullptr;
 };
 
 template <typename F>
@@ -142,6 +158,20 @@ const DuckdbApi& api() {
                     bind_sym(a.lib, a.append_int64, "duckdb_append_int64") &&
                     bind_sym(a.lib, a.append_double, "duckdb_append_double") &&
                     bind_sym(a.lib, a.append_varchar, "duckdb_append_varchar");
+    a.chunk_ok = bind_sym(a.lib, a.create_logical_type, "duckdb_create_logical_type") &&
+                 bind_sym(a.lib, a.destroy_logical_type, "duckdb_destroy_logical_type") &&
+                 bind_sym(a.lib, a.create_data_chunk, "duckdb_create_data_chunk") &&
+                 bind_sym(a.lib, a.destroy_data_chunk, "duckdb_destroy_data_chunk") &&
+                 bind_sym(a.lib, a.data_chunk_reset, "duckdb_data_chunk_reset") &&
+                 bind_sym(a.lib, a.data_chunk_set_size, "duckdb_data_chunk_set_size") &&
+                 bind_sym(a.lib, a.data_chunk_get_vector, "duckdb_data_chunk_get_vector") &&
+                 bind_sym(a.lib, a.vector_get_data, "duckdb_vector_get_data") &&
+                 bind_sym(a.lib, a.vector_get_validity, "duckdb_vector_get_validity") &&
+                 bind_sym(a.lib, a.vector_ensure_validity_writable,
+                          "duckdb_vector_ensure_validity_writable") &&
+                 bind_sym(a.lib, a.vector_assign_string_element,
+                          "duckdb_vector_assign_string_element") &&
+                 bind_sym(a.lib, a.append_data_chunk, "duckdb_append_data_chunk");
     if (!ok) {
       tilt_dlclose(a.lib);
       a = DuckdbApi{};
@@ -607,6 +637,156 @@ Value duckdb_consulta_tabelas(const std::string& sql,
   DbConn* h = abre_banco(db, ":memory:");
   try {
     for (const auto& [nome, tabela] : tabelas) {
+      // Tabelas colunares entram diretamente no appender. O caminho anterior
+      // chamava materialize_rows(), criando um mapa e um Value para cada
+      // célula antes de a mesma célula ser copiada novamente para o DuckDB.
+      if (const ColumnarTable* col = tabela.columnar(); col && !tabela.list_ref()) {
+        struct ColunaColunar {
+          std::string nome;
+          const ColumnarColumn* coluna = nullptr;
+          ColumnarColumn::Type tipo = ColumnarColumn::Type::Mixed;
+        };
+        std::vector<ColunaColunar> colunas;
+        colunas.reserve(col->names.size());
+        for (const std::string& coluna_nome : col->names) {
+          const ColumnarColumn* coluna = col->find(coluna_nome);
+          if (!coluna) die("'" + nome + "' nao contem a coluna '" + coluna_nome + "'");
+          colunas.push_back({coluna_nome, coluna, coluna->type});
+        }
+        if (colunas.empty()) die("a tabela '" + nome + "' esta vazia: sem colunas para criar");
+        std::string ddl = "CREATE TABLE " + ident_duck(nome) + " (";
+        for (std::size_t k = 0; k < colunas.size(); ++k) {
+          const auto tipo = colunas[k].tipo;
+          const char* sql_tipo = tipo == ColumnarColumn::Type::Integer ? "BIGINT" :
+                                 tipo == ColumnarColumn::Type::Decimal ? "DOUBLE" :
+                                 tipo == ColumnarColumn::Type::Boolean ? "BIGINT" :
+                                 tipo == ColumnarColumn::Type::Text || tipo == ColumnarColumn::Type::TextPlain
+                                     ? "VARCHAR"
+                                     : "VARCHAR";
+          ddl += (k ? ", " : "") + ident_duck(colunas[k].nome) + " " + sql_tipo;
+        }
+        exec_simples(db, h->connection, ddl + ")");
+        void* app = nullptr;
+        if (db.appender_create(h->connection, nullptr, nome.c_str(), &app) != kDuckdbSuccess)
+          die("falha ao abrir a carga de '" + nome + "'");
+        if (db.chunk_ok) {
+          std::vector<void*> logical_types;
+          logical_types.reserve(colunas.size());
+          for (const ColunaColunar& item : colunas) {
+            const int tipo = item.tipo == ColumnarColumn::Type::Integer ||
+                                     item.tipo == ColumnarColumn::Type::Boolean
+                                 ? kDuckdbBigint
+                                 : item.tipo == ColumnarColumn::Type::Decimal ? kDuckdbDouble
+                                 : kDuckdbVarchar;
+            void* logical = db.create_logical_type(tipo);
+            if (!logical) {
+              for (void* type : logical_types) db.destroy_logical_type(&type);
+              db.appender_destroy(&app);
+              die("DuckDB nao criou o tipo logico do bloco colunar");
+            }
+            logical_types.push_back(logical);
+          }
+          void* chunk = db.create_data_chunk(logical_types.data(), logical_types.size());
+          if (!chunk) {
+            for (void* type : logical_types) db.destroy_logical_type(&type);
+            db.appender_destroy(&app);
+            die("DuckDB nao criou o bloco colunar");
+          }
+          constexpr std::size_t kChunkRows = 4096;
+          for (std::size_t inicio = 0; inicio < col->rows; inicio += kChunkRows) {
+            const std::size_t count = std::min(kChunkRows, col->rows - inicio);
+            if (inicio != 0) db.data_chunk_reset(chunk);
+            for (std::size_t ci = 0; ci < colunas.size(); ++ci) {
+              const ColunaColunar& item = colunas[ci];
+              const ColumnarColumn& coluna = *item.coluna;
+              void* vector = db.data_chunk_get_vector(chunk, ci);
+              std::uint64_t* validity = nullptr;
+              for (std::size_t offset = 0; offset < count; ++offset) {
+                const std::size_t physical = col->physical_row(inicio + offset);
+                if (coluna.null_at(physical)) {
+                  if (!validity) {
+                    db.vector_ensure_validity_writable(vector);
+                    validity = db.vector_get_validity(vector);
+                  }
+                  if (validity) validity[offset / 64] &= ~(std::uint64_t{1} << (offset % 64));
+                  continue;
+                }
+                switch (item.tipo) {
+                  case ColumnarColumn::Type::Integer:
+                    static_cast<std::int64_t*>(db.vector_get_data(vector))[offset] =
+                        coluna.integers[physical];
+                    break;
+                  case ColumnarColumn::Type::Decimal:
+                    static_cast<double*>(db.vector_get_data(vector))[offset] =
+                        coluna.decimals[physical];
+                    break;
+                  case ColumnarColumn::Type::Boolean:
+                    static_cast<std::int64_t*>(db.vector_get_data(vector))[offset] =
+                        coluna.booleans[physical] ? 1 : 0;
+                    break;
+                  case ColumnarColumn::Type::Text:
+                  case ColumnarColumn::Type::TextPlain: {
+                    const std::string text = coluna.key_at(physical);
+                    db.vector_assign_string_element(vector, offset, text.c_str());
+                    break;
+                  }
+                  default: {
+                    const std::string text = json_dump_compacto(coluna.at(physical));
+                    db.vector_assign_string_element(vector, offset, text.c_str());
+                    break;
+                  }
+                }
+              }
+            }
+            db.data_chunk_set_size(chunk, count);
+            if (db.append_data_chunk(app, chunk) != kDuckdbSuccess) {
+              db.destroy_data_chunk(&chunk);
+              for (void* type : logical_types) db.destroy_logical_type(&type);
+              db.appender_destroy(&app);
+              die("falha ao anexar bloco colunar no DuckDB");
+            }
+          }
+          db.destroy_data_chunk(&chunk);
+          for (void* type : logical_types) db.destroy_logical_type(&type);
+          db.appender_destroy(&app);
+          continue;
+        }
+        for (std::size_t row = 0; row < col->rows; ++row) {
+          const std::size_t physical = col->physical_row(row);
+          for (const ColunaColunar& item : colunas) {
+            const ColumnarColumn& coluna = *item.coluna;
+            if (coluna.null_at(physical)) {
+              db.append_null(app);
+              continue;
+            }
+            switch (item.tipo) {
+              case ColumnarColumn::Type::Integer:
+                db.append_int64(app, coluna.integers[physical]);
+                break;
+              case ColumnarColumn::Type::Decimal:
+                db.append_double(app, coluna.decimals[physical]);
+                break;
+              case ColumnarColumn::Type::Boolean:
+                db.append_int64(app, coluna.booleans[physical] ? 1 : 0);
+                break;
+              case ColumnarColumn::Type::Text:
+              case ColumnarColumn::Type::TextPlain: {
+                const std::string text = coluna.key_at(physical);
+                db.append_varchar(app, text.c_str());
+                break;
+              }
+              default: {
+                const std::string text = json_dump_compacto(coluna.at(physical));
+                db.append_varchar(app, text.c_str());
+                break;
+              }
+            }
+          }
+          db.appender_end_row(app);
+        }
+        db.appender_destroy(&app);
+        continue;
+      }
       Value materializada = tabela;
       materializada.materialize_rows();
       if ((materializada.kind != ValueKind::Tabela && materializada.kind != ValueKind::Lista) ||
@@ -771,17 +951,26 @@ Value duckdb_juntar(const Value& esquerda, const Value& direita,
   if (chaves.empty()) die("juntar: nenhuma chave informada");
   Value esq = esquerda;
   Value dir = direita;
-  esq.materialize_rows();
-  dir.materialize_rows();
-  if (!esq.list_ref() || !dir.list_ref()) die("juntar: tabelas invalidas para DuckDB");
-  std::vector<std::string> nomes_esq;
-  std::vector<std::string> nomes_dir;
-  for (const Value& linha : *esq.list_ref())
-    if (linha.map_ref()) for (const auto& [nome, _] : linha.map_ref()->items)
-      if (std::find(nomes_esq.begin(), nomes_esq.end(), nome) == nomes_esq.end()) nomes_esq.push_back(nome);
-  for (const Value& linha : *dir.list_ref())
-    if (linha.map_ref()) for (const auto& [nome, _] : linha.map_ref()->items)
-      if (std::find(nomes_dir.begin(), nomes_dir.end(), nome) == nomes_dir.end()) nomes_dir.push_back(nome);
+  // Preserve the columnar representation all the way to the DuckDB bridge.
+  // The old path materialized every row map just to discover the schema,
+  // defeating the data_chunk/appender fast path for joins.
+  auto nomes_tabela = [](Value& tabela) {
+    std::vector<std::string> nomes;
+    if (ColumnarTable* colunas = tabela.columnar()) {
+      nomes = colunas->names;
+      return nomes;
+    }
+    if (!tabela.list_ref()) die("tabela invalida para DuckDB");
+    for (const Value& linha : *tabela.list_ref()) {
+      if (!linha.map_ref()) die("tabela invalida para DuckDB");
+      for (const auto& [nome, _] : linha.map_ref()->items)
+        if (std::find(nomes.begin(), nomes.end(), nome) == nomes.end()) nomes.push_back(nome);
+    }
+    return nomes;
+  };
+  const std::vector<std::string> nomes_esq = nomes_tabela(esq);
+  const std::vector<std::string> nomes_dir = nomes_tabela(dir);
+  if (nomes_esq.empty() || nomes_dir.empty()) die("tabelas invalidas para DuckDB: sem colunas");
   std::string sql = "SELECT ";
   bool first = true;
   for (const std::string& nome : nomes_esq) {

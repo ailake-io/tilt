@@ -106,10 +106,10 @@ std::shared_ptr<Closure> Value::closure_shared() const {
   return kind == ValueKind::Funcao ? std::static_pointer_cast<Closure>(payload_ref()) : nullptr;
 }
 
-ColumnarTable* Value::columnar() const {
+ColumnarTable* Value::columnar(bool carregar) const {
   if (kind != ValueKind::Tabela || !payload_ref()) return nullptr;
   auto* columns = static_cast<ColumnarTable*>(payload_ref().get());
-  columnar_ensure_loaded(columns);
+  if (carregar) columnar_ensure_loaded(columns);
   return columns;
 }
 
@@ -152,7 +152,12 @@ bool Value::truthy() const {
       return !s.empty();
     case ValueKind::Lista:
     case ValueKind::Tabela:
-      return (list_ref() && !list_ref()->empty()) || (columnar() && columnar()->rows > 0);
+      if (list_ref() && !list_ref()->empty()) return true;
+      if (ColumnarTable* col = columnar()) {
+        col->materialize_view();
+        return col->rows > 0;
+      }
+      return false;
     case ValueKind::Mapa:
       return map_ref() && !map_ref()->items.empty();
     case ValueKind::Tensor:

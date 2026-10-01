@@ -103,7 +103,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   e AWS KMS usa `chave_kms` com permissões `GenerateDataKey`/`Decrypt`; os
   provedores `chave_env` e `chave_arquivo` atendem secret mounts sem SDK;
   Azure Key Vault (`chave_azure`), GCP Cloud KMS (`chave_gcp`) e Vault Transit
-  (`chave_vault`) usam APIs HTTP e tokens de ambiente.
+  (`chave_vault`) usam APIs HTTP. Tokens estáticos continuam aceitos por
+  ambiente; arquivos (`AZURE_ACCESS_TOKEN_FILE`, `GCP_ACCESS_TOKEN_FILE`,
+  `VAULT_TOKEN_FILE`), Azure OAuth por client credentials e descoberta/renovação
+  por Azure IMDS (`AZURE_IMDS_ENDPOINT` opcional), GCP metadata
+  (`GCP_METADATA_HOST` opcional) e Vault `renew-self` também são suportados,
+  com cache até a expiração.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
@@ -146,7 +151,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   (fase 30) expõe as tabelas Hadoop locais como **catálogo REST server**
   (config/namespaces/tables/loadTable, createTable, transactions, DELETE e
   endpoint de arquivos com proteção contra path traversal; conflitos respondem
-  409; a listagem aceita `page_size`/`page_token` e `HEAD` verifica tabelas) —
+  409; a listagem aceita `page_size`/`page_token`, `HEAD` verifica tabelas e
+  `createTable` materializa metadata inicial quando necessário) —
   o metadata servido reescreve as locations para URLs do servidor, mas
   para o Spark/Hadoop (cujo `fs.http` reporta length -1, rejeitado pelo leitor
   Avro do Iceberg) há o modo `--sem-reecrita-manifests`, em que manifest lists,
@@ -383,8 +389,9 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
   `agrupamento_max`, `achatar`, `residual`, `incorporacao` e
-  `recorrente` (RNN/LSTM/GRU com BPTT). O backward CUDA dessas três camadas
-  usa kernels dedicados quando CUDA está ativo; CPU permanece como fallback.
+  `recorrente` (RNN/LSTM/GRU com BPTT). O backward CUDA das camadas listadas
+  usa kernels dedicados quando CUDA está ativo e o lote é elegível; CPU
+  permanece como fallback.
 - `conv2d` e `norma_lote` existem como **operações de tensor** (guia 04);
   `incorporacao`, `recorrente`, `conv2d` e `norma_lote` existem como camadas de `modelo`/`treino` (`incorporacao: [vocabulario, dimensao]`,
   `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`

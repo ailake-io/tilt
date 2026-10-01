@@ -212,6 +212,19 @@ Principais otimizações disponíveis no runtime atual.
   26,112/23,410/32,768 ms; e DuckDB em 83,735/78,854/71,633 ms. Os dados estão
   em `benchmarks/data-backends-2026-09-29.md`. A leitura CSV colunar direta
   removeu o vetor de `Value` por linha e reduziu o processo novo em 36%–51%.
+- A repetição de 30/09/2026 em 2 milhões de linhas marcou, no processo RPC,
+  169,026/174,722/385,664 ms para agrupamento/filtro/junção. Após códigos
+  dictionary e seleção tardia, a melhor rodada marcou 134,493/160,630/344,111
+  ms. A junção teve uma repetição posterior de 366,825 ms, portanto o ganho
+  ainda precisa de uma série maior para virar uma regressão fixa. Polars marcou
+  62,583/52,801/58,563 ms e DuckDB 112,663/101,145/96,519 ms na referência.
+  Os dados estão em `benchmarks/data-backends-2026-09-30-2m.md` e nos relatórios
+  de códigos compactos.
+- A seleção tardia deixou `filtrar -> selecionar -> agrupar` praticamente no
+  mesmo custo de `filtrar -> agrupar` (28,180 contra 27,565 ms em 200 mil
+  linhas). Em 1 milhão de linhas, a projeção de duas colunas reduziu a rodada
+  de 97,637 para 90,687 ms. O ganho depende da quantidade de colunas
+  descartadas e ainda deve ser separado do custo de leitura.
 - `conv2d` grande usa tiles im2col limitados em memória e CBLAS quando disponível;
   a implementação direta permanece para entradas pequenas ou CPU sem BLAS.
 - CUDA e cuBLAS opcionais são carregados em tempo de execução. O caminho de
@@ -311,11 +324,16 @@ o próximo salto da lógica pura depende agora de medir o efeito do `ValueStorag
    bytes e o merge paralelo de operações gerais continuam como próximos ganhos.
 3. ~~**Delegar ao DuckDB**~~ feita de forma opcional: agregações e junções colunares
    usam SQL gerado apenas quando o motor é solicitado ou o modo `auto` amortiza a carga.
-4. ~~**Planos preguiçosos com pushdown**~~ feita para CSV, Parquet e Delta locais e
-   conectores remotos. `lazy: verdadeiro` adia a primeira consulta; SQL mantém
-   projeção/filtro/limite parametrizados e Elasticsearch/OpenSearch traduz
+4. **Planos preguiçosos com pushdown**: a composição de `filtrar`, `selecionar` e
+   `limite` antes da leitura já funciona para CSV, Parquet e Delta locais;
+   Parquet também preserva pruning por estatísticas. SQL mantém
+   projeção/filtro/limite parametrizados, Elasticsearch/OpenSearch traduz
    `pushdown.colunas`, `pushdown.onde` e `pushdown.limite` para `_source`,
-   `bool.filter` e `size`.
+   `bool.filter` e `size`, e Spark via Livy envolve o SQL com projection,
+   predicate e limit quando os identificadores são simples. Os demais conectores remotos preservam a semântica
+   executando o residual; ainda falta tradução nativa para eles e ampliar os
+   casos nested sem fallback. No Parquet, um `limite` sem filtro também evita
+   descomprimir row groups posteriores.
 5. ~~**Rede e loops.**~~ O cliente HTTP persistente já reduz o custo das chamadas
    repetidas; fontes remotas podem ser lazy e aplicar pushdown. A execução paralela
    de passos e o loop independente `saida[i] = expressao` estão disponíveis com
@@ -344,3 +362,106 @@ o laço do interpretador não acelera seu núcleo numérico. Ainda há gargalos
 próprios: materialização de linhas, operadores não cobertos por kernels e
 transferência host↔GPU. Para modelos grandes, o ganho seletivo da GPU está
 medido no [relatório](../benchmarks/relatorio-2026-09-24.md).
+
+## Rodada atual e próximos ganhos
+
+Em 30/09/2026 o hash join colunar passou a usar códigos canônicos de 32 bits
+para textos dictionary encoded, evitando copiar o texto inteiro na chave de
+cada linha. Uma rodada do benchmark RPC de 2 milhões de linhas marcou 344,111
+ms, mas uma repetição posterior marcou 366,825 ms; o ganho ainda precisa ser
+confirmado com mais amostras. Os números completos estão em
+[`data-backends-2026-09-30-2m-join-codec.md`](../benchmarks/data-backends-2026-09-30-2m-join-codec.md).
+
+O agrupamento com chave de baixa cardinalidade dictionary encoded também deixou
+de montar chaves textuais no caminho paralelo; a última rodada marcou 134,493 ms
+no RPC para 2 milhões de linhas. O resultado completo está em
+[`data-backends-2026-09-30-2m-group-codes.md`](../benchmarks/data-backends-2026-09-30-2m-group-codes.md)
+e ainda deve ser repetido com mais amostras antes de virar um limite de
+regressão.
+
+O plano registrado em
+[`roadmap-performance.md`](../benchmarks/roadmap-performance.md) prioriza o
+executor por lotes, a fusão de scan/filtro/projeção/agregação, um pool global de
+threads, pushdown lazy completo, agregadores com spill e a ponte DuckDB por
+blocos colunares. A ponte usa `data_chunk` quando a biblioteca fornece essa
+API e recua para o appender tipado em versões antigas, sempre sem materializar
+mapas de linhas. O caminho de junção delegado ao DuckDB também obtém os nomes
+diretamente das colunas, portanto não materializa a tabela só para montar o
+schema. Arrow/zero-copy permanece como ganho seguinte.
+
+Como primeiro passo da fusão, filtros colunares agora retornam uma seleção
+tardia que compartilha as colunas de origem. `agrupar_por` percorre esses
+índices sem copiar a tabela filtrada; métodos que exigem armazenamento próprio
+materializam a visão somente quando necessário.
+
+`selecionar` também tem caminho colunar: numa visão filtrada, somente as colunas
+solicitadas são copiadas para a próxima etapa, preservando a agregação tipada e
+evitando materializar colunas descartadas.
+
+`derivar` e `mapear` mantêm o caminho colunar para aliases diretos e expressões
+aritméticas (`linha.valor * 2`, por exemplo). Quando a entrada tem um predicado
+adiado, expressões numéricas simples tornam-se colunas virtuais e são calculadas
+no mesmo loop da agregação; aliases, funções, condicionais e acessos nested fora
+desse subconjunto materializam apenas a seleção e preservam o fallback por
+linhas.
+
+As faixas paralelas de `agrupar_por` e da construção do índice hash de joins
+agora usam um pool global reutilizável. O número de faixas e a ordem do merge
+não mudam; a alteração elimina a criação e destruição de threads em cada
+operação. O pool limita-se a 16 workers (ou ao número menor de CPUs disponível)
+para não manter centenas de threads ociosas em hosts com muitos núcleos. A
+medição de throughput em cargas grandes ainda deve ser repetida
+com várias execuções antes de estabelecer um limite de regressão.
+
+Filtros colunares simples e compostos também processam lotes de 8.192 linhas.
+Cada worker produz um selection vector local e o merge concatena os lotes em
+ordem, mantendo a semântica original. A máscara de predicados compostos usa
+blocos de palavras de 64 bits no mesmo pool. Para o caminho analítico terminal,
+o plano agora pode manter o predicado como função adiada: `selecionar` carrega
+essa função junto com a projeção e `agrupar_por` percorre o scan físico uma vez,
+aplicando filtro e acumuladores no mesmo loop. Isso elimina o selection vector
+e o objeto de visão no caso `filtrar -> selecionar -> agrupar_por` para
+predicados escalares e compostos suportados. Métodos que precisam de buffers
+próprios materializam o plano antes de continuar.
+Projeções sem filtro registram índices identidade para que as reduções SIMD e
+os intervalos de tabelas ordenadas continuem no caminho rápido.
+Seleções identidade também reutilizam a tabela compartilhada em `take_rows`,
+evitando criar uma visão quando o predicado aceita todas as linhas.
+O agrupamento também resolve o parent e o vetor físico uma vez antes da
+varredura. Em 200 mil linhas, três repetições mediram 27,565 ms para
+`filtro → agrupar` e 28,180 ms para `filtro → selecionar → agrupar`; o relatório
+está em [`pipeline-view-2026-09-30.md`](../benchmarks/pipeline-view-2026-09-30.md).
+Para `distintos`, acumuladores de grupos em textos dictionary encoded agora
+guardam apenas códigos `uint32`, inclusive nas faixas paralelas; a conversão
+para texto só é necessária em colunas sem dicionário. Os estados de conjuntos e
+amostras também são indexados apenas pelas agregações que os usam; planos com
+`somar`, `media`, `min`, `max` ou `contar` não reservam containers vazios para
+cada grupo.
+
+Para cargas numéricas com cardinalidade que não cabe confortavelmente em
+memória, `TILT_AGG_SPILL=1` ativa o spill externo de `agrupar_por`. O runtime
+particiona as linhas por hash da chave em arquivos temporários, reduz cada
+partição isoladamente e ordena os resultados pela primeira ocorrência. O modo
+normal continua em memória; `distintos` e quantis permanecem no caminho nativo
+até receberem um formato de spill específico.
+
+Em 2 milhões de linhas e 500 mil grupos, três repetições marcaram 2.843,8 ms
+e 1.675.064 KiB de RSS no caminho em memória contra 1.903,0 ms e 409.496 KiB
+com spill (reduções de 33,1% e 75,6%). A medição inclui leitura CSV e está
+registrada em [`aggregate-spill-2026-09-30.md`](../benchmarks/aggregate-spill-2026-09-30.md);
+a matriz de cardinalidade usada para calibrar a escolha está em
+[`cardinality-2026-09-30.md`](../benchmarks/cardinality-2026-09-30.md).
+
+O modo `TILT_AGG_SPILL=auto` agora estima a cardinalidade pela dictionary ou
+por uma amostra de até 65.536 linhas. Ele ativa o spill somente quando a
+estimativa supera `TILT_AGG_SPILL_MIN_GROUPS` (100 mil por padrão) e representa
+cerca de um quarto ou mais das linhas; cargas pequenas continuam in-memory.
+`TILT_AGG_SPILL=1` ainda força o caminho externo para testes e operações
+controladas.
+
+A matriz de cardinalidade confirma que o spill deve ser seletivo: em 2 milhões
+de linhas ele piorou o agrupamento com 5 grupos (152,896 → 567,671 ms), mas
+melhorou o caso com 500 mil grupos (2.840,011 → 1.497,294 ms). Polars e DuckDB
+continuam à frente em tempo absoluto; o principal benefício atual do spill é
+manter o pico de memória sob controle. Os dados completos estão em
+[`cardinality-2026-09-30.md`](../benchmarks/cardinality-2026-09-30.md).

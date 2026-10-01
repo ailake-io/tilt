@@ -93,7 +93,11 @@
 - [x] Locks cooperativos e optimistic concurrency local para Delta/Iceberg
 - [x] Paginação, Bearer token e HEAD no servidor REST Iceberg
 - [x] Provedores HTTP Parquet para Azure Key Vault, GCP Cloud KMS e Vault Transit
-- [x] Operações createTable, transactions e DELETE no servidor REST Iceberg
+- [x] Operações createTable, transactions e DELETE no servidor REST Iceberg;
+  `createTable` materializa `metadata/v0.metadata.json` a partir do schema quando
+  a tabela ainda não existe e métodos fora do contrato respondem 405 com Allow
+- [x] Tokens cloud Parquet com arquivos de segredo, Azure OAuth/IMDS, GCP
+  metadata e renovação Vault `renew-self`, com cache até expiração
 - [x] Implementar `tilt servir-catalogo` (fase 30)
 - [x] Adicionar deletes (position/equality) para Iceberg (fase 12-5a; leitura
   nativa aplica ambos, pyiceberg aplica position e ainda não suporta equality)
@@ -378,6 +382,24 @@ documentação fecha sem o antigo T032 duplo (`docs` 102/102).
 - [x] Propagação de metadados de ordenação colunar para evitar nova verificação no merge join.
 - [x] Cache reutilizável do índice hash no lado esquerdo para right joins.
 - [x] Índice de join compacto: buckets com offsets e vetor contínuo de posições, reduzindo alocações por chave.
+- [x] Chaves de texto dictionary encoded usam códigos canônicos de 32 bits durante o hash join, sem copiar o texto por linha; o cache inclui a identidade dos dicionários.
+- [x] `agrupar_por` paralelo usa diretamente os códigos da chave dictionary encoded, sem reconstruir uma string por linha; resultado registrado em `benchmarks/data-backends-2026-09-30-2m-group-codes.md`.
+- [x] Filtros de igualdade e desigualdade em textos dictionary encoded resolvem o literal para um código uma vez e comparam inteiros por linha; comparadores lexicais continuam usando o dicionário.
+- [x] Filtros colunares retornam seleção tardia compartilhando as colunas de origem; `agrupar_por` percorre a seleção sem copiar todas as colunas e métodos que exigem buffers próprios materializam sob demanda.
+- [x] `selecionar` colunar projeta somente as colunas pedidas e aplica a seleção tardia diretamente; o caminho de linhas continua como fallback para tabelas materializadas. Rodada preliminar em `benchmarks/pipeline-selection-2026-09-30.md`.
+- [x] `derivar`/`mapear` preservam o caminho colunar para aliases e expressões aritméticas; no plano com filtro adiado, expressões numéricas simples viram colunas virtuais consumidas pela agregação no mesmo loop. Funções, condicionais e acessos nested continuam materializando somente a seleção e usando o fallback por linhas.
+- [x] Pool global de workers para agregações paralelas e construção de índices de join; as faixas continuam determinísticas e o fallback serial permanece disponível.
+- [x] Executor em lotes de 8.192 linhas para filtros colunares simples e máscaras compostas; a seleção local é fundida em ordem determinística e o caminho serial permanece para tabelas pequenas.
+- [x] Projeção colunar sobre seleção tardia agora é uma visão sem cópia; `filtrar -> selecionar -> agrupar_por` mantém índices e colunas no parent e materializa apenas quando um consumidor exige buffers próprios.
+- [x] Projeções sem filtro registram seleção identidade; `agrupar_por` preserva reduções SIMD e intervalos ordenados sem percorrer um vetor de índices.
+- [x] `agrupar_por` resolve o parent e a seleção física uma vez por operação, evitando indireções por linha; o resultado preliminar está em `benchmarks/pipeline-view-2026-09-30.md`.
+- [x] `distintos` usa códigos `uint32` em colunas dictionary encoded, inclusive no caminho paralelo, evitando materializar uma string por valor e mantendo strings para colunas não codificadas.
+- [x] Checkpoint de continuidade salvo em `benchmarks/checkpoint-performance-2026-09-30.md`; próximo item: acumuladores compactos por grupo e spill/sort externo.
+- [x] Acumuladores de grupos alocam estados de `distintos` e quantis somente para as funções presentes no plano; agregações simples não carregam conjuntos/vetores vazios por grupo.
+- [x] Spill externo opcional para agregações numéricas grandes (`TILT_AGG_SPILL=1`): particiona por hash em arquivos temporários, reduz uma partição por vez e restaura a ordem da primeira ocorrência.
+- [x] Benchmark de spill em 2 milhões de linhas/500 mil grupos: RSS 1.675.064 → 409.496 KiB (−75,6%) e tempo 2.843,8 → 1.903,0 ms (−33,1%); detalhes em `benchmarks/aggregate-spill-2026-09-30.md`.
+- [x] Matriz de cardinalidade (5/5.000/500.000 grupos) contra pandas, Polars e DuckDB; spill só compensa em cardinalidade alta. Relatório: `benchmarks/cardinality-2026-09-30.md`.
+- [x] Seleção automática opcional do spill (`TILT_AGG_SPILL=auto`): usa dictionary ou amostra de 65.536 linhas e ativa somente acima do limite de cardinalidade e de aproximadamente 25% das linhas; `TILT_AGG_SPILL_MIN_GROUPS` ajusta o limite.
 - [x] Métricas de cache de join (`metricas_join`): bytes, buckets, posições, hits e misses.
 - [x] Limite de 64 MiB por tabela para o cache de joins, com expulsão FIFO de índices antigos.
 - [x] Limite de cache configurável por tabela via `limitar_cache_join(bytes)`.
@@ -549,3 +571,43 @@ continua fora do escopo salvo indicação explícita.
   gzip, Snappy e Zstd está em `benchmarks/parquet-large-2026-09-30-2m.md`.
 - [ ] Manter AMD/ROCm fora do escopo; preservar fallback CPU para todos os
   caminhos CUDA/Metal.
+
+### Próxima implementação de performance (2026-09-30)
+
+- [x] Executor por lotes de 2.048–8.192 linhas com selection vector e bitmap de nulos para filtros colunares; o caminho terminal também pode consumir o predicado diretamente no scan.
+- [x] Fusão de scan, filtro, seleção e agregação para predicados escalares simples/compostos: `filtrar -> selecionar -> agrupar_por` preserva o predicado adiado e reduz no mesmo loop, sem selection vector ou objeto de visão. Expressões de `derivar` fora do subconjunto vetorizável continuam no fallback materializado.
+- [x] `take_rows` reconhece selection vector identidade e reutiliza a tabela compartilhada, removendo visões intermediárias quando o filtro aceita todas as linhas.
+- [x] Thread pool global reutilizável para agregações e joins; a leitura ainda pode migrar para o pool.
+- [ ] Planejador lazy com projection, predicate e slice pushdown completos.
+  A composição já acumula `filtrar`, `selecionar` e `limite` antes da leitura
+  em CSV, Parquet e Delta locais; ainda falta levar o mesmo plano até todos os
+  conectores remotos e cobrir os casos nested sem fallback. SQL,
+  Elasticsearch/OpenSearch e Spark via Livy já traduzem o plano para o backend; os demais
+  conectores executam o residual após a leitura. Parquet sem predicado já
+  descarta row groups posteriores para `limite` antes da descompressão.
+- [x] Agregadores tipados locais por thread e spill numérico; spill de `distintos`/quantis e sort externo geral continuam pendentes.
+- [x] Ponte DuckDB por blocos colunares, sem materialização linha a linha.
+  Quando a API `data_chunk` está disponível, blocos de 4.096 linhas são
+  enviados diretamente aos vetores DuckDB; bibliotecas antigas recuam para o
+  appender tipado, ainda sem criar mapas de linhas. O caminho de junção também
+  preserva `ColumnarTable` ao descobrir o schema, evitando materializar mapas
+  antes da ponte. Arrow/zero-copy continua sendo uma otimização futura.
+- [x] Benchmark de cardinalidade, tempo e RSS contra pandas, Polars e DuckDB em
+  1M/2M linhas; separar leitura/materialização e cache frio/quente continua
+  pendente para 10M/100M linhas e pelo menos 10 repetições.
+- [x] Pushdown Spark via Livy validado contra container real; o cliente aceita
+  o prefixo `resN: String = [...]` emitido pelo REPL Scala e mantém fallback
+  colunar para predicados não traduzíveis.
+- [ ] Próxima rodada: hash join paralelo/streaming, Arrow/zero-copy, nested
+  pushdown completo, spill de distintos/quantis e sort externo geral.
+
+### Beta pública `v0.2.0-beta.1` (2026-10-01)
+
+- [x] Suíte completa executada fora do sandbox: 107/107; dependências de
+  sockets/serviços classificadas em `docs/validacao-beta-2026-10-01.md`.
+- [x] CPack e workflow de release preparados para Linux x86_64, macOS
+  arm64/x86_64 e Windows x64, com checksums e prerelease beta.
+- [x] Changelog, política de compatibilidade e matriz de recursos publicados.
+- [x] Exemplos reproduzíveis de dados, ML, LLM/RAG e serviço HTTP publicados.
+- [x] Benchmark comparativo publicado com a ressalva de que Polars e DuckDB
+  ainda vencem o Tilt em cargas grandes.

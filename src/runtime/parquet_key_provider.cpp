@@ -2,11 +2,15 @@
 
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
+#include <fstream>
 #include <initializer_list>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "runtime/http_client.hpp"
@@ -37,6 +41,166 @@ std::string env_required(std::initializer_list<const char*> names) {
 std::string trim_slash(std::string value) {
   while (!value.empty() && value.back() == '/') value.pop_back();
   return value;
+}
+
+std::string form_encode(const std::string& value) {
+  static constexpr char hex[] = "0123456789ABCDEF";
+  std::string out;
+  for (unsigned char c : value) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+      out += static_cast<char>(c);
+    } else {
+      out += '%';
+      out += hex[c >> 4];
+      out += hex[c & 15];
+    }
+  }
+  return out;
+}
+
+struct TokenCacheEntry {
+  std::string value;
+  std::chrono::steady_clock::time_point expires;
+};
+
+std::mutex token_cache_mutex;
+std::unordered_map<std::string, TokenCacheEntry> token_cache;
+
+std::string trim_token(std::string value) {
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' ||
+                            value.back() == ' ' || value.back() == '\t')) value.pop_back();
+  std::size_t first = 0;
+  while (first < value.size() && (value[first] == ' ' || value[first] == '\t')) ++first;
+  if (first) value.erase(0, first);
+  return value;
+}
+
+std::string token_file(const char* env_name) {
+  const char* path = std::getenv(env_name);
+  if (!path || !*path) return {};
+  std::ifstream in(path, std::ios::binary);
+  if (!in) die(std::string("nao foi possivel ler ") + env_name + "='" + path + "'");
+  return trim_token(std::string((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>()));
+}
+
+std::string cached_token(const std::string& key) {
+  std::lock_guard<std::mutex> lock(token_cache_mutex);
+  const auto it = token_cache.find(key);
+  if (it == token_cache.end() || it->second.value.empty()) return {};
+  if (it->second.expires != std::chrono::steady_clock::time_point::max() &&
+      std::chrono::steady_clock::now() + std::chrono::seconds(30) >= it->second.expires)
+    return {};
+  return it->second.value;
+}
+
+void cache_token(const std::string& key, std::string value, std::int64_t expires_in) {
+  value = trim_token(std::move(value));
+  if (value.empty()) return;
+  const auto expires = expires_in <= 0
+                           ? std::chrono::steady_clock::time_point::max()
+                           : std::chrono::steady_clock::now() + std::chrono::seconds(expires_in);
+  std::lock_guard<std::mutex> lock(token_cache_mutex);
+  token_cache[key] = TokenCacheEntry{std::move(value), expires};
+}
+
+std::string json_token_response(const HttpClientResponse& response, const char* provider,
+                                std::int64_t& expires_in) {
+  if (!response.error.empty()) die(std::string(provider) + ": falha HTTP: " + response.error);
+  if (response.status < 200 || response.status >= 300)
+    die(std::string(provider) + ": HTTP " + std::to_string(response.status) +
+        " — " + response.body.substr(0, 300));
+  Value body;
+  try { body = json_parse(response.body); }
+  catch (const std::exception& e) { die(std::string(provider) + ": JSON invalido: " + e.what()); }
+  const Value* token = body.map_ref() ? body.map_ref()->find("access_token") : nullptr;
+  if (!token || token->kind != ValueKind::Texto || token->s.empty())
+    die(std::string(provider) + ": resposta sem access_token");
+  expires_in = 0;
+  if (body.map_ref()) {
+    if (const Value* ttl = body.map_ref()->find("expires_in");
+        ttl && ttl->kind == ValueKind::Inteiro) expires_in = ttl->i;
+  }
+  return token->s;
+}
+
+std::string azure_token() {
+  const std::string key = "azure";
+  if (const char* value = std::getenv("AZURE_KEY_VAULT_TOKEN"); value && *value) {
+    return value;
+  }
+  if (const char* value = std::getenv("AZURE_ACCESS_TOKEN"); value && *value) {
+    return value;
+  }
+  if (const std::string file = token_file("AZURE_ACCESS_TOKEN_FILE"); !file.empty()) {
+    return file;
+  }
+  if (const std::string cached = cached_token(key); !cached.empty()) return cached;
+  const char* tenant = std::getenv("AZURE_TENANT_ID");
+  const char* client = std::getenv("AZURE_CLIENT_ID");
+  const char* secret = std::getenv("AZURE_CLIENT_SECRET");
+  if (tenant && *tenant && client && *client && secret && *secret) {
+    const std::string url = "https://login.microsoftonline.com/" + std::string(tenant) +
+                            "/oauth2/v2.0/token";
+    const std::string body = "client_id=" + form_encode(client) +
+                             "&client_secret=" + form_encode(secret) +
+                             "&scope=" + form_encode("https://vault.azure.net/.default") +
+                             "&grant_type=client_credentials";
+    std::int64_t ttl = 0;
+    const std::string token = json_token_response(
+        http_request("POST", url, {{"Content-Type", "application/x-www-form-urlencoded"}},
+                     body, 5, false), "Azure OAuth", ttl);
+    cache_token(key, token, ttl);
+    return token;
+  }
+  const char* endpoint = std::getenv("AZURE_IMDS_ENDPOINT");
+  const std::string url = endpoint && *endpoint
+                              ? endpoint
+                              : "http://169.254.169.254/metadata/identity/oauth2/token";
+  const std::string full = url + (std::string(url).find('?') == std::string::npos ? "?" : "&") +
+                           "api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net";
+  std::int64_t ttl = 0;
+  const std::string token = json_token_response(
+      http_request("GET", full, {{"Metadata", "true"}}, "", 5, false),
+      "Azure Managed Identity", ttl);
+  cache_token(key, token, ttl);
+  return token;
+}
+
+std::string gcp_token() {
+  const std::string key = "gcp";
+  if (const char* value = std::getenv("GOOGLE_OAUTH_ACCESS_TOKEN"); value && *value) {
+    return value;
+  }
+  if (const char* value = std::getenv("GCP_ACCESS_TOKEN"); value && *value) {
+    return value;
+  }
+  if (const std::string file = token_file("GCP_ACCESS_TOKEN_FILE"); !file.empty()) {
+    return file;
+  }
+  if (const std::string cached = cached_token(key); !cached.empty()) return cached;
+  const char* host = std::getenv("GCP_METADATA_HOST");
+  const std::string base = host && *host ? host : "http://169.254.169.254";
+  std::int64_t ttl = 0;
+  const std::string token = json_token_response(
+      http_request("GET", trim_slash(base) + "/computeMetadata/v1/instance/service-accounts/default/token",
+                   {{"Metadata-Flavor", "Google"}}, "", 5, false),
+      "GCP Metadata", ttl);
+  cache_token(key, token, ttl);
+  return token;
+}
+
+std::string vault_token() {
+  const std::string key = "vault";
+  if (const std::string renewed = cached_token("vault-renewed"); !renewed.empty()) return renewed;
+  if (const char* value = std::getenv("VAULT_TOKEN"); value && *value) {
+    return value;
+  }
+  const std::string file = token_file("VAULT_TOKEN_FILE");
+  if (!file.empty()) return file;
+  if (const std::string cached = cached_token(key); !cached.empty()) return cached;
+  return env_required({"VAULT_TOKEN", "VAULT_TOKEN_FILE"});
 }
 
 const Value& response_object(const HttpClientResponse& response, const char* provider) {
@@ -145,9 +309,41 @@ HttpClientResponse request_vault_json(const std::string& url, const std::string&
                       body, 30, false);
 }
 
+bool vault_renew_token(const std::string& token) {
+  const char* addr = std::getenv("VAULT_ADDR");
+  if (!addr || !*addr) return false;
+  const HttpClientResponse response = request_vault_json(
+      trim_slash(addr) + "/v1/auth/token/renew-self", token, "{}");
+  if (!response.error.empty() || response.status < 200 || response.status >= 300) return false;
+  try {
+    const Value body = json_parse(response.body);
+    const Value* auth = body.map_ref() ? body.map_ref()->find("auth") : nullptr;
+    const Value* data = body.map_ref() ? body.map_ref()->find("data") : nullptr;
+    const Value* object = auth && auth->kind == ValueKind::Mapa ? auth : data;
+    if (!object || object->kind != ValueKind::Mapa || !object->map_ref()) return false;
+    const Value* client = object->map_ref()->find("client_token");
+    if (!client || client->kind != ValueKind::Texto || client->s.empty()) return false;
+    std::int64_t ttl = 0;
+    if (const Value* lease = object->map_ref()->find("lease_duration");
+        lease && lease->kind == ValueKind::Inteiro) ttl = lease->i;
+    cache_token("vault-renewed", client->s, ttl);
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+HttpClientResponse request_vault_with_renew(const std::string& url, const std::string& body) {
+  std::string token = vault_token();
+  HttpClientResponse response = request_vault_json(url, token, body);
+  if ((response.status == 401 || response.status == 403) && vault_renew_token(token))
+    response = request_vault_json(url, vault_token(), body);
+  return response;
+}
+
 void azure(const std::string& key_id, std::array<std::uint8_t, 32>& plaintext,
            std::string& ciphertext, bool decrypt) {
-  const std::string token = env_required({"AZURE_KEY_VAULT_TOKEN", "AZURE_ACCESS_TOKEN"});
+  const std::string token = azure_token();
   std::string url = key_id;
   while (!url.empty() && url.back() == '/') url.pop_back();
   const std::size_t query = url.find('?');
@@ -170,7 +366,7 @@ void azure(const std::string& key_id, std::array<std::uint8_t, 32>& plaintext,
 
 void gcp(const std::string& key_id, std::array<std::uint8_t, 32>& plaintext,
          std::string& ciphertext, bool decrypt) {
-  const std::string token = env_required({"GOOGLE_OAUTH_ACCESS_TOKEN", "GCP_ACCESS_TOKEN"});
+  const std::string token = gcp_token();
   std::string base = trim_slash(std::getenv("GCP_KMS_ENDPOINT") ? std::getenv("GCP_KMS_ENDPOINT") : "https://cloudkms.googleapis.com");
   if (base.size() < 3 || base.rfind("/v1") != base.size() - 3) base += "/v1";
   const std::string op = decrypt ? ":decrypt" : ":encrypt";
@@ -190,11 +386,10 @@ void gcp(const std::string& key_id, std::array<std::uint8_t, 32>& plaintext,
 
 void vault(const std::string& key_id, std::array<std::uint8_t, 32>& plaintext,
            std::string& ciphertext, bool decrypt) {
-  const std::string token = env_required({"VAULT_TOKEN"});
   const std::string url = vault_url(key_id, decrypt ? "decrypt" : "encrypt");
   const std::string body = decrypt ? "{\"ciphertext\":\"" + ciphertext + "\"}"
                                    : "{\"plaintext\":\"" + base64_encode(plaintext.data(), plaintext.size()) + "\"}";
-  const Value& response = response_object(request_vault_json(url, token, body), "Vault Transit");
+  const Value& response = response_object(request_vault_with_renew(url, body), "Vault Transit");
   const Value* data = response.map_ref() ? response.map_ref()->find("data") : nullptr;
   if (!data || data->kind != ValueKind::Mapa || !data->map_ref()) die("resposta sem data");
   const std::string encoded = json_field(*data, decrypt ? "plaintext" : "ciphertext", "Vault Transit");

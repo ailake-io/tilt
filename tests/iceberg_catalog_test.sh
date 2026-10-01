@@ -286,6 +286,29 @@ with urllib.request.urlopen(req) as r:
         falha("DELETE tabela -> %d" % r.status)
 get(base + "/namespaces/default/tables/tabela_iceberg", expect=(404,))
 
+# createTable materializa o metadata inicial quando a tabela ainda nao existe.
+nova_dir = os.path.join(root, "tabela_nova")
+create_nova = json.dumps({"name": "tabela_nova", "location": "file://" + nova_dir,
+                          "schema": schema, "properties": {}}).encode()
+req = urllib.request.Request(base + "/namespaces/default/tables", data=create_nova,
+                             headers={"Content-Type": "application/json"}, method="POST")
+with urllib.request.urlopen(req) as r:
+    if r.status != 200:
+        falha("createTable sem metadata -> %d" % r.status)
+if not os.path.exists(os.path.join(nova_dir, "metadata", "v0.metadata.json")):
+    falha("createTable sem metadata nao materializou v0.metadata.json")
+req = urllib.request.Request(base + "/namespaces/default/tables/tabela_nova", method="PATCH")
+try:
+    urllib.request.urlopen(req)
+    falha("metodo REST fora do subconjunto nao retornou 405")
+except urllib.error.HTTPError as e:
+    if e.code != 405:
+        falha("metodo REST fora do subconjunto -> %d (esperado 405)" % e.code)
+req = urllib.request.Request(base + "/namespaces/default/tables/tabela_nova", method="DELETE")
+with urllib.request.urlopen(req) as r:
+    if r.status != 204:
+        falha("DELETE tabela_nova -> %d" % r.status)
+
 # rota fora do prefixo -> 404
 get(base + "inexistente", expect=(404,))
 get(base.replace("/v1", "/v2") + "/namespaces", expect=(404,))
