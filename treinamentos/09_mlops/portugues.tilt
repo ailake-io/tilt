@@ -1,0 +1,12 @@
+# Contrato de dados e pipeline pronto para registrar no registry local.
+
+tipo Evento:
+  usuario: texto
+  valor: decimal
+
+pipeline experimento:
+  passos:
+    - eventos = ler_json "exemplos/dados/produtos.json"
+    - verificar eventos, esquema: Evento
+    - imprimir "eventos carregados:", tamanho eventos
+    - imprimir "Registre o artefato com: tilt registrar-modelo churn pesos.json --versao 1.0.0"

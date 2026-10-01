@@ -1,0 +1,19 @@
+# Servico HTTP tipado com rota GET e POST.
+
+tipo Pedido:
+  cliente: texto
+  valor: decimal
+
+servico Loja:
+  porta: 8090
+  rota get "/saude":
+    passos:
+      - responder:
+          dados: { status: "ok", servico: "tilt" }
+  rota post "/pedidos":
+    entrada: Pedido
+    passos:
+      - total = entrada.valor * 1.1
+      - responder:
+          status: 201
+          dados: { cliente: entrada.cliente, total: total }

@@ -1,0 +1,13 @@
+# language: en
+# Data contract and pipeline ready for the local model registry.
+
+type Event:
+  user: text
+  value: decimal
+
+pipeline experiment:
+  steps:
+    - events = read_json "exemplos/dados/produtos.json"
+    - verify events, schema: Event
+    - print "loaded events:", length events
+    - print "Register with: tilt registrar-modelo churn pesos.json --versao 1.0.0"

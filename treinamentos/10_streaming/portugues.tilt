@@ -1,0 +1,13 @@
+# Janela de streaming. Requer um broker quando a fonte for kafka.
+
+fonte eventos:
+  tipo: kafka
+  topico: "eventos"
+  grupo: "treinamento-tilt"
+
+pipeline agregacao:
+  entrada: eventos
+  janela: 10
+  sobreposicao: 2
+  passos:
+    - imprimir "janela recebida:", tamanho linhas

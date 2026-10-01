@@ -1,0 +1,20 @@
+# language: en
+# Typed HTTP service with GET and POST routes.
+
+type Order:
+  customer: text
+  value: decimal
+
+service Store:
+  port: 8090
+  route get "/health":
+    steps:
+      - respond:
+          data: { status: "ok", service: "tilt" }
+  route post "/orders":
+    input: Order
+    steps:
+      - total = input.value * 1.1
+      - respond:
+          status: 201
+          data: { customer: input.customer, total: total }

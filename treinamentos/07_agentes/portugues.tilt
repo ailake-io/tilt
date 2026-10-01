@@ -1,0 +1,19 @@
+# Agente com ferramenta, politica de custo e etapas observaveis.
+
+ferramenta consultar_status:
+  descricao: "Consulta o status de um pedido de demonstração."
+  entrada:
+    id: texto
+  executar:
+    - retornar { id: entrada.id, estado: "separando" }
+
+agente suporte:
+  papel: "Responda com objetividade usando a ferramenta quando necessário."
+  ferramentas: [consultar_status]
+  max_passos: 3
+  max_custo: 0.02
+
+pipeline atendimento:
+  passos:
+    - resposta = suporte.responder "Qual o estado do pedido 42?"
+    - imprimir resposta.texto

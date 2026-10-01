@@ -1,0 +1,22 @@
+# language: en
+# ML: dense model, training, evaluation and inference.
+
+model Classifier:
+  layers:
+    - linear: [2, 8]
+    - activation: relu
+    - linear: [8, 2]
+    - softmax
+
+train Classifier:
+  data: loader "exemplos/dados/flores.csv", target: "especie"
+  loss: cross_entropy
+  optimizer: adam
+  rate: 0.01
+  epochs: 10
+  device: auto
+
+pipeline inference:
+  steps:
+    - result = model Classifier.execute tensor([5.0, 2.2])
+    - print "class:", result.argmax

@@ -1,0 +1,21 @@
+# language: en
+# Optional GPU: the same program falls back to CPU without CUDA or Metal.
+
+model Network:
+  layers:
+    - linear: [4, 8]
+    - activation: gelu
+    - linear: [8, 2]
+  device: auto
+
+task compute:
+  input:
+    a: tensor[f32, 2, 4] on device gpu
+    b: tensor[f32, 4, 8] on device gpu
+  execute:
+    - c = input.a.matmul input.b
+    - return c.shape
+
+pipeline demonstration:
+  steps:
+    - print tensor [0.1, 0.2, 0.3, 0.4]

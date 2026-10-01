@@ -1,0 +1,12 @@
+# Testes executaveis e funcao compativel com o codegen nativo.
+
+funcao dobro n -> inteiro:
+  retornar n * 2
+
+teste dobro_funciona:
+  passos:
+    - afirmar_igual dobro(21), 42
+
+pipeline exemplo:
+  passos:
+    - imprimir dobro 5

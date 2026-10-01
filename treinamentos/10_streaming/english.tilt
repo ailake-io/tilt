@@ -1,0 +1,14 @@
+# language: en
+# Streaming window. A broker is required when the source is Kafka.
+
+source events:
+  type: kafka
+  topic: "events"
+  group: "tilt-training"
+
+pipeline aggregation:
+  input: events
+  window: 10
+  overlap: 2
+  steps:
+    - print "received window:", length rows

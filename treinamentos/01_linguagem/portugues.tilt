@@ -1,0 +1,16 @@
+# Fundamentos: tipos, funcao, condicional, laço e colecoes.
+
+funcao classificar valor -> texto:
+  se valor >= 10:
+    retornar "alto"
+  senao:
+    retornar "baixo"
+
+pipeline fundamentos:
+  passos:
+    - numeros = [3, 7, 12]
+    - pares = filtrar numeros, funcao n: n % 2 == 0
+    - quadrados = mapear pares, funcao n: n * n
+    - para cada n em numeros:
+        imprimir n, classificar n
+    - imprimir "quadrados:", quadrados
