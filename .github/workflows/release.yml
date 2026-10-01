@@ -19,9 +19,10 @@ jobs:
         include:
           - os: ubuntu-24.04
             asset: linux-x86_64
-          - os: macos-latest
-            asset: macos-arm64
-          - os: macos-13
+          # macos-15-intel substitui o runner macos-13, que foi retirado da
+          # fila pública. O binário macOS arm64 será publicado quando o build
+          # Metal/arm64 passar no CI dedicado.
+          - os: macos-15-intel
             asset: macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
@@ -36,7 +37,17 @@ jobs:
 
       - name: build do binário (macOS)
         if: runner.os == 'macOS'
-        run: cmake --build --preset release --target tilt
+        shell: bash
+        run: |
+          set +e
+          cmake --build --preset release --target tilt 2>&1 | tee build-macos.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            grep -Ei 'error:|fatal error:|undefined reference|no such file' build-macos.log | tail -80 | while IFS= read -r line; do
+              echo "::error title=compilacao macOS::$line"
+            done
+          fi
+          exit "$status"
 
       - name: deps (macOS)
         if: runner.os == 'macOS'
@@ -114,7 +125,16 @@ jobs:
         run: cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release
 
       - name: build
-        run: cmake --build build/release --config Release --target tilt
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          cmake --build build/release --config Release --target tilt 2>&1 | Tee-Object -FilePath build-windows.log
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content build-windows.log | Select-String -Pattern 'error C[0-9]+|fatal error|undefined reference|error:' | Select-Object -Last 80 | ForEach-Object {
+              Write-Output "::error title=compilacao Windows::$($_.Line)"
+            }
+            exit $LASTEXITCODE
+          }
 
       - name: smoke
         run: |
