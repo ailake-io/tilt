@@ -185,6 +185,11 @@ Detalhe de cada flag e código de saída em [`docs/guia-08-cli.md`](docs/guia-08
 | `servico.tilt` | `servico` / `rota` HTTP | `tilt servir` |
 | `nativo.tilt` | subconjunto compilável (fatorial, ackermann) | `tilt compilar` |
 
+Para uma trilha completa, consulte [`treinamentos/README.md`](treinamentos/README.md).
+Ela reúne exemplos equivalentes em português e inglês para linguagem, dados,
+Parquet/Delta/Iceberg, ML, GPU, LLM/RAG, agentes, HTTP, MLOps, streaming, SQL,
+testes, Python, PySpark e Kof.
+
 ---
 
 ## Documentação

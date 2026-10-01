@@ -1,0 +1,14 @@
+// Cliente Kof chamando o endpoint RPC HTTP do Tilt.
+// Suba antes: tilt rpc treinamentos/13_interoperabilidade/portugues.tilt --porta 8091
+
+import kof.http
+
+main() {
+    var corpo = "{\"args\":[120]}"
+    var resposta = http.post(
+        "http://127.0.0.1:8091/chamar/classificar",
+        corpo,
+        "Content-Type: application/json"
+    )
+    println(resposta)
+}

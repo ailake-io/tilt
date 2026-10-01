@@ -1,0 +1,26 @@
+# language: en
+# Python, PySpark and Kof: the same Tilt module can be called through RPC/HTTP.
+
+function classify value:
+  if valor >= 100:
+    return "high"
+  else:
+    return "low"
+
+function enrich rows:
+  return rows.derive { band: classify(row.value) }
+
+pipeline local_python:
+  steps:
+    - root = call_python "math", "sqrt", 16
+    - print "Python returned:", root
+
+pipeline pyspark_livy:
+  steps:
+    - total = spark_sql "http://localhost:8998", "select count(*) as total from sales", language: "pyspark"
+    - print "Spark returned:", total
+
+pipeline kof_http:
+  steps:
+    - response = http_post_json "http://127.0.0.1:8091/pontuar", { cliente: "bia", valor: 250 }
+    - print response.cliente, response.pontos

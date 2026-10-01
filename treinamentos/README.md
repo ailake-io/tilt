@@ -39,6 +39,7 @@ done
 | `10_streaming` | fonte Kafka, janela e sobreposição | broker Kafka para executar |
 | `11_sql_conectores` | consulta e DDL parametrizados | SQLite local; outros bancos são opcionais |
 | `12_testes_nativo` | testes, afirmações e função compatível com codegen | nenhuma; `tilt testar` para testes |
+| `13_interoperabilidade` | Python, PySpark via Livy, RPC HTTP e Kof | Python; Spark/Livy e Kof são opcionais |
 
 ## Execução por área
 
