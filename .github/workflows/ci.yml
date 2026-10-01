@@ -19,7 +19,7 @@ jobs:
 
       - name: lint changed C/C++ files
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           HEAD_SHA: ${{ github.sha }}
         run: tests/lint_test.sh "$BASE_SHA" "$HEAD_SHA"
 
@@ -42,7 +42,7 @@ jobs:
 
       - name: lint changed C/C++ files
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           HEAD_SHA: ${{ github.sha }}
         run: tests/lint_cpp_test.sh "$BASE_SHA" "$HEAD_SHA" build/lint
 
