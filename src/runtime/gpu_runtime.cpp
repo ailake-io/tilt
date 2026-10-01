@@ -1,9 +1,5 @@
 #include "runtime/gpu_runtime.hpp"
 
-#include "runtime/compat.hpp"
-#include "runtime/metal_runtime.hpp"
-#include "runtime/tensor.hpp"
-
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -12,10 +8,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <numeric>
 #include <new>
-#include <vector>
+#include <numeric>
 #include <type_traits>
+#include <vector>
+
+#include "runtime/compat.hpp"
+#include "runtime/metal_runtime.hpp"
+#include "runtime/tensor.hpp"
 
 namespace tilt::rt {
 
