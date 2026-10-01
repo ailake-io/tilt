@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(tilt VERSION 0.2.0 LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 # Versao de produto exibida por `tilt versao`. O numero CMake continua
 # estavel para que DEB/RPM/MSI aceitem a versao, enquanto o sufixo semver
 # identifica o pre-release beta.
@@ -166,7 +168,7 @@ add_library(tilt_core STATIC
 target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(tilt_core PUBLIC ${CMAKE_DL_LIBS})
+target_link_libraries(tilt_core PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
 if(APPLE)
   target_link_libraries(tilt_core PUBLIC "-framework Metal" "-framework Foundation")
 endif()

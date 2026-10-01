@@ -12,6 +12,11 @@ Resultado: **107/107 testes aprovados (100%)**, em 135,49 s. A execução
 incluiu CUDA fake/real quando disponível, Metal stub, Parquet/KMS, Delta,
 Iceberg, Spark/Livy, DuckDB, MLflow, LLM, HTTP, LSP, JIT e fuzz do frontend.
 
+Revalidação fora do sandbox em 01/10/2026, com `-j2`, repetiu o resultado em
+**69,44 s**. Uma execução isolada encontrou apenas um certificado MariaDB ainda
+não válido durante a inicialização; a repetição do teste `mysql` e a suíte
+completa passaram sem alteração no runtime.
+
 ## Classificação de dependências externas
 
 | Grupo | Testes/recursos | Como a suíte valida |

@@ -15,6 +15,7 @@
 #include <numeric>
 #include <new>
 #include <vector>
+#include <type_traits>
 
 namespace tilt::rt {
 
@@ -23,6 +24,19 @@ GpuTensorStorage::~GpuTensorStorage() {
 }
 
 namespace {
+
+// std::bit_cast was added to libstdc++ after the minimum Linux toolchains
+// supported by the runtime. Keep the conversion available on older images
+// (for example Spark distributions based on Ubuntu 20.04) as well.
+template <typename To, typename From>
+To bit_cast_compat(const From& value) noexcept {
+  static_assert(sizeof(To) == sizeof(From));
+  static_assert(std::is_trivially_copyable_v<To>);
+  static_assert(std::is_trivially_copyable_v<From>);
+  To result{};
+  std::memcpy(&result, &value, sizeof(result));
+  return result;
+}
 
 // Reference row-major SGEMM / ReLU used by the Fake backend and as the shape
 // the CUDA kernel must match.
@@ -179,7 +193,7 @@ bool fake_ensure_output(GpuBuffer& output, std::size_t bytes) {
 // IEEE-754 round-to-nearest-even. Keep the master weights and gradients f32;
 // only GEMM operands are reduced to f16 in mixed precision.
 std::uint16_t to_half(float value) {
-  const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+  const std::uint32_t bits = bit_cast_compat<std::uint32_t>(value);
   const std::uint16_t sign = static_cast<std::uint16_t>((bits >> 16) & 0x8000U);
   const int exponent = static_cast<int>((bits >> 23) & 0xffU) - 127 + 15;
   const std::uint32_t mantissa = bits & 0x7fffffU;
@@ -207,7 +221,7 @@ float from_half(std::uint16_t value) {
   }
   const std::uint32_t bits = exponent == 31 ? sign | 0x7f800000U | (mantissa << 13)
       : exponent == 0 ? sign : sign | (static_cast<std::uint32_t>(exponent + 112) << 23) | (mantissa << 13);
-  return std::bit_cast<float>(bits);
+  return bit_cast_compat<float>(bits);
 }
 
 std::vector<std::uint16_t> half_operands(const float* input, std::size_t count) {

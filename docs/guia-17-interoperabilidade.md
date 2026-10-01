@@ -166,6 +166,12 @@ o caminho). `transformar` vê só um lote por vez: para somar/contar de verdade 
 `por_grupo` ou o próprio Spark. Validado com PySpark 4.2 em modo local
 (`python/testes/test_spark.py`).
 
+O caminho REST também foi validado com Livy real (`openeuler/livy:0.8.0`):
+`spark_sql` em Scala e em PySpark retornaram resultados pelo endpoint
+`/sessions`. Imagens Livy que oferecem apenas `python3` precisam expor também o
+comando `python` (ou configurar `livy.repl.pyspark.python` no servidor), pois o
+interpretador PySpark do Livy inicia esse executável.
+
 ## Kof
 
 [Kof](https://koflang.github.io/) roda em JVM, nativo e JS e tem cliente HTTP
@@ -206,6 +212,23 @@ pipeline pontuar:
 
 O teste `kof_interop` sobe os dois lados com o toolchain `kof` real (e é pulado se
 `kof`, `curl` ou `python3` não estiverem instalados).
+
+### Kof em container
+
+O projeto da imagem é [`KofLang/kof-docker-image`](https://github.com/KofLang/kof-docker-image).
+O workflow de publicação usa o nome `ghcr.io/koflang/kof-docker-image`;
+portanto, esse é o caminho derivado do repositório para uma imagem versionada.
+O README da imagem ainda instrui `ghcr.io/koflang/kof:latest`, criando uma
+divergência entre a documentação e o workflow. Em 2026-10-01, os dois caminhos
+retornaram `denied`/`unauthorized` em pull anônimo no GHCR, então o pacote exige
+login com `read:packages` ou precisa ter a visibilidade pública corrigida pelo
+maintainer. Enquanto isso, a alternativa reproduzível é construir localmente:
+
+```bash
+git clone https://github.com/KofLang/kof-docker-image.git
+docker build -t kof:local kof-docker-image
+docker run --rm -it kof:local
+```
 
 ## Limites conhecidos
 
