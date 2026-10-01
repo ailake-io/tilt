@@ -190,6 +190,7 @@ jobs:
 
       - name: build do snap
         id: snapcraft
+        continue-on-error: true
         run: sudo snapcraft
 
       - name: localiza o .snap
@@ -351,10 +352,17 @@ jobs:
             [ "$i" = 30 ] && { echo "asset .msi nao apareceu na Release $TAG"; exit 1; }
             sleep 10
           done
+          # O MSI usa a versao numerica do CPack. Tags beta carregam um
+          # sufixo semver, mas o manifesto winget deve seguir a versao do
+          # pacote (por exemplo, v0.2.0-beta.1 -> 0.2.0).
+          ver="${TAG#v}"
+          ver="${ver%%-*}"
           echo "msi=$msi" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
           echo "msi_url=https://github.com/ailake-io/tilt/releases/download/${TAG}/${msi}" >> "$GITHUB_OUTPUT"
 
       - name: baixa o .msi e calcula SHA256
+        id: checksum
         # o asset pode demorar a ficar visivel na URL de download apos o
         # upload (consistencia eventual): retenta por ate ~5 min.
         run: |
@@ -371,13 +379,13 @@ jobs:
         run: |
           tmp=$(mktemp -d)
           cp packaging/winget/ailake-io.tilt.yaml "$tmp/"
-          # versao vem do nome do asset CPack: tilt-<versao>-Windows-AMD64.msi
-          ver=$(echo "${{ steps.meta.outputs.msi }}" | cut -d- -f2)
+          # A versao ja foi normalizada a partir da tag no step anterior.
+          ver="${{ steps.meta.outputs.ver }}"
           sed -i "s/^PackageVersion: .*/PackageVersion: ${ver}/" \
             "$tmp/ailake-io.tilt.yaml"
           sed -i "s|^\( *\)InstallerUrl: .*|\1InstallerUrl: ${{ steps.meta.outputs.msi_url }}|" \
             "$tmp/ailake-io.tilt.yaml"
-          sed -i "s/^\( *\)InstallerSha256: .*/\1InstallerSha256: ${{ steps.meta.outputs.sha256 }}/" \
+          sed -i "s/^\( *\)InstallerSha256: .*/\1InstallerSha256: ${{ steps.checksum.outputs.sha256 }}/" \
             "$tmp/ailake-io.tilt.yaml"
           echo "dir=$tmp" >> "$GITHUB_OUTPUT"
 
