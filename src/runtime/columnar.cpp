@@ -590,20 +590,24 @@ ColumnarColumn ColumnarColumn::binary_numeric(const ColumnarColumn* rhs, double 
   if (integer_result) out.integers.resize(count, 0);
   else out.decimals.resize(count, 0.0);
 
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
   bool dense = true;
+#endif
   for (std::size_t row = 0; row < count; ++row) {
     if (nulls[row] || (rhs && rhs->nulls[row])) {
       out.nulls[row] = 1;
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
       dense = false;
+#endif
     }
   }
 
   // The common CSV path is Decimal/Decimal (or Decimal/scalar). Keep the
   // loop over raw arrays and let AVX2 evaluate four values per iteration.
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
   const bool left_decimal = type == Type::Decimal;
   const bool right_decimal = rhs && rhs->type == Type::Decimal;
   const bool scalar_decimal = !rhs && !scalar_is_integer;
-#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
   if (!integer_result && operation != '/' && dense && left_decimal &&
       (right_decimal || scalar_decimal) &&
       count >= 64 && __builtin_cpu_supports("avx2")) {
@@ -630,10 +634,10 @@ ColumnarColumn ColumnarColumn::binary_numeric(const ColumnarColumn* rhs, double 
 
 double ColumnarColumn::sum_numeric() const {
   if (type == Type::Decimal) {
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     bool sem_nulos = true;
     for (std::size_t row = 0; row < decimals.size(); ++row)
       if (row >= nulls.size() || nulls[row]) { sem_nulos = false; break; }
-#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     if (sem_nulos && __builtin_cpu_supports("avx2")) return soma_avx2(decimals.data(), decimals.size());
 #endif
   }
@@ -647,10 +651,10 @@ double ColumnarColumn::sum_numeric() const {
 
 double ColumnarColumn::sum_squares_numeric() const {
   if (type == Type::Decimal) {
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     bool sem_nulos = true;
     for (std::size_t row = 0; row < decimals.size(); ++row)
       if (row >= nulls.size() || nulls[row]) { sem_nulos = false; break; }
-#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     if (sem_nulos && __builtin_cpu_supports("avx2"))
       return soma_quadrados_avx2(decimals.data(), decimals.size());
 #endif
@@ -670,10 +674,10 @@ double ColumnarColumn::sum_numeric_range(std::size_t begin, std::size_t end) con
   end = std::min(end, nulls.size());
   begin = std::min(begin, end);
   if (type == Type::Decimal) {
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     bool sem_nulos = true;
     for (std::size_t row = begin; row < end; ++row)
       if (nulls[row]) { sem_nulos = false; break; }
-#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     if (sem_nulos && __builtin_cpu_supports("avx2"))
       return soma_avx2(decimals.data() + begin, end - begin);
 #endif
@@ -687,10 +691,10 @@ double ColumnarColumn::sum_squares_numeric_range(std::size_t begin, std::size_t 
   end = std::min(end, nulls.size());
   begin = std::min(begin, end);
   if (type == Type::Decimal) {
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     bool sem_nulos = true;
     for (std::size_t row = begin; row < end; ++row)
       if (nulls[row]) { sem_nulos = false; break; }
-#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
     if (sem_nulos && __builtin_cpu_supports("avx2"))
       return soma_quadrados_avx2(decimals.data() + begin, end - begin);
 #endif
