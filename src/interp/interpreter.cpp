@@ -2670,12 +2670,12 @@ std::shared_ptr<rt::ColumnarTable> csv_colunas_simples(
       column.append_integer(integer);
       return;
     }
-    double decimal = 0.0;
 #if !defined(__APPLE__) && (!defined(__GNUC__) || defined(__clang__) || __GNUC__ >= 11)
     // O libc++ dos runners macOS e o libstdc++ do GCC 10 podem declarar a
     // sobrecarga flutuante como indisponível. Nesses ambientes o fallback
     // strtod abaixo mantém a leitura correta; toolchains mais novas seguem
     // pelo caminho sem cópia.
+    double decimal = 0.0;
     const auto decimal_result = std::from_chars(first, last, decimal);
     if (decimal_result.ec == std::errc() && decimal_result.ptr == last) {
       column.append_decimal(decimal);
