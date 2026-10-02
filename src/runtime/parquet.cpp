@@ -1859,7 +1859,6 @@ const ZlibApi& zlib() {
 constexpr int kZNoFlush = 0;
 constexpr int kZFinish = 4;
 constexpr int kZStreamEnd = 1;
-constexpr int kZDefaultCompression = -1;
 // Nivel 1: 3-5x mais rapido que o padrao (6) na escrita, com arquivos ~10-20% maiores;
 // leitores de Parquet nao dependem do nivel usado.
 constexpr int kZBestSpeed = 1;
