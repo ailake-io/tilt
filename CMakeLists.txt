@@ -6,7 +6,7 @@ find_package(Threads REQUIRED)
 # Versao de produto exibida por `tilt versao`. O numero CMake continua
 # estavel para que DEB/RPM/MSI aceitem a versao, enquanto o sufixo semver
 # identifica o pre-release beta.
-set(TILT_VERSION "${PROJECT_VERSION}-beta.1" CACHE STRING "Versao exibida pelo Tilt")
+set(TILT_VERSION "${PROJECT_VERSION}-beta.2" CACHE STRING "Versao exibida pelo Tilt")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
