@@ -86,4 +86,4 @@ jobs:
             --file "${{ matrix.dockerfile }}" \
             --build-arg TILT_VERSION=0.2.0-beta.2 .
           docker run --rm tilt:ci versao
-          docker run --rm tilt:ci checar exemplos/soma.tilt
+          docker run --rm tilt:ci checar /usr/local/share/tilt/exemplos/soma.tilt
