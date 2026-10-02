@@ -1,0 +1,13 @@
+# language: en
+# Executable tests and a function compatible with native code generation.
+
+function twice n:
+  return n * 2
+
+test twice_works:
+  steps:
+    - assert_equal twice(21), 42
+
+pipeline example:
+  steps:
+    - print twice 5

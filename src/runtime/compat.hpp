@@ -161,6 +161,15 @@ inline int tilt_close_file(int fd) { return ::close(fd); }
 // aberto (>= 0, para _close/tilt_close_file), ou -1 em erro.
 int tilt_tempfile(const char* tag, std::string& path);
 
+// Grava um arquivo de configuracao do curl (`curl -K <path>`) com `url` (se nao
+// vazia) e um `header` por item de `headers`, em arquivo temporario exclusivo
+// (0600 no POSIX). Serve para manter segredos (x-api-key, Bearer, userinfo da
+// URL) fora do argv, que qualquer usuario da maquina le em ps//proc. O caller
+// remove o arquivo (std::remove) depois do curl. false se CR/LF/NUL em algum
+// valor (injecao de opcao) ou se o arquivo nao puder ser criado.
+bool tilt_curl_config(const std::string& url, const std::vector<std::string>& headers,
+                      std::string& path);
+
 bool tilt_file_exists(const std::string& path);
 std::int64_t tilt_file_size(const std::string& path);  // -1 se ausente/erro
 bool tilt_is_directory(const std::string& path);

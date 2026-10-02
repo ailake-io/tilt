@@ -1,0 +1,20 @@
+# GPU opcional: o mesmo programa funciona com CPU quando CUDA/Metal nao existe.
+
+modelo Rede:
+  camadas:
+    - linear: [4, 8]
+    - ativacao: gelu
+    - linear: [8, 2]
+  dispositivo: auto
+
+tarefa calculo:
+  entrada:
+    a: tensor[f32, 2, 4] no dispositivo gpu
+    b: tensor[f32, 4, 8] no dispositivo gpu
+  executar:
+    - c = entrada.a.matmul entrada.b
+    - retornar c.forma
+
+pipeline demonstracao:
+  passos:
+    - imprimir tensor [0.1, 0.2, 0.3, 0.4]

@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/vectorstore.hpp"
+
 namespace tilt::rt {
 
 // Indice vetorial remoto no Qdrant (REST via curl, mesmo padrao do llm.cpp).
@@ -13,9 +15,7 @@ namespace tilt::rt {
 void qdrant_upsert(const std::string& base, const std::string& collection,
                    const std::string& id, const std::string& text,
                    const std::vector<float>& vec);
-std::vector<std::pair<std::string, double>> qdrant_search(const std::string& base,
-                                                          const std::string& collection,
-                                                          const std::vector<float>& vec,
-                                                          std::size_t k);
+std::vector<VectorHit> qdrant_search(const std::string& base, const std::string& collection,
+                                     const std::vector<float>& vec, std::size_t k);
 
 }  // namespace tilt::rt

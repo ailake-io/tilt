@@ -1,0 +1,7 @@
+erro[T901]: busca 'Otimizar': grade grande demais (90 > 64 combinacoes; use 'estrategia: aleatoria' com 'tentativas: N')
+  --> input.tilt:9:1
+   |
+ 9 | busca Otimizar:
+   | ^^^^^
+   |
+

@@ -1,0 +1,25 @@
+# Python, PySpark e Kof: o mesmo modulo Tilt pode ser chamado por RPC/HTTP.
+
+funcao classificar valor:
+  se valor >= 100:
+    retornar "alto"
+  senao:
+    retornar "baixo"
+
+funcao enriquecer linhas:
+  retornar linhas.derivar { faixa: classificar(linha.valor) }
+
+pipeline python_local:
+  passos:
+    - raiz = chamar_python "math", "sqrt", 16
+    - imprimir "Python devolveu:", raiz
+
+pipeline pyspark_livy:
+  passos:
+    - total = spark_sql "http://localhost:8998", "select count(*) as total from vendas", lingua: "pyspark"
+    - imprimir "Spark devolveu:", total
+
+pipeline kof_http:
+  passos:
+    - resposta = http_post_json "http://127.0.0.1:8091/pontuar", { cliente: "bia", valor: 250 }
+    - imprimir resposta.cliente, resposta.pontos

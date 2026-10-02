@@ -39,4 +39,12 @@ void sqlite_exec_params(const std::string& db_path, const std::string& sql,
 void sqlite_transact(const std::string& db_path,
                      const std::vector<std::pair<std::string, std::vector<SqlParam>>>& passos);
 
+// SQL sobre tabelas tilt: abre um banco em memoria, carrega cada `(nome, tabela)`
+// (colunas = chaves; INTEGER/REAL/TEXT inferidos das linhas; logico vira 0/1;
+// lista/mapa vira texto JSON) e roda `sql` (com `?` ligados a `params`). Devolve
+// uma tabela. Lanca std::runtime_error.
+Value sqlite_consulta_tabelas(const std::string& sql,
+                              const std::vector<std::pair<std::string, Value>>& tabelas,
+                              const std::vector<SqlParam>& params);
+
 }  // namespace tilt::rt

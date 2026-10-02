@@ -1,0 +1,8 @@
+pipeline qualidade:
+  steps:
+    - agregado = [{ dominio: "x.com", total: 2, receita: 20 }]
+    - verify agregado:
+        - not_null: [dominio, total]
+        - unique: dominio
+        - range: row.receita >= 0
+        on_violation: abort

@@ -335,7 +335,7 @@ std::string json_compact(const Value& v) {
     case ValueKind::Lista: {
       std::string out = "[";
       bool first = true;
-      for (const Value& e : *v.list) {
+      for (const Value& e : *v.list_ref()) {
         if (!first) out += ',';
         first = false;
         out += json_compact(e);
@@ -346,7 +346,7 @@ std::string json_compact(const Value& v) {
     case ValueKind::Mapa: {
       std::string out = "{";
       bool first = true;
-      for (const auto& kv : v.map->items) {
+      for (const auto& kv : v.map_ref()->items) {
         if (!first) out += ',';
         first = false;
         out += "\"" + json_escape(kv.first) + "\":" + json_compact(kv.second);

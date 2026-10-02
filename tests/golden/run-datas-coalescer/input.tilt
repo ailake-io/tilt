@@ -1,0 +1,15 @@
+pipeline datas:
+  passos:
+    - d = converter_data("31/01/2024")
+    - imprimir d, ano(d), mes(d), dia(d)
+    - imprimir adicionar_dias(d, 30), adicionar_dias("2024-12-25", 10), adicionar_dias(d, -31)
+    - imprimir dias_entre("2024-01-01", "2024-03-01"), dias_entre("2024-03-01", "2024-01-01")
+    - imprimir converter_data("2024-02-30"), converter_data(42)
+    - imprimir coalescer(nulo, "", "  ", 0, 5), coalescer(nulo, nulo)
+    - vendas = [{ nascimento: "05/03/1990", apelido: "" }, { nascimento: "ruim", apelido: "zé" }]
+    - t = vendas.derivar { ano: coalescer(ano(converter_data(linha.nascimento)), 0), nome: coalescer(linha.apelido, "sem apelido") }
+    - imprimir t[0].ano, t[0].nome, t[1].ano, t[1].nome
+    - tentar:
+        dias_entre("hoje", "amanha")
+    capturar erro:
+      imprimir "erro: {{erro}}"

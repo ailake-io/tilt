@@ -2,12 +2,13 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
+  workflow_dispatch: # Actions > ci > Run workflow (qualquer branch)
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,12 +19,12 @@ jobs:
 
       - name: lint changed C/C++ files
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           HEAD_SHA: ${{ github.sha }}
         run: tests/lint_test.sh "$BASE_SHA" "$HEAD_SHA"
 
   lint_cpp:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,7 +42,7 @@ jobs:
 
       - name: lint changed C/C++ files
         env:
-          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before || github.sha }}
           HEAD_SHA: ${{ github.sha }}
         run: tests/lint_cpp_test.sh "$BASE_SHA" "$HEAD_SHA" build/lint
 
@@ -49,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +65,7 @@ jobs:
         run: cmake --preset release -DTILT_WERROR=ON
 
       - name: build
-        run: cmake --build --preset release
+        run: cmake --build --preset release --config Release
 
       - name: test
         run: ctest --preset release --output-on-failure
@@ -80,6 +81,28 @@ jobs:
           TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente.tilt
           TILT_LLM=mock ./build/release/bin/tilt executar exemplos/agente_multi_etapas.tilt
 
+  performance:
+    # O baseline só é comparado quando a CPU/arquitetura coincidem; em runners
+    # diferentes o script ainda executa os casos e publica os tempos no log.
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: dependencias dos benchmarks
+        run: python3 -m pip install --user --disable-pip-version-check pyarrow
+      - name: configure release
+        run: cmake --preset release
+      - name: build tilt
+        run: cmake --build --preset release --target tilt -j2
+      - name: benchmark de regressão
+        timeout-minutes: 10
+        run: |
+          python3 bench/comparar.py build/release/bin/tilt --repeticoes 1
+          python3 scripts/benchmark_columnar_join.py build/release/bin/tilt --rows 100000 --repetitions 1
+          python3 scripts/benchmark_columnar_composite_join.py build/release/bin/tilt --rows 100000 --repetitions 1
+          python3 scripts/benchmark_parquet_nested.py build/release/bin/tilt --rows 100000 --repetitions 1
+          python3 scripts/benchmark_value_pool.py build/release/bin/tilt --rows 100000 --repetitions 1
+
   # Port Windows (MSVC, windows-latest): o CTest registra uma suíte funcional
   # nativa em PowerShell; os testes shell de conectores ficam em Linux/macOS.
   windows:
@@ -91,7 +114,7 @@ jobs:
         run: cmake --preset release -DTILT_WERROR=ON
 
       - name: build
-        run: cmake --build --preset release
+        run: cmake --build --preset release --config Release
 
       - name: smoke
         shell: pwsh
@@ -108,10 +131,29 @@ jobs:
 
       - name: functional tests (CTest + PowerShell)
         shell: pwsh
-        run: ctest --test-dir build/release -C Debug --output-on-failure
+        env:
+          TILT_FUZZ_SALVAR: ${{ github.workspace }}\fuzz_ultimo.tilt
+        run: ctest --test-dir build/release -C Release --output-on-failure
+
+      - name: last fuzz input (only when the tests failed)
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:GITHUB_WORKSPACE\fuzz_ultimo.tilt") {
+            $t = Get-Content -Raw "$env:GITHUB_WORKSPACE\fuzz_ultimo.tilt"
+            "tamanho: $($t.Length) caracteres"
+            $t.Substring(0, [Math]::Min(4000, $t.Length))
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-ultimo-windows
+          path: fuzz_ultimo.tilt
+          if-no-files-found: ignore
 
   connectors:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -131,12 +173,35 @@ jobs:
       - name: build
         run: cmake --build --preset release
 
+      - name: start MongoDB
+        run: |
+          docker run -d --name tilt-mongo-ci -p 127.0.0.1:27017:27017 mongo:7
+          for i in $(seq 1 60); do
+            docker exec tilt-mongo-ci mongosh --quiet --eval 'db.runCommand({ping:1}).ok' 2>/dev/null | grep -q 1 && break
+            sleep 1
+          done
+
+      - name: start Redis
+        run: |
+          docker run -d --name tilt-redis-ci -p 127.0.0.1:6379:6379 redis:7-alpine
+          for i in $(seq 1 30); do
+            docker exec tilt-redis-ci redis-cli ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
+
       - name: connector integration tests
-        run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse)$" --output-on-failure
+        env:
+          TILT_MONGO_REAL_URL: mongodb://127.0.0.1:27017/tilt_real
+          TILT_REDIS_REAL_URL: redis://127.0.0.1:6379/0
+        run: ctest --test-dir build/release -R "^(pg|mysql|duckdb|clickhouse|mongo_real|redis_real)$" --output-on-failure
+
+      - name: cleanup MongoDB and Redis
+        if: always()
+        run: docker rm -f tilt-mongo-ci tilt-redis-ci || true
 
 
   vector_connectors:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -177,7 +242,7 @@ jobs:
         run: docker rm -f tilt-qdrant-ci tilt-weaviate-ci tilt-chroma-ci tilt-pgvector-ci || true
 
   sanitizers:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -186,10 +251,54 @@ jobs:
       - name: build
         run: cmake --build --preset debug
       - name: test
-        run: ctest --preset debug --output-on-failure --timeout 300
+        run: |
+          # O teste de recursao profunda valida a protecao da VM em 4000 niveis.
+          # Reserve espaco suficiente para chegar ao limite sob AddressSanitizer.
+          ulimit -s 65536
+          ctest --preset debug --output-on-failure --timeout 300
+
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install gcovr
+        run: python3 -m pip install --user --disable-pip-version-check gcovr==8.3
+
+      - name: configure (Debug, gcov instrumentation)
+        run: cmake -S . -B build/coverage -DCMAKE_BUILD_TYPE=Debug -DTILT_COVERAGE=ON -DTILT_STATIC_LIBSTDCXX=OFF
+
+      - name: build
+        run: cmake --build build/coverage --parallel
+
+      - name: test (services that are not available skip themselves)
+        run: ctest --test-dir build/coverage -j2 --timeout 600 -E "vector_real|spark|tensor_benchmark|^golden$|^par$|equipe_paralela"
+
+      - name: golden tests
+        run: ctest --test-dir build/coverage --timeout 900 -R "^golden$"
+
+      - name: coverage report
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # gcov (threads) as vezes emite contagens de branch negativas (GCC bug 68080).
+          gcovr -r . --object-directory build/coverage --filter 'src/' \
+            --gcov-ignore-parse-errors negative_hits.warn_once_per_file \
+            --print-summary --xml coverage.xml --html-details coverage.html
+          {
+            echo '### Cobertura de linhas (src/)'
+            gcovr -r . --object-directory build/coverage --filter 'src/' \
+              --gcov-ignore-parse-errors negative_hits.warn_once_per_file --print-summary | tail -3
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.xml
+            coverage*.html
 
   arm64_codegen:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 

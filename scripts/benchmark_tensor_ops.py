@@ -48,8 +48,11 @@ def compile_tilt() -> tuple[Path, tempfile.TemporaryDirectory]:
         "-I", str(ROOT / "src"),
         str(ROOT / "benchmarks" / "tensor_ops_benchmark.cpp"),
         str(ROOT / "src" / "runtime" / "tensor.cpp"),
+        str(ROOT / "src" / "runtime" / "compat.cpp"),
         "-pthread", "-o", str(binary),
     ]
+    if sys.platform.startswith("linux"):
+        command.insert(-2, "-ldl")
     try:
         subprocess.run(command, check=True)
     except Exception:

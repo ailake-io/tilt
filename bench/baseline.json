@@ -1,0 +1,33 @@
+{
+  "calibracao_s": 0.4921,
+  "casos": {
+    "laco_3M": {
+      "s": 0.5565,
+      "relativo": 1.1308
+    },
+    "laco_3M_vm": {
+      "s": 0.5542,
+      "relativo": 1.1261
+    },
+    "laco_3M_jit": {
+      "s": 0.1163,
+      "relativo": 0.2363
+    },
+    "fib_30": {
+      "s": 0.408,
+      "relativo": 0.829
+    },
+    "csv_agrupar_parquet_1M": {
+      "s": 0.7279,
+      "relativo": 1.4791
+    },
+    "csv_ordenar_1M": {
+      "s": 1.0147,
+      "relativo": 2.062
+    },
+    "parquet_ida_e_volta_1M": {
+      "s": 2.6017,
+      "relativo": 5.2867
+    }
+  }
+}

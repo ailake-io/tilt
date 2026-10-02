@@ -1,9 +1,9 @@
 {
   "format-version": 2,
-  "table-uuid": "04ead4cf-8227-4173-a4c9-e2dd3d106cc3",
-  "location": "/home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi",
+  "table-uuid": "dd2d0ef2-ed19-4886-9d11-2bd9995cf819",
+  "location": "/home/tel/Projects/tilt/tests/golden/run-iceberg-onde/multi",
   "last-sequence-number": 1,
-  "last-updated-ms": 1789730652742,
+  "last-updated-ms": 1790712937378,
   "last-column-id": 4,
   "last-partition-id": 1001,
   "schemas": [
@@ -19,18 +19,18 @@
     { "spec-id": 0, "fields": [{ "field-id": 1000, "source-id": 1, "transform": "identity", "name": "estado" }, { "field-id": 1001, "source-id": 2, "transform": "identity", "name": "ano" }] }
   ],
   "default-spec-id": 0,
-  "current-snapshot-id": 6366925918471022539,
+  "current-snapshot-id": 924398502554671963,
   "snapshots": [
     {
-      "snapshot-id": 6366925918471022539,
+      "snapshot-id": 924398502554671963,
       "sequence-number": 1,
-      "timestamp-ms": 1789730652742,
+      "timestamp-ms": 1790712937378,
       "summary": { "operation": "overwrite" },
-      "manifest-list": "file:///home/thiago/Documents/Work-Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-6366925918471022539-0-615cb73a-5236-484c-b3cc-dce084e5ca2e.avro"
+      "manifest-list": "file:///home/tel/Projects/tilt/tests/golden/run-iceberg-onde/multi/metadata/snap-924398502554671963-0-c7e2496c-0660-4133-9bfe-d1006997abac.avro"
     }
   ],
   "snapshot-log": [
-    { "timestamp-ms": 1789730652742, "snapshot-id": 6366925918471022539 }
+    { "timestamp-ms": 1790712937378, "snapshot-id": 924398502554671963 }
   ],
   "metadata-log": [],
   "sort-orders": [ { "order-id": 0, "fields": [] } ],

@@ -1,0 +1,12 @@
+funcao escala x:
+  retornar x * 2.5
+
+funcao soma x y:
+  retornar x + y
+
+funcao divide x:
+  retornar x / 2.0
+
+pipeline jit_decimal:
+  passos:
+    - imprimir escala(4.0), soma(1.5, 2.25), divide(7.5)

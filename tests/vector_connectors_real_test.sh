@@ -14,8 +14,14 @@ command -v curl >/dev/null 2>&1 || {
 
 wait_http() {
   url="$1"
+  sucessos=0
   for _ in $(seq 1 "${TILT_VECTOR_WAIT_ATTEMPTS:-15}"); do
-    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then return 0; fi
+    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+      sucessos=$((sucessos + 1))
+      [ "$sucessos" -ge 3 ] && return 0
+    else
+      sucessos=0
+    fi
     sleep 1
   done
   return 1
@@ -38,7 +44,24 @@ if ! command -v pg_isready >/dev/null 2>&1 || \
 fi
 
 run_fixture() {
-  env TILT_LLM=mock "$BIN" executar "$1"
+  fixture="$1"
+  ultima_saida=""
+  for tentativa in 1 2 3 4 5; do
+    if ultima_saida=$(env TILT_LLM=mock "$BIN" executar "$fixture" 2>&1); then
+      printf '%s\n' "$ultima_saida"
+      return 0
+    fi
+    if ! printf '%s\n' "$ultima_saida" | grep -Eq 'curl codigo|libcurl codigo|servidor'; then
+      printf '%s\n' "$ultima_saida"
+      return 1
+    fi
+    sleep 2
+  done
+  printf '%s\n' "$ultima_saida"
+  # Devolve sucesso para que o chamador consiga imprimir a resposta capturada
+  # e identificar qual backend falhou; a validacao abaixo transforma a saida
+  # incompleta em falha do teste com diagnostico visivel.
+  return 0
 }
 
 check_common() {
@@ -49,6 +72,11 @@ check_common() {
   }
   [ "$(printf '%s\n' "$output" | grep -c '^achado:')" = 2 ] || {
     echo "vector_connectors_real: busca nao retornou 2 hits: $output"
+    return 1
+  }
+  # o texto guardado no `inserir` volta no `buscar` (todos os backends)
+  echo "$output" | grep -q '^texto1: gato' || {
+    echo "vector_connectors_real: hit sem o texto inserido: $output"
     return 1
   }
 }
@@ -80,7 +108,7 @@ echo "$weaviate_out" | grep -q "top1: 00000000-0000-4000-8000-000000000002" || {
   echo "weaviate ranking inesperado: $weaviate_out"; exit 1;
 }
 
-chroma_out=$(run_fixture "$FIXTURES/chroma_rag.tilt")
+chroma_out=$(run_fixture "$FIXTURES/chroma_real_rag.tilt")
 check_common "$chroma_out"
 echo "$chroma_out" | grep -q "top1: b1" || {
   echo "chroma ranking inesperado: $chroma_out"; exit 1;

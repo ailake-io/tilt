@@ -77,24 +77,24 @@ void pgvector_upsert(const std::string& url, const std::string& tabela_raw, cons
   postgres_exec(url, sql);
 }
 
-std::vector<std::pair<std::string, double>> pgvector_search(const std::string& url,
-                                                            const std::string& tabela_raw,
-                                                            const std::vector<float>& vec,
-                                                            std::size_t k) {
+std::vector<VectorHit> pgvector_search(const std::string& url, const std::string& tabela_raw,
+                                       const std::vector<float>& vec, std::size_t k) {
   const std::string tabela = sanitize_table(tabela_raw);
   const std::string v = vec_literal(vec);
-  const std::string sql = "SELECT id, 1 - (embedding <=> " + v +
-                          ") AS score FROM " + tabela + " ORDER BY embedding <=> " + v +
-                          " ASC LIMIT " + std::to_string(k);
+  const std::string sql = "SELECT id, texto, 1 - (embedding <=> " + v + ") AS score FROM " +
+                          tabela + " ORDER BY embedding <=> " + v + " ASC LIMIT " +
+                          std::to_string(k);
   Value result = postgres_query(url, sql);
-  std::vector<std::pair<std::string, double>> out;
-  if (!result.list) return out;
-  for (const Value& row : *result.list) {
-    if (row.kind != ValueKind::Mapa || !row.map) continue;
-    const Value* id = row.map->find("id");
-    const Value* score = row.map->find("score");
-    out.emplace_back(id && id->kind == ValueKind::Texto ? id->s : "?",
-                     score ? score->as_number() : 0.0);
+  std::vector<VectorHit> out;
+  if (!result.list_ref()) return out;
+  for (const Value& row : *result.list_ref()) {
+    if (row.kind != ValueKind::Mapa || !row.map_ref()) continue;
+    const Value* id = row.map_ref()->find("id");
+    const Value* score = row.map_ref()->find("score");
+    const Value* texto = row.map_ref()->find("texto");
+    out.push_back({id && id->kind == ValueKind::Texto ? id->s.str() : "?",
+                   score ? score->as_number() : 0.0,
+                   texto && texto->kind == ValueKind::Texto ? texto->s.str() : ""});
   }
   return out;
 }

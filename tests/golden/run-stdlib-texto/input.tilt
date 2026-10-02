@@ -1,0 +1,11 @@
+funcao principal:
+  imprimir substituir("a-b-c", "-", "+"), substituir("aaa", "a", "bb")
+  imprimir aparar("  oi  ") + "|"
+  imprimir comeca_com("tilt", "ti"), comeca_com("tilt", "lt"), termina_com("tilt", "lt")
+  imprimir juntar([1, 2, 3], ", "), juntar(["a", "b"]), juntar([])
+  imprimir maiusculas("ab1"), minusculas("AB1")
+  imprimir regex_casa("abc123", "[0-9]+"), regex_casa("abc", "^[0-9]+$")
+  imprimir regex_extrair("a1 b22 c3", "([a-z])[0-9]+")
+  imprimir regex_extrair("x=1, y=22", "[0-9]+")
+  imprimir regex_substituir("a1b2", "[0-9]", "#")
+  imprimir reverso("olá"), reverso("abc")

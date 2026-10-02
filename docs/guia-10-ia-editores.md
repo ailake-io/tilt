@@ -77,17 +77,20 @@ Filtro por prefixo (case-insensitive).
   checker, tipo do valor em usos de variável e tipo da expressão mais interna
   sob o cursor (tensor mostra a forma quando conhecida; desconhecido mantém o
   texto atual, sem falsos positivos);
-- **go-to-definition** (`definitionProvider`): mesma arquivo — variáveis de
+- **go-to-definition** (`definitionProvider`): resolve variáveis de
   `seja`/`constante`, atribuições, parâmetros de `funcao`, variáveis de
-  `para cada`/`capturar` e nomes de declarações (`pipeline x:`, `funcao y`,
-  `agente z`, ...). Sem resolução cross-file;
-- **find references** (`referencesProvider`): localiza todas as ocorrências
-  same-file do símbolo resolvido no cursor, ignorando acessos de membro
-  (`obj.campo`). `context.includeDeclaration` controla se a declaração entra
-  no resultado; sem ele, o resultado traz somente os usos;
+  `para cada`/`capturar` e declarações (`pipeline x:`, `funcao y`, `agente z`, ...).
+  O índice de workspace varre `.tilt` sob `rootUri`/`workspaceFolders`, acompanha
+  documentos abertos e resolve imports explícitos `de modulo importar nome [como alias]`
+  e `importar modulo [como alias]` para módulos locais, `modulos/` e
+  `TILT_STDLIB_PATH`;
+- **find references** (`referencesProvider`): localiza usos same-file e entre
+  arquivos para símbolos importados e exportados. `context.includeDeclaration`
+  controla se a declaração entra no resultado;
 - **rename symbol** (`renameProvider`): valida o novo identificador e devolve
-  `WorkspaceEdit.changes` para renomear a declaração e todos os usos same-file;
-  referências cross-file e renomeação de campos de membro ficam para depois;
+  `WorkspaceEdit.changes` agrupado por arquivo, incluindo declaração, aliases,
+  imports e usos cross-file. A resolução continua lexical para campos dinâmicos
+  de mapas e membros sem símbolo exportado;
 - **signatureHelp** (`signatureHelpProvider`, gatilhos `,` e `(`): assinatura
   do builtin mais interno na linha, com o parâmetro ativo destacado (só
   argumentos na mesma linha);

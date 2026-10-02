@@ -1,0 +1,12 @@
+# language: en
+# Local Parquet, Delta and Iceberg. Run in a disposable directory.
+
+pipeline formats:
+  steps:
+    - data = read_csv "exemplos/dados/vendas.csv", columnar: true
+    - write_parquet data, "treinamentos/saida/sales.parquet", codec: "snappy"
+    - parquet = read_parquet "treinamentos/saida/sales.parquet", select: ["region", "value"]
+    - write_delta parquet, "treinamentos/saida/sales_delta", partition_by: ["region"]
+    - delta = read_delta "treinamentos/saida/sales_delta", where: { region: "Sul" }
+    - write_iceberg delta, "treinamentos/saida/sales_iceberg", partition_by: ["region"]
+    - print "rows:", length delta

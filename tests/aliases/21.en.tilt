@@ -1,0 +1,13 @@
+index base_conhecimento:
+  embeddings: "texto-embedding-3-small"
+  storage: "memory"
+  dimension: 16
+  metric: cosine
+
+pipeline rag:
+  steps:
+    - total = base_conhecimento.insert([{ texto: "tilt is declarative" }])
+    - print total
+    - trechos = base_conhecimento.search "tilt", top_k: 1
+    - for each h in trechos:
+        print h.id, h.score

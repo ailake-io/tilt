@@ -1,0 +1,9 @@
+# CSV colunar: leitura lazy, filtro, projecao, derivacao e agregacao.
+
+pipeline vendas:
+  passos:
+    - tabela = ler_csv "exemplos/dados/vendas.csv", colunar: verdadeiro, lazy: verdadeiro
+    - filtrada = tabela.filtrar { valor: { maior_que: 100 } }
+    - selecionada = filtrada.selecionar ["regiao", "valor"]
+    - resumo = selecionada.agrupar_por "regiao", { total: somar "valor", media: media "valor" }
+    - escrever_parquet resumo, "treinamentos/saida/vendas_resumo.parquet", codec: "zstd"

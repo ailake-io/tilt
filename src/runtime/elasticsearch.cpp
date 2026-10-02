@@ -45,24 +45,34 @@ std::string base64_encode(const std::string& in) {
 }
 
 struct EsUrl {
-  std::string base;    // "http://host:porta"
+  std::string base;    // "http://host:porta" (ou "https://" com o esquema +https)
   std::string indice;  // vazio = todos os indices
   std::string auth;    // valor do header Authorization, vazio = sem auth
 };
 
 // "elasticsearch://[usuario[:senha]@]host[:porta][/indice]" (ou opensearch://,
-// mesmo formato e porta default 9200). Sem userinfo, usuario/senha caem para
+// mesmo formato e porta default 9200); "elasticsearch+https://" e
+// "opensearch+https://" falam HTTPS (o certificado e verificado pelo curl; para
+// CA propria use CURL_CA_BUNDLE). Sem userinfo, usuario/senha caem para
 // ELASTIC_USER/ELASTIC_PASSWORD do ambiente; sem nenhum dos dois, nenhum
 // header de autenticacao e enviado.
 EsUrl parse_url(const std::string& url) {
   std::string rest;
+  bool https = false;
   if (url.rfind("elasticsearch://", 0) == 0) {
     rest = url.substr(16);
   } else if (url.rfind("opensearch://", 0) == 0) {
     rest = url.substr(13);
+  } else if (url.rfind("elasticsearch+https://", 0) == 0) {
+    rest = url.substr(22);
+    https = true;
+  } else if (url.rfind("opensearch+https://", 0) == 0) {
+    rest = url.substr(19);
+    https = true;
   } else {
     die("url invalida: '" + url +
-        "' (use elasticsearch://[usuario[:senha]@]host[:porta][/indice])");
+        "' (use elasticsearch://[usuario[:senha]@]host[:porta][/indice] ou "
+        "elasticsearch+https://...)");
   }
 
   EsUrl out;
@@ -113,7 +123,7 @@ EsUrl parse_url(const std::string& url) {
     host = hostport.substr(0, colon);
     if (host.empty()) host = "localhost";
   }
-  out.base = "http://" + host + ":" + std::to_string(port);
+  out.base = std::string(https ? "https://" : "http://") + host + ":" + std::to_string(port);
   return out;
 }
 
@@ -123,12 +133,12 @@ std::string motivo_erro(const std::string& body) {
   if (body.empty()) return "erro desconhecido (resposta vazia)";
   try {
     const Value j = json_parse(body);
-    if (j.kind == ValueKind::Mapa && j.map) {
-      const Value* err = j.map->find("error");
+    if (j.kind == ValueKind::Mapa && j.map_ref()) {
+      const Value* err = j.map_ref()->find("error");
       if (err) {
         if (err->kind == ValueKind::Texto) return err->s;
-        if (err->kind == ValueKind::Mapa && err->map) {
-          const Value* reason = err->map->find("reason");
+        if (err->kind == ValueKind::Mapa && err->map_ref()) {
+          const Value* reason = err->map_ref()->find("reason");
           if (reason && reason->kind == ValueKind::Texto && !reason->s.empty()) return reason->s;
         }
       }
@@ -185,19 +195,19 @@ Value es_query(const std::string& url, const Value& dsl) {
   if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
 
   const Value resp = json_do_corpo(r.body, "_search");
-  if (resp.kind != ValueKind::Mapa || !resp.map) {
+  if (resp.kind != ValueKind::Mapa || !resp.map_ref()) {
     die("resposta de _search sem objeto no corpo");
   }
-  const Value* hits = resp.map->find("hits");
-  if (!hits || hits->kind != ValueKind::Mapa || !hits->map) {
+  const Value* hits = resp.map_ref()->find("hits");
+  if (!hits || hits->kind != ValueKind::Mapa || !hits->map_ref()) {
     die("resposta de _search sem 'hits'");
   }
 
   // total: ES 7+ devolve {"value": N, "relation": "eq"}; ES 6, numero puro.
   Value total = Value::inteiro(0);
-  if (const Value* t = hits->map->find("total")) {
-    if (t->kind == ValueKind::Mapa && t->map) {
-      const Value* v = t->map->find("value");
+  if (const Value* t = hits->map_ref()->find("total")) {
+    if (t->kind == ValueKind::Mapa && t->map_ref()) {
+      const Value* v = t->map_ref()->find("value");
       if (v && v->is_number()) total = Value::inteiro(static_cast<std::int64_t>(v->as_number()));
     } else if (t->is_number()) {
       total = Value::inteiro(static_cast<std::int64_t>(t->as_number()));
@@ -206,25 +216,25 @@ Value es_query(const std::string& url, const Value& dsl) {
 
   // Cada hit vira um mapa: campos de _source achatados um nivel + "_id".
   ValueList linhas;
-  if (const Value* hh = hits->map->find("hits"); hh && hh->kind == ValueKind::Lista && hh->list) {
-    for (const Value& hit : *hh->list) {
-      if (hit.kind != ValueKind::Mapa || !hit.map) continue;
+  if (const Value* hh = hits->map_ref()->find("hits"); hh && hh->kind == ValueKind::Lista && hh->list_ref()) {
+    for (const Value& hit : *hh->list_ref()) {
+      if (hit.kind != ValueKind::Mapa || !hit.map_ref()) continue;
       Value linha = Value::mapa();
-      if (const Value* src = hit.map->find("_source");
-          src && src->kind == ValueKind::Mapa && src->map) {
-        for (const auto& [chave, valor] : src->map->items) linha.map->set(chave, valor);
+      if (const Value* src = hit.map_ref()->find("_source");
+          src && src->kind == ValueKind::Mapa && src->map_ref()) {
+        for (const auto& [chave, valor] : src->map_ref()->items) linha.map_ref()->set(chave, valor);
       }
-      const Value* id = hit.map->find("_id");
-      linha.map->set("_id", Value::texto(id && id->kind == ValueKind::Texto ? id->s : "?"));
+      const Value* id = hit.map_ref()->find("_id");
+      linha.map_ref()->set("_id", Value::texto(id && id->kind == ValueKind::Texto ? id->s.str() : "?"));
       linhas.push_back(std::move(linha));
     }
   }
 
   Value out = Value::mapa();
-  out.map->set("total", std::move(total));
-  out.map->set("hits", Value::tabela(std::move(linhas)));
-  if (const Value* aggs = resp.map->find("aggregations"); aggs && aggs->kind == ValueKind::Mapa) {
-    out.map->set("agregacoes", *aggs);
+  out.map_ref()->set("total", std::move(total));
+  out.map_ref()->set("hits", Value::tabela(std::move(linhas)));
+  if (const Value* aggs = resp.map_ref()->find("aggregations"); aggs && aggs->kind == ValueKind::Mapa) {
+    out.map_ref()->set("agregacoes", *aggs);
   }
   return out;
 }

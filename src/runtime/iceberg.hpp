@@ -28,8 +28,8 @@ namespace tilt::rt {
 //   particionada), grava novos data files, um novo manifest/manifest list e
 //   commita v<N+1>-<uuid>.metadata.json com o novo snapshot (parent =
 //   current-snapshot-id anterior). Commit atomico via temporario + rename()
-//   no mesmo diretorio; pressupoe um unico escritor — sem locks nem
-//   optimistic concurrency;
+//   no mesmo diretorio; usa lock cooperativo `.tilt.lock.d` e rejeita uma
+//   versao de metadata ja existente (optimistic concurrency local);
 // - leitura resolve o snapshot atual percorrendo a cadeia de pais
 //   (parent-snapshot-id) e coletando adds menos removes dos manifests,
 //   concatenando os data files; projeta cada arquivo no schema corrente por
@@ -55,7 +55,7 @@ namespace tilt::rt {
 //   tabela existente mantem o partition spec (divergencia -> erro claro).
 //   Sem as env vars o comportamento e o HadoopCatalog local, byte a byte.
 //   Para expor as tabelas Hadoop locais a engines como Spark como catalogo
-//   REST read-only, ver iceberg_catalog_server.hpp (`tilt servir-catalogo`).
+//   REST server, ver iceberg_catalog_server.hpp (`tilt servir-catalogo`).
 // - particao bucket (Fase 12-5a): `part_cols` aceita "bucket[N](col)"
 //   (inteiro/texto/logico); o spec grava o transform bucket[N] com campo
 //   "col_bucket_N" (int) e a coluna de origem permanece no parquet; a leitura

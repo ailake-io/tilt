@@ -1,0 +1,7 @@
+erro[T901]: ordenar: nao sabe comparar texto com inteiro (use so numeros ou so textos)
+  --> input.tilt:2:12
+   |
+ 2 |   imprimir ordenar([1, "a"])
+   |            ^^^^^^^
+   |
+

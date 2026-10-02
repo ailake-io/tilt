@@ -1,0 +1,8 @@
+importar mat_local como m
+importar io como arquivos
+de mat_local importar dobro como d, triplo, base como b0
+
+pipeline t:
+  passos:
+    - imprimir m.dobro(2), arquivos.juntar_caminhos("a", "b")
+    - imprimir d(4), triplo(2), b0

@@ -1,0 +1,11 @@
+model Mini:
+  input: tensor[f32, 2]
+  layers:
+    - dense: 2
+    - softmax
+
+train Mini:
+  data: { x: [[0, 0], [0, 1], [1, 0], [1, 1]], y: [0, 1, 1, 0] }
+  loss: cross_entropy
+  optimizer: sgd
+  epochs: 3

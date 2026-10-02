@@ -1,0 +1,17 @@
+# language: en
+# Basics: types, function, conditional, loop and collections.
+
+function classify value:
+  if valor >= 10:
+    return "high"
+  else:
+    return "low"
+
+pipeline basics:
+  steps:
+    - numbers = [3, 7, 12]
+    - evens = filter numbers, function n: n % 2 == 0
+    - squares = map evens, function n: n * n
+    - for each n in numbers:
+        print n, classify n
+    - print "squares:", squares

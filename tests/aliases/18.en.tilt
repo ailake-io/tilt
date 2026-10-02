@@ -1,0 +1,15 @@
+llm gpt:
+  provider: "anthropic"
+  model: "claude-sonnet-5"
+  key: env "ANTHROPIC_API_KEY"
+
+type Resumo:
+  titulo: text
+  pontos: list[text]
+  sentimento: "positive" | "neutral" | "negative"
+
+pipeline extrair:
+  steps:
+    - dados = ask gpt, format: Resumo:
+        user: "Extract structure from:\ntilt is great"
+    - print dados.titulo

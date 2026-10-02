@@ -857,4 +857,87 @@ PYEOF
 
 [ "$fail_tr" = 0 ] || exit 1
 
+# --- 7. particoes null: path Hive, manifest, summaries, append e pruning --------
+cat > "$tmp/null_part.tilt" <<'TILTEOF'
+pipeline principal:
+  passos:
+    - base = [{ id: 1, estado: nulo, ts: nulo, nota: "base-null" },
+              { id: 2, estado: "sp", ts: "2024-01-15T10:30:00", nota: "base" }]
+    - escrever_iceberg base, "null_part", particionar_por: ["estado", "year(ts)"]
+    - novos = [{ id: 3, estado: nulo, ts: nulo, nota: "has-type" },
+               { id: 4, estado: nulo, ts: nulo, nota: nulo },
+               { id: 5, estado: "rj", ts: "2025-01-10T08:00:00", nota: "novo" }]
+    - anexar_iceberg novos, "null_part"
+    - tudo = ler_iceberg "null_part"
+    - imprimir "null_total:", tamanho tudo
+    - null_estado = ler_iceberg "null_part", onde: { estado: nulo }
+    - imprimir "null_estado:", tamanho null_estado
+    - null_year = ler_iceberg "null_part", onde: { year_ts: nulo }
+    - imprimir "null_year:", tamanho null_year
+    - null_source = ler_iceberg "null_part", onde: { ts: nulo }
+    - imprimir "null_source:", tamanho null_source
+TILTEOF
+out_null_part=$("$BIN" executar "$tmp/null_part.tilt")
+printf '%s\n' "$out_null_part"
+echo "$out_null_part" | grep -qE "null_total: +5" || { echo "null Iceberg: total errado"; exit 1; }
+echo "$out_null_part" | grep -qE "null_estado: +3" || { echo "null Iceberg: pruning identity null errado"; exit 1; }
+echo "$out_null_part" | grep -qE "null_year: +3" || { echo "null Iceberg: pruning campo transformado null errado"; exit 1; }
+echo "$out_null_part" | grep -qE "null_source: +3" || { echo "null Iceberg: pruning da origem null errado"; exit 1; }
+
+python3 - "$tmp/null_part" <<'PYEOF'
+import glob
+import json
+import os
+import sys
+from avro_ocf import ocf
+
+table = sys.argv[1]
+metas = sorted(glob.glob(os.path.join(table, "metadata", "v*.metadata.json")))
+assert metas, "metadata Iceberg ausente"
+metadata = json.load(open(metas[-1]))
+schema = next(s for s in metadata["schemas"]
+              if s["schema-id"] == metadata["current-schema-id"])
+required = {f["name"]: f["required"] for f in schema["fields"]}
+assert required["estado"] is False and required["ts"] is False, required
+assert required["nota"] is False, required
+snapshot = next(s for s in metadata["snapshots"]
+                if s["snapshot-id"] == metadata["current-snapshot-id"])
+manifest_list = snapshot["manifest-list"]
+if manifest_list.startswith("file://"):
+    manifest_list = manifest_list[7:]
+_, manifests = ocf(manifest_list)
+found_null = False
+null_summary = False
+for manifest in manifests:
+    summaries = manifest.get("partitions") or []
+    if any(s["contains_null"] for s in summaries):
+        null_summary = True
+    path = manifest["manifest_path"]
+    if path.startswith("file://"):
+        path = path[7:]
+    _, entries = ocf(path)
+    for entry in entries:
+        data_file = entry["data_file"]
+        part = data_file["partition"]
+        if part.get("estado") is None and part.get("year_ts") is None:
+            assert "estado=__HIVE_DEFAULT_PARTITION__" in data_file["file_path"]
+            assert "year_ts=__HIVE_DEFAULT_PARTITION__" in data_file["file_path"]
+            found_null = True
+assert found_null, "manifest nao registrou partition values null"
+assert null_summary, "manifest list nao declarou contains_null"
+
+try:
+    from pyiceberg.table import StaticTable
+except ImportError:
+    print("pyiceberg ausente; verificacao Avro/schema concluida")
+else:
+    tabela = StaticTable.from_metadata(metas[-1])
+    rows = tabela.scan().to_arrow().to_pylist()
+    assert len(rows) == 5, rows
+    assert sum(r["estado"] is None for r in rows) == 3, rows
+    assert sum(r["ts"] is None for r in rows) == 3, rows
+    assert sum(r["nota"] is None for r in rows) == 1, rows
+    print("pyiceberg: null partition, append e schema optional validados")
+PYEOF
+
 echo "iceberg_test ok"

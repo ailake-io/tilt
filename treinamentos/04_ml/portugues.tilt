@@ -1,0 +1,21 @@
+# ML: modelo denso, treino, avaliacao e inferencia.
+
+modelo Classificador:
+  camadas:
+    - linear: [2, 8]
+    - ativacao: relu
+    - linear: [8, 2]
+    - softmax
+
+treino Classificador:
+  dados: carregador "exemplos/dados/flores.csv", alvo: "especie"
+  perda: entropia_cruzada
+  otimizador: adam
+  taxa: 0.01
+  epocas: 10
+  dispositivo: auto
+
+pipeline inferencia:
+  passos:
+    - resultado = modelo Classificador.executar tensor([5.0, 2.2])
+    - imprimir "classe:", resultado.argmax

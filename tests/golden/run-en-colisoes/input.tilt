@@ -1,0 +1,25 @@
+# Palavras em ingles usadas como nomes do usuario: nada disso pode ser traduzido.
+function total_of items:
+  count = 0
+  for each item in items:
+    count = count + item.count
+  return count
+
+pipeline collisions:
+  steps:
+    - text = "hello"
+    - sum = 40
+    - filter = 2
+    - config = { type: "a", count: 3, model: "m", user: "u", from: 1, in: 2 }
+    - print text, sum + filter
+    - print config.type, config.count, config.model, config.user, config.from
+    - rows2 = [{ count: 1, size: 10 }, { count: 2, size: 20 }]
+    - print total_of(rows2)
+    - print rows2.filter row.size > 10
+    - stats = rows2.group_by "count", { n: count, s: sum "size" }
+    - print stats
+    - print "{{text}} {{sum}}"
+    - result = 7
+    - print result, "{{result}}"
+    - upper = "kept"
+    - print upper

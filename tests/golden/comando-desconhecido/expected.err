@@ -1,6 +1,6 @@
 tilt: comando desconhecido 'xyz'
 
-tilt 0.1.0
+tilt 0.2.0-beta.2
 
 uso: tilt <comando> [argumentos]
 
@@ -9,10 +9,25 @@ comandos:
   executar <arquivo> [--agendar]     roda o programa no interpretador
   executar --vm <arquivo>            roda pipelines pelo bytecode VM
   executar --jit <arquivo>           JIT nativo; fallback para a VM
+  testar [caminho...] [--filtro X]   roda os blocos `teste` (afirmar, afirmar_igual)
+  formatar <caminho...> [--verificar]  normaliza espacos dos .tilt
+  novo <nome>                        cria um projeto (programa, testes, README)
+  adicionar <nome> <arquivo.tilt>    inclui modulo local e atualiza tilt.lock
+  atualizar <nome> <arquivo.tilt>    substitui modulo local e atualiza tilt.lock
+  registrar-modelo <nome> <arquivo>  grava artefato versionado no registry local
+  listar-modelos [--registro DIR]    lista versões do registry local
+  promover-modelo <nome> <versao> <stage>  promove versão (staging/production/archived)
+  rollback-modelo <nome>             reverte production para a versão anterior
+  linhagem-modelo <nome>              exibe a linhagem do artefato resolvido
+  resolver-modelo <nome> [--versao V|--stage S]  resolve artefato registrado
+  repl                               laco interativo com estado entre linhas
+  rpc <arquivo>                      expoe funcoes e pipelines por JSON-lines
+  chamar <arquivo> <funcao> [json]   chama uma funcao e imprime o resultado em JSON
   servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado
-                                     [--requisicoes N] [--threads N]
+                                     [--requisicoes N] [--threads N] [--pesos ARQUIVO]
+                                     [--modelo N --versao V|--stage S --registro DIR]
   servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via
-                                     REST catalog read-only [--prefixo P]
+                                     REST catalog local [--prefixo P]
                                      [--sem-reecrita-manifests]
   compilar <arquivo> --saida <bin>   gera binario nativo
                                      [--asm] [--arch x86_64|arm64]

@@ -2,6 +2,6 @@ pipeline t:
   passos:
     - linhas = ler_csv "dados.csv"
     - g = linhas.filtrar linha.n >= 2
-    - r = g.agrupar_por "cat", { total: somar "n", qtd: contar }
+    - r = g.agrupar_por "cat", { total: somar "n", qtd: contar, menor: min "n", maior: max "n", media: media "n" }
     - para cada x em r:
-        imprimir x.cat, x.total, x.qtd
+        imprimir x.cat, x.total, x.qtd, x.menor, x.maior, x.media

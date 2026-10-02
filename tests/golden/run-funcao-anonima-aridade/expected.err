@@ -1,0 +1,7 @@
+erro[T901]: funcao anonima espera 1 argumento(s), recebeu 2
+  --> input.tilt:4:16
+   |
+ 4 |     - imprimir f(1, 2)
+   |                ^
+   |
+

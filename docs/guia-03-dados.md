@@ -34,6 +34,36 @@ pipeline etl:
 `tilt executar` roda **todo** `pipeline` de topo, na ordem do arquivo. Sem
 pipeline, roda uma `funcao principal` se existir.
 
+Para arquivos locais, `ler_csv`, `ler_parquet` e `ler_delta` aceitam
+`lazy: verdadeiro` (também `preguicoso: verdadeiro`). A chamada cria um plano
+colunar sem ler as linhas; a leitura acontece quando uma operação consulta o
+resultado. `colunar: verdadeiro`, `selecionar`, `onde` e `tipos` continuam
+valendo dentro do carregamento adiado.
+
+Operações encadeadas também permanecem no plano: `filtrar`, `selecionar` e
+`limite` são acumulados antes da leitura em CSV, Parquet e Delta locais. A
+projeção inclui as colunas necessárias ao predicado e devolve somente as
+colunas solicitadas; quando a fonte não reconhece um predicado, o filtro
+residual é aplicado pelo executor colunar. Fontes SQL, Elasticsearch/OpenSearch
+e Spark via Livy também recebem esse plano no backend; os demais conectores usam
+o mesmo fallback residual.
+
+Um pipeline pode declarar `paralelo: verdadeiro` para executar em conjunto
+atribuições simples que não dependem umas das outras:
+
+```tilt skip
+pipeline preparar:
+  paralelo: verdadeiro
+  passos:
+    - vendas = ler_parquet "vendas.parquet", colunar: verdadeiro, lazy: verdadeiro
+    - clientes = ler_csv "clientes.csv", colunar: verdadeiro, lazy: verdadeiro
+    - imprimir tamanho(vendas), tamanho(clientes)
+```
+
+O runtime mantém sequenciais as etapas que leem uma variável produzida por
+outra, escrevem arquivos ou produzem saída textual. A variável `TILT_PIPELINE_PARALLEL=1`
+habilita o mesmo comportamento globalmente.
+
 `tilt executar --agendar` entra em **loop real de agenda**: pipelines sem
 `agenda:` rodam uma vez na entrada; os demais disparam no próximo minuto que
 casa com o cron (suporta `*`, `*/n`, `a-b`, `a-b/n` e listas `a,b`; 0 e 7 =
@@ -282,11 +312,15 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   grupos OPTIONAL. Uma coluna só de nulos (ou só de listas vazias) gera
   erro — o tipo não pode ser inferido;
 - **compressão**: `escrever_parquet tabela, "saida.parquet", codec: "gzip"`
-  (padrão), `codec: "snappy"` ou `codec: "zstd"` — o compressor snappy próprio é
+  (padrão), `codec: "snappy"`, `codec: "zstd"`, `codec: "lz4"`/`"lz4_raw"`
+  ou `codec: "brotli"` — o compressor snappy próprio é
   "literal-only" (emite um bloco snappy válido sem matching, sem redução de
   espaço), então qualquer leitor descomprime; a leitura descomprime snappy
   genérico (com matching), gzip/deflate (zlib via `dlopen("libz.so.1")`) e
-  zstd (libzstd via `dlopen`, codec Parquet 6);
+  zstd (libzstd via `dlopen`, codec Parquet 6), LZ4_RAW (liblz4 via `dlopen`,
+  codec Parquet 7) e Brotli (libbrotlienc/libbrotlidec via `dlopen`, codec
+  Parquet 4). LZ4 e Brotli exigem as bibliotecas opcionais no ambiente; sem
+  elas o Tilt informa o pacote ausente e os demais codecs continuam disponíveis;
 - **dictionary**: encoding DICTIONARY automático por coluna quando há
   repetição (dicionário em PLAIN + índices RLE; `dicionario: falso` volta ao
   PLAIN puro);
@@ -297,10 +331,33 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   chave: "segredo"` grava `PARE` com AES-GCM-256 (`AES_GCM_V1`), cifrando
   headers/payloads de páginas e o footer. A leitura exige a mesma chave em
   `TILT_PARQUET_KEY`; a chave não é persistida no arquivo e a autenticação
-  rejeita arquivo adulterado ou segredo incorreto. O resolvedor AWS KMS ainda
-  é uma etapa separada (o formato já preserva `FileCryptoMetaData` e
-  `ColumnCryptoMetaData` padrão);
-- escrita: encoding **PLAIN** ou **DICTIONARY** (acima), um row group por arquivo;
+  rejeita arquivo adulterado ou segredo incorreto. AWS KMS também pode ser
+  usado com `chave_kms: "arn:aws:kms:REGIAO:CONTA:key/ID"`: o tilt chama
+  `GenerateDataKey(AES_256)` ao gravar e `Decrypt` ao ler. O footer persiste
+  somente o `KeyId` resolvido e o `CiphertextBlob`; a data key em claro não
+  é persistida. Configure `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+  `AWS_REGION` (padrão `us-east-1`) e, opcionalmente, `AWS_SESSION_TOKEN`;
+  a identidade precisa de `kms:GenerateDataKey` e `kms:Decrypt` na chave.
+  `KMS_ENDPOINT` permite apontar para um endpoint compatível/local.
+  Para ambientes sem SDK de nuvem, `chave_env: "NOME_DA_VAR"` deriva a chave
+  de uma variável de ambiente e `chave_arquivo: "/run/secrets/parquet.key"`
+  lê um segredo de arquivo; ambos gravam apenas o nome/path do provedor no
+  footer e nunca o segredo. `chave`, `chave_kms`, `chave_env` e
+  `chave_arquivo` são mutuamente exclusivas. Para integrações cloud sem SDK,
+  `chave_azure` recebe a URL completa da chave do Azure Key Vault e usa
+  `AZURE_KEY_VAULT_TOKEN`/`AZURE_ACCESS_TOKEN`, arquivo de token,
+  client credentials (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+  `AZURE_CLIENT_SECRET`) ou Azure IMDS; `chave_gcp` recebe o resource
+  name do Cloud KMS e usa `GCP_ACCESS_TOKEN`/`GOOGLE_OAUTH_ACCESS_TOKEN`,
+  arquivo de token ou GCP metadata;
+  `chave_vault` recebe um caminho Transit (por exemplo `transit/minha-chave`)
+  e usa `VAULT_ADDR`/`VAULT_TOKEN` ou `VAULT_TOKEN_FILE`, renovando o token
+  com `auth/token/renew-self` após expiração;
+- escrita: encoding **PLAIN** ou **DICTIONARY** (acima). Por padrão há um row
+  group; use `row_group: 100_000` (ou `grupo:`) em `escrever_parquet` para
+  particionar uma tabela grande em vários grupos no mesmo arquivo. A opção
+  recua para um único grupo se a inferência local produzir schemas
+  incompatíveis;
   a 1ª linha da tabela define o schema e todas as linhas precisam ter as
   mesmas colunas e tipos;
 - leitura: **todos os row groups** (concatenados), campos REQUIRED, OPTIONAL
@@ -309,11 +366,13 @@ com **Spark 3.5** (`spark.read.parquet`, `tests/spark_test.sh`):
   TIMESTAMP/DECIMAL** (data/hora/timestamp viram texto ISO, decimal vira
   decimal, dictionary pages PLAIN ou PLAIN_DICTIONARY), páginas **PLAIN** e
   **DICTIONARY** (`PLAIN_DICTIONARY`/`RLE_DICTIONARY`) e compressão
-  **gzip/deflate**, **snappy** e **zstd**. Listas com 3+ níveis seguem com
-  erro claro.
+  **gzip/deflate**, **snappy**, **zstd**, **lz4_raw** e **brotli**. Listas
+  escalares nested com quatro ou mais níveis são reconstruídas genericamente;
+  listas de structs com campos compostos continuam limitadas ao caminho
+  suportado pelo leitor.
 
 Exemplo de interoperabilidade com Python (arquivos de outras ferramentas —
-dictionary, gzip/snappy, v2 e listas — são lidos diretamente):
+dictionary, gzip/snappy/zstd/LZ4/Brotli, v2 e listas — são lidos diretamente):
 
 ```python
 import pyarrow as pa, pyarrow.parquet as pq
@@ -368,9 +427,12 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   de partição nos dados (padrão Delta — os valores vivem no diretório e no
   `partitionValues` de cada `add`; o `metaData` registra `partitionColumns` e o
   `schemaString` continua listando as colunas). Valor nulo em coluna de partição
-  ou texto com `/` → erro claro (sem `__HIVE_DEFAULT_PARTITION__` nem
-  escaping). `anexar_delta` herda a partição da tabela existente (chamar sem a
-  opção ou com o mesmo valor, na mesma ordem); `particionar_por` explícito e
+  usa `__HIVE_DEFAULT_PARTITION__` no caminho Hive e `null` no `partitionValues`;
+  `ler_delta` reidrata e permite poda com `nulo`. O marcador literal é reservado
+  (não pode ser usado como valor textual). Colunas passam a `nullable` no schema
+  ao anexar linhas nulas. Texto com `/` continua sendo erro claro, sem escaping.
+  `anexar_delta` herda a partição da tabela existente (chamar sem a opção ou
+  com o mesmo valor, na mesma ordem); `particionar_por` explícito e
   divergente, ou opção em tabela não particionada → erro claro. Na leitura as
   colunas são reidratadas a partir de `partitionValues`, convertidas para o tipo
   declarado no schema (falha de conversão mantém texto). Tabelas particionadas
@@ -390,8 +452,8 @@ pq.write_table(tabela, "saida.parquet", row_group_size=100_000,
   escritas pelo tilt, e o tilt lê tabelas delta-rs gravadas sem compressão,
   sem dictionary e com colunas obrigatórias;
 - limitações: `escrever_delta` sobrescreve a tabela (recria a versão 0);
-  `anexar_delta` pressupõe um único escritor (sem locks nem optimistic
-  concurrency), sem transações concorrentes. **Checkpoint tilt-native (Fase
+  `anexar_delta` usa lock cooperativo e rejeita uma versão já existente, mas
+  não coordena writers externos que não respeitem `.tilt.lock.d`. **Checkpoint tilt-native (Fase
   12-5a)**: a cada 10 versões o append materializa
   `_delta_log/<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` e a leitura
   usa o checkpoint mais recente como base (só os JSONs maiores são
@@ -470,9 +532,12 @@ pipeline iceberg_demo:
   cada `data_file` do manifest ganha um record `partition` com um campo por
   coluna, no tipo da coluna (string/long/double/boolean). `ler_iceberg`
   resolve o spec do metadata e reidrata as colunas a partir dos manifests,
-  convertendo pelo tipo do schema. Valor nulo em coluna de partição, texto
-  com `/` e coluna repetida ou inexistente falham com erro claro (sem
-  `__HIVE_DEFAULT_PARTITION__` nem escaping);
+  convertendo pelo tipo do schema. Nulo usa `__HIVE_DEFAULT_PARTITION__` no
+  caminho e permanece tipado como null no record `partition`; os summaries
+  marcam `contains_null`, e leitura/pruning aceitam `nulo`. Campos opcionais
+  continuam com tipo definido pelo schema Iceberg mesmo quando um data file
+  contém apenas nulos. O marcador literal é reservado. Texto com `/`, coluna
+  repetida ou inexistente seguem falhando com erro claro (sem escaping);
 - **partição bucket (Fase 12-5a)**: `particionar_por: ["bucket[4](id)"]`
   (coluna inteira/texto/lógica) cria o campo `id_bucket_4` com transform
   `bucket[4]` (murmur3_x86_32 da spec, validado contra referência e
@@ -531,8 +596,7 @@ pipeline iceberg_demo:
   manifest list;
 - limitações: sem o modo REST (abaixo) o catálogo é só Hadoop (diretório
   local, sem JDBC), lê o que o tilt escreve (sem garantia de tabelas de
-  outros escritores além do subconjunto validado) e single-writer (sem locks
-  nem optimistic concurrency). No modo REST, `apagar_iceberg` commita via
+  outros escritores além do subconjunto validado). No modo REST, `apagar_iceberg` commita via
   `transactions` (add-snapshot + set-snapshot-ref) como o append.
 
 ### Iceberg REST catalog (opt-in, fase 29)
@@ -588,16 +652,19 @@ operação:
 
 Erros claros: `ICEBERG_URI` ausente com `ICEBERG_CATALOG=rest`, respostas
 não-2xx com o corpo do erro, JSON malformado e tabela inexistente no
-`ler_iceberg` ("tabela `<nome>` não existe no catálogo REST"). Ainda é
-single-writer (sem locks no catálogo) e 1ª passada: sem namespaces além de
-`default`, sem paginação, sem OAuth e com location `file://` apenas. Fluxo
+`ler_iceberg` ("tabela `<nome>` não existe no catálogo REST"). O cliente
+envia `Authorization: Bearer` quando `ICEBERG_OAUTH_TOKEN` (ou
+`ICEBERG_TOKEN`) está definido. Escritas locais usam lock cooperativo
+`.tilt.lock.d` e verificam a versão antes do rename; o requisito
+`assert-current-snapshot-id` do REST fornece a mesma proteção no catálogo.
+Continua sem namespaces além de `default` e com location `file://` apenas. Fluxo
 completo coberto por `tests/iceberg_rest_test.sh` (mock HTTP + validação do
 metadata do "servidor" com pyiceberg `StaticTable.from_metadata`).
 
 ### `tilt servir-catalogo`: catálogo REST server (fase 30)
 
 `tilt servir-catalogo <diretorio-raiz> [--porta N] [--prefixo P]` (porta
-default **8191**) sobe um **servidor Iceberg REST Open API read-only** sobre as
+default **8191**) sobe um **servidor Iceberg REST Open API** sobre as
 tabelas Iceberg locais escritas pela tilt (formato Hadoop, subseção acima) —
 uma engine como Spark SQL configura um `SparkCatalog` tipo `rest` com a URI
 apontando para o tilt e lê as tabelas pelo nome, sem HadoopCatalog local:
@@ -609,6 +676,10 @@ tilt servir-catalogo /dados/iceberg --porta 8191
 #   default.vendas_part
 # servir-catalogo: escutando http://127.0.0.1:8191/v1 (root: /dados/iceberg)
 ```
+
+Para exigir autenticação no servidor, defina `ICEBERG_CATALOG_TOKEN`; cada
+requisição precisa trazer `Authorization: Bearer <token>`. O cliente do Tilt
+usa `ICEBERG_OAUTH_TOKEN` ou `ICEBERG_TOKEN` para enviar esse cabeçalho.
 
 ```python
 spark = (SparkSession.builder
@@ -628,8 +699,12 @@ configurável via `--prefixo`, default `/v1`):
 | `GET /v1/config` | `{"defaults":{},"overrides":{}}` |
 | `GET /v1/namespaces` | `[["default"]]` |
 | `GET /v1/namespaces/default` | namespace + properties vazios |
-| `GET /v1/namespaces/default/tables` | identifiers de todas as tabelas |
+| `GET /v1/namespaces/default/tables?page_size=N&page_token=T` | identifiers paginados; a resposta inclui `next-page-token` quando houver mais |
 | `GET /v1/namespaces/default/tables/<tabela>` | loadTable: `metadata-location` + `metadata` do `v<N>.metadata.json` mais recente (mesma regra do modo Hadoop: maior versão parseada do nome) + `config` |
+| `HEAD /v1/namespaces/default/tables/<tabela>` | verifica a existência sem baixar metadata |
+| `POST /v1/namespaces/default/tables` | cria a tabela e materializa `metadata/v0.metadata.json` a partir do schema REST quando necessário |
+| `POST /v1/namespaces/default/tables/<tabela>/transactions` | valida `assert-current-snapshot-id` e aceita o commit |
+| `DELETE /v1/namespaces/default/tables/<tabela>` | remove a tabela dentro do root |
 | `GET/HEAD /v1/files/<rel-ao-root>` | bytes do arquivo (metadata.json, manifest `.avro`, data `.parquet`); a forma legada `?path=<abs>` também é aceita |
 
 O loadTable **reescreve** as locations `file://<abs>` do metadata servido
@@ -651,14 +726,263 @@ Spark ler manifest lists pelo FileSystem, suba com **`--sem-reecrita-manifests`*
 (mantém `file://` nas manifest-lists; o caller precisa acessar esses arquivos
 locais, ex.: montando o diretório no mesmo path — como faz
 `tests/spark_catalog_test.sh`). O `metadata-location` continua servido por
-HTTP em todos os casos, e o restante do protocolo REST é idêntico. É **read-only** na 1ª passada: `createTable`/`commit`
-(POST `…/transactions`)/HEAD de tabela respondem **501** com mensagem clara,
+HTTP em todos os casos, e o restante do protocolo REST é idêntico. O servidor
+aceita `createTable`, `transactions` e `DELETE` somente dentro do root; quando o
+metadata ainda não existe, `createTable` cria a estrutura inicial e grava
+`metadata/v0.metadata.json` a partir do schema enviado. Conflitos de snapshot
+respondem HTTP 409. Métodos não permitidos respondem **405** com `Allow`,
 tabela ou rota inexistente respondem 404 (`NoSuchTableException` /
 `NotFoundException`). Coberto por `tests/iceberg_catalog_test.sh` (cliente
-urllib exercendo o subconjunto + traversal + read-only) e validado com
+urllib exercendo o subconjunto + traversal + escrita controlada) e validado com
 **Spark 3.5 real** via catálogo REST em `tests/spark_catalog_test.sh` (container
 `apache/spark:3.5.3` + `iceberg-spark-runtime`, `--network host` e o dir montado
 no mesmo path absoluto — manifests/data continuam `file://` absolutos).
+
+## Limpeza e preparação de dados
+
+Métodos de `tabela` que cobrem o dia a dia de limpeza sem escrever `derivar` linha a
+linha. Todos devolvem uma tabela **nova** (a original não muda) e têm nome em inglês
+equivalente (`drop_nulls`, `fill_nulls`, `rename`, `drop_columns`, `cast`, `deduplicate`,
+`join`, `stack`, `describe`, `sample`, `value_counts`, `clean_text`; guia 18).
+
+Uma célula é **nula** quando é `nulo`, a chave não existe ou é um texto vazio/só de
+espaços (o que `ler_csv` devolve para célula vazia).
+
+```tilt run
+pipeline limpeza:
+  passos:
+    - bruto = [
+        { id: 1, nome: "  Ana   Silva ", idade: "30", cidade: "sp", nascimento: "31/01/1994" },
+        { id: 2, nome: "bruno", idade: "", cidade: "rj", nascimento: "1990-02-30" },
+        { id: 2, nome: "bruno", idade: "", cidade: "rj", nascimento: "1990-02-30" },
+        { id: 3, nome: "", idade: "1,5", cidade: nulo, nascimento: "2001/12/05" }
+      ]
+    # 1. conhecer os dados: tipo, nulos e distintos por coluna
+    - para cada p em bruto.descrever:
+        imprimir p.coluna, p.tipo, p.nulos, p.distintos
+    # 2. limpar
+    - a = bruto.deduplicar
+    - b = a.limpar_texto "nome", caixa: "minusculas"
+    - c = b.converter { idade: "inteiro", nascimento: "data" }
+    - d = c.preencher_nulos { cidade: "desconhecida", idade: 0 }
+    - e = d.remover_nulos "nome"
+    - imprimir tamanho(e), e[0].nome, e[0].idade, e[0].nascimento, e[1].nascimento
+    # 3. juntar com outra tabela e contar
+    - ufs = [{ cidade: "sp", estado: "Sao Paulo" }, { cidade: "rj", estado: "Rio de Janeiro" }]
+    - j = e.juntar ufs, por: "cidade", tipo: "esquerda"
+    - imprimir j[0].estado, j[1].estado
+    - cv = e.contar_valores "cidade"
+    - imprimir cv[0].valor, cv[0].contagem
+```
+
+| Método | O que faz |
+|---|---|
+| `remover_nulos ["a", "b"]` | tira as linhas com nulo nessas colunas (todas, sem argumento) |
+| `preencher_nulos { a: 0 }` / `preencher_nulos 0` | preenche nulos por coluna (cria a coluna se faltar) ou em todas |
+| `renomear { antigo: "novo" }` | renomeia mantendo a ordem; coluna inexistente é erro |
+| `remover_colunas "a", "b"` | tira colunas; nome inexistente é erro (pega typo) |
+| `converter { c: "inteiro" }` | `inteiro`, `decimal` (aceita `1,5`), `texto`, `logico` (sim/não/true/false/1/0), `data` (→ `AAAA-MM-DD`) e `data_hora` (→ UTC ISO). O que não converte vira `nulo`; fração em `inteiro` também (use `arredondar`) |
+| `deduplicar ["a"]` | mantém a 1ª ocorrência por chave (linha inteira sem argumento); `distinto` é o mesmo |
+| `juntar outra, por: "id", tipo: "esquerda"` | `interna` (padrão), `esquerda`, `direita`, `completa`; `por:` é nome, lista ou `{ esq: dir }`; colunas repetidas da direita ganham `_direita`; chave nula nunca casa |
+| `empilhar(outra)` | concatena; o esquema vira a união das colunas |
+| `descrever` | uma linha por coluna: `coluna, tipo, total, nulos, distintos, minimo, maximo, media` |
+| `perfil tabela, amostra: 10000` / `t.perfil` | perfil automático com total, tamanho da amostra, schema inferido e estatísticas das colunas |
+| `inferir_schema tabela, amostra: 1000` / `t.inferir_schema` | contrato versionado `{ formato: "tilt.schema", versao: 1, campos: [...] }` |
+| `validar_schema tabela, schema` / `t.validar_schema schema` | devolve `{ ok, versao, erros }`, sem interromper o pipeline |
+| `evoluir_schema schema, tabela` / `t.evoluir_schema schema` | cria nova versão, preservando campos e adicionando colunas novas como anuláveis |
+| `amostra 100, semente: 7` / `amostra 0.1` | amostra sem reposição, reproduzível, na ordem original |
+| `contar_valores "col"` | `{ valor, contagem }` do mais ao menos frequente |
+| `limpar_texto ["nome"], caixa: "minusculas"` | tira espaços das pontas e repetidos (e muda a caixa) |
+| `ordenar_por "a", "b", desc: verdadeiro` | várias colunas, estável |
+
+Com `colunar: verdadeiro`, joins internos e à esquerda detectam automaticamente
+quando os dois lados já estão ordenados pelas chaves e usam uma intercalação
+linear; entradas sem essa ordem continuam usando o índice hash reutilizável.
+
+Contratos podem ser guardados como JSON e versionados no repositório de dados:
+
+```tilt skip
+schema = inferir_schema vendas, amostra: 10000
+escrever_json schema, "schemas/vendas-v1.json"
+resultado = validar_schema vendas, ler_json "schemas/vendas-v1.json"
+schema2 = evoluir_schema schema, vendas_novas   # incrementa versao se mudar
+```
+
+`validar_schema` devolve todos os erros encontrados em `erros`, permitindo
+decidir no pipeline se a carga vai para quarentena. `evoluir_schema` preserva
+campos existentes, promove `inteiro` para `decimal` quando necessário e adiciona
+colunas novas como anuláveis.
+
+### Pivô, janelas, divisão de coluna e fusos
+
+```tilt run
+pipeline avancada:
+  passos:
+    - vendas = [
+        { regiao: "sul", produto: "a", mes: 1, valor: 10 },
+        { regiao: "sul", produto: "b", mes: 1, valor: 5 },
+        { regiao: "sul", produto: "a", mes: 2, valor: 20 },
+        { regiao: "norte", produto: "a", mes: 1, valor: 7 }
+      ]
+    # linhas -> colunas (e de volta)
+    - p = vendas.pivotar indice: "regiao", colunas: "produto", valores: "valor", agregacao: "soma"
+    - imprimir p[0].regiao, p[0].a, p[0].b, p[1].a, p[1].b
+    - d = p.despivotar id: "regiao", nome: "produto", valor: "total"
+    - imprimir tamanho(d)
+    # janela: acumulado por regiao, na ordem dos meses
+    - k = vendas.janela "acum", "soma_acumulada", "valor", por: "regiao", ordem: "mes"
+    - imprimir k[0].acum, k[1].acum, k[2].acum, k[3].acum
+    # dividir uma coluna de texto
+    - pessoas = [{ nome: "ana maria silva" }, { nome: "bruno" }]
+    - dv = pessoas.dividir_coluna "nome", " ", nomes: ["primeiro", "resto"]
+    - imprimir dv[0].primeiro, dv[0].resto, dv[1].resto
+    # fusos horarios
+    - imprimir converter_fuso("2024-01-31T12:00:00", "UTC", "-03:00")
+```
+
+| Método | O que faz |
+|---|---|
+| `pivotar indice: "a", colunas: "b", valores: "v", agregacao: "soma"` | linhas → colunas: uma linha por `indice` (nome ou lista), uma coluna por valor distinto de `colunas`; `agregacao`: `soma` (padrão), `media`, `contar`, `min`, `max`, `primeiro`; combinação sem dados é `nulo` (0 em `contar`) |
+| `despivotar id: "a", colunas: [...], nome: "variavel", valor: "valor"` | colunas → linhas; sem `colunas:` usa todas fora de `id`; células nulas saem, exceto com `manter_nulos: verdadeiro` |
+| `janela "nome", "funcao", "coluna", por: ..., ordem: ...` | acrescenta uma coluna calculada sem mudar a ordem das linhas (abaixo) |
+| `dividir_coluna "col", ",", nomes: [...], remover: verdadeiro` | divide o texto em colunas novas (o resto vai na última; sem `nomes:` são `col_1..N`); nulo gera nulos |
+| `converter_fuso "col", origem: "UTC", destino: "America/Sao_Paulo"` | converte datas e horas de uma coluna; o que não é data vira `nulo` |
+
+**Funções de janela** (`por:` particiona, `ordem:` ordena dentro da partição, `desc: verdadeiro`
+inverte): `numero_linha`, `ranking` (empates repetem e deixam salto), `ranking_denso`,
+`soma_acumulada`, `contagem_acumulada`, `media_acumulada`, `soma_movel` e `media_movel`
+(`tamanho: n`, inclui a linha atual), `anterior` e `proximo` (`deslocamento: n`, `padrao: v`),
+`diferenca` (valor menos o da linha anterior), `primeiro` e `ultimo`. Nulos são ignorados
+nas somas e médias. Sem `por:` a tabela toda é uma partição.
+
+**Fusos.** `converter_fuso(texto, origem, destino)` (função) e o método aceitam `UTC`,
+deslocamento fixo (`-03:00`, `+0530`) ou nome IANA (`America/Sao_Paulo`, `Europe/London`),
+que usa o *tzdata* do sistema (horário de verão incluído; no Windows só `UTC` e
+deslocamentos). Um sufixo no próprio texto (`...Z`, `...-03:00`) vale mais que `origem`. O
+resultado é `AAAA-MM-DDTHH:MM:SS` no fuso de destino. Horário que não existe ou é ambíguo
+na virada do horário de verão segue a regra da libc do sistema.
+
+### Ler e gravar CSV de verdade
+
+`ler_csv` aceita opções (todas opcionais; sem opção o comportamento é o de sempre):
+
+```tilt skip
+t = ler_csv "vendas.csv", separador: ";", pular: 2, nulos: ["NA", "-", ""],
+      tipos: { valor: "decimal", data: "data" }
+ti = ler_csv "eventos.csv", inferir: verdadeiro, amostra: 2000,
+       fuso: "America/Sao_Paulo", destino_fuso: "UTC"
+u = ler_csv "x.txt", separador: "auto"                      # detecta , ; tab |
+v = ler_csv "sem_titulo.csv", sem_cabecalho: verdadeiro, colunas: ["id", "nome"]
+w = ler_csv "vendas.csv", selecionar: ["regiao", "valor"] # evita materializar as demais colunas
+c = ler_csv "vendas.csv", selecionar: ["regiao", "valor"], colunar: verdadeiro
+r = c.agrupar_por "regiao", { total: somar "valor", n: contar }
+r2 = c.agrupar_por "regiao", { dispersao: variancia "valor", unicos: distintos "valor" }
+r3 = c.agrupar_por "regiao", { mediana: mediana "valor", p90: quantil "valor", 0.9 }
+r4 = c.agrupar_por "regiao", { p90_aprox: quantil_aproximado "valor", 0.9 }
+f = c.filtrar linha.valor >= 100
+p = ler_parquet "vendas.parquet", selecionar: ["regiao", "valor"]
+pc = ler_parquet "vendas.parquet", selecionar: ["regiao", "valor"], colunar: verdadeiro
+pn = ler_parquet "clientes.parquet", selecionar: ["cliente.id"], colunar: verdadeiro
+pf = ler_parquet "vendas.parquet", onde: { regiao: "sul" }, colunar: verdadeiro
+pcf = ler_parquet "vendas.parquet", onde: { ou: [{ total: { ">": 100 } }, { regiao: "sul" }] }, colunar: verdadeiro
+```
+
+- `separador:` um caractere, `"tab"` ou `"auto"`; `fonte tipo: csv` também aceita `separador:`.
+- `pular: n` descarta as n primeiras linhas (títulos); `sem_cabecalho: verdadeiro` lê a
+  primeira linha como dado (colunas `coluna1..N`, ou os nomes de `colunas:`).
+- `nulos: [...]` lê esses textos como `nulo`; `tipos: { coluna: tipo }` converte na leitura
+  (os mesmos tipos de `converter`, inclusive `"1,5"` como decimal e `31/01/2024` como data).
+- `inferir: verdadeiro` (alias `inferir_tipos`) examina até `amostra:`/`amostra_tipos:` linhas
+  antes de ler o arquivo inteiro e fixa o tipo por coluna (`logico`, `inteiro`, `decimal`,
+  `data`, `data_hora` ou `texto`). Inteiro + decimal promove para decimal; valores
+  incompatíveis fora da amostra recuam para texto daquela célula. A inferência também
+  funciona com `colunar: verdadeiro`.
+- `fuso:`/`fuso_origem:` define o fuso de textos sem offset e `destino_fuso:` normaliza
+  colunas `data_hora` para `AAAA-MM-DDTHH:MM:SS`, usando tzdata IANA, UTC ou deslocamentos
+  fixos. Um sufixo `Z`/`+HH:MM` no valor tem precedência. Essas opções ativam a inferência.
+- `selecionar: ["coluna", ...]` mantém apenas os campos pedidos, nessa ordem;
+  no Parquet, folhas fora da projeção nem são decodificadas. Para structs, use
+  caminhos pontilhados como `"cliente.id"`; o resultado preserva `cliente` e
+  contém somente o campo projetado. `colunas:` no CSV
+  continua servindo para nomear o cabeçalho, antes da seleção.
+- `onde: { coluna: valor }` aplica igualdade diretamente nos vetores colunares
+  após a leitura e combina várias colunas com AND. Comparadores podem ser escritos
+  como `{ coluna: { ">=": valor } }`; predicados compostos usam
+  `{ e: [{...}, {...}] }` ou `{ ou: [{...}, {...}] }`. O Parquet usa min/max
+  do row group para descartar grupos incompatíveis antes de decodificar. Se
+  `selecionar:` for usado, inclua nele todas as colunas referenciadas por `onde:`.
+- `colunar: verdadeiro` guarda CSV ou Parquet em vetores tipados, com textos repetidos
+  codificados por dicionário, listas por offsets e estruturas por campo quando
+  mantêm o mesmo formato. `tamanho`, `agrupar_por` e `filtrar` com comparação
+  simples `linha.coluna <operador> literal` operam sem criar um mapa por linha.
+  `escrever_parquet` também evita criar mapas por linha. Acesso por índice
+  e outros métodos materializam as linhas quando necessários.
+  É opcional e funciona integralmente em CPU, sem GPU ou BLAS.
+- `escrever_csv tabela, "x.csv", separador: ";"` coloca entre aspas o campo que tiver o
+  separador, aspas ou quebra de linha (RFC 4180) e grava `nulo` como campo vazio.
+
+### Datas e nulos
+
+| Função | O que faz |
+|---|---|
+| `converter_data("31/01/2024")` | `2024-01-31` (aceita `AAAA-MM-DD`, `AAAA/MM/DD`, `DD/MM/AAAA` e hora opcional); `nulo` se inválida |
+| `ano(d)`, `mes(d)`, `dia(d)` | partes de uma data ISO (`nulo` se inválida) |
+| `adicionar_dias(d, n)` | soma (ou subtrai, com `n` negativo) dias |
+| `dias_entre(a, b)` | dias de `a` até `b` (negativo se `b` < `a`) |
+| `coalescer(a, b, ...)` | o primeiro valor que não é nulo nem texto vazio |
+
+
+Métodos sem argumentos (`descrever`, `deduplicar`, `remover_nulos`, `limpar_texto`) podem
+ser escritos sem parênteses; um argumento que seja lista literal exige parênteses
+(`a.empilhar([...])`, pois `a.empilhar [...]` é lido como índice). Em 1 M de linhas,
+`deduplicar`, `juntar` (600 mil linhas de resultado), `descrever`, `contar_valores` e
+`converter` juntos levam ~2,4 s além da leitura. Para junções e agregações muito grandes,
+`sql` com DuckDB (seção abaixo) é mais rápido.
+
+## SQL sobre tabelas Tilt: `sql`
+
+SQL é cidadão de primeira classe: `sql` roda uma consulta sobre tabelas que já estão
+na memória do programa, sem servidor e sem `fonte`. O resultado é uma `tabela` normal
+(`.filtrar`, `escrever_parquet`, outro `sql`...).
+
+```tilt run
+pipeline sql_local:
+  passos:
+    - vendas = [
+        { regiao: "sul", valor: 30 },
+        { regiao: "norte", valor: 120 },
+        { regiao: "sul", valor: 5 }
+      ]
+    - clientes = [{ regiao: "sul", nome: "ana" }, { regiao: "norte", nome: "bia" }]
+    # variaveis-tabela citadas no SQL entram sozinhas
+    - resumo = sql "select regiao, sum(valor) as total from vendas group by regiao order by regiao"
+    - imprimir resumo[0].regiao, resumo[0].total
+    # join, parametros com ? e nome explicito
+    - j = sql "select c.nome, sum(v.valor) as total from vendas v join clientes c on c.regiao = v.regiao group by c.nome order by c.nome"
+    - imprimir j[0].nome, j[0].total
+    - altos = sql "select * from vendas where valor >= ?", [30]
+    - imprimir tamanho(altos)
+    - n = sql "select count(*) as n from t", t: vendas
+    - imprimir n[0].n
+    # metodo: a propria tabela e `t`
+    - m = vendas.sql "select max(valor) as maior from t"
+    - imprimir m[0].maior
+```
+
+- **Tabelas**: variáveis-tabela citadas no SQL entram sozinhas; `nome: valor` registra
+  explicitamente; `tabela.sql "... from t"` usa a própria tabela como `t`.
+- **Parâmetros**: `sql "... where x >= ?", [30]` (o `?` é ligado por tipo, sem interpolar texto).
+- **Colunas**: as chaves das linhas; o tipo (`INTEGER`, `REAL`, `TEXT`) vem dos valores.
+  `logico` vira 0/1; lista/mapa viram texto JSON. Uma tabela vazia não tem colunas e dá erro.
+- **Motor** (`motor: "sqlite" | "duckdb" | "auto"`, padrão `auto`): SQLite em memória
+  para tabelas (sempre disponível com `libsqlite3`). Se a consulta lê arquivos
+  (`from 'vendas.csv'`, `'x.parquet'`, `read_csv(...)`) o `auto` usa o **DuckDB**
+  (`libduckdb.so` no `LD_LIBRARY_PATH`), que lê CSV/Parquet direto e é muito mais
+  rápido em agregações grandes (1 M de linhas em ~0,2 s contra ~1,1 s do
+  `ler_csv` + `agrupar_por`). Os dialetos diferem em detalhes (ex.: `7/2` é `3` no
+  SQLite e `3.5` no DuckDB); fixe o `motor:` quando isso importar.
+- Para bancos de verdade (Postgres, MySQL, SQLite em arquivo) use `fonte`, `consultar_sql`
+  e `executar_sql` (seção abaixo).
 
 ## Bancos relacionais (SQLite, Postgres, DuckDB, MySQL/MariaDB e ClickHouse)
 
@@ -783,6 +1107,12 @@ texto e é convertido), demais tipos (VARCHAR, TEXT, DATE, DATETIME, JSON,
 ENUM...)→`texto`. O conector MySQL carrega `libmariadb.so.3` ou
 `libmysqlclient.so*` via `dlopen` (MariaDB e MySQL usam a mesma C API);
 serve tanto contra MySQL quanto contra MariaDB.
+
+Fontes SQL remotas também aceitam `lazy: verdadeiro`: a conexão e a consulta
+só são executadas quando a tabela é materializada, conservando o `pushdown`
+parametrizado até esse momento. Elasticsearch/OpenSearch aceita a mesma opção;
+`pushdown: {colunas: [...], onde: {...}, limite: N}` vira `_source`, filtros
+`term` e `size`, respectivamente.
 
 ### ClickHouse (HTTP nativo)
 
@@ -1309,7 +1639,7 @@ Operam sobre `tabela` e `lista` de mapas. `linha` é a variável implícita da l
 | `.derivar { col: <expr> }` | adiciona/atualiza colunas por linha |
 | `.mapear { col: <expr> }` | idem `.derivar` |
 | `.selecionar "a", "b"` | mantém só as colunas nomeadas |
-| `.agrupar_por "col", { nome: <agg> }` | agrupa; `<agg>` ∈ `contar`, `somar "c"`, `media "c"`, `min "c"`, `max "c"` |
+| `.agrupar_por "col", { nome: <agg> }` | agrupa; `<agg>` ∈ `contar`, `somar "c"`, `media "c"`, `variancia "c"` (populacional), `distintos "c"`, `mediana "c"`, `quantil "c", q` (q entre 0 e 1), `mediana_aproximada "c"`, `quantil_aproximado "c", q`, `min "c"`, `max "c"` |
 | `.ordenar_por "col", desc: verdadeiro` | ordena (numérico ou lexicográfico) |
 | `.limite N` / `.primeiros N` | primeiras N linhas |
 | `.distinto` / `.distinto "col"` | remove duplicatas |

@@ -25,6 +25,7 @@ pipeline rag:
     - achados = kb.buscar("gato", top_k: 2)
     - para cada h em achados:
         imprimir "achado:", h.id, h.score
+    - imprimir "textos:", achados[0].texto, "|", achados[1].texto
     - unico = kb.buscar("gato", top_k: 1)
     - imprimir "top1:", unico[0].id
     - tentar:

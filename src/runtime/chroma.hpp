@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/vectorstore.hpp"
+
 namespace tilt::rt {
 
 // Indice vetorial no Chroma (REST via curl, HTTP puro, mesmo padrao do
@@ -16,9 +18,7 @@ namespace tilt::rt {
 void chroma_upsert(const std::string& base, const std::string& colecao,
                    const std::string& id, const std::string& text,
                    const std::vector<float>& vec);
-std::vector<std::pair<std::string, double>> chroma_search(const std::string& base,
-                                                          const std::string& colecao,
-                                                          const std::vector<float>& vec,
-                                                          std::size_t k);
+std::vector<VectorHit> chroma_search(const std::string& base, const std::string& colecao,
+                                     const std::vector<float>& vec, std::size_t k);
 
 }  // namespace tilt::rt

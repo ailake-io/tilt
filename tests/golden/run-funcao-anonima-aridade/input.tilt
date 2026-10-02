@@ -1,0 +1,4 @@
+pipeline t:
+  passos:
+    - f = funcao x: x
+    - imprimir f(1, 2)

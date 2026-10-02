@@ -1,0 +1,19 @@
+source clientes:
+  type: csv
+  path: "clientes.csv"
+
+pipeline etl_clientes:
+  schedule: "0 * * * *"
+  on_failure: retry 3, wait: "30s"
+
+  steps:
+    - cru = [{ email: "ana@x.com", valor: 10 }, { email: "bad", valor: 5 }]
+    - write_csv cru, "clientes.csv"
+    - bruto = read clientes
+    - limpo = bruto.filter row.email contains "@"
+    - com_dom = limpo.derive { dominio: split(row.email, "@")[1] }
+    - agregado = com_dom.group_by "dominio", {
+        total: count,
+        receita: sum "valor"
+      }
+    - write_parquet agregado, "sales_by_domain.parquet"

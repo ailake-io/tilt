@@ -1,0 +1,9 @@
+pipeline avancada:
+  steps:
+    - vendas = [{ regiao: "sul", produto: "a", mes: 1, valor: 10 }, { regiao: "norte", produto: "b", mes: 2, valor: 3 }]
+    - p = vendas.pivot index: "regiao", columns: "produto", values: "valor", agg: "soma"
+    - d = p.unpivot id: "regiao", name: "produto", value: "total"
+    - j = vendas.window "acum", "soma_acumulada", "valor", by: "regiao", order: "mes", size: 2, default: 0
+    - dv = vendas.split_column "regiao", "o", names: ["x", "y"], remove: verdadeiro
+    - f = vendas.convert_timezone "mes", origin: "UTC", destination: "-03:00"
+    - g = convert_timezone("2024-01-31T12:00:00", "UTC", "-03:00")

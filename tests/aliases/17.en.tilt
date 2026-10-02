@@ -1,0 +1,11 @@
+llm gpt:
+  provider: "anthropic"
+  model: "claude-sonnet-5"
+  key: env "ANTHROPIC_API_KEY"
+
+pipeline resumir:
+  steps:
+    - resposta = ask gpt:
+        system: "You resumir technical texts in 3 sentences."
+        user: "Resuma: tilt é uma linguagem declarativa"
+    - print resposta.text

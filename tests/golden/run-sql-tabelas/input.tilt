@@ -1,0 +1,31 @@
+pipeline sql_local:
+  passos:
+    - vendas = [
+        { regiao: "sul", valor: 30, taxa: 0.5 },
+        { regiao: "norte", valor: 120, taxa: 1.5 },
+        { regiao: "sul", valor: 5, taxa: 0.25 }
+      ]
+    - clientes = [{ regiao: "sul", nome: "ana" }, { regiao: "norte", nome: "bia" }]
+    # variaveis-tabela citadas no SQL entram sozinhas
+    - resumo = sql "select regiao, sum(valor) as total, count(*) as n from vendas group by regiao order by regiao"
+    - imprimir resumo[0].regiao, resumo[0].total, resumo[0].n
+    - imprimir resumo[1].regiao, resumo[1].total, resumo[1].n
+    # join entre duas tabelas
+    - j = sql "select c.nome, sum(v.valor) as total from vendas v join clientes c on c.regiao = v.regiao group by c.nome order by c.nome"
+    - imprimir j[0].nome, j[0].total, j[1].nome, j[1].total
+    # parametros com ?
+    - altos = sql "select * from vendas where valor >= ? order by valor", [30]
+    - imprimir tamanho(altos), altos[0].valor
+    # nome explicito e decimais
+    - m = sql "select round(avg(taxa), 3) as media from t", t: vendas
+    - imprimir m[0].media
+    # metodo: a propria tabela e `t`
+    - q = vendas.sql "select count(*) as n from t where valor > 10"
+    - imprimir q[0].n
+    # o resultado e uma tabela normal
+    - grandes = resumo.filtrar linha.total > 40
+    - imprimir tamanho(grandes)
+    - tentar:
+        sql "select * from nao_existe"
+    capturar erro:
+      imprimir "erro: {{erro}}"

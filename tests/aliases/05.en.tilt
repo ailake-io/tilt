@@ -1,0 +1,13 @@
+type EntradaInferencia:
+  texto: texto
+  vetor_contexto: tensor[f32, 1536]
+  temperatura: decimal
+
+type MetricasProcessamento:
+  latencia_ms: decimal
+  tokens_usados: integer
+  dispositivo: texto
+
+pipeline tipos:
+  steps:
+    - print "tipos declared"

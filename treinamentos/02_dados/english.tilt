@@ -1,0 +1,10 @@
+# language: en
+# Columnar CSV: lazy scan, filter, projection, derivation and aggregation.
+
+pipeline sales:
+  steps:
+    - table = read_csv "exemplos/dados/vendas.csv", columnar: true, lazy: true
+    - filtered = table.filter { value: { greater_than: 100 } }
+    - selected = filtered.select ["region", "value"]
+    - summary = selected.group_by "region", { total: sum "value", average: mean "value" }
+    - write_parquet summary, "treinamentos/saida/vendas_resumo.parquet", codec: "zstd"

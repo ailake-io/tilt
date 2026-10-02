@@ -10,9 +10,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   em posição de operador, nome em posição de nome).
 - Parâmetros compostos em `funcao` (Marco 3 / C3): `nome[]` ou
   `nome[]: <tipo>` (opcional), `mapa` como tipo base; `Arg.optional` é
-  metadado do parser. A aridade de funções de usuário é validada pelo checker:
-  argumentos faltantes são erro; argumentos excedentes são aceitos apenas no
-  formato de chamada entre parênteses, conforme a regra de chamada da Tilt.
+  metadado do parser. A aridade de funções de usuário é validada pelo checker
+  nas chamadas locais e pelo runtime em todas as chamadas:
+  argumentos obrigatórios faltantes ou excedentes são erro; os parâmetros
+  opcionais ausentes recebem `nulo` ou o valor padrão declarado. Argumentos
+  nomeados podem vir após os posicionais; nomes desconhecidos, duplicados ou
+  posicionais após nomeados são erro.
 
 ## Semântica
 
@@ -57,18 +60,26 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   parcialmente definidos continuam desconhecidos. Por entidade — fora daí o tipo
   vira "desconhecido" e segue sem verificação: campos de `tipo` Registro, campos dinâmicos de tabelas e
   `verificar`/`ao_falhar`.
+- Para importações locais (`de modulo importar ...` e chamadas qualificadas por
+  `importar modulo`), o checker carrega e memoriza as assinaturas das funções
+  exportadas para validar aridade, argumentos nomeados e parâmetros opcionais;
+  módulos ausentes, exports dinâmicos e contratos de tipos entre arquivos ainda
+  ficam para o runtime.
 
 ## Dados
 
 - Parquet é nativo (reader/writer próprio, zero dependências de link): a
   escrita é PLAIN com compressão **gzip** (padrão), **snappy** (`codec:
   "snappy"` — compressor literal-only, sem ganho de espaço mas interoperável),
+  **zstd**, **LZ4_RAW** (`codec: "lz4"` ou `"lz4_raw"`) e **Brotli**
+  (`codec: "brotli"`),
   páginas DATA_PAGE **v1** (padrão) ou **v2** (`paginas: "v2"`), um row group
-  por arquivo, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
+  por padrão ou vários com `row_group:`, com colunas REQUIRED ou OPTIONAL (nulos via definition levels
   RLE),   **listas de escalares** (anotação LIST, elemento Nulo vira OPTIONAL —
   Marco 2 / B3), **structs** (Fase 12-5a), **listas aninhadas**
   (`list<list<...>>`, Marco 2 / B2a, nulos em todos os níveis),
-  **3 níveis de lista** (Fase 12-5a.1, nulos/vazios em todos os níveis) e
+  **3 níveis de lista** (Fase 12-5a.1, nulos/vazios em todos os níveis), além
+  de listas escalares com **4 ou mais níveis** reconstruídas genericamente, e
   **listas de structs** (Marco 2 / B2b, elemento Nulo vira OPTIONAL;
   campos-escalares **e campos-lista** nos elementos, Fase 12-5a.1) — tudo
   validado com pyarrow nos dois sentidos — e estreitamento opt-in `tipos: {col:
@@ -83,20 +94,32 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   timestamp viram texto ISO, decimal vira decimal) e dictionary pages com
   encoding PLAIN ou PLAIN_DICTIONARY, páginas v1 e
   v2, PLAIN e DICTIONARY (PLAIN_DICTIONARY/RLE_DICTIONARY) e os codecs
-  gzip/deflate (zlib via `dlopen`), **snappy** (codec próprio) e **ZSTD**
-  (libzstd via `dlopen`). Ainda fora do subconjunto: 4+ níveis de lista e
-  criptografia Parquet.
+  gzip/deflate (zlib via `dlopen`), **snappy** (codec próprio), **ZSTD**
+  (libzstd via `dlopen`), **LZ4_RAW** (liblz4 via `dlopen`) e **Brotli**
+  (libbrotlienc/libbrotlidec via `dlopen`). LZ4 e Brotli são opcionais e
+  geram erro explícito quando a biblioteca não está instalada. Ainda fora do
+  subconjunto: listas de structs com campos compostos em 4+ níveis. Modular Encryption
+  `AES_GCM_V1` cobre páginas/footer; a chave local usa `TILT_PARQUET_KEY`,
+  e AWS KMS usa `chave_kms` com permissões `GenerateDataKey`/`Decrypt`; os
+  provedores `chave_env` e `chave_arquivo` atendem secret mounts sem SDK;
+  Azure Key Vault (`chave_azure`), GCP Cloud KMS (`chave_gcp`) e Vault Transit
+  (`chave_vault`) usam APIs HTTP. Tokens estáticos continuam aceitos por
+  ambiente; arquivos (`AZURE_ACCESS_TOKEN_FILE`, `GCP_ACCESS_TOKEN_FILE`,
+  `VAULT_TOKEN_FILE`), Azure OAuth por client credentials e descoberta/renovação
+  por Azure IMDS (`AZURE_IMDS_ENDPOINT` opcional), GCP metadata
+  (`GCP_METADATA_HOST` opcional) e Vault `renew-self` também são suportados,
+  com cache até a expiração.
 - Delta Lake é mínimo: `escrever_delta` sobrescreve a tabela (recria a versão
   0); o append existe via `anexar_delta` (nova versão por commit atômico de
   `rename`, validação de schema por nome com evolução limitada — ver abaixo —,
-  single-writer — sem locks/optimistic concurrency). Partições hive-style
+  lock cooperativo e optimistic concurrency na versão do log). Partições hive-style
   suportam **uma ou mais colunas** (`particionar_por: "col"` ou
   `particionar_por: ["c1", "c2"]`, layout `<c1>=<v1>/<c2>=<valor>/part-NNNNN.parquet`,
   colunas reidratadas na leitura) e há **pruning** de partições em
   `ler_delta ... onde: {...}` (igualdade; predicados em coluna de partição pulam
-  arquivos inteiros pelo log, o resto filtra linhas). Ainda assim: valor nulo
-  em coluna de partição e valores com `/` não são suportados (erro claro, sem
-  `__HIVE_DEFAULT_PARTITION__` nem escaping) e checkpoint tilt-native a cada
+  arquivos inteiros pelo log, o resto filtra linhas). Partição nula é suportada
+  com `__HIVE_DEFAULT_PARTITION__` no caminho, `null` no log e leitura/poda
+  null-safe; valores com `/` seguem sem suporte (erro claro, sem escaping). Há checkpoint tilt-native a cada
   10 versões (`<v>.checkpoint.parquet` + `<v>.checkpoint.meta.json` em
   _delta_log, ignorados por leitores externos) mais leitura do checkpoint
   padrão (`_last_checkpoint` + `<v>.checkpoint*.parquet` no schema oficial,
@@ -108,26 +131,38 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   commit; arquivos antigos ficam sem a coluna e a leitura projeta nulo
   (union-by-name). Remover coluna ou mudar o tipo de uma existente → erro
   claro.
+- Planos `lazy: verdadeiro` existem para CSV, Parquet e Delta locais e carregam
+  a fonte no primeiro acesso; SQL remoto, Elasticsearch/OpenSearch e Spark
+  também podem adiar a primeira consulta. SQL mantém pushdown parametrizado;
+  Elasticsearch/OpenSearch traduz projeção, filtros `term` e limite para o DSL.
+  A delegação de agregações/junções para DuckDB é opt-in (`TILT_ANALYTIC_ENGINE`) ou
+  automática em `auto`, mas exige `libduckdb` com appender e recua para o motor
+  nativo quando necessário. `paralelo: verdadeiro` só paraleliza atribuições
+  independentes simples em `passos:`; loops elementwise independentes podem usar
+  `TILT_LOOP_PARALLEL=1`, e loops com efeitos externos continuam sequenciais.
 - Iceberg é de 1ª passada: o catálogo default é **Hadoop** (diretório local).
   Há um **REST catalog opt-in** (fase 29: `ICEBERG_CATALOG=rest` +
   `ICEBERG_URI`) falando o subconjunto `loadTable`/`createTable`/`transactions`
-  do Iceberg REST Open API no namespace `default` — sem paginação, sem OAuth,
-  location `file://` apenas (o tilt grava os arquivos localmente e commita as
-  locations) e single-writer como no Hadoop; sobrescrita de tabela existente
+  do Iceberg REST Open API no namespace `default`, com token Bearer opcional
+  (`ICEBERG_OAUTH_TOKEN`/`ICEBERG_TOKEN`) — location `file://` apenas (o tilt
+  grava os arquivos localmente e commita as locations); sobrescrita de tabela existente
   mantém o partition spec (divergência → erro claro). Sem as env vars o modo
   Hadoop continua, byte a byte. Na direção inversa, `tilt servir-catalogo`
-  (fase 30) expõe as tabelas Hadoop locais como **catálogo REST server
-  read-only** (subconjunto de leitura v1: config/namespaces/tables/loadTable +
-  endpoint de arquivos com proteção contra path traversal; createTable/commit →
-  501) — o metadata servido reescreve as locations para URLs do servidor, mas
+  (fase 30) expõe as tabelas Hadoop locais como **catálogo REST server**
+  (config/namespaces/tables/loadTable, createTable, transactions, DELETE e
+  endpoint de arquivos com proteção contra path traversal; conflitos respondem
+  409; a listagem aceita `page_size`/`page_token`, `HEAD` verifica tabelas e
+  `createTable` materializa metadata inicial quando necessário) —
+  o metadata servido reescreve as locations para URLs do servidor, mas
   para o Spark/Hadoop (cujo `fs.http` reporta length -1, rejeitado pelo leitor
   Avro do Iceberg) há o modo `--sem-reecrita-manifests`, em que manifest lists,
   manifests e data files seguem `file://` absolutos (o
   `tests/spark_catalog_test.sh` monta o diretório no mesmo path dentro do
-  container). Demais limites: a
+  container). Escritas locais Delta/Iceberg usam `.tilt.lock.d` e falham com
+  conflito se a versão alvo já existir; locks abandonados exigem remoção manual
+  após conferir o arquivo `owner`. Demais limites: a
   leitura cobre o mesmo subconjunto do Parquet acima (tabelas de outros
-  escritores sem garantia além dele) e single-writer (sem locks nem optimistic
-  concurrency);
+  escritores sem garantia além dele);
   `escrever_iceberg` sobrescreve a tabela (recria a versão 0) e o append é via
   `anexar_iceberg` (novo snapshot por commit atômico de `rename`; o manifest
   do novo snapshot lista os arquivos ativos como EXISTING + o ADD — além da
@@ -159,7 +194,8 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
    Os manifest lists carregam `partitions` com `contains_null`, `lower_bound` e
    `upper_bound` por campo, além de `sequence_number`/`min_sequence_number`;
    snapshots e entradas de manifest também recebem sequence numbers reais da
-   spec v2 (validado com pyiceberg). Mas: valor nulo em coluna de partição,
+   spec v2 (validado com pyiceberg). Partições null são suportadas com marcador
+   Hive, valor null no manifest, summaries `contains_null` e pruning null-safe;
    valores com `/` e coluna repetida não são suportados (erro claro, sem
    escaping). A estrutura escrita (metadata, manifest list, manifest e
    parquet com field-ids) carrega no **pyiceberg**.
@@ -186,15 +222,18 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   Qualquer outro endpoint (indexação, `_delete_by_query`, `_cat`, settings)
   é via `es_executar`, que devolve o JSON parseado ou `texto` cru quando a
   resposta não é JSON. Auth só Basic (userinfo da URL ou env
-  `ELASTIC_USER`/`ELASTIC_PASSWORD`), sem API keys/SASL/SSO, e HTTP apenas —
-  esquema `https://` ainda não é configurável na URL (use o `es_executar`
-  com reverse proxy local ou a rede interna).
+  `ELASTIC_USER`/`ELASTIC_PASSWORD`), sem API keys/SASL/SSO. HTTPS com os
+  esquemas `elasticsearch+https://` e `opensearch+https://` (o `curl` valida o
+  certificado; para uma CA própria ou autoassinada use `CURL_CA_BUNDLE`; certificado
+  não confiável é recusado — coberto por `tests/es_https_test.sh`).
 - MongoDB (`mongo_inserir`/`mongo_buscar`/`mongo_atualizar`/`mongo_deletar`/
   `mongo_criar_indice`/`mongo_agregar`): BSON + OP_MSG próprios com CRUD
-  básico completo — restam: `mongo_agregar` lê só o `firstBatch` do cursor
-  (sem `getMore`; use `$limit`/`$skip` para caber no primeiro batch) e não
-  valida as etapas (erro de pipeline vira erro claro do servidor), update só
-  com `$set`/`$inc` (sem `$unset` e demais operadores), projeção de
+  básico completo, validado contra um `mongod` 7 real (`tests/mongo_real_test.sh`):
+  `mongo_buscar` e `mongo_agregar` seguem o cursor com `getMore` até o fim
+  (o `cursor.id` é int64), `mongo_agregar` não valida as etapas (erro de
+  pipeline vira erro claro do servidor) e o update aceita `$set`, `$inc`,
+  `$unset`, `$push`, `$addToSet`, `$pull`, `$mul`, `$min`, `$max`, `$rename` e
+  `$currentDate` — restam: projeção de
   `mongo_buscar` só whitelist (`somente:`; sem exclusões tipo `{campo: 0}`),
   sem índices de texto/TTL, filtro de `mongo_buscar` só por igualdade exata
   top-level (combinado por E), `mongo_deletar` remove sempre todos que casam
@@ -256,11 +295,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   auth por userinfo da URL ou env `CLICKHOUSE_USER`/`CLICKHOUSE_PASSWORD`.
 - Redis: TLS via `rediss://` ou `{tls: verdadeiro}`, timeout fixo de 5s.
   AUTH via userinfo da URL (`redis://:senha@host`) ou opção `senha:`; SELECT
-  via path numérico (`redis://host:6379/2`) ou opção `banco:`. Sem
-  pub/sub, streams, scripts Lua nem conexões persistentes/reconnect —
-  `redis_executar` cobre comandos avulsos e `redis_lote` roda um pipeline
-  de até 10 mil comandos numa única conexão; `ler_redis`/`escrever_redis`/
-  `redis_executar` abrem uma conexão por chamada.
+  via path numérico (`redis://host:6379/2`) ou opção `banco:`. Validado contra
+  um Redis 7 real (`tests/redis_real_test.sh`): `redis_executar` roda qualquer
+  comando de resposta única — inclusive streams (`XADD`/`XLEN`/`XRANGE`), hashes,
+  listas e `PUBLISH` — e `redis_lote` um pipeline de até 10 mil comandos numa
+  única conexão. Sem `SUBSCRIBE`/pub-sub assinante, `XREAD BLOCK` longo, scripts
+  Lua interativos nem conexões persistentes/reconnect: `ler_redis`/
+  `escrever_redis`/`redis_executar` abrem uma conexão por chamada.
 - TLS (redis/mongo/kafka): camada mínima em `src/runtime/tls.*` — OpenSSL
   carregado em runtime via `dlopen` (`libssl.so.3`, fallback `libssl.so`, e
   libcrypto correspondente), zero dependência de link. Verificação de
@@ -273,12 +314,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   hora com a CLI `openssl`). Quando OpenSSL ou uma DLL/SO estiver ausente, o erro
   preserva os nomes tentados e o detalhe do carregador para orientar a instalação.
 - Qdrant: a coleção usa distância Cosine e ids determinísticos derivados do
-  id tilt; `buscar` contra Qdrant devolve `id` e `score` (sem o campo
-  `texto`, que fica no payload do ponto).
+  id tilt; `buscar` contra Qdrant devolve `id`, `texto` e `score` (ambos vêm do
+  payload do ponto; pontos de versões antigas, sem `tilt_id`, devolvem o UUID).
 - Weaviate: a classe é criada com `vectorizer: "none"` (o vetor vem pronto do
   `embeddings:`) e o nome deve ser de GraphQL (`[A-Z][_a-zA-Z0-9]*`); a busca
-  é GraphQL `nearVector` (cosseno, `score = 1 - distance`) e devolve `id` e
-  `score` (sem o `texto`, que fica na propriedade `texto` do objeto); no
+  é GraphQL `nearVector` (cosseno, `score = 1 - distance`) e devolve `id`,
+  `texto` (propriedade `texto` do objeto) e `score`; a gravação faz GET e depois
+  PUT (existe) ou POST (novo), pois o PUT de um id novo falha; no
   Weaviate real o `id` do objeto deve ser UUID; auth só por env
   `WEAVIATE_API_KEY` (Bearer), sem usuário/senha nem TLS dedicado (HTTP puro).
 - Pinecone: data plane apenas — o índice deve já existir na conta (criar
@@ -286,13 +328,13 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   é obrigatória (header `Api-Key`), com erro claro antes da rede quando
   ausente; o score já é similaridade de cosseno (maior = melhor, sem conversão
   como no Weaviate); `ensure` consulta `describe_index_stats` e valida o namespace antes de buscar; o upsert continua criando-o implicitamente;
-  `buscar` devolve `id` e `score`, sem o `texto` (que vai no `metadata.texto`).
+  `buscar` devolve `id`, `texto` (de `metadata.texto`) e `score`.
 - Chroma: HTTP puro, sem auth (Chroma open-source padrão; Chroma Cloud com
   auth/tls fica fora de escopo); a coleção é get-or-create (`POST
   /api/v1/collections` com o nome) e o `id` devolvido endereça add/query;
   a query devolve `distances` (`distance = 1 - cosseno` com `hnsw:space
   cosine`), então o score tilt é `1 - distance`; `buscar` devolve `id` e
-  `score`, sem o `texto` (que fica em `metadatas[].texto`/`documents[]`).
+  `texto` (de `documents[]`) e `score`.
 - pgvector: exige a extensão `vector` instalada no banco (o Tilt tenta
   `CREATE EXTENSION IF NOT EXISTS vector`, que precisa de privilégio na
   primeira vez); upsert sem prepared statements (escaping manual de
@@ -312,9 +354,12 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   Kafka, Mongo etc. sem `grupo:` nao têm checkpoint local; sem `grupo:` na fonte Kafka ela é relida do início por
   inteiro a cada tick, o que não escala para tópicos grandes (com `grupo:` o
   checkpoint é o offset commitado no broker).
-- `--agendar` entra em loop real de agenda, mas o parser cron é numérico
-  (sem nomes `jan`/`mon`), os campos dia-do-mês e dia-da-semana combinam por
-  E (não pelo OU do cron clássico). Janelas sobre arquivos persistem offset,
+- `--agendar` entra em loop real de agenda. O cron aceita 5 campos com números
+  ou nomes (`jan`..`dec`, `sun`..`sat`, sem diferenciar maiúsculas), listas,
+  faixas e passos, os atalhos `@hourly`, `@daily`/`@midnight`, `@weekly`,
+  `@monthly` e `@yearly`/`@annually`, e a semântica clássica: com dia-do-mês **e**
+  dia-da-semana restritos vale um **ou** o outro (coberto por
+  `tests/cron_nomes_test.sh`). Fuso: sempre o local da máquina. Janelas sobre arquivos persistem offset,
   buffer pendente e `last_run` entre disparos; conectores sem checkpoint de
   grupo continuam sujeitos às limitações descritas nas seções próprias.
 
@@ -327,18 +372,26 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   busca de hiperparâmetros, `pre_processar` só `um_de_n`/`padronizar`/
   `imputar` (sintaxe `- chave: [cols]`; o `->` do esboço original não
   parseia), `f1` ponderado pelo suporte, `registrar_em: mlflow://` envia
-  parâmetros e métricas ao Tracking REST do MLflow.
+  parâmetros e métricas ao Tracking REST do MLflow. Quando o experimento tem
+  um arquivo de código ou dados, o registro local e o MLflow também guardam a
+  linhagem com SHA-256, tamanho e relação com a versão do modelo; a
+  consistência entre execuções depende de manter esses arquivos acessíveis.
 - `pesos: "arquivo"` carrega no formato tilt-pesos (ver guia 04); arquivo
   ausente mantém o init Xavier com `[nota]`. `carregar_pesos` faz o mesmo em
   tempo de execução; `exportar_onnx` exporta o modelo para ONNX opset 20
   (Gemm + ativações + Softmax + LayerNormalization + Conv +
-  BatchNormalization + MaxPool + Flatten + RNN/LSTM/GRU + residual). A camada `incorporacao` ainda nao e exportavel para ONNX;
-  use pesos/treino nativos ou GGUF.
+  BatchNormalization + MaxPool + Flatten + RNN/LSTM/GRU + residual) e
+  `incorporacao` inicial via `Gather` com entrada INT64. GGUF v3 aceita
+  exportação F32 e Q8_0 (blocos múltiplos de 32), e `carregar_pesos` importa
+  ambos desquantizando para F32.
 - `treino` suporta `perda: entropia_cruzada` (com `softmax` final) e
   `perda: quadratica` (regressão escalar); backward completo de `densa`,
   ativações (inclusive `gelu`, com a derivada exata da aproximação usada na
   forward), `norma_camada` (sem affine), `conv2d`, `norma_lote`,
-  `agrupamento_max`, `achatar`, `residual` e `recorrente` (RNN/LSTM/GRU com BPTT em CPU) (CNN de brinquedo em CPU, com mini-lotes).
+  `agrupamento_max`, `achatar`, `residual`, `incorporacao` e
+  `recorrente` (RNN/LSTM/GRU com BPTT). O backward CUDA das camadas listadas
+  usa kernels dedicados quando CUDA está ativo e o lote é elegível; CPU
+  permanece como fallback.
 - `conv2d` e `norma_lote` existem como **operações de tensor** (guia 04);
   `incorporacao`, `recorrente`, `conv2d` e `norma_lote` existem como camadas de `modelo`/`treino` (`incorporacao: [vocabulario, dimensao]`,
   `conv2d: [C_saida, C_entrada, KH, KW, passo, padding, dilatacao]`
@@ -354,45 +407,78 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   (`{ tipo: cosseno }` ou `{ tipo: degrau, a_cada:, fator: }`),
   `validacao:` (fração) + `parar_cedo:` (`N` ou
   `{ paciencia:, melhorar_min: }`, restaura os melhores pesos) e `busca`
-  em grade (`modelo:`, `grade:`, `criterio: perda|acuracia`, máx. 64
-  combinações, melhor fica no modelo). `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
+  em grade, aleatória ou bayesiana (`modelo:`, `grade:`, `estrategia:`,
+  `criterio: perda|acuracia`, máx. 64 combinações, melhor fica no modelo).
+  `carregador ..., fluxo: verdadeiro` treina CSV ou Parquet grande em blocos
   (`bloco:`, default 1024; Parquet usa row groups) sem materializar — bit-idêntico
-  ao RAM. `exportar_gguf` grava GGUF v3 (só escrita) e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32 e ONNX; ONNX cobre as camadas exportáveis e a camada `incorporacao` continua sem suporte. Limites: fluxo só modelo 2D;
-  sem AMP.
-- GPU: o backend CUDA (`TILT_GPU=auto`) ainda não foi validado em hardware
-  CUDA real; aqui use `TILT_GPU=fake` para exercitar o caminho de dispatch.
+  ao RAM. `exportar_gguf` grava GGUF v3 F32/Q8_0 e `salvar_pesos`/`carregar_pesos` aceitam Safetensors F32, ONNX e GGUF; ONNX cobre as camadas exportáveis, inclusive `incorporacao` inicial. Limites: fluxo só modelo 2D;
+  AMP limitado a GEMM de camadas densas/residuais.
+- Cluster de treino usa filesystem compartilhado: all-reduce e checkpoints são
+  implementados em arquivos atômicos e exigem que os ranks compartilhem o
+  mesmo diretório. `recuperar`/`tentativas` cobre atrasos transitórios; a
+  recuperação de uma falha definitiva reinicia todos os ranks usando o último
+  `aggregate-epoch-N.json` como `retomar`, preservando uma média consistente.
+- GPU: GEMM FP32/FP16, `conv2d`, ReLU, GELU e soma foram validados em RTX 5050.
+  GEMM usa cuBLAS opcionalmente, com fallback NVRTC; buffers CUDA são
+  reutilizados, `GpuGraph` encadeia operações residentes e Tensor Cores são ativados via cuBLAS quando suportados. Metal
+  no macOS oferece os mesmos kernels em MSL. A API residente mantém buffers
+  de entrada, pesos, convoluções, vieses e saída no device entre chamadas; o dispatch de modelo
+  mantém operações pequenas na
+  CPU para evitar o custo de transferência. `TILT_GPU=fake` exercita o
+  dispatch e a conversão FP16 sem medir desempenho CUDA.
+
+- O backward das camadas suportadas (`densa`, `residual`, `conv2d`,
+  `incorporacao`, `recorrente`, `norma_lote`, `agrupamento_max` e ativações)
+  é executado em CUDA quando há kernel dedicado e o lote é elegível. O
+  runtime mantém fallback CPU para qualquer ausência de CUDA, Metal ou erro
+  de despacho; Metal ainda usa o caminho CPU para esses três backward.
 
 ## LLM / RAG
 
 - Sem `TILT_LLM`, a chamada real depende do `curl` no `PATH`.
+- Segredos (chave de API do LLM, headers de qualquer `http_*`/S3/Elasticsearch/
+  Pinecone, userinfo da URL) vão para o `curl` por um arquivo de configuração
+  `-K` temporário (0600, removido ao fim da chamada), nunca pelo argv — que
+  outros usuários da máquina leem em `ps`/`/proc`. O `curl` ainda é iniciado
+  por shell (`popen`); só caminhos de arquivos temporários passam pela linha
+  de comando. Coberto por `tests/curl_secrets_test.sh`.
 - Robustez do cliente (guia 05): `tempo_limite:` (segundos por tentativa,
   default 60, via `--max-time`), `tentativas:` (default 3, retry com backoff
   1s/2s/4s… teto 15s em erro de transporte, 429 e 5xx; 4xx falha rápido),
   `reserva: [outro_llm]` (fallback em ordem, sem cadeia) e `teto_tokens:`
   (barreira no acumulado entrada+saída por `llm` antes de cada chamada).
-  `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` (tokens do
-  `usage` da API; no mock, heurística chars/4). O retry respeita `Retry-After`
-  numérico ou HTTP-date em respostas 429 (limitado a 300s). Ainda não há cache
-  de respostas nem retry em streaming (timeout vale para o SSE inteiro).
+  `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}, custo,
+  contabilidade}` (tokens do `usage` da API; no mock, heurística chars/4). O
+  retry respeita `Retry-After` numérico ou HTTP-date em respostas 429 (limitado
+  a 300s). `contabilidade:` persiste tokens/custos em JSONL e
+  `observabilidade:` registra metadados; prompts/respostas só entram com
+  `registrar_prompts: verdadeiro`. Há cache opt-in em memória por processo e
+  retry da tentativa inteira no streaming SSE. Para contabilizar embeddings no
+  mesmo ledger, o `indice` ou agente deve declarar `llm: <nome>`; sem isso o
+  embedding continua local/sem custo associado.
 - `indice` roda com `armazenamento: "memoria"` (cosseno local),
   `"qdrant://host:porta/colecao"` (REST via curl), `"pgvector://colecao"`
   (SQL sobre libpq, cosseno `<=>`; a tabela é criada automaticamente e
-  `buscar` devolve `{ id, score }`, sem o texto), `"weaviate://host:porta/classe"`
-  (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, score }`, sem
-  o texto; auth por env `WEAVIATE_API_KEY`),
+  `buscar` devolve `{ id, texto, score }`), `"weaviate://host:porta/classe"`
+  (REST via curl, GraphQL `nearVector`; `buscar` devolve `{ id, texto, score }`; auth por env `WEAVIATE_API_KEY`),
   `"pinecone://host-do-indice/namespace"` (REST via `curl`, sempre HTTPS,
-  `POST /query`; `buscar` devolve `{ id, score }`, sem o texto; exige env
+  `POST /query`; `buscar` devolve `{ id, texto, score }`; exige env
   `PINECONE_API_KEY` e índice já criado na conta) e
   `"chroma://host[:porta]/colecao"` (REST via `curl`, HTTP puro, sem auth;
-  coleção get-or-create; `buscar` devolve `{ id, score }`, sem o texto; o
+  coleção get-or-create; `buscar` devolve `{ id, texto, score }`; o
   score é `1 - distance` da query do Chroma).
 - Os embeddings do modo `mock` mantêm 16 dimensões e combinam tokens hasheados com trigrams
   com padding de borda e normalização L2; continuam sendo apenas um mock determinístico, não relevância real.
+- `dividir_texto`/`fragmentar` oferecem modos de sentença, código, parágrafo e
+  linha. `.avaliar` em índices calcula recall, precisão, MRR e nDCG executando
+  a busca no backend configurado.
 - `avaliacao` é de 1ª passada (guia 05): `dados:` inline/bloco/caminho,
   `executar:` por caso com `caso` + `retornar`, métricas `exata`/`contem`/
   `regex`/`tolerancia`/`juiz` (todas precisam passar por caso), gate no
   `limiar:`, `amostra:` + `semente:` determinísticos e `registrar_em:` local ou via MLflow REST. Limites: juiz sem cadeia de pensamento; voto multi-juiz usa maioria ou unanimidade,
-  amostra por contagem, opcionalmente estratificada proporcionalmente por campo; não há frações ou pesos manuais; o MLflow ainda não publica artefatos ou detalhes de cada caso.
+  amostra por contagem, opcionalmente estratificada proporcionalmente por campo; não há frações ou pesos manuais. O MLflow publica `detalhes.json` e
+  `lineage.json` como artefatos, incluindo cada caso avaliado, o relatório e
+  hashes dos insumos; o servidor precisa expor o endpoint de artifacts.
 
 ## Agentes
 
@@ -400,10 +486,17 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `responder: ...`); LLMs reais podem ignorá-lo — a resposta fora do
   protocolo vira a resposta final, sem garantia de que as ferramentas certas
   foram chamadas. No modo `mock` o planner é determinístico (cada ferramenta
-  uma vez, na ordem declarada).
+  uma vez, na ordem declarada). Contextos longos usam compactação extrativa
+  limitada por `max_contexto:`; ainda não há sumarização semântica feita por
+  um segundo modelo.
 - Supervisor delega por rótulo; um rótulo sugerido pelo LLM que não está em
   `agentes:` é erro de execução (`T901`).
-- Serviços HTTP podem restringir chamadas de ferramentas com `ferramentas: [...]`; sem essa lista, rotas mantêm o comportamento aberto.
+- Serviços HTTP podem restringir chamadas de ferramentas com `ferramentas: [...]`; sem essa lista, rotas mantêm o comportamento aberto. Agentes também podem usar uma `politica Nome:` compartilhada com limites de tokens, custo, passos, aprovação e ferramentas permitidas. `compartilhado: verdadeiro` aplica os tetos de tokens/custo ao ledger do `llm` entre agentes que reutilizam a política; concorrência exige margem, pois a reserva é verificada antes de cada etapa.
+- O rollout A/B/canário, os limites por rota e o rollback após respostas 5xx
+  são mantidos no processo do `servico`: os contadores e variantes desativadas
+  são perdidos ao reiniciar e não são coordenados entre réplicas. Para uma
+  reversão persistente, use `rollback-modelo` no registry local antes de subir
+  novamente o serviço.
 - Ferramentas validam campos obrigatórios, campos desconhecidos e tipos escalares/listas/mapas nas chamadas; registros nomeados são tratados como mapas e não têm validação recursiva de esquema.
 
 ## HTTP
@@ -443,9 +536,25 @@ funciona, mas há bordas conhecidas. Lista do que **ainda não** funciona.
   `qemu-aarch64` no job `arm64_codegen` do CI, que instala a toolchain cross.
   Localmente, sem `gcc-aarch64-linux-gnu` + QEMU, ele fica limitado à geração
   e montagem quando o assembler estiver disponível. Mach-O (macOS) e PE/COFF (Windows) ficam fora: o codegen
-  é ELF-only. O JIT (`tilt executar --jit`) emite x86-64 diretamente em memória para o subconjunto inteiro (constantes, locais, aritmética, comparações, condicionais, laços e `imprimir`); decimal, texto, listas, membros e chamadas caem automaticamente para a VM. Arquiteturas sem backend JIT usam o mesmo fallback.
+  é ELF-only. O JIT (`tilt executar --jit`) emite x86-64 ou AArch64 diretamente em memória para o subconjunto escalar (constantes, locais, aritmética, comparações, condicionais, laços, chamadas numéricas, impressão e decimais); textos, listas, membros e builtins continuam no fallback da VM. Arquiteturas sem emissor JIT em memória usam o codegen estático (`tilt compilar --arch arm64`) ou o mesmo fallback.
 
 ## Stdlib
+
+**Funções embutidas** (`src/runtime/stdlib.cpp`, sem `importar`): matemática
+(`raiz`, `abs`, `exp`, `logaritmo`, `potencia`, `piso`, `teto`, `arredondar`,
+`seno`, `cosseno`, `tangente`, `pi`), conversões (`inteiro`, `decimal`, `texto`,
+`logico`, `tipo_de`), texto (`maiusculas`, `minusculas`, `aparar`, `substituir`,
+`comeca_com`, `termina_com`, `juntar`, `regex_casa`, `regex_extrair`,
+`regex_substituir` — ECMAScript), listas e mapas (`ordenar`, `unicos`, `reverso`,
+`zip`, `enumerar`, `chaves`, `valores`), tempo em UTC (`agora`, `timestamp`,
+`formatar_data`, `dormir`), arquivos de texto (`ler_texto`, `escrever_texto`,
+`anexar_texto`, `listar_arquivos`, `remover_arquivo`) e `sha256`,
+`base64_codificar`/`base64_decodificar`, `json_texto`/`json_ler`. Função do
+usuário com o mesmo nome tem prioridade. Limites: `maiusculas`/`minusculas`
+só ASCII; datas em CSV são normalizadas por amostra e usam tzdata do sistema
+quando `fuso:` é informado, enquanto `Value` continua representando datas como
+texto ISO; `ordenar` compara só números com números ou textos com textos.
+
 
 A stdlib instalada com o tilt (`<prefixo>/share/tilt/stdlib`, resolução em
 "Importar" no guia 01) cobre em 1ª passada:

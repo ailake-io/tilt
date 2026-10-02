@@ -1,0 +1,26 @@
+# LLM e RAG offline: TILT_LLM=mock torna o exemplo deterministico.
+
+llm assistente:
+  provedor: "openai"
+  modelo: "gpt-4o-mini"
+  chave: env "OPENAI_API_KEY"
+  contabilidade:
+    teto_tokens: 400
+    custo_entrada_mil: 0.15
+    custo_saida_mil: 0.60
+  observabilidade:
+    registrar_prompts: verdadeiro
+
+indice documentos:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+
+pipeline pergunta:
+  passos:
+    - documentos.inserir "Tilt le CSV, Parquet, Delta e Iceberg."
+    - documentos.inserir "O runtime usa CPU e pode despachar kernels CUDA ou Metal."
+    - contexto = documentos.buscar "quais formatos existem", top_k: 2
+    - resposta = perguntar assistente:
+        sistema: "Responda usando apenas o contexto."
+        usuario: "Quais formatos o Tilt suporta?"
+    - imprimir resposta.texto

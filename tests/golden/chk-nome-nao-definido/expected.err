@@ -4,5 +4,6 @@ erro[T030]: nome 'c' nao definido
  4 |     - b = a + c
    |               ^
    |
+   = voce quis dizer 'a'?
 
 1 erro(s) em input.tilt

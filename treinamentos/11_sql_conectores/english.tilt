@@ -1,0 +1,8 @@
+# language: en
+# Parameterized SQL and transaction. The URL may point to SQLite/DuckDB/Postgres.
+
+pipeline query:
+  steps:
+    - rows = query_sql "sqlite://treinamentos/saida/example.db", "select 1 as value", []
+    - print "result:", rows
+    - run_sql "sqlite://treinamentos/saida/example.db", "create table if not exists audit (id integer)", []

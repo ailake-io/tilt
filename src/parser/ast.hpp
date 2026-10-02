@@ -39,13 +39,16 @@ enum class ExprKind {
   MapLit,   // entries
   Assign,   // lhs = target, rhs = value
   Device,   // lhs = inner expression, text = device name ("no dispositivo <name>")
+  Lambda,   // `funcao a, b: rhs` (args = parametros, rhs = corpo em expressao)
+  Cond,     // `lhs se extra senao rhs` (lhs = valor se verdadeiro, extra = condicao, rhs = senao)
 };
 
 struct Arg {
   std::string name;              // vazio => posicional; [] => opcional/composicao
   ExprPtr value;                 // anotacao de tipo opcional (ex.: texto, tensor)
-  std::string optional_annotation; // "[]" quando marcado como [opcional: tipo] ou []
+  std::string optional_annotation;  // "[]" quando marcado como [opcional: tipo] ou []
   bool optional = false;         // marcado via [] (sem tipo) ou [opcional: tipo]
+  ExprPtr default_value;         // funcao: `nome = <expr>` (valor padrao do parametro)
 };
 
 struct MapEntry {
@@ -74,7 +77,7 @@ struct Expr {
 
 // ---------------------------------------------------------------- statements
 
-enum class StmtKind { Expr, Assign, If, ForEach, While, Try, Return };
+enum class StmtKind { Expr, Assign, If, ForEach, While, Try, Return, Break, Continue };
 
 struct ElseIf {
   ExprPtr cond;
@@ -118,6 +121,32 @@ struct Item {
   StmtPtr stmt;   // Stmt
   ItemPtr child;  // ListEntry
 };
+
+// Nome importado por `importar mod [como apelido]` ou `de mod importar nome
+// [como apelido]`; `alias == nome` quando nao ha `como`.
+struct ImportName {
+  std::string nome;
+  std::string alias;
+};
+
+// Nomes do header de um Decl `importar` / `de`, sem a palavra 'importar' e com
+// os pares `x como y` resolvidos. Em `de`, o 1o item e o modulo.
+inline std::vector<ImportName> nomes_importados(const Item& item) {
+  std::vector<ImportName> out;
+  const auto eh_nome = [](const ExprPtr& h) { return h && h->kind == ExprKind::Name; };
+  const auto& hd = item.header;
+  for (std::size_t i = 0; i < hd.size(); ++i) {
+    if (!eh_nome(hd[i]) || hd[i]->text == "importar") continue;
+    ImportName n{hd[i]->text, hd[i]->text};
+    if (i + 2 < hd.size() && eh_nome(hd[i + 1]) && hd[i + 1]->text == "como" &&
+        eh_nome(hd[i + 2])) {
+      n.alias = hd[i + 2]->text;
+      i += 2;
+    }
+    out.push_back(std::move(n));
+  }
+  return out;
+}
 
 struct Program {
   std::vector<ItemPtr> items;

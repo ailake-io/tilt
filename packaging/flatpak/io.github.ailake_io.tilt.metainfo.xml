@@ -21,8 +21,8 @@
     <binary>tilt</binary>
   </provides>
   <releases>
-    <release version="0.1.0" date="2026-09-07">
-      <description><p>Versão inicial empacotada para Flatpak.</p></description>
+    <release version="0.2.0" date="2026-10-01">
+      <description><p>Primeira beta pública com motor colunar, ML, LLM e pacotes multiplataforma.</p></description>
     </release>
   </releases>
   <content_rating type="oars-1.1"/>

@@ -9,7 +9,7 @@ namespace tilt::vm {
 
 namespace {
 
-constexpr char kMagic[] = "TILTC1";
+constexpr char kMagic[] = "TILTC3";  // v3: Instr ganhou o operando c das superinstrucoes
 
 void put_u8(std::string& o, std::uint8_t v) { o.push_back(static_cast<char>(v)); }
 
@@ -164,7 +164,7 @@ bool tiltc_save(const std::string& path, const std::string& source_bytes,
     }
     // Valida ops conhecidos (fail-closed contra ops futuros sem suporte).
     for (const auto& in : cc.chunk.code) {
-      if (static_cast<std::uint8_t>(in.op) > static_cast<std::uint8_t>(Op::ReturnNil)) ok = false;
+      if (static_cast<std::uint8_t>(in.op) > static_cast<std::uint8_t>(Op::SuperConstLocalBinop)) ok = false;
     }
     if (ok) kept.emplace_back(name, cc);
   }
@@ -179,6 +179,7 @@ bool tiltc_save(const std::string& path, const std::string& source_bytes,
       put_u8(o, static_cast<std::uint8_t>(in.op));
       put_i32(o, in.a);
       put_i32(o, in.b);
+      put_i32(o, in.c);
     }
     put_u32(o, static_cast<std::uint32_t>(cc.chunk.consts.size()));
     for (const auto& c : cc.chunk.consts) put_const(o, c);
@@ -235,10 +236,10 @@ bool tiltc_load(const std::string& path, const std::string& source_bytes, Cached
     cc.chunk.num_locals = num_locals;
     for (std::uint32_t i = 0; i < ncode; ++i) {
       std::uint8_t op = 0;
-      std::int32_t a = 0, b = 0;
-      if (!r.take_u8(op) || !take_i32(a) || !take_i32(b)) return false;
-      if (op > static_cast<std::uint8_t>(Op::ReturnNil)) return false;
-      cc.chunk.code.push_back({static_cast<Op>(op), a, b});
+      std::int32_t a = 0, b = 0, c = 0;
+      if (!r.take_u8(op) || !take_i32(a) || !take_i32(b) || !take_i32(c)) return false;
+      if (op > static_cast<std::uint8_t>(Op::SuperConstLocalBinop)) return false;
+      cc.chunk.code.push_back({static_cast<Op>(op), a, b, c});
     }
     if (!r.take_u32(nconsts) || nconsts > 1000000) return false;
     for (std::uint32_t i = 0; i < nconsts; ++i) {

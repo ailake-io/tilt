@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(tilt VERSION 0.1.0 LANGUAGES CXX)
+project(tilt VERSION 0.2.0 LANGUAGES CXX)
+
+find_package(Threads REQUIRED)
+
+# Versao de produto exibida por `tilt versao`. O numero CMake continua
+# estavel para que DEB/RPM/MSI aceitem a versao, enquanto o sufixo semver
+# identifica o pre-release beta.
+set(TILT_VERSION "${PROJECT_VERSION}-beta.2" CACHE STRING "Versao exibida pelo Tilt")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,21 +30,73 @@ if(TILT_WERROR)
   endif()
 endif()
 
+option(TILT_COVERAGE "Instrument for gcov/gcovr line coverage (GCC/Clang)" OFF)
+if(TILT_COVERAGE AND NOT MSVC)
+  add_compile_options(--coverage -O0 -g)
+  add_link_options(--coverage)
+endif()
+
 option(TILT_SANITIZE "Enable AddressSanitizer + UBSan" OFF)
 if(TILT_SANITIZE AND NOT MSVC)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
+# Build optimizations are opt-in: default binaries remain portable and do not
+# require a training profile. GCC profile files are tied to object paths, so
+# GENERATE and USE must reconfigure the same build tree.
+option(TILT_LTO "Enable link-time optimization in Release builds" OFF)
+set(TILT_PGO "OFF" CACHE STRING "Profile-guided optimization: OFF, GENERATE or USE")
+set_property(CACHE TILT_PGO PROPERTY STRINGS OFF GENERATE USE)
+set(TILT_PGO_PROFILE_DIR "" CACHE PATH "Directory shared by PGO training and use builds")
+if(TILT_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT tilt_ipo_ok OUTPUT tilt_ipo_error)
+  if(NOT tilt_ipo_ok)
+    message(FATAL_ERROR "TILT_LTO is unavailable: ${tilt_ipo_error}")
+  endif()
+  set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+if(NOT TILT_PGO STREQUAL "OFF")
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(FATAL_ERROR "TILT_PGO currently supports GCC only")
+  endif()
+  if(NOT TILT_PGO STREQUAL "GENERATE" AND NOT TILT_PGO STREQUAL "USE")
+    message(FATAL_ERROR "TILT_PGO must be OFF, GENERATE or USE")
+  endif()
+  if(TILT_PGO_PROFILE_DIR STREQUAL "")
+    message(FATAL_ERROR "TILT_PGO_PROFILE_DIR must point to a shared profile directory")
+  endif()
+  if(TILT_PGO STREQUAL "GENERATE")
+    add_compile_options(-fprofile-generate=${TILT_PGO_PROFILE_DIR})
+    add_link_options(-fprofile-generate=${TILT_PGO_PROFILE_DIR})
+  else()
+    # Some optional connector translation units may not run during training.
+    add_compile_options(-fprofile-use=${TILT_PGO_PROFILE_DIR} -fprofile-correction
+                        -Wno-error=missing-profile)
+    add_link_options(-fprofile-use=${TILT_PGO_PROFILE_DIR})
+  endif()
+endif()
+
 configure_file(
   ${CMAKE_CURRENT_SOURCE_DIR}/src/common/version.hpp.in
   ${CMAKE_CURRENT_BINARY_DIR}/generated/tilt/version.hpp @ONLY)
+
+# Metal é opcional e só entra no binário macOS. Nas outras plataformas o stub
+# mantém o runtime compilável sem SDK ou frameworks Apple.
+if(APPLE)
+  enable_language(OBJCXX)
+  set(TILT_METAL_SOURCE src/runtime/metal_runtime.mm)
+else()
+  set(TILT_METAL_SOURCE src/runtime/metal_runtime.cpp)
+endif()
 
 add_library(tilt_core STATIC
   src/common/source.cpp
   src/diagnostics/codes.cpp
   src/diagnostics/diagnostic.cpp
   src/lexer/token.cpp
+  src/lexer/aliases_en.cpp
   src/lexer/lexer.cpp
   src/parser/parser.cpp
   src/parser/ast_dump.cpp
@@ -45,7 +104,12 @@ add_library(tilt_core STATIC
   src/semantic/checker.cpp
   src/runtime/compat.cpp
   src/runtime/value.cpp
+  src/runtime/columnar.cpp
   src/runtime/json.cpp
+  src/runtime/python_interop.cpp
+  src/runtime/sql_tabelas.cpp
+  src/runtime/tabela_ops.cpp
+  src/runtime/fuso.cpp
   src/runtime/tensor.cpp
   src/runtime/safetensors.cpp
   src/runtime/onnx.cpp
@@ -55,7 +119,9 @@ add_library(tilt_core STATIC
   src/runtime/http_server.cpp
   src/runtime/http_client.cpp
   src/runtime/gpu_runtime.cpp
+  ${TILT_METAL_SOURCE}
   src/runtime/parquet.cpp
+  src/runtime/parquet_key_provider.cpp
   # Avro OCF/Confluent vive no mesmo TU do Iceberg para reutilizar o codec
   # binario e os codecs de bloco sem duplicar a implementacao.
   src/runtime/delta.cpp
@@ -69,8 +135,11 @@ add_library(tilt_core STATIC
   src/runtime/checkpoint.cpp
   src/runtime/mongo.cpp
   src/runtime/tls.cpp
+  src/runtime/aws_sigv4.cpp
+  src/runtime/aws_kms.cpp
   src/runtime/s3.cpp
   src/runtime/sha256.cpp
+  src/runtime/stdlib.cpp
   src/runtime/sqlite.cpp
   src/runtime/sql_pool.cpp
   src/runtime/postgres.cpp
@@ -90,13 +159,26 @@ add_library(tilt_core STATIC
   src/codegen/codegen_x86_64.cpp
   src/codegen/codegen_arm64.cpp
   src/lsp/completion.cpp
+  src/lsp/workspace_index.cpp
   src/lsp/lsp_server.cpp
   src/interp/interpreter.cpp
-  src/cli/cli.cpp)
+  src/cli/cli.cpp
+  src/cli/dev_cmds.cpp
+  src/cli/rpc.cpp)
 target_include_directories(tilt_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_BINARY_DIR}/generated)
-target_link_libraries(tilt_core PUBLIC ${CMAKE_DL_LIBS})
+target_link_libraries(tilt_core PUBLIC ${CMAKE_DL_LIBS} Threads::Threads)
+if(APPLE)
+  target_link_libraries(tilt_core PUBLIC "-framework Metal" "-framework Foundation")
+endif()
+# O cliente HTTP nativo usa o header de libcurl quando disponivel, mas carrega
+# a biblioteca em runtime; instalacoes sem libcurl continuam com o curl CLI.
+find_path(TILT_CURL_INCLUDE_DIR curl/curl.h HINTS "$ENV{CONDA_PREFIX}/include")
+if(TILT_CURL_INCLUDE_DIR)
+  target_include_directories(tilt_core PRIVATE ${TILT_CURL_INCLUDE_DIR})
+  target_compile_definitions(tilt_core PRIVATE TILT_HAS_CURL_HEADER=1)
+endif()
 if(WIN32)
   # Camada de compat: sockets (Winsock2) no runtime kafka/mongo/redis/http.
   target_link_libraries(tilt_core PUBLIC ws2_32)
@@ -104,15 +186,25 @@ endif()
 
 add_executable(tilt src/main.cpp)
 target_link_libraries(tilt PRIVATE tilt_core)
+# Windows: a pilha padrao do executavel e 1 MB (Linux/macOS: 8 MB); o parser e o
+# checker recursam na estrutura do programa e o MSVC usa frames grandes. 16 MB
+# da a mesma folga das outras plataformas (os limites de profundidade do parser
+# continuam valendo como protecao).
+if(MSVC)
+  target_link_options(tilt PRIVATE /STACK:16777216)
+elseif(WIN32)
+  target_link_options(tilt PRIVATE -Wl,--stack,16777216)
+endif()
 set_target_properties(tilt PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# stdlib ao lado do binario no build tree: o interpretador resolve modulos em
-# <exe>/../share/tilt/stdlib, mesmo layout da instalacao (install/CPack).
-add_custom_command(TARGET tilt POST_BUILD
+# stdlib ao lado do binario no build tree: copie tambem em builds incrementais
+# quando apenas um modulo .tilt mudar.
+add_custom_target(tilt_stdlib ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           ${CMAKE_CURRENT_SOURCE_DIR}/stdlib
           ${CMAKE_BINARY_DIR}/share/tilt/stdlib)
+add_dependencies(tilt tilt_stdlib)
 
 option(TILT_STATIC_LIBSTDCXX "Link libstdc++/libgcc statically (portable Linux binary)" ON)
 if(TILT_STATIC_LIBSTDCXX AND NOT APPLE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

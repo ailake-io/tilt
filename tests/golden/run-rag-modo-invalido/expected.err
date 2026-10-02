@@ -1,0 +1,7 @@
+erro[T901]: buscar: modo 'xpto' invalido (use "vetorial" ou "hibrido")
+  --> input.tilt:6:16
+   |
+ 6 |     - imprimir base.buscar("x", modo: "xpto")
+   |                ^^^^
+   |
+

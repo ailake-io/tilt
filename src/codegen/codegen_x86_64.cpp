@@ -87,6 +87,9 @@ struct Emitter {
         case Op::Index:
         case Op::Return:
         case Op::ReturnNil:
+        case Op::SuperLocalConstBinop:
+        case Op::SuperLocalLocalBinop:
+        case Op::SuperConstLocalBinop:
           break;
         default:
           *err = "instrucao fora do subconjunto nativo (GetField/membros ainda sem emissor)";
@@ -209,6 +212,45 @@ struct Emitter {
         case Op::Binop: {
           os << "  lea " << kSlot << "(%rsp), %rdi\n  lea " << kSlot << "(%rsp), %rsi\n  mov $"
              << binop_id(c.op_names[static_cast<std::size_t>(in.a)]) << ", %edx\n"
+             << "  mov %rsp, %rcx\n  call tv_binop\n  add $" << kSlot << ", %rsp\n";
+          break;
+        }
+        case Op::SuperLocalConstBinop:
+        case Op::SuperLocalLocalBinop:
+        case Op::SuperConstLocalBinop: {
+          const bool lhs_local = in.op != Op::SuperConstLocalBinop;
+          const bool rhs_const = in.op == Op::SuperLocalConstBinop;
+          if (lhs_local) {
+            os << "  sub $" << kSlot << ", %rsp\n";
+            copy_slot(os, "%rsp", 0, "%rbp", local(in.a));
+          } else {
+            const rt::Value& v = c.consts[static_cast<std::size_t>(in.a)];
+            if (v.kind == rt::ValueKind::Inteiro) os << "  mov $" << v.i << ", %rsi\n";
+            else if (v.kind == rt::ValueKind::Logico) os << "  mov $" << (v.b ? 1 : 0) << ", %rsi\n";
+            else if (v.kind == rt::ValueKind::Nulo) { push_nulo(); }
+            else if (v.kind == rt::ValueKind::Decimal) os << "  movsd " << labels.at(in.a) << "(%rip), %xmm0\n";
+            else if (v.kind == rt::ValueKind::Texto) os << "  lea " << labels.at(in.a) << "(%rip), %rsi\n";
+            if (v.kind != rt::ValueKind::Nulo)
+              push_const_call(v.kind == rt::ValueKind::Decimal ? "tv_decimal" :
+                              (v.kind == rt::ValueKind::Texto ? "tv_texto" : "tv_inteiro"));
+          }
+          if (rhs_const) {
+            const int ci = in.op == Op::SuperLocalConstBinop ? in.b : in.a;
+            const rt::Value& v = c.consts[static_cast<std::size_t>(ci)];
+            if (v.kind == rt::ValueKind::Inteiro) os << "  mov $" << v.i << ", %rsi\n";
+            else if (v.kind == rt::ValueKind::Logico) os << "  mov $" << (v.b ? 1 : 0) << ", %rsi\n";
+            else if (v.kind == rt::ValueKind::Nulo) { push_nulo(); }
+            else if (v.kind == rt::ValueKind::Decimal) os << "  movsd " << labels.at(ci) << "(%rip), %xmm0\n";
+            else if (v.kind == rt::ValueKind::Texto) os << "  lea " << labels.at(ci) << "(%rip), %rsi\n";
+            if (v.kind != rt::ValueKind::Nulo)
+              push_const_call(v.kind == rt::ValueKind::Decimal ? "tv_decimal" :
+                              (v.kind == rt::ValueKind::Texto ? "tv_texto" : "tv_inteiro"));
+          } else {
+            os << "  sub $" << kSlot << ", %rsp\n";
+            copy_slot(os, "%rsp", 0, "%rbp", local(in.b));
+          }
+          os << "  lea " << kSlot << "(%rsp), %rdi\n  lea " << kSlot << "(%rsp), %rsi\n  mov $"
+             << binop_id(c.op_names[static_cast<std::size_t>(in.c)]) << ", %edx\n"
              << "  mov %rsp, %rcx\n  call tv_binop\n  add $" << kSlot << ", %rsp\n";
           break;
         }

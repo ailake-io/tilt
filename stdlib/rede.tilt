@@ -10,8 +10,8 @@
 # (T901) — envolva em tentar/capturar para tratar como valor. De fora: outros
 # verbos (PUT/PATCH/DELETE), corpo bruto (nao-JSON) e streaming.
 
-funcao get_json url: texto, cabecalhos:
+funcao get_json url: texto, cabecalhos = nulo:
   retornar http_get_json url, cabecalhos
 
-funcao post_json url: texto, corpo, cabecalhos:
+funcao post_json url: texto, corpo, cabecalhos = nulo:
   retornar http_post_json url, corpo, cabecalhos

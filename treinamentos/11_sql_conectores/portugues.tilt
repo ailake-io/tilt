@@ -1,0 +1,7 @@
+# SQL parametrizado e transacao. A URL pode apontar para SQLite/DuckDB/Postgres.
+
+pipeline consulta:
+  passos:
+    - linhas = consultar_sql "sqlite://treinamentos/saida/exemplo.db", "select 1 as valor", []
+    - imprimir "resultado:", linhas
+    - executar_sql "sqlite://treinamentos/saida/exemplo.db", "create table if not exists auditoria (id integer)", []

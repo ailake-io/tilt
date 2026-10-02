@@ -1,0 +1,6 @@
+importar mat_local como m
+
+pipeline t:
+  passos:
+    - imprimir m.dobro(2)
+    - imprimir mat_local.dobro(2)

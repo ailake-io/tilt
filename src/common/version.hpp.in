@@ -2,6 +2,6 @@
 
 namespace tilt {
 
-inline constexpr const char* kVersion = "@PROJECT_VERSION@";
+inline constexpr const char* kVersion = "@TILT_VERSION@";
 
 }  // namespace tilt

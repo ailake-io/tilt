@@ -1,7 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <string>
+#include <utility>
 #include <vector>
+
+#include "runtime/value.hpp"
 
 namespace tilt::rt {
 
@@ -19,6 +23,13 @@ struct LlmConfig {
   long long teto_tokens = 0;        // 0 = sem teto; >0 = falha antes de estourar
   bool cache = false;               // reutiliza respostas idempotentes no processo
   std::vector<std::string> reserva;  // nomes de outros `llm` (fallback em ordem)
+  // Governanca: valores em moeda por mil tokens e arquivos JSONL opcionais.
+  double custo_entrada_mil = 0.0;
+  double custo_saida_mil = 0.0;
+  std::string contabilidade;        // ledger persistente de uso/custo
+  std::string observabilidade;       // eventos de prompt/resposta
+  std::string otel_exporter;         // arquivo JSONL de spans (opcional)
+  bool registrar_prompts = false;    // opt-in para nao vazar dados sensiveis
 };
 
 // Resposta com contabilidade: texto + tokens + modelo que respondeu.
@@ -27,6 +38,7 @@ struct RespostaLLM {
   long long tok_entrada = 0;
   long long tok_saida = 0;
   std::string modelo;
+  double custo = 0.0;
 };
 
 // Backend selected by the TILT_LLM environment variable:
@@ -45,8 +57,99 @@ RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::str
 RespostaLLM llm_chat_fluxo_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
                                   const std::string& user);
 
+// --- Tool-calling nativo (Anthropic `tool_use` / OpenAI `tool_calls`) -------
+
+// Ferramenta oferecida ao modelo: nome, descricao e JSON Schema dos argumentos.
+struct FerramentaLLM {
+  std::string nome;
+  std::string descricao;
+  Value schema;  // {"type":"object","properties":{...},"required":[...]}
+};
+
+struct ChamadaFerramenta {
+  std::string id;
+  std::string nome;
+  Value argumentos;  // mapa
+};
+
+// Turno da conversa: "user", "assistant" (texto e/ou chamadas) ou "tool"
+// (resultado de `chamada_id`).
+struct MensagemLLM {
+  std::string papel;
+  std::string texto;
+  std::vector<ChamadaFerramenta> chamadas;
+  std::string chamada_id;
+};
+
+struct RespostaFerramentas {
+  std::string texto;                        // vazio quando so ha chamadas
+  std::vector<ChamadaFerramenta> chamadas;  // vazio => resposta final
+  long long tok_entrada = 0;
+  long long tok_saida = 0;
+  std::string modelo;
+  double custo = 0.0;
+};
+
+// Um turno de conversa com ferramentas nativas, com o mesmo retry/fallback/
+// teto_tokens de llm_chat_cadeia. Em mock, chama cada ferramenta uma vez (na
+// ordem) com argumentos vazios e depois responde texto fixo.
+RespostaFerramentas llm_chat_ferramentas(const std::vector<LlmConfig>& cadeia,
+                                         const std::string& system,
+                                         const std::vector<MensagemLLM>& mensagens,
+                                         const std::vector<FerramentaLLM>& ferramentas);
+
 // Deterministic in mock mode; real embeddings via `curl` otherwise.
 std::vector<float> llm_embed(const std::string& model, const std::string& text);
+std::vector<float> llm_embed(const LlmConfig& cfg, const std::string& text);
+
+// Consulta a contabilidade em memoria e, quando configurado, o ledger JSONL
+// persistente. O mapa devolvido e estavel para uso em Tilt:
+// {entrada, saida, total, custo, chamadas}.
+Value llm_metricas(const LlmConfig& cfg);
+long long llm_uso_total(const LlmConfig& cfg);
+
+// Contexto de rastreamento por thread. O interpretador usa este escopo para
+// associar eventos a agente, sessão e trace_id sem alterar a API do provedor.
+class LlmContextoGuard {
+ public:
+  LlmContextoGuard(std::string agente, std::string sessao, std::string trace_id = {});
+  ~LlmContextoGuard();
+  LlmContextoGuard(const LlmContextoGuard&) = delete;
+  LlmContextoGuard& operator=(const LlmContextoGuard&) = delete;
+  const std::string& trace_id() const { return trace_id_; }
+ private:
+  bool ativo_ = false;
+  std::string trace_id_;
+};
+
+// Span estruturado no formato comum aos exporters OpenTelemetry. O arquivo
+// JSONL e opt-in por `observabilidade:`, `otel_exporter:` ou
+// `TILT_OTEL_EXPORTER=file:/caminho`; nenhum dado de prompt e gravado aqui.
+class LlmSpanGuard {
+ public:
+  LlmSpanGuard(const LlmConfig& cfg, std::string nome, std::string tipo = "llm",
+               std::vector<std::pair<std::string, std::string>> atributos = {});
+  ~LlmSpanGuard();
+  LlmSpanGuard(const LlmSpanGuard&) = delete;
+  LlmSpanGuard& operator=(const LlmSpanGuard&) = delete;
+  void erro();
+  const std::string& span_id() const { return span_id_; }
+ private:
+  LlmConfig cfg_;
+  std::string nome_;
+  std::string tipo_;
+  std::vector<std::pair<std::string, std::string>> atributos_;
+  std::string trace_id_;
+  std::string span_id_;
+  std::string previous_trace_id_;
+  std::string parent_span_id_;
+  std::string previous_span_id_;
+  std::chrono::steady_clock::time_point inicio_;
+  std::chrono::system_clock::time_point inicio_wall_;
+  int uncaught_ = 0;
+  bool erro_ = false;
+  bool ativo_ = false;
+};
 
 bool llm_is_mock();
 

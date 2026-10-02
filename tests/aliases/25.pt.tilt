@@ -1,0 +1,33 @@
+# Rota que expõe um agente; roda sob 'tilt servir'.
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+ferramenta eco:
+  descricao: "Repete o texto de volta."
+  entrada:
+    texto: texto
+  executar:
+    retornar texto
+
+agente AssistenteTecnico:
+  llm: gpt
+  papel: "Atende o chat."
+  ferramentas: [eco]
+  memoria: conversa
+  max_passos: 4
+
+tipo EntradaChat:
+  mensagem: texto
+
+servico Agente:
+  porta: 8080
+  rota post "/chat":
+    entrada: EntradaChat
+    passos:
+      - r = AssistenteTecnico.responder entrada.mensagem
+      - responder:
+          dados:
+            texto: r.texto
+            passos: r.rastro

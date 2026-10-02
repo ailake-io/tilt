@@ -1,0 +1,2 @@
+funcao dobro x:
+  retornar x * 2

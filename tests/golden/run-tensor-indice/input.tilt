@@ -1,0 +1,8 @@
+pipeline t:
+  passos:
+    - v = tensor [10, 20, 30]
+    - m = tensor [[1, 2, 3], [4, 5, 6]]
+    - imprimir v[0], v[-1], m[1, 2], m[-1, 0]
+    - imprimir m[1].forma, m[0].soma
+    - para cada i em 0..3:
+        imprimir v[i] * 2

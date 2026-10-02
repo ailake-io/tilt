@@ -10,7 +10,8 @@
 #   3) docker: container mariadb:11 com senha de root temporaria
 # Se nenhuma estiver disponivel, pula com mensagem (padrao dos outros testes).
 # Em todos os casos o tilt tambem precisa achar a lib do cliente
-# (libmariadb/libmysqlclient) — senao o runtime falha com erro acionavel.
+# (libmariadb/libmysqlclient). No fallback Docker/Linux, a biblioteca cliente
+# da propria imagem e usada quando o host nao a tem instalada.
 set -eu
 
 BIN="$1"
@@ -55,6 +56,19 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
+# O servidor no container nao instala a biblioteca cliente no host. Para que
+# o teste cubra o conector em maquinas que so tem Docker, usa a lib da mesma
+# imagem em um diretorio temporario; o loader continua preferindo a lib local.
+if [ -z "$MYSQLD" ] && [ -z "$MARIADB" ] && [ -n "$DOCKER" ] &&
+   [ "$(uname -s)" = Linux ] &&
+   ! ldconfig -p 2>/dev/null | grep -Eq 'lib(mariadb|mysqlclient)\.so'; then
+  if "$DOCKER" run --rm --entrypoint sh mariadb:11 -c \
+      'cat /usr/lib/*-linux-gnu/libmariadb.so.3' >"$tmp/libmariadb.so.3"; then
+    LD_LIBRARY_PATH="$tmp${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH
+  fi
+fi
 
 # Quando o servidor vem de um prefixo nao padrao (ex.: conda), a lib do
 # cliente fica em <prefix>/lib — expoe para o dlopen do tilt (so quando a
@@ -225,6 +239,28 @@ elif [ -n "$DOCKER" ]; then
   setup_sql() { root_sql "select 1"; }
   count_sql() { root_sql "select count(*) from tilt_test.clientes"; }
   URL="mysql://root:$ROOT_SENHA@127.0.0.1:$PORTA/tilt_test"
+
+  # `mariadb-admin ping` pelo socket do container pode responder antes de o
+  # encaminhamento TCP do Docker estar acessivel ao processo Tilt no host.
+  cat >"$tmp/pronto.tilt" <<'EOF2'
+pipeline pronto:
+  passos:
+    - url = env "MYSQL_URL"
+    - executar_sql url, "select 1"
+EOF2
+  pronto=0
+  for _ in $(seq 1 30); do
+    if env MYSQL_URL="$URL" "$BIN" executar "$tmp/pronto.tilt" >"$tmp/pronto.log" 2>&1; then
+      pronto=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$pronto" -ne 1 ]; then
+    echo "MariaDB respondeu no container, mas a conexao TCP do Tilt nao ficou pronta:"
+    cat "$tmp/pronto.log"
+    exit 1
+  fi
 fi
 
 # ---------------------------------------------------------------- roundtrip

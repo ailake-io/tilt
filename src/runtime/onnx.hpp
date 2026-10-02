@@ -14,6 +14,7 @@ struct OnnxLayer {
   enum Kind {
     Dense,
     Residual,
+    Embedding,
     Recorrente,
     Activation,
     Softmax,

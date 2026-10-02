@@ -1,0 +1,13 @@
+# Uma celula com o texto que o leitor ja usou como marcador interno continua texto,
+# com ou sem `nulos:` (o marcador de nulo nao vive dentro do texto da celula).
+pipeline sentinela:
+  passos:
+    - escrever_texto "s.csv", """a,b
+NULO,NA
+x,y
+"""
+    - t = ler_csv "s.csv"
+    - imprimir tipo_de(t[0].a), tamanho(t[0].a), t[0].b
+    - u = ler_csv "s.csv", nulos: ["NA"]
+    - imprimir tipo_de(u[0].a), tamanho(u[0].a), tipo_de(u[0].b), u[1].b
+    - remover_arquivo "s.csv"

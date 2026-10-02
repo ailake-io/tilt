@@ -108,5 +108,10 @@
     "label": "servico",
     "kind": "keyword",
     "detail": "declaracao de topo"
+  },
+  {
+    "label": "teste",
+    "kind": "keyword",
+    "detail": "declaracao de topo"
   }
 ]

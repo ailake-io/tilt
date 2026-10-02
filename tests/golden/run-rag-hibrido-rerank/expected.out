@@ -1,0 +1,16 @@
+== pipeline rag ==
+vetorial:
+d
+c
+a
+b
+hibrido:
+d 0.0328
+a 0.032
+c 0.0318
+b 0.0315
+rerank:
+d verdadeiro 0.0328
+c verdadeiro 0.032
+a verdadeiro 0.032
+[{texto: um gato, score: 0.0325225}, {texto: o sofa azul, score: 0.0325225}, {texto: cadeira, score: 0.031746}]

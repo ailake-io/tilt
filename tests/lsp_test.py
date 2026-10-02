@@ -4,6 +4,8 @@
 import json
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 
 def frame(obj):
@@ -27,7 +29,7 @@ def parse_frames(data: bytes):
     return out
 
 
-def run_lsp(binary, doc, requests):
+def run_lsp(binary, doc, requests, uri="file:///t.tilt"):
     """`requests` is a list of request dicts; they are framed and sent after didOpen."""
     last_id = 1
     for r in requests:
@@ -39,7 +41,7 @@ def run_lsp(binary, doc, requests):
             {
                 "jsonrpc": "2.0",
                 "method": "textDocument/didOpen",
-                "params": {"textDocument": {"uri": "file:///t.tilt", "text": doc}},
+                "params": {"textDocument": {"uri": uri, "text": doc}},
             }
         ),
     ]
@@ -455,6 +457,73 @@ def main() -> int:
         again_tab = edits_tab2[0]["newText"]
         if again_tab != formatted_tab:
             problems.append("formatting (tab) nao e idempotente")
+
+    # Explicit imports navigate into the module file, including an alias and
+    # a qualified member. No workspace index or network dependency is needed.
+    with tempfile.TemporaryDirectory(prefix="tilt-lsp-import-") as tmp:
+        source_path = Path(tmp) / "principal.tilt"
+        module_path = Path(tmp) / "util.tilt"
+        module_path.write_text("funcao dobro x:\n  retornar x * 2\n")
+        imported = (
+            "de util importar dobro como duplo\n"
+            "importar util como u\n"
+            "pipeline p:\n  passos:\n"
+            "    - x = duplo 2\n"
+            "    - y = u.dobro 3\n"
+        )
+        uri = source_path.as_uri()
+        requests = [
+            {"jsonrpc": "2.0", "id": idx, "method": "textDocument/definition",
+             "params": {"textDocument": {"uri": uri},
+                        "position": {"line": line, "character": char}}}
+            for idx, line, char in [(60, 4, 12), (61, 5, 14), (62, 1, 20)]
+        ]
+        requests += [
+            {"jsonrpc": "2.0", "id": 63, "method": "textDocument/references",
+             "params": {"textDocument": {"uri": uri}, "position": {"line": 4, "character": 12},
+                        "context": {"includeDeclaration": True}}},
+            {"jsonrpc": "2.0", "id": 64, "method": "textDocument/rename",
+             "params": {"textDocument": {"uri": uri}, "position": {"line": 4, "character": 12},
+                        "newName": "triplo"}},
+        ]
+        frames = run_lsp(binary, imported, requests, uri=uri)
+        if frames is None:
+            return 1
+        imported_responses = by_id(frames)
+        for idx in (60, 61):
+            location = imported_responses.get(idx, {}).get("result") or {}
+            if (location.get("uri") != module_path.as_uri() or
+                    location.get("range", {}).get("start") !=
+                    {"line": 0, "character": 7}):
+                problems.append(f"definition entre modulos {idx}: {location}")
+        location = imported_responses.get(62, {}).get("result") or {}
+        if location.get("uri") != module_path.as_uri():
+            problems.append(f"definition do alias de modulo: {location}")
+        refs = imported_responses.get(63, {}).get("result") or []
+        ref_uris = {ref.get("uri") for ref in refs}
+        if module_path.as_uri() not in ref_uris or uri not in ref_uris or len(refs) < 4:
+            problems.append(f"references entre modulos: {refs}")
+        changes = (imported_responses.get(64, {}).get("result") or {}).get("changes", {})
+        if module_path.as_uri() not in changes or uri not in changes:
+            problems.append(f"rename entre modulos: {changes}")
+
+    # A project dependency installed by `tilt adicionar` is also navigable.
+    with tempfile.TemporaryDirectory(prefix="tilt-lsp-vendor-") as tmp:
+        project = Path(tmp)
+        (project / "modulos").mkdir()
+        (project / "src").mkdir()
+        (project / "tilt.toml").write_text('[projeto]\nnome = "app"\n')
+        module_path = project / "modulos" / "util.tilt"
+        module_path.write_text("funcao dobro x:\n  retornar x * 2\n")
+        uri = (project / "src" / "principal.tilt").as_uri()
+        source = "importar util\npipeline p:\n  passos:\n    - imprimir util.dobro(2)\n"
+        request = {"jsonrpc": "2.0", "id": 70, "method": "textDocument/definition",
+                   "params": {"textDocument": {"uri": uri},
+                              "position": {"line": 3, "character": 21}}}
+        frames = run_lsp(binary, source, [request], uri=uri)
+        location = by_id(frames).get(70, {}).get("result") or {} if frames else {}
+        if location.get("uri") != module_path.as_uri():
+            problems.append(f"definition do modulo vendorizado: {location}")
 
     for p in problems:
         print(p)

@@ -14,7 +14,7 @@ diff -u "$tmp/interp.out" "$tmp/jit.out"
 # O JIT nativo so existe em x86_64 (jit.cpp); nas demais arquiteturas o
 # resultado igual ao interpretador vem pelo fallback transparente.
 case "$(uname -m)" in
-  x86_64|amd64) grep -q '^\[jit native\]' "$tmp/jit.err" ;;
+  x86_64|amd64|aarch64|arm64) grep -q '^\[jit native\]' "$tmp/jit.err" ;;
   *) grep -q '^\[jit fallback\]' "$tmp/jit.err" ;;
 esac
 
@@ -23,5 +23,17 @@ TILT_JIT_DEBUG=1 "$BIN" executar --jit "$FIXTURES/nativo2.tilt" \
   >"$tmp/fallback-jit.out" 2>"$tmp/fallback.err"
 diff -u "$tmp/fallback-interp.out" "$tmp/fallback-jit.out"
 grep -q '^\[jit fallback\]' "$tmp/fallback.err"
+
+"$BIN" executar "$FIXTURES/jit_recursivo.tilt" >"$tmp/recursive-interp.out"
+"$BIN" executar --jit "$FIXTURES/jit_recursivo.tilt" >"$tmp/recursive-jit.out"
+diff -u "$tmp/recursive-interp.out" "$tmp/recursive-jit.out"
+
+"$BIN" executar "$FIXTURES/jit_decimal.tilt" >"$tmp/decimal-interp.out"
+TILT_JIT_DEBUG=1 "$BIN" executar --jit "$FIXTURES/jit_decimal.tilt" \
+  >"$tmp/decimal-jit.out" 2>"$tmp/decimal.err"
+diff -u "$tmp/decimal-interp.out" "$tmp/decimal-jit.out"
+case "$(uname -m)" in
+  x86_64|amd64|aarch64|arm64) grep -q '^\[jit native\]' "$tmp/decimal.err" ;;
+esac
 
 echo "jit_test ok"

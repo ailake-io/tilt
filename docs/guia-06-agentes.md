@@ -34,6 +34,16 @@ llm gpt:
   modelo: "claude-sonnet-5"
   chave: env "ANTHROPIC_API_KEY"
 
+politica OperacaoSegura:
+  max_tokens: 4000
+  max_custo: 0.50
+  max_passos: 6
+  max_contexto: 12000
+  resumo_automatico: verdadeiro
+  compartilhado: verdadeiro       # orçamento global do llm entre agentes
+  requer_aprovacao: verdadeiro
+  ferramentas_permitidas: [eco]
+
 ferramenta eco:
   descricao: "Repete o texto de volta."
   entrada:
@@ -48,6 +58,7 @@ agente AssistenteTecnico:
     - eco
   memoria: conversa                 # nenhuma | conversa | vetorial
   max_passos: 8
+  politica: OperacaoSegura           # reutilizável por outros agentes
 
 pipeline pergunta:
   passos:
@@ -75,18 +86,61 @@ Retorna (ilustração da forma; ver exemplo executável no fim do guia):
 
 ```tilt skip
 { texto: "...",
+  tokens: 123, custo: 0.01, politica: "OperacaoSegura",
+  contexto: { limite: 12000, compactado: falso, antes: 0, depois: 0 },
+  orcamento: { tokens_limite: 4000, tokens_usados: 123,
+               custo_limite: 0.50, custo_usado: 0.01 },
   rastro: [ { passo: 1, ferramenta: "busca_documentos",
               argumentos: {...}, observacao: "..." } ] }
 ```
 
 `memoria: conversa` mantém um histórico por agente, prefixado no prompt das
-chamadas seguintes. `memoria: vetorial` guarda cada turno (pergunta+resposta)
+chamadas seguintes. `max_contexto:` limita esse histórico, as observações e as
+mensagens de ferramentas; `resumo_automatico:` preserva o início/fim e marca a
+parte intermediária compactada. `memoria: vetorial` guarda cada turno (pergunta+resposta)
 num índice em memória e prefixa os 3 mais similares (`Lembretes relevantes:`)
 — usa `embeddings:` do agente (default `text-embedding-3-small`; no mock,
 vetores determinísticos de 16 dimensões). Sem poda: acima de 200 turnos por
 agente, turnos novos não entram. Outro valor em `memoria:` é erro (`T011`).
 No modo `TILT_LLM=mock` o planner é determinístico: cada
 ferramenta é chamada uma vez, na ordem declarada, e depois o mock responde.
+
+### Tool-calling nativo (`protocolo: nativo`)
+
+Com `protocolo: nativo` no `agente`, o interpretador usa o tool-calling do
+próprio provedor em vez do protocolo de texto acima: as ferramentas vão como
+`tools` (Anthropic: `input_schema`; OpenAI/local/vLLM: `function.parameters`),
+o schema JSON sai dos campos de `entrada:` (`texto`→string, `inteiro`→integer,
+`decimal`→number, `logico`→boolean, `lista`→array, `mapa`→object) e o modelo
+devolve chamadas estruturadas (`tool_use` / `tool_calls`). Cada resultado volta
+ao modelo como `tool_result` / mensagem `role: tool` com o mesmo id, até haver
+uma resposta sem chamadas ou `max_passos`. O padrão continua sendo
+`protocolo: texto`. Em `TILT_LLM=mock` o planner chama cada ferramenta uma vez,
+na ordem. Coberto por `tests/agent_native_test.sh` (servidor falso nos dois
+formatos).
+
+### Guardrails
+
+- `ferramenta` com `requer_aprovacao: verdadeiro` só roda depois de uma
+  aprovação humana. `TILT_APROVAR=sim` (ou `todas`) aprova, `TILT_APROVAR=nao`
+  nega; sem a variável, o `tilt` pergunta no terminal (`Executar? [s/N]`) e, sem
+  terminal interativo, nega. Uma ferramenta negada não aborta o agente: a
+  observação vira `[negada] <motivo>` e a entrada do `rastro` ganha
+  `negada: verdadeiro`.
+- `agente` com `max_tokens_sessao: N` para de chamar o LLM quando a soma de
+  tokens (entrada + saída) de uma chamada de `.responder` chega a `N` e responde
+  `[agente] limite compartilhado de tokens/custo atingido`. `0`/ausente = sem teto.
+- `politica Nome:` pode ser compartilhada por vários agentes. Seus campos
+  `max_tokens`, `max_custo`, `max_passos`, `requer_aprovacao` e
+  `ferramentas_permitidas`, `max_contexto` e `resumo_automatico` são combinados
+  com os limites locais (o menor limite vence). Com `compartilhado: verdadeiro`,
+  `max_tokens` e `max_custo` consultam
+  também o ledger acumulado do primeiro `llm` da cadeia e valem para os agentes
+  que reutilizam essa política. O resultado inclui tokens, custo, `trace_id`,
+  `contexto` e `orcamento`; `llm_metricas` informa médias e preços.
+- Spans de chamadas, etapas e ferramentas podem ser exportados pelo
+  `otel_exporter:` do bloco `llm` ou `TILT_OTEL_EXPORTER=file:...`, com
+  duração, status, atributos e parentesco sem registrar prompts.
 
 ## `equipe`
 
@@ -135,7 +189,7 @@ pipeline relatorio:
 `E.executar "mensagem"` (ou `E.responder`):
 
 - `sequencial` — a saída de um agente é a entrada do próximo; retorna a última.
-- `paralelo` — todos recebem a mesma mensagem; retorna `rotulo: texto` concatenado.
+- `paralelo` — todos recebem a mesma mensagem e rodam **ao mesmo tempo** (uma thread por agente; o tempo total é o do mais lento); retorna `rotulo: texto` concatenado, na ordem declarada, e o `rastro` na mesma ordem. O primeiro erro (na ordem) aborta depois de todos terminarem. Coberto por `tests/equipe_paralela_test.sh`.
 - `supervisor` — um LLM orquestra: a cada passo responde `delegar <rotulo>
   <tarefa>` (o agente roda com o planner iterativo) ou `responder: <final>`.
   Exige o campo `supervisor: <llm>`; rastro com `{ agente, tarefa, texto }`.

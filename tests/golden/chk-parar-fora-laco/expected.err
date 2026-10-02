@@ -1,0 +1,10 @@
+erro[T014]: 'parar' fora de um laco
+  --> input.tilt:2:3
+   |
+ 2 |   parar
+   |   ^^^^^
+   |
+   = so vale dentro de 'para cada' ou 'enquanto'
+   = sugestao: mova 'parar' para dentro do laco, ou use 'retornar' para sair da funcao
+
+1 erro(s) em input.tilt

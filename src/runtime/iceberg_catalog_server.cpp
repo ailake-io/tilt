@@ -2,16 +2,22 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
+#include <random>
 #include <system_error>
 #include <thread>
 
 #include "runtime/compat.hpp"
 #include "runtime/http_server.hpp"
 #include "runtime/json.hpp"
+#include "runtime/table_lock.hpp"
 
 namespace tilt::rt {
 
@@ -155,6 +161,25 @@ std::string read_file_bytes(const std::string& path, bool& ok) {
   return out;
 }
 
+std::string catalog_uuid() {
+  std::random_device rd;
+  std::mt19937_64 gen(rd());
+  char buf[37];
+  std::snprintf(buf, sizeof buf, "%08x-%04x-%04x-%04x-%012llx",
+                static_cast<unsigned>(gen() & 0xffffffffu),
+                static_cast<unsigned>(gen() & 0xffffu),
+                static_cast<unsigned>(0x4000u | (gen() & 0xfffu)),
+                static_cast<unsigned>(0x8000u | (gen() & 0x3fffu)),
+                static_cast<unsigned long long>(gen() & 0xffffffffffffull));
+  return buf;
+}
+
+std::int64_t catalog_now_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
 // ---------------------------------------------------------------------------
 // Contexto do handler: imutavel apos o init (thread-safe com workers).
 // ---------------------------------------------------------------------------
@@ -164,6 +189,7 @@ struct CatalogoCtx {
   std::string prefix;       // "/v1" (sem barra final)
   std::string anuncio;      // host:porta fallback p/ URLs quando sem Host header
   bool reescrever_manifests = true;
+  std::string auth_token;  // opcional: ICEBERG_CATALOG_TOKEN
 };
 
 // Codifica um caminho relativo segmento a segmento ('/' preservado).
@@ -228,12 +254,12 @@ std::string reescrever_location(const CatalogoCtx& ctx, const std::string& host_
 void reescrever_locations(const CatalogoCtx& ctx, const std::string& host_hdr, Value& v) {
   if (v.kind == ValueKind::Texto) return;
   if (v.kind == ValueKind::Lista) {
-    if (!v.list) return;
-    for (Value& e : *v.list) reescrever_locations(ctx, host_hdr, e);
+    if (!v.list_ref()) return;
+    for (Value& e : *v.list_ref()) reescrever_locations(ctx, host_hdr, e);
     return;
   }
-  if (v.kind != ValueKind::Mapa || !v.map) return;
-  for (auto& kv : v.map->items) {
+  if (v.kind != ValueKind::Mapa || !v.map_ref()) return;
+  for (auto& kv : v.map_ref()->items) {
     const bool chave_reecrita = kv.first == "metadata-file" ||
                                 (ctx.reescrever_manifests && kv.first == "manifest-list");
     if (chave_reecrita && kv.second.kind == ValueKind::Texto) {
@@ -255,11 +281,10 @@ HttpResponse resposta_erro(int code, const std::string& msg, const std::string& 
   return resp;
 }
 
-HttpResponse resposta_501(const std::string& op) {
+HttpResponse resposta_405(const std::string& op, const std::string& allow = {}) {
   HttpResponse resp = resposta_erro(
-      501, "catalogo read-only: " + op +
-               " nao e suportado pelo 'tilt servir-catalogo' (1a passada; apenas leitura)",
-      "UnsupportedOperationException");
+      405, "metodo nao permitido para " + op, "MethodNotAllowedException");
+  if (!allow.empty()) resp.headers.emplace_back("Allow", allow);
   return resp;
 }
 
@@ -317,27 +342,256 @@ HttpResponse rota_load_table(const CatalogoCtx& ctx, const HttpRequest& req,
   reescrever_locations(ctx, req.host, md);
 
   Value out = Value::mapa();
-  out.map->set("metadata-location", Value::texto(url_arquivo(ctx, req.host, meta_path)));
-  out.map->set("metadata", std::move(md));
-  out.map->set("config", Value::mapa());
+  out.map_ref()->set("metadata-location", Value::texto(url_arquivo(ctx, req.host, meta_path)));
+  out.map_ref()->set("metadata", std::move(md));
+  out.map_ref()->set("config", Value::mapa());
   HttpResponse resp;
+  if (req.method == "HEAD") {
+    resp.body.clear();
+    return resp;
+  }
   resp.body = json_dump(out);
   return resp;
 }
 
-HttpResponse rota_list_tables(const CatalogoCtx& ctx) {
+std::optional<std::int64_t> metadata_snapshot(const std::string& path) {
+  bool ok = false;
+  const std::string raw = read_file_bytes(path, ok);
+  if (!ok) return std::nullopt;
+  try {
+    const Value md = json_parse(raw);
+    const Value* current = md.map_ref() ? md.map_ref()->find("current-snapshot-id") : nullptr;
+    if (!current || current->kind != ValueKind::Inteiro) return std::nullopt;
+    return current->i;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
+HttpResponse rota_create_table(const CatalogoCtx& ctx, const HttpRequest& req) {
+  Value body;
+  try {
+    body = json_parse(req.body);
+  } catch (const std::exception& e) {
+    return resposta_erro(400, "createTable: JSON invalido: " + std::string(e.what()),
+                         "IllegalArgumentException");
+  }
+  const Value* name = body.map_ref() ? body.map_ref()->find("name") : nullptr;
+  const Value* location = body.map_ref() ? body.map_ref()->find("location") : nullptr;
+  if (!name || name->kind != ValueKind::Texto || name->s.empty() ||
+      name->s.find('/') != std::string::npos || name->s == "." || name->s == "..") {
+    return resposta_erro(400, "createTable: name invalido", "IllegalArgumentException");
+  }
+  if (!location || location->kind != ValueKind::Texto || location->s.empty()) {
+    return resposta_erro(400, "createTable: location ausente", "IllegalArgumentException");
+  }
+  std::string loc = location->s;
+  if (loc.rfind("file://", 0) == 0) loc = loc.substr(7);
+  if (loc.front() != '/') loc = ctx.root + "/" + loc;
+  std::string canon;
+  if (!dentro_do_root(ctx, loc, canon)) {
+    return resposta_erro(403, "location fora do diretorio-raiz do catalogo", "ForbiddenException");
+  }
+  const std::string expected = ctx.root + "/" + name->s;
+  std::string expected_canon;
+  if (!dentro_do_root(ctx, expected, expected_canon) || canon != expected_canon) {
+    return resposta_erro(400, "createTable: location deve apontar para a tabela no root",
+                         "IllegalArgumentException");
+  }
+  TableLock table_lock(canon + "/.tilt.rest", "Iceberg REST");
+  if (latest_metadata_path(canon).empty()) {
+    const Value* schema = body.map_ref()->find("schema");
+    if (!schema || schema->kind != ValueKind::Mapa || !schema->map_ref()) {
+      return resposta_erro(400, "createTable: schema ausente", "IllegalArgumentException");
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(canon + "/metadata", ec);
+    if (ec) return resposta_erro(500, "createTable: falha ao criar metadata: " + ec.message(),
+                                  "RuntimeException");
+    Value schema_copy = *schema;
+    if (!schema_copy.map_ref()->find("type"))
+      schema_copy.map_ref()->set("type", Value::texto("struct"));
+    schema_copy.map_ref()->set("schema-id", Value::inteiro(0));
+    std::int64_t last_column_id = 0;
+    if (const Value* fields = schema_copy.map_ref()->find("fields");
+        fields && fields->kind == ValueKind::Lista && fields->list_ref()) {
+      for (const Value& field : *fields->list_ref()) {
+        if (field.map_ref()) {
+          if (const Value* id = field.map_ref()->find("id");
+              id && id->kind == ValueKind::Inteiro) last_column_id = std::max(last_column_id, id->i);
+        }
+      }
+    }
+    Value spec = Value::mapa();
+    if (const Value* requested = body.map_ref()->find("partition-spec");
+        requested && requested->kind == ValueKind::Mapa) spec = *requested;
+    spec.map_ref()->set("spec-id", Value::inteiro(0));
+    Value metadata = Value::mapa();
+    metadata.map_ref()->set("format-version", Value::inteiro(2));
+    metadata.map_ref()->set("table-uuid", Value::texto(catalog_uuid()));
+    metadata.map_ref()->set("location", Value::texto(location->s));
+    metadata.map_ref()->set("last-sequence-number", Value::inteiro(0));
+    metadata.map_ref()->set("last-updated-ms", Value::inteiro(catalog_now_ms()));
+    metadata.map_ref()->set("last-column-id", Value::inteiro(last_column_id));
+    metadata.map_ref()->set("last-partition-id", Value::inteiro(999));
+    Value schemas = Value::lista();
+    schemas.list_ref()->push_back(std::move(schema_copy));
+    metadata.map_ref()->set("schemas", std::move(schemas));
+    metadata.map_ref()->set("current-schema-id", Value::inteiro(0));
+    metadata.map_ref()->set("partition-spec", Value::lista());
+    Value specs = Value::lista();
+    specs.list_ref()->push_back(std::move(spec));
+    metadata.map_ref()->set("partition-specs", std::move(specs));
+    metadata.map_ref()->set("default-spec-id", Value::inteiro(0));
+    const Value* properties = body.map_ref()->find("properties");
+    metadata.map_ref()->set("properties", properties && properties->kind == ValueKind::Mapa
+                                             ? *properties : Value::mapa());
+    metadata.map_ref()->set("current-snapshot-id", Value::inteiro(-1));
+    metadata.map_ref()->set("snapshots", Value::lista());
+    metadata.map_ref()->set("snapshot-log", Value::lista());
+    metadata.map_ref()->set("metadata-log", Value::lista());
+    Value orders = Value::lista();
+    Value order = Value::mapa();
+    order.map_ref()->set("order-id", Value::inteiro(0));
+    order.map_ref()->set("fields", Value::lista());
+    orders.list_ref()->push_back(std::move(order));
+    metadata.map_ref()->set("sort-orders", std::move(orders));
+    metadata.map_ref()->set("default-sort-order-id", Value::inteiro(0));
+    metadata.map_ref()->set("refs", Value::mapa());
+    const std::string final_path = canon + "/metadata/v0.metadata.json";
+    const std::string temp_path = final_path + ".tmp";
+    std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
+    if (!out) return resposta_erro(500, "createTable: falha ao abrir metadata", "RuntimeException");
+    out << json_dump(metadata);
+    out.close();
+    if (!out || std::rename(temp_path.c_str(), final_path.c_str()) != 0) {
+      std::remove(temp_path.c_str());
+      return resposta_erro(500, "createTable: falha ao materializar metadata", "RuntimeException");
+    }
+  }
+  HttpRequest load_req;
+  load_req.method = "GET";
+  load_req.host = req.host;
+  return rota_load_table(ctx, load_req, name->s);
+}
+
+HttpResponse rota_commit_table(const CatalogoCtx& ctx, const HttpRequest& req,
+                               const std::string& tabela) {
+  Value body;
+  try {
+    body = json_parse(req.body);
+  } catch (const std::exception& e) {
+    return resposta_erro(400, "transactions: JSON invalido: " + std::string(e.what()),
+                         "IllegalArgumentException");
+  }
+  const Value* requirements = body.map_ref() ? body.map_ref()->find("requirements") : nullptr;
+  if (!requirements || requirements->kind != ValueKind::Lista || !requirements->list_ref()) {
+    return resposta_erro(400, "transactions: requirements ausente", "IllegalArgumentException");
+  }
+  std::optional<std::int64_t> expected;
+  for (const Value& requirement : *requirements->list_ref()) {
+    const Value* type = requirement.map_ref() ? requirement.map_ref()->find("type") : nullptr;
+    if (!type || type->kind != ValueKind::Texto) continue;
+    if (type->s == "assert-current-snapshot-id") {
+      const Value* id = requirement.map_ref()->find("snapshot-id");
+      if (!id || id->kind != ValueKind::Inteiro) {
+        return resposta_erro(400, "transactions: snapshot-id invalido", "IllegalArgumentException");
+      }
+      expected = id->i;
+    }
+  }
+  const std::string table_dir = ctx.root + "/" + tabela;
+  TableLock table_lock(table_dir + "/.tilt.rest", "Iceberg REST");
+  const std::string latest = latest_metadata_path(table_dir);
+  if (latest.empty()) return resposta_erro(404, "tabela nao encontrada: " + tabela,
+                                           "NoSuchTableException");
+  const std::int64_t latest_version = metadata_version_from_name(
+      latest.substr(latest.find_last_of('/') + 1));
+  std::optional<std::int64_t> previous;
+  if (latest_version > 0) {
+    const std::string prev = table_dir + "/metadata/v" + std::to_string(latest_version - 1) +
+                             ".metadata.json";
+    previous = metadata_snapshot(prev);
+  }
+  if (expected.has_value()) {
+    const std::int64_t actual = previous.value_or(-1);
+    if (actual != *expected) {
+      return resposta_erro(409, "transactions: conflito de snapshot (esperado " +
+                               std::to_string(*expected) + ", atual " + std::to_string(actual) + ")",
+                           "CommitFailedException");
+    }
+  }
+  HttpRequest load_req;
+  load_req.method = "GET";
+  load_req.host = req.host;
+  return rota_load_table(ctx, load_req, tabela);
+}
+
+HttpResponse rota_drop_table(const CatalogoCtx& ctx, const std::string& tabela) {
+  if (tabela.empty() || tabela.find('/') != std::string::npos || tabela == "." || tabela == "..") {
+    return resposta_erro(404, "tabela nao encontrada: " + tabela, "NoSuchTableException");
+  }
+  const std::string dir = ctx.root + "/" + tabela;
+  std::string canon;
+  if (!dentro_do_root(ctx, dir, canon)) {
+    return resposta_erro(403, "tabela fora do diretorio-raiz", "ForbiddenException");
+  }
+  if (!tilt_is_directory(canon)) return resposta_erro(404, "tabela nao encontrada: " + tabela,
+                                                       "NoSuchTableException");
+  TableLock table_lock(canon + "/.tilt.rest", "Iceberg REST");
+  std::error_code ec;
+  std::filesystem::remove_all(canon, ec);
+  if (ec) return resposta_erro(500, "falha ao remover tabela: " + ec.message(), "RuntimeException");
+  HttpResponse response;
+  response.status = 204;
+  response.body.clear();
+  return response;
+}
+
+// Query string -> mapa (k=v separados por '&'; '+' = espaco, form-encoding).
+std::string query_param(const std::string& query, const std::string& chave);
+
+HttpResponse rota_list_tables(const CatalogoCtx& ctx, const std::string& query) {
   const std::vector<std::string> tabelas = iceberg_catalog_tables(ctx.root);
+  std::size_t inicio = 0;
+  std::size_t tamanho = tabelas.size();
+  const std::string token = query_param(query, "page_token");
+  const std::string page_size = query_param(query, "page_size");
+  if (!token.empty()) {
+    try {
+      inicio = static_cast<std::size_t>(std::stoull(token));
+    } catch (...) {
+      return resposta_erro(400, "page_token invalido", "IllegalArgumentException");
+    }
+  }
+  if (inicio > tabelas.size()) {
+    return resposta_erro(400, "page_token fora do intervalo", "IllegalArgumentException");
+  }
+  if (!page_size.empty()) {
+    try {
+      const std::size_t parsed = static_cast<std::size_t>(std::stoull(page_size));
+      if (parsed == 0 || parsed > 1000) {
+        return resposta_erro(400, "page_size deve estar entre 1 e 1000", "IllegalArgumentException");
+      }
+      tamanho = parsed;
+    } catch (...) {
+      return resposta_erro(400, "page_size invalido", "IllegalArgumentException");
+    }
+  }
+  const std::size_t fim = std::min(tabelas.size(), inicio + tamanho);
   Value ids = Value::lista();
-  for (const std::string& t : tabelas) {
+  for (std::size_t i = inicio; i < fim; ++i) {
+    const std::string& t = tabelas[i];
     Value id = Value::mapa();
     Value ns = Value::lista();
-    ns.list->push_back(Value::texto("default"));
-    id.map->set("namespace", std::move(ns));
-    id.map->set("name", Value::texto(t));
-    ids.list->push_back(std::move(id));
+    ns.list_ref()->push_back(Value::texto("default"));
+    id.map_ref()->set("namespace", std::move(ns));
+    id.map_ref()->set("name", Value::texto(t));
+    ids.list_ref()->push_back(std::move(id));
   }
   Value out = Value::mapa();
-  out.map->set("identifiers", std::move(ids));
+  out.map_ref()->set("identifiers", std::move(ids));
+  if (fim < tabelas.size()) out.map_ref()->set("next-page-token", Value::texto(std::to_string(fim)));
   HttpResponse resp;
   resp.body = json_dump(out);
   return resp;
@@ -382,35 +636,82 @@ HttpResponse despachar(const CatalogoCtx& ctx, const HttpRequest& req) {
   const std::string rest =
       full_path.size() == base.size() ? "" : full_path.substr(base.size());
 
+  // Quando configurado, o token protege todas as rotas do catalogo, inclusive
+  // /config e /namespaces. Isso evita que um endpoint de descoberta vire uma
+  // forma de contornar a autenticacao exigida para as operacoes de tabela.
+  if (!ctx.auth_token.empty()) {
+    const std::string expected = "Bearer " + ctx.auth_token;
+    if (req.authorization != expected) {
+      return resposta_erro(401, "Authorization Bearer ausente ou invalido", "UnauthorizedException");
+    }
+  }
+
   if (rest == "/config") {
-    if (req.method != "GET") return resposta_501("config write");
-    return HttpResponse{200, "application/json", "{\"defaults\":{},\"overrides\":{}}"};
+    if (req.method != "GET") return resposta_405("config", "GET");
+    HttpResponse response;
+    response.status = 200;
+    response.content_type = "application/json";
+    response.body = "{\"defaults\":{},\"overrides\":{}}";
+    return response;
   }
   if (rest == "/namespaces") {
-    if (req.method != "GET") return resposta_501("namespace write");
-    return HttpResponse{200, "application/json", "{\"namespaces\":[[\"default\"]]}"};
+    if (req.method == "GET") {
+      HttpResponse response;
+      response.status = 200;
+      response.content_type = "application/json";
+      response.body = "{\"namespaces\":[[\"default\"]]}";
+      return response;
+    }
+    if (req.method == "POST") {
+      Value body;
+      try { body = json_parse(req.body); }
+      catch (...) { return resposta_erro(400, "namespace: JSON invalido", "IllegalArgumentException"); }
+      const Value* ns = body.map_ref() ? body.map_ref()->find("namespace") : nullptr;
+      if (!ns || ns->kind != ValueKind::Lista || !ns->list_ref() || ns->list_ref()->size() != 1 ||
+          ns->list_ref()->front().kind != ValueKind::Texto || ns->list_ref()->front().s != "default")
+        return resposta_erro(400, "somente o namespace default e suportado", "IllegalArgumentException");
+      HttpResponse response;
+      response.status = 200;
+      response.body = "{\"namespace\":[\"default\"],\"properties\":{}}";
+      return response;
+    }
+    return resposta_405("namespace", "GET, POST");
   }
   if (rest == "/namespaces/default") {
-    if (req.method != "GET") return resposta_501("namespace write");
-    return HttpResponse{200, "application/json",
-                        "{\"namespace\":[\"default\"],\"properties\":{}}"};
+    if (req.method == "DELETE") {
+      if (!iceberg_catalog_tables(ctx.root).empty())
+        return resposta_erro(409, "namespace default nao esta vazio", "NamespaceNotEmptyException");
+      HttpResponse response;
+      response.status = 204;
+      response.body.clear();
+      return response;
+    }
+    if (req.method != "GET") return resposta_405("namespace default", "GET, DELETE");
+    HttpResponse response;
+    response.status = 200;
+    response.content_type = "application/json";
+    response.body = "{\"namespace\":[\"default\"],\"properties\":{}}";
+    return response;
   }
   if (rest == "/namespaces/default/tables") {
-    if (req.method == "GET") return rota_list_tables(ctx);
-    return resposta_501("createTable");
+    if (req.method == "GET") return rota_list_tables(ctx, query);
+    if (req.method == "POST") return rota_create_table(ctx, req);
+    return resposta_405("tables", "GET, POST");
   }
   const std::string kTablesPrefix = "/namespaces/default/tables/";
   if (rest.rfind(kTablesPrefix, 0) == 0) {
     const std::string sub = rest.substr(kTablesPrefix.size());
     const std::size_t txs = sub.find("/transactions");
     if (txs != std::string::npos && txs + std::string("/transactions").size() == sub.size()) {
-      return resposta_501("commit (transactions)");
+      if (req.method == "POST") return rota_commit_table(ctx, req, pct_decode(sub.substr(0, txs)));
+      return resposta_405("transactions", "POST");
     }
     if (sub.find('/') != std::string::npos) {
       return resposta_erro(404, "rota nao encontrada: " + full_path, "NotFoundException");
     }
-    if (req.method == "GET") return rota_load_table(ctx, req, pct_decode(sub));
-    return resposta_501("escrita em tabela (" + req.method + ")");
+    if (req.method == "GET" || req.method == "HEAD") return rota_load_table(ctx, req, pct_decode(sub));
+    if (req.method == "DELETE") return rota_drop_table(ctx, pct_decode(sub));
+    return resposta_405("tabela", "GET, HEAD, DELETE");
   }
   if (rest == "/files" || rest.rfind("/files/", 0) == 0) {
     if (req.method == "GET" || req.method == "HEAD") {
@@ -432,7 +733,7 @@ HttpResponse despachar(const CatalogoCtx& ctx, const HttpRequest& req) {
       }
       return rota_arquivos(ctx, req, query_param(query, "path"));
     }
-    return resposta_501("escrita de arquivo (" + req.method + ")");
+    return resposta_405("files", "GET, HEAD");
   }
   return resposta_erro(404, "rota nao encontrada: " + full_path, "NotFoundException");
 }
@@ -450,6 +751,7 @@ int iceberg_catalog_serve(const IcebergCatalogConfig& cfg) {
   ctx.root = root_canon.string();
   ctx.prefix = cfg.prefix;
   ctx.reescrever_manifests = cfg.reescrever_manifests;
+  if (const char* token = std::getenv("ICEBERG_CATALOG_TOKEN")) ctx.auth_token = token;
   while (ctx.prefix.size() > 1 && ctx.prefix.back() == '/') ctx.prefix.pop_back();
   if (ctx.prefix.empty() || ctx.prefix.front() != '/') ctx.prefix = "/v1";
   const std::string bind_host = cfg.host.empty() ? "0.0.0.0" : cfg.host;

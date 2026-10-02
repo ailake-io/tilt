@@ -1,0 +1,26 @@
+llm gpt:
+  provider: "anthropic"
+  model: "claude-sonnet-5"
+  key: env "ANTHROPIC_API_KEY"
+
+pipeline fluxo:
+  steps:
+    - pontuacao = 0.7
+    - rotulo = "?"
+    - if pontuacao >= 0.9:
+        rotulo = "high"
+    else if pontuacao >= 0.5:
+        rotulo = "medium"
+    else:
+        rotulo = "low"
+    - print rotulo
+    - tabela = [{ email: "a@x" }]
+    - for each row in tabela:
+        print row.email
+    - tentativas = 0
+    - while tentativas < 3:
+        tentativas = tentativas + 1
+    - try:
+        resposta = ask gpt, user: "summarize tilt"
+    catch erro:
+      register "LLM failure: {{erro}}"

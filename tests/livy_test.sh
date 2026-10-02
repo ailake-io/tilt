@@ -79,7 +79,8 @@ def saida_para(code):
         else:
             linhas = [{"id": 1, "nome": "ana"}, {"id": 2, "nome": "bruno"}]
         return {"status": "ok", "execution_count": 1,
-                "data": {"text/plain": json.dumps(linhas)}}
+                # O REPL Scala real prefixa o valor com `resN: String = `.
+                "data": {"text/plain": "res0: String = " + json.dumps(linhas) + "\\n"}}
     # spark_executar: codigo verbatim (REPL Scala do mock)
     if "1 + 1" in code:
         texto = "res0: Int = 2"

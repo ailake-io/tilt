@@ -1,0 +1,8 @@
+erro[T030]: nome 'indefinido' nao definido
+  --> input.tilt:3:16
+   |
+ 3 |     - x = 1 se indefinido senao 2
+   |                ^^^^^^^^^^
+   |
+
+1 erro(s) em input.tilt

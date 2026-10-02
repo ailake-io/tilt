@@ -1,1 +1,2 @@
 TILT_LLM=mock
+TILT_HTTP_BACKEND=cli

@@ -1,0 +1,8 @@
+pipeline qualidade:
+  passos:
+    - agregado = [{ dominio: "x.com", total: 2, receita: 20 }]
+    - verificar agregado:
+        - nao_nulo: [dominio, total]
+        - unico: dominio
+        - intervalo: linha.receita >= 0
+        ao_violar: abortar        # ou 'avisar'

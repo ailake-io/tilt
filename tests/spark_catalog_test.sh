@@ -87,6 +87,16 @@ done
 }
 echo "catalogo REST no ar: http://127.0.0.1:$PORTA/v1"
 
+# Docker Desktop/WSL pode oferecer `--network host` sem compartilhar o loopback
+# com o processo no host. Distingue essa limitacao da leitura Iceberg: o
+# catalogo ja respondeu no host, mas o container precisa alcança-lo tambem.
+if ! docker run --rm --network host --entrypoint python3 "$IMAGEM" -c \
+    'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=3).read()' \
+    "http://127.0.0.1:$PORTA/v1/config" >/dev/null 2>&1; then
+  echo "container Spark sem acesso ao catalogo no loopback do host; pulando o teste spark_catalog"
+  exit 0
+fi
+
 # --- 2. spark (container, --network host) le via SparkCatalog rest -------------------
 cat > "$tmp/verifica_catalogo.py" <<'PYEOF'
 import sys

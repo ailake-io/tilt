@@ -1,0 +1,32 @@
+llm gpt:
+  provider: "anthropic"
+  model: "claude-sonnet-5"
+  key: env "ANTHROPIC_API_KEY"
+
+tool eco:
+  description: "Repeats the text back."
+  input:
+    text: text
+  execute:
+    return text
+
+agent AssistenteTecnico:
+  llm: gpt
+  role: "Answers the chat."
+  tools: [eco]
+  memory: conversation
+  max_steps: 4
+
+type EntradaChat:
+  mensagem: text
+
+service Agent:
+  port: 8080
+  route post "/chat":
+    input: EntradaChat
+    steps:
+      - r = AssistenteTecnico.respond input.mensagem
+      - respond:
+          data:
+            text: r.text
+            steps: r.rastro

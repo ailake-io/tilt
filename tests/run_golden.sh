@@ -8,6 +8,7 @@
 #   expected.code  optional. Exact process exit code.
 #   expected.out   optional. Exact stdout.
 #   expected.err   optional. Exact stderr.
+#   expected.err.alt optional. Alternate exact stderr for optional libraries.
 #
 # Regenerate expected files with:  UPDATE=1 sh run_golden.sh <bin> <golden-dir>
 
@@ -55,7 +56,10 @@ for case_dir in "$DIR"/*/; do
   fi
   for stream in out err; do
     if [ -f "$case_dir/expected.$stream" ]; then
-      if ! diff -u "$case_dir/expected.$stream" "$case_dir/.actual.$stream"; then
+      if ! cmp -s "$case_dir/expected.$stream" "$case_dir/.actual.$stream" &&
+         { [ ! -f "$case_dir/expected.$stream.alt" ] ||
+           ! cmp -s "$case_dir/expected.$stream.alt" "$case_dir/.actual.$stream"; }; then
+        diff -u "$case_dir/expected.$stream" "$case_dir/.actual.$stream" || true
         echo "[$name] $stream difere"
         ok=0
       fi

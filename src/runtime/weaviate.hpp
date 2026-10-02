@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/vectorstore.hpp"
+
 namespace tilt::rt {
 
 // Indice vetorial remoto no Weaviate (REST via curl, mesmo padrao do
@@ -14,9 +16,7 @@ namespace tilt::rt {
 void weaviate_upsert(const std::string& base, const std::string& classe,
                      const std::string& id, const std::string& text,
                      const std::vector<float>& vec);
-std::vector<std::pair<std::string, double>> weaviate_search(const std::string& base,
-                                                            const std::string& classe,
-                                                            const std::vector<float>& vec,
-                                                            std::size_t k);
+std::vector<VectorHit> weaviate_search(const std::string& base, const std::string& classe,
+                                       const std::vector<float>& vec, std::size_t k);
 
 }  // namespace tilt::rt

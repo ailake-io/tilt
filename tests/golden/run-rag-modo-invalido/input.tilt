@@ -1,0 +1,6 @@
+indice base:
+  embeddings: "m"
+  armazenamento: "memoria"
+pipeline p:
+  passos:
+    - imprimir base.buscar("x", modo: "xpto")

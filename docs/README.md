@@ -10,8 +10,8 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 02 | [Tipos](guia-02-tipos.md) | `tipo`, escalares, `lista`/`mapa`/`opcional`, `tensor`, `tabela`, `fluxo`, união de literais, valores padrão |
 | 03 | [Engenharia de dados](guia-03-dados.md) | `fonte`, `pipeline`, `passos`, métodos de tabela, `verificar`, `ao_falhar`, `agenda`, CSV/JSON, stdlib `io` |
 | 04 | [ML e Deep Learning](guia-04-ml-dl.md) | tensores e ops, `modelo`/`camadas`, `modelo X.executar`, `treino`, `carregador`, otimizadores, `dispositivo`/GPU, stdlib `nn` |
-| 05 | [LLMs e RAG](guia-05-llm-rag.md) | `llm`, `perguntar`, `formato: <tipo>`, `incorporar`, `dividir_texto`, `indice`, `.inserir`/`.buscar` |
-| 06 | [Agentes](guia-06-agentes.md) | `ferramenta`, `agente`, `.responder`, `rastro`, `memoria`, `equipe`, `estrategia` |
+| 05 | [LLMs e RAG](guia-05-llm-rag.md) | `llm`, contabilidade/observabilidade, `perguntar`, `formato: <tipo>`, `incorporar`, `fragmentar`/`dividir_texto`, `indice`, `.inserir`/`.buscar`/`.avaliar` |
+| 06 | [Agentes](guia-06-agentes.md) | `ferramenta`, `agente`, `politica`, `.responder`, `rastro`, `memoria`, `equipe`, `estrategia` |
 | 07 | [Serviços HTTP](guia-07-http.md) | `servico`, `rota`, `entrada`, `responder`, `tilt servir`, validação, códigos de status |
 | 08 | [CLI](guia-08-cli.md) | cada comando, flags, códigos de saída, variáveis de ambiente |
 | 09 | [VM e nativo](guia-09-vm-nativo.md) | subconjunto da VM de bytecode e do codegen x86-64/ARM64, limitações |
@@ -19,3 +19,13 @@ Documentação de uso. Para a especificação arquitetural do compilador veja
 | 11 | [Diagnósticos](guia-11-diagnosticos.md) | todos os códigos `Tnnn` com exemplo |
 | 12 | [Limitações](guia-12-limitacoes.md) | status da 1ª passada — o que ainda não funciona |
 | 13 | [Instalação e distribuição](guia-13-instalacao.md) | requisitos, instalação do fonte, binários pré-compilados, gerar tarball/`.deb`/Release, extensão VS Code |
+| 14 | [Roteiro](guia-14-roteiro.md) | o que falta por domínio (dados, ML, DL, LLM, agentes, MLOps) e prioridades |
+| 15 | [Solução de problemas](guia-15-troubleshooting.md) | erros comuns e como resolver |
+| 16 | [Desempenho](guia-16-desempenho.md) | medições reais (lógica e dados), por que é lento e o plano para acelerar, como medir com `bench/rodar.sh` |
+| 17 | [Interoperabilidade](guia-17-interoperabilidade.md) | `tilt rpc` (JSON-lines e HTTP), `tilt chamar`, pacote Python `tilt`, `chamar_python`, PySpark (`tilt.spark`), Kof nas duas direções |
+| 18 | [Palavras em inglês](guia-18-palavras-em-ingles.md) | `if`/`for each`/`steps`/`print`/`filter`... em inglês, como o idioma é escolhido, o que não é traduzido, tabela completa |
+
+Para a beta pública, consulte também a [matriz de recursos](matriz-recursos-beta.md),
+os [exemplos reproduzíveis](exemplos-beta.md), o
+[relatório de validação](validacao-beta-2026-10-01.md) e o
+[guia de benchmarks](../benchmarks/beta-2026-10-01.md).

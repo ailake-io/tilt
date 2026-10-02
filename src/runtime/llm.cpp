@@ -1,7 +1,6 @@
 #include "runtime/llm.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -10,11 +9,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <fstream>
+#include <exception>
 #include <initializer_list>
 #include <iomanip>
 #include <map>
 #include <mutex>
+#include <fstream>
+#include <filesystem>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -25,7 +26,9 @@
 #endif
 
 #include "runtime/compat.hpp"
+#include "runtime/http_client.hpp"
 #include "runtime/json.hpp"
+#include "runtime/sha256.hpp"
 #include "runtime/value.hpp"
 
 namespace tilt::rt {
@@ -41,33 +44,20 @@ std::string truncate(const std::string& s, std::size_t n) {
   return s.size() <= n ? s : s.substr(0, n) + "...";
 }
 
-// Runs a command, returns its stdout. Throws on non-zero exit.
-std::string run(const std::string& cmd) {
-  std::string out;
-  std::array<char, 4096> buf{};
-  FILE* pipe = tilt_popen(cmd.c_str(), "r");
-  if (!pipe) throw std::runtime_error("nao foi possivel executar 'curl'");
-  std::size_t n;
-  while ((n = std::fread(buf.data(), 1, buf.size(), pipe)) > 0) out.append(buf.data(), n);
-  int rc = tilt_pclose(pipe);
+std::string agora_utc_iso() {
+  const std::time_t now = std::time(nullptr);
+  std::tm tm{};
 #if defined(_WIN32)
-  const int codigo = rc;
+  gmtime_s(&tm, &now);
 #else
-  // pclose devolve wait-status (codigo << 8); extrai a saida real (28 =
-  // timeout do --max-time, 6 = DNS, 7 = conexao recusada).
-  const int codigo = WIFEXITED(rc) ? WEXITSTATUS(rc) : rc;
+  gmtime_r(&now, &tm);
 #endif
-  if (codigo != 0) {
-    throw std::runtime_error("curl retornou codigo " + std::to_string(codigo) +
-                             " (verifique rede/chave/URL)");
-  }
-  return out;
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+  return buf;
 }
 
-// Writes `body` to a temp file and POSTs it with curl; returns {status, body}.
-// Sem --fail: 4xx/5xx voltam com o corpo para decidir retry (429/5xx) ou
-// falha rapida (demais 4xx). Erro de transporte (DNS, conexao, timeout)
-// joga runtime_error com o codigo do curl.
+// Sem falhar em 4xx/5xx: o chamador decide retry para 429/5xx.
 struct HttpResult {
   long status = 0;
   std::string body;
@@ -120,76 +110,210 @@ long retry_after_seconds(const std::string& headers) {
 
 HttpResult http_post_status(const std::string& url, const std::vector<std::string>& headers,
                             const std::string& body, int timeout_s) {
-  std::string body_file;
-  std::string header_file;
-  const int fd = tilt_tempfile("llm", body_file);
-  if (fd < 0) throw std::runtime_error("nao foi possivel criar arquivo temporario");
-  tilt_close_file(fd);
-  {
-    std::ofstream out(body_file, std::ios::trunc);
-    out << body;
-    if (!out) {
-      std::remove(body_file.c_str());
-      throw std::runtime_error("falha ao escrever o corpo da requisicao");
-    }
+  std::vector<std::pair<std::string, std::string>> request_headers = {
+      {"content-type", "application/json"}};
+  for (const std::string& line : headers) {
+    const std::size_t colon = line.find(':');
+    if (colon == std::string::npos || colon == 0)
+      throw std::runtime_error("header LLM invalido");
+    request_headers.emplace_back(line.substr(0, colon), trim_http(line.substr(colon + 1)));
   }
-
-  const int fd_headers = tilt_tempfile("llm-h", header_file);
-  if (fd_headers < 0) {
-    std::remove(body_file.c_str());
-    throw std::runtime_error("nao foi possivel criar arquivo temporario de cabecalhos");
-  }
-  tilt_close_file(fd_headers);
-
-  std::string cmd = "curl -sS -X POST -H 'content-type: application/json'";
-  for (const std::string& h : headers) cmd += " -H " + tilt_shell_quote(h);
-  if (timeout_s > 0) cmd += " --max-time " + std::to_string(timeout_s);
-  cmd += " -D " + tilt_shell_quote(header_file) + " --data @" + tilt_shell_quote(body_file) +
-         " -w " + tilt_shell_quote("\n%{http_code}") + " " + tilt_shell_quote(url);
-
-  std::string resp;
-  try {
-    resp = run(cmd);
-  } catch (const std::exception& e) {
-    std::remove(body_file.c_str());
-    std::remove(header_file.c_str());
-    throw std::runtime_error(std::string("falha de transporte: ") + e.what());
-  }
-  std::remove(body_file.c_str());
-  std::ifstream header_in(header_file);
-  std::ostringstream header_text;
-  header_text << header_in.rdbuf();
-  std::remove(header_file.c_str());
-  // Ultima linha = codigo HTTP; o resto = corpo (pode conter \n).
-  std::size_t nl = resp.rfind('\n');
-  long status = 0;
-  std::string corpo = resp;
-  if (nl != std::string::npos) {
-    try {
-      status = std::stol(resp.substr(nl + 1));
-    } catch (...) {
-      status = 0;
-    }
-    corpo = resp.substr(0, nl);
-    if (!corpo.empty() && corpo.back() == '\r') corpo.pop_back();
-  }
-  return {status, corpo, retry_after_seconds(header_text.str())};
+  std::vector<std::pair<std::string, std::string>> response_headers;
+  HttpClientResponse response =
+      http_request("POST", url, request_headers, body, timeout_s, false, &response_headers);
+  if (!response.error.empty())
+    throw std::runtime_error("falha de transporte: " + response.error);
+  std::string header_text;
+  for (const auto& [name, value] : response_headers)
+    header_text += name + ": " + value + "\n";
+  return {response.status, std::move(response.body), retry_after_seconds(header_text)};
 }
 
-// Contabilidade de tokens por llm (processo; protege rotas paralelas).
+// Contabilidade de tokens por llm. O mapa acelera o processo atual; o ledger
+// JSONL opcional torna o teto e os custos persistentes entre execucoes.
 std::mutex g_uso_mu;
 std::map<std::string, std::pair<long long, long long>> g_uso;  // nome -> {entrada, saida}
+std::map<std::string, double> g_custo;
+std::map<std::string, long long> g_chamadas;
+std::mutex g_arquivo_mu;
 
-void soma_uso(const std::string& nome, long long entrada, long long saida) {
-  std::lock_guard<std::mutex> lk(g_uso_mu);
-  auto& u = g_uso[nome];
-  u.first += entrada;
-  u.second += saida;
+struct LlmContexto {
+  std::string agente;
+  std::string sessao;
+  std::string trace_id;
+  std::string span_id;
+};
+thread_local LlmContexto g_contexto;
+std::atomic<unsigned long long> g_trace_seq{0};
+
+std::string novo_trace_id() {
+  const auto seq = ++g_trace_seq;
+  std::ostringstream out;
+  out << std::hex << std::hash<std::thread::id>{}(std::this_thread::get_id()) << '-' << seq;
+  return out.str();
 }
 
-long long uso_total(const std::string& nome) {
+std::string novo_span_id() {
+  const auto seq = ++g_trace_seq;
+  std::ostringstream out;
+  out << std::hex << std::hash<std::thread::id>{}(std::this_thread::get_id()) << '-' << seq;
+  return out.str();
+}
+
+std::string span_exporter(const LlmConfig& cfg) {
+  std::string path = !cfg.otel_exporter.empty() ? cfg.otel_exporter : cfg.observabilidade;
+  if (path.empty()) {
+    const char* env = std::getenv("TILT_OTEL_EXPORTER");
+    if (env) path = env;
+  }
+  if (path.rfind("file:", 0) == 0) path.erase(0, 5);
+  if (path == "none" || path == "stdout" || path == "stderr") return {};
+  return path;
+}
+
+double custo_tokens(const LlmConfig& cfg, long long entrada, long long saida) {
+  return (static_cast<double>(entrada) * cfg.custo_entrada_mil +
+          static_cast<double>(saida) * cfg.custo_saida_mil) /
+         1000.0;
+}
+
+void soma_uso(const LlmConfig& cfg, long long entrada, long long saida, double custo) {
   std::lock_guard<std::mutex> lk(g_uso_mu);
-  auto it = g_uso.find(nome);
+  auto& u = g_uso[cfg.nome];
+  u.first += entrada;
+  u.second += saida;
+  g_custo[cfg.nome] += custo;
+  g_chamadas[cfg.nome]++;
+}
+
+void persistir_evento(const LlmConfig& cfg, const std::string& operacao, long long entrada,
+                      long long saida, double custo, const std::string& sistema,
+                      const std::string& usuario, const std::string& resposta, bool cache) {
+  if (cfg.contabilidade.empty() && cfg.observabilidade.empty()) return;
+  std::lock_guard<std::mutex> lk(g_arquivo_mu);
+  const std::string agora = agora_utc_iso();
+  auto compactar = [](std::string s) {
+    s.erase(std::remove(s.begin(), s.end(), '\n'), s.end());
+    s.erase(std::remove(s.begin(), s.end(), '\r'), s.end());
+    return s;
+  };
+  if (!cfg.contabilidade.empty()) {
+    Value e = Value::mapa();
+    e.map_ref()->set("timestamp", Value::texto(agora));
+    e.map_ref()->set("llm", Value::texto(cfg.nome));
+    e.map_ref()->set("provedor", Value::texto(cfg.provider));
+    e.map_ref()->set("modelo", Value::texto(cfg.model));
+    e.map_ref()->set("operacao", Value::texto(operacao));
+    if (!g_contexto.agente.empty()) e.map_ref()->set("agente", Value::texto(g_contexto.agente));
+    if (!g_contexto.sessao.empty()) e.map_ref()->set("sessao", Value::texto(g_contexto.sessao));
+    if (!g_contexto.trace_id.empty()) e.map_ref()->set("trace_id", Value::texto(g_contexto.trace_id));
+    if (!g_contexto.span_id.empty()) e.map_ref()->set("span_id", Value::texto(g_contexto.span_id));
+    e.map_ref()->set("entrada", Value::inteiro(entrada));
+    e.map_ref()->set("saida", Value::inteiro(saida));
+    e.map_ref()->set("custo", Value::decimal(custo));
+    e.map_ref()->set("cache", Value::logico(cache));
+    std::error_code ec;
+    const std::filesystem::path parent = std::filesystem::path(cfg.contabilidade).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    std::ofstream out(cfg.contabilidade, std::ios::app);
+    if (out) out << compactar(json_dump(e)) << '\n';
+  }
+  if (!cfg.observabilidade.empty()) {
+    Value e = Value::mapa();
+    e.map_ref()->set("timestamp", Value::texto(agora));
+    e.map_ref()->set("llm", Value::texto(cfg.nome));
+    e.map_ref()->set("modelo", Value::texto(cfg.model));
+    e.map_ref()->set("operacao", Value::texto(operacao));
+    if (!g_contexto.agente.empty()) e.map_ref()->set("agente", Value::texto(g_contexto.agente));
+    if (!g_contexto.sessao.empty()) e.map_ref()->set("sessao", Value::texto(g_contexto.sessao));
+    if (!g_contexto.trace_id.empty()) e.map_ref()->set("trace_id", Value::texto(g_contexto.trace_id));
+    if (!g_contexto.span_id.empty()) e.map_ref()->set("span_id", Value::texto(g_contexto.span_id));
+    e.map_ref()->set("entrada", Value::inteiro(entrada));
+    e.map_ref()->set("saida", Value::inteiro(saida));
+    e.map_ref()->set("custo", Value::decimal(custo));
+    if (cfg.registrar_prompts) {
+      e.map_ref()->set("sistema", Value::texto(sistema));
+      e.map_ref()->set("usuario", Value::texto(usuario));
+      e.map_ref()->set("resposta", Value::texto(resposta));
+    } else {
+      e.map_ref()->set("prompt_registrado", Value::logico(false));
+      e.map_ref()->set("sistema_hash", Value::texto(sha256_hex(sistema)));
+      e.map_ref()->set("usuario_hash", Value::texto(sha256_hex(usuario)));
+      e.map_ref()->set("resposta_hash", Value::texto(sha256_hex(resposta)));
+    }
+    std::error_code ec;
+    const std::filesystem::path parent = std::filesystem::path(cfg.observabilidade).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    std::ofstream out(cfg.observabilidade, std::ios::app);
+    if (out) out << compactar(json_dump(e)) << '\n';
+  }
+}
+
+void registrar_uso(const LlmConfig& cfg, long long entrada, long long saida,
+                  const std::string& sistema = {}, const std::string& usuario = {},
+                  const std::string& resposta = {}, const std::string& operacao = "chat",
+                  bool cache = false) {
+  const double custo = custo_tokens(cfg, entrada, saida);
+  soma_uso(cfg, entrada, saida, custo);
+  persistir_evento(cfg, operacao, entrada, saida, custo, sistema, usuario, resposta, cache);
+}
+
+std::pair<long long, long long> ler_ledger(const std::string& arquivo, const std::string& nome,
+                                           double* custo = nullptr, long long* chamadas = nullptr) {
+  std::pair<long long, long long> soma{0, 0};
+  if (custo) *custo = 0.0;
+  if (chamadas) *chamadas = 0;
+  std::ifstream in(arquivo);
+  std::string conteudo((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  std::vector<std::string> objetos;
+  std::size_t inicio = std::string::npos;
+  int profundidade = 0;
+  bool string_json = false;
+  bool escape = false;
+  for (std::size_t p = 0; p < conteudo.size(); ++p) {
+    const char c = conteudo[p];
+    if (string_json) {
+      if (escape) escape = false;
+      else if (c == '\\') escape = true;
+      else if (c == '"') string_json = false;
+      continue;
+    }
+    if (c == '"') { string_json = true; continue; }
+    if (c == '{') { if (profundidade++ == 0) inicio = p; }
+    else if (c == '}' && profundidade > 0 && --profundidade == 0 && inicio != std::string::npos) {
+      objetos.push_back(conteudo.substr(inicio, p - inicio + 1));
+      inicio = std::string::npos;
+    }
+  }
+  for (const std::string& linha : objetos) {
+    try {
+      Value e = json_parse(linha);
+      if (e.kind != ValueKind::Mapa || !e.map_ref()) continue;
+      const Value* l = e.map_ref()->find("llm");
+      if (l && l->kind == ValueKind::Texto && !nome.empty() && l->s != nome) continue;
+      const Value* i = e.map_ref()->find("entrada");
+      const Value* o = e.map_ref()->find("saida");
+      if (i && i->is_number()) soma.first += static_cast<long long>(i->as_number());
+      if (o && o->is_number()) soma.second += static_cast<long long>(o->as_number());
+      if (custo) {
+        const Value* c = e.map_ref()->find("custo");
+        if (c && c->is_number()) *custo += c->as_number();
+      }
+      if (chamadas) ++*chamadas;
+    } catch (...) {
+      // Linhas incompletas nao invalidam o restante do ledger.
+    }
+  }
+  return soma;
+}
+
+long long uso_total(const LlmConfig& cfg) {
+  if (!cfg.contabilidade.empty()) {
+    const auto s = ler_ledger(cfg.contabilidade, cfg.nome);
+    return s.first + s.second;
+  }
+  std::lock_guard<std::mutex> lk(g_uso_mu);
+  auto it = g_uso.find(cfg.nome);
   return it == g_uso.end() ? 0 : it->second.first + it->second.second;
 }
 
@@ -239,11 +363,11 @@ const Value* dig(const Value& v, std::initializer_list<const char*> path) {
   const Value* cur = &v;
   for (const char* key : path) {
     if (!cur) return nullptr;
-    if (cur->kind == ValueKind::Mapa && cur->map) {
-      cur = cur->map->find(key);
-    } else if (cur->kind == ValueKind::Lista && cur->list && !cur->list->empty() &&
+    if (cur->kind == ValueKind::Mapa && cur->map_ref()) {
+      cur = cur->map_ref()->find(key);
+    } else if (cur->kind == ValueKind::Lista && cur->list_ref() && !cur->list_ref()->empty() &&
                std::strcmp(key, "0") == 0) {
-      cur = &(*cur->list)[0];
+      cur = &(*cur->list_ref())[0];
     } else {
       return nullptr;
     }
@@ -403,9 +527,9 @@ PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std:
                      bool fluxo = false) {
   PedidoLLM p;
   Value body = Value::mapa();
-  body.map->set("model", Value::texto(cfg.model));
-  body.map->set("temperature", Value::decimal(cfg.temperature));
-  if (fluxo) body.map->set("stream", Value::logico(true));
+  body.map_ref()->set("model", Value::texto(cfg.model));
+  body.map_ref()->set("temperature", Value::decimal(cfg.temperature));
+  if (fluxo) body.map_ref()->set("stream", Value::logico(true));
 
   if (cfg.provider == "anthropic") {
     // Sem base_url: API da Anthropic; com base_url: endpoint compativel
@@ -413,12 +537,12 @@ PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std:
     p.url = cfg.base_url.empty() ? "https://api.anthropic.com/v1/messages"
                                  : cfg.base_url + "/v1/messages";
     p.headers = {"x-api-key: " + cfg.api_key, "anthropic-version: 2023-06-01"};
-    body.map->set("max_tokens", Value::inteiro(cfg.max_tokens));
-    if (!system.empty()) body.map->set("system", Value::texto(system));
+    body.map_ref()->set("max_tokens", Value::inteiro(cfg.max_tokens));
+    if (!system.empty()) body.map_ref()->set("system", Value::texto(system));
     Value msg = Value::mapa();
-    msg.map->set("role", Value::texto("user"));
-    msg.map->set("content", Value::texto(user));
-    body.map->set("messages", Value::lista({msg}));
+    msg.map_ref()->set("role", Value::texto("user"));
+    msg.map_ref()->set("content", Value::texto(user));
+    body.map_ref()->set("messages", Value::lista({msg}));
   } else {
     // openai | local | vllm. Sem base_url: API da OpenAI; com base_url:
     // "<base>/chat/completions" (compativel OpenAI, como local/vllm).
@@ -428,15 +552,15 @@ PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std:
     Value msgs = Value::lista();
     if (!system.empty()) {
       Value s = Value::mapa();
-      s.map->set("role", Value::texto("system"));
-      s.map->set("content", Value::texto(system));
-      msgs.list->push_back(s);
+      s.map_ref()->set("role", Value::texto("system"));
+      s.map_ref()->set("content", Value::texto(system));
+      msgs.list_ref()->push_back(s);
     }
     Value u = Value::mapa();
-    u.map->set("role", Value::texto("user"));
-    u.map->set("content", Value::texto(user));
-    msgs.list->push_back(u);
-    body.map->set("messages", msgs);
+    u.map_ref()->set("role", Value::texto("user"));
+    u.map_ref()->set("content", Value::texto(user));
+    msgs.list_ref()->push_back(u);
+    body.map_ref()->set("messages", msgs);
   }
   p.corpo = json_dump(body);
   return p;
@@ -444,28 +568,31 @@ PedidoLLM monta_chat(const LlmConfig& cfg, const std::string& system, const std:
 
 // Uma config, com retry/backoff/timeout/teto. Devolve texto + tokens.
 RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std::string& user) {
+  LlmSpanGuard span(cfg, "llm.chat", "client",
+                    {{"operacao", "chat"}, {"prompt_chars", std::to_string(system.size() + user.size())}});
   const std::string cache_key = cfg.cache ? llm_cache_key(cfg, system, user) : std::string();
   if (cfg.cache) {
     RespostaLLM cached;
     if (cache_read(cache_key, cached)) return cached;
   }
   if (llm_is_mock()) {
-    if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+    if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
       throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
                                cfg.nome + "' (mock)");
     }
     const std::string t = mock_chat(system, user);
     const long long tin = mock_tokens(system + user);
     const long long tout = mock_tokens(t);
-    soma_uso(cfg.nome, tin, tout);
     RespostaLLM response{t, tin, tout, cfg.model};
+    response.custo = custo_tokens(cfg, tin, tout);
+    registrar_uso(cfg, tin, tout, system, user, t, "chat");
     if (cfg.cache) cache_write(cache_key, response);
     return response;
   }
 
-  if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+  if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
     throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
-                             cfg.nome + "' (acumulado " + std::to_string(uso_total(cfg.nome)) + ")");
+                             cfg.nome + "' (acumulado " + std::to_string(uso_total(cfg)) + ")");
   }
   const PedidoLLM ped = monta_chat(cfg, system, user);
   const int tents = cfg.tentativas < 1 ? 1 : cfg.tentativas;
@@ -488,8 +615,9 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
       Value resp = json_parse(r.body);
       long long tin = 0, tout = 0;
       const std::string texto = ped.texto_de(resp, tin, tout);
-      soma_uso(cfg.nome, tin, tout);
       RespostaLLM response{texto, tin, tout, cfg.model};
+      response.custo = custo_tokens(cfg, tin, tout);
+      registrar_uso(cfg, tin, tout, system, user, texto, "chat");
       if (cfg.cache) cache_write(cache_key, response);
       return response;
     }
@@ -508,24 +636,293 @@ RespostaLLM chat_uma(const LlmConfig& cfg, const std::string& system, const std:
   throw std::runtime_error(ultimo_erro);
 }
 
+// --- ferramentas nativas ---------------------------------------------------
+
+Value mensagens_anthropic(const std::vector<MensagemLLM>& mensagens) {
+  Value out = Value::lista();
+  Value* resultados = nullptr;  // user com tool_result consecutivos (mesmo turno)
+  for (const MensagemLLM& m : mensagens) {
+    if (m.papel == "tool") {
+      if (!resultados) {
+        Value turno = Value::mapa();
+        turno.map_ref()->set("role", Value::texto("user"));
+        turno.map_ref()->set("content", Value::lista());
+        out.list_ref()->push_back(std::move(turno));
+        resultados = out.list_ref()->back().map_ref()->find("content");
+      }
+      Value bloco = Value::mapa();
+      bloco.map_ref()->set("type", Value::texto("tool_result"));
+      bloco.map_ref()->set("tool_use_id", Value::texto(m.chamada_id));
+      bloco.map_ref()->set("content", Value::texto(m.texto));
+      resultados->list_ref()->push_back(std::move(bloco));
+      continue;
+    }
+    resultados = nullptr;
+    Value turno = Value::mapa();
+    turno.map_ref()->set("role", Value::texto(m.papel));
+    if (m.papel == "assistant" && !m.chamadas.empty()) {
+      Value blocos = Value::lista();
+      if (!m.texto.empty()) {
+        Value t = Value::mapa();
+        t.map_ref()->set("type", Value::texto("text"));
+        t.map_ref()->set("text", Value::texto(m.texto));
+        blocos.list_ref()->push_back(std::move(t));
+      }
+      for (const ChamadaFerramenta& c : m.chamadas) {
+        Value u = Value::mapa();
+        u.map_ref()->set("type", Value::texto("tool_use"));
+        u.map_ref()->set("id", Value::texto(c.id));
+        u.map_ref()->set("name", Value::texto(c.nome));
+        u.map_ref()->set("input", c.argumentos.kind == ValueKind::Mapa ? c.argumentos : Value::mapa());
+        blocos.list_ref()->push_back(std::move(u));
+      }
+      turno.map_ref()->set("content", std::move(blocos));
+    } else {
+      turno.map_ref()->set("content", Value::texto(m.texto));
+    }
+    out.list_ref()->push_back(std::move(turno));
+  }
+  return out;
+}
+
+Value mensagens_openai(const std::string& system, const std::vector<MensagemLLM>& mensagens) {
+  Value out = Value::lista();
+  if (!system.empty()) {
+    Value s = Value::mapa();
+    s.map_ref()->set("role", Value::texto("system"));
+    s.map_ref()->set("content", Value::texto(system));
+    out.list_ref()->push_back(std::move(s));
+  }
+  for (const MensagemLLM& m : mensagens) {
+    Value turno = Value::mapa();
+    if (m.papel == "tool") {
+      turno.map_ref()->set("role", Value::texto("tool"));
+      turno.map_ref()->set("tool_call_id", Value::texto(m.chamada_id));
+      turno.map_ref()->set("content", Value::texto(m.texto));
+    } else {
+      turno.map_ref()->set("role", Value::texto(m.papel));
+      turno.map_ref()->set("content", m.texto.empty() && !m.chamadas.empty() ? Value::nulo()
+                                                                       : Value::texto(m.texto));
+      if (!m.chamadas.empty()) {
+        Value chamadas = Value::lista();
+        for (const ChamadaFerramenta& c : m.chamadas) {
+          Value fn = Value::mapa();
+          fn.map_ref()->set("name", Value::texto(c.nome));
+          fn.map_ref()->set("arguments", Value::texto(json_dump(c.argumentos)));
+          Value item = Value::mapa();
+          item.map_ref()->set("id", Value::texto(c.id));
+          item.map_ref()->set("type", Value::texto("function"));
+          item.map_ref()->set("function", std::move(fn));
+          chamadas.list_ref()->push_back(std::move(item));
+        }
+        turno.map_ref()->set("tool_calls", std::move(chamadas));
+      }
+    }
+    out.list_ref()->push_back(std::move(turno));
+  }
+  return out;
+}
+
+PedidoLLM monta_ferramentas(const LlmConfig& cfg, const std::string& system,
+                            const std::vector<MensagemLLM>& mensagens,
+                            const std::vector<FerramentaLLM>& ferramentas) {
+  PedidoLLM p;
+  Value body = Value::mapa();
+  body.map_ref()->set("model", Value::texto(cfg.model));
+  body.map_ref()->set("temperature", Value::decimal(cfg.temperature));
+  Value tools = Value::lista();
+  if (cfg.provider == "anthropic") {
+    p.url = cfg.base_url.empty() ? "https://api.anthropic.com/v1/messages"
+                                 : cfg.base_url + "/v1/messages";
+    p.headers = {"x-api-key: " + cfg.api_key, "anthropic-version: 2023-06-01"};
+    body.map_ref()->set("max_tokens", Value::inteiro(cfg.max_tokens));
+    if (!system.empty()) body.map_ref()->set("system", Value::texto(system));
+    for (const FerramentaLLM& f : ferramentas) {
+      Value t = Value::mapa();
+      t.map_ref()->set("name", Value::texto(f.nome));
+      t.map_ref()->set("description", Value::texto(f.descricao));
+      t.map_ref()->set("input_schema", f.schema);
+      tools.list_ref()->push_back(std::move(t));
+    }
+    body.map_ref()->set("tools", std::move(tools));
+    body.map_ref()->set("messages", mensagens_anthropic(mensagens));
+  } else {
+    p.url = cfg.base_url.empty() ? "https://api.openai.com/v1/chat/completions"
+                                 : cfg.base_url + "/chat/completions";
+    p.headers = {"Authorization: Bearer " + cfg.api_key};
+    for (const FerramentaLLM& f : ferramentas) {
+      Value fn = Value::mapa();
+      fn.map_ref()->set("name", Value::texto(f.nome));
+      fn.map_ref()->set("description", Value::texto(f.descricao));
+      fn.map_ref()->set("parameters", f.schema);
+      Value t = Value::mapa();
+      t.map_ref()->set("type", Value::texto("function"));
+      t.map_ref()->set("function", std::move(fn));
+      tools.list_ref()->push_back(std::move(t));
+    }
+    body.map_ref()->set("tools", std::move(tools));
+    body.map_ref()->set("messages", mensagens_openai(system, mensagens));
+  }
+  p.corpo = json_dump(body);
+  return p;
+}
+
+// Extrai texto, chamadas e tokens da resposta de cada provedor.
+RespostaFerramentas resposta_ferramentas(const LlmConfig& cfg, const Value& resp) {
+  RespostaFerramentas out;
+  out.modelo = cfg.model;
+  auto inteiro = [&](std::initializer_list<const char*> caminho) -> long long {
+    const Value* v = dig(resp, caminho);
+    return v && v->kind == ValueKind::Inteiro ? v->i : 0;
+  };
+  if (cfg.provider == "anthropic") {
+    out.tok_entrada = inteiro({"usage", "input_tokens"});
+    out.tok_saida = inteiro({"usage", "output_tokens"});
+    const Value* blocos = resp.map_ref() ? resp.map_ref()->find("content") : nullptr;
+    if (blocos && blocos->kind == ValueKind::Lista && blocos->list_ref()) {
+      for (const Value& b : *blocos->list_ref()) {
+        const Value* tipo = b.map_ref() ? b.map_ref()->find("type") : nullptr;
+        if (!tipo || tipo->kind != ValueKind::Texto) continue;
+        if (tipo->s == "text") {
+          if (const Value* t = b.map_ref()->find("text"); t && t->kind == ValueKind::Texto) {
+            out.texto += t->s;
+          }
+        } else if (tipo->s == "tool_use") {
+          ChamadaFerramenta c;
+          if (const Value* v = b.map_ref()->find("id"); v && v->kind == ValueKind::Texto) c.id = v->s;
+          if (const Value* v = b.map_ref()->find("name"); v && v->kind == ValueKind::Texto) c.nome = v->s;
+          const Value* in = b.map_ref()->find("input");
+          c.argumentos = in && in->kind == ValueKind::Mapa ? *in : Value::mapa();
+          out.chamadas.push_back(std::move(c));
+        }
+      }
+    }
+  } else {
+    out.tok_entrada = inteiro({"usage", "prompt_tokens"});
+    out.tok_saida = inteiro({"usage", "completion_tokens"});
+    if (const Value* c = dig(resp, {"choices", "0", "message", "content"});
+        c && c->kind == ValueKind::Texto) {
+      out.texto = c->s;
+    }
+    if (const Value* tc = dig(resp, {"choices", "0", "message", "tool_calls"});
+        tc && tc->kind == ValueKind::Lista && tc->list_ref()) {
+      for (const Value& item : *tc->list_ref()) {
+        ChamadaFerramenta c;
+        if (const Value* v = item.map_ref() ? item.map_ref()->find("id") : nullptr;
+            v && v->kind == ValueKind::Texto) {
+          c.id = v->s;
+        }
+        const Value* fn = item.map_ref() ? item.map_ref()->find("function") : nullptr;
+        if (!fn || fn->kind != ValueKind::Mapa || !fn->map_ref()) continue;
+        if (const Value* v = fn->map_ref()->find("name"); v && v->kind == ValueKind::Texto) c.nome = v->s;
+        c.argumentos = Value::mapa();
+        if (const Value* a = fn->map_ref()->find("arguments"); a && a->kind == ValueKind::Texto) {
+          try {
+            Value parsed = json_parse(a->s);
+            if (parsed.kind == ValueKind::Mapa) c.argumentos = std::move(parsed);
+          } catch (const std::exception&) {
+            // argumentos malformados: o interpretador completa com best-effort
+          }
+        }
+        out.chamadas.push_back(std::move(c));
+      }
+    }
+  }
+  return out;
+}
+
+RespostaFerramentas ferramentas_uma(const LlmConfig& cfg, const std::string& system,
+                                    const std::vector<MensagemLLM>& mensagens,
+                                    const std::vector<FerramentaLLM>& ferramentas) {
+  LlmSpanGuard span(cfg, "llm.ferramentas", "client",
+                    {{"operacao", "ferramentas"},
+                     {"mensagens", std::to_string(mensagens.size())},
+                     {"ferramentas", std::to_string(ferramentas.size())}});
+  if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
+    throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) + " estourado em '" +
+                             cfg.nome + "'");
+  }
+  if (llm_is_mock()) {
+    // Planner deterministico: uma chamada por ferramenta, na ordem declarada.
+    std::size_t resultados = 0;
+    for (const MensagemLLM& m : mensagens) resultados += m.papel == "tool" ? 1 : 0;
+    RespostaFerramentas out;
+    out.modelo = cfg.model;
+    if (resultados < ferramentas.size()) {
+      ChamadaFerramenta c;
+      c.id = "mock_call_" + std::to_string(resultados + 1);
+      c.nome = ferramentas[resultados].nome;
+      c.argumentos = Value::mapa();
+      out.chamadas.push_back(std::move(c));
+    } else {
+      out.texto = "[mock] resposta final apos " + std::to_string(resultados) + " ferramenta(s)";
+    }
+    std::string entrada = system;
+    for (const MensagemLLM& m : mensagens) entrada += m.texto;
+    out.tok_entrada = mock_tokens(entrada);
+    out.tok_saida = mock_tokens(out.texto);
+    out.custo = custo_tokens(cfg, out.tok_entrada, out.tok_saida);
+    registrar_uso(cfg, out.tok_entrada, out.tok_saida, system, {}, out.texto, "ferramentas");
+    return out;
+  }
+  const PedidoLLM ped = monta_ferramentas(cfg, system, mensagens, ferramentas);
+  const int tents = cfg.tentativas < 1 ? 1 : cfg.tentativas;
+  std::string ultimo_erro;
+  for (int t = 1; t <= tents; ++t) {
+    HttpResult r;
+    try {
+      r = http_post_status(ped.url, ped.headers, ped.corpo, cfg.tempo_limite);
+    } catch (const std::exception& e) {
+      ultimo_erro = e.what();
+      if (t < tents) {
+        espera_retry(t, r.retry_after);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
+                               " tentativa(s) (ajuste tempo_limite:/tentativas: em '" + cfg.nome +
+                               "')");
+    }
+    if (r.status >= 200 && r.status < 300) {
+      RespostaFerramentas out = resposta_ferramentas(cfg, json_parse(r.body));
+      out.custo = custo_tokens(cfg, out.tok_entrada, out.tok_saida);
+      registrar_uso(cfg, out.tok_entrada, out.tok_saida, system, {}, out.texto, "ferramentas");
+      return out;
+    }
+    if (r.status == 429 || (r.status >= 500 && r.status < 600)) {
+      ultimo_erro = "HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 200);
+      if (t < tents) {
+        espera_retry(t, r.retry_after);
+        continue;
+      }
+      throw std::runtime_error(ultimo_erro + " apos " + std::to_string(tents) +
+                               " tentativa(s) (ajuste tentativas:/reserva: em '" + cfg.nome + "')");
+    }
+    throw std::runtime_error("HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 300));
+  }
+  throw std::runtime_error(ultimo_erro);
+}
+
 RespostaLLM chat_fluxo_uma(const LlmConfig& cfg, const std::string& system,
                            const std::string& user) {
+  LlmSpanGuard span(cfg, "llm.fluxo", "client",
+                    {{"operacao", "fluxo"}, {"prompt_chars", std::to_string(system.size() + user.size())}});
   const std::string cache_key = cfg.cache ? llm_cache_key(cfg, system, user) : std::string();
   if (cfg.cache) {
     RespostaLLM cached;
     if (cache_read(cache_key, cached)) return cached;
   }
   if (llm_is_mock()) {
-    if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+    if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
       throw std::runtime_error("teto_tokens excedido no streaming");
     }
     const std::string texto = mock_chat(system, user);
     RespostaLLM response{texto, mock_tokens(system + user), mock_tokens(texto), cfg.model};
-    soma_uso(cfg.nome, response.tok_entrada, response.tok_saida);
+    response.custo = custo_tokens(cfg, response.tok_entrada, response.tok_saida);
+    registrar_uso(cfg, response.tok_entrada, response.tok_saida, system, user, response.texto, "fluxo");
     if (cfg.cache) cache_write(cache_key, response);
     return response;
   }
-  if (cfg.teto_tokens > 0 && uso_total(cfg.nome) >= cfg.teto_tokens) {
+  if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
     throw std::runtime_error("teto_tokens excedido no streaming");
   }
   const PedidoLLM ped = monta_chat(cfg, system, user, true);
@@ -547,8 +944,9 @@ RespostaLLM chat_fluxo_uma(const LlmConfig& cfg, const std::string& system,
     if (r.status >= 200 && r.status < 300) {
       long long tok_in = 0, tok_out = 0;
       const std::string texto = texto_de_fluxo(ped, r.body, tok_in, tok_out);
-      soma_uso(cfg.nome, tok_in, tok_out);
       RespostaLLM response{texto, tok_in, tok_out, cfg.model};
+      response.custo = custo_tokens(cfg, tok_in, tok_out);
+      registrar_uso(cfg, tok_in, tok_out, system, user, texto, "fluxo");
       if (cfg.cache) cache_write(cache_key, response);
       return response;
     }
@@ -581,6 +979,23 @@ RespostaLLM llm_chat_cadeia(const std::vector<LlmConfig>& cadeia, const std::str
   throw std::runtime_error(erros);
 }
 
+RespostaFerramentas llm_chat_ferramentas(const std::vector<LlmConfig>& cadeia,
+                                         const std::string& system,
+                                         const std::vector<MensagemLLM>& mensagens,
+                                         const std::vector<FerramentaLLM>& ferramentas) {
+  if (cadeia.empty()) throw std::runtime_error("cadeia de LLMs vazia");
+  std::string erros;
+  for (std::size_t k = 0; k < cadeia.size(); ++k) {
+    try {
+      return ferramentas_uma(cadeia[k], system, mensagens, ferramentas);
+    } catch (const std::exception& e) {
+      if (!erros.empty()) erros += "; ";
+      erros += "'" + cadeia[k].nome + "': " + e.what();
+    }
+  }
+  throw std::runtime_error(erros);
+}
+
 RespostaLLM llm_chat_fluxo_cadeia(const std::vector<LlmConfig>& cadeia, const std::string& system,
                                   const std::string& user) {
   if (cadeia.empty()) throw std::runtime_error("cadeia de LLMs vazia");
@@ -600,7 +1015,8 @@ std::string llm_chat(const LlmConfig& cfg, const std::string& system, const std:
   return llm_chat_cadeia({cfg}, system, user).texto;
 }
 
-std::vector<float> llm_embed(const std::string& model, const std::string& text) {
+std::vector<float> llm_embed_impl(const std::string& model, const std::string& text,
+                                  long long* tokens) {
   if (llm_is_mock()) {
     // Deterministic hashed token + subword trigram embedding, L2-normalized.
     // Tokens keep exact-word precision; boundary-padded trigrams reduce the
@@ -639,12 +1055,13 @@ std::vector<float> llm_embed(const std::string& model, const std::string& text) 
     for (float x : v) norm += x * x;
     norm = norm > 0.0F ? std::sqrt(norm) : 1.0F;
     for (float& x : v) x /= norm;
+    if (tokens) *tokens = mock_tokens(text);
     return v;
   }
 
   Value body = Value::mapa();
-  body.map->set("model", Value::texto(model));
-  body.map->set("input", Value::texto(text));
+  body.map_ref()->set("model", Value::texto(model));
+  body.map_ref()->set("input", Value::texto(text));
   const std::string payload = json_dump(body);
   const std::vector<std::string> headers = {
       "Authorization: Bearer " +
@@ -679,13 +1096,156 @@ std::vector<float> llm_embed(const std::string& model, const std::string& text) 
     throw std::runtime_error("HTTP " + std::to_string(r.status) + ": " + truncate(r.body, 300));
   }
   Value resp = json_parse(raw);
+  if (tokens) {
+    *tokens = mock_tokens(text);
+    if (const Value* usage = resp.map_ref() ? resp.map_ref()->find("usage") : nullptr;
+        usage && usage->kind == ValueKind::Mapa && usage->map_ref()) {
+      if (const Value* p = usage->map_ref()->find("prompt_tokens"); p && p->is_number())
+        *tokens = static_cast<long long>(p->as_number());
+      else if (const Value* p = usage->map_ref()->find("total_tokens"); p && p->is_number())
+        *tokens = static_cast<long long>(p->as_number());
+    }
+  }
   std::vector<float> out;
   if (const Value* arr = dig(resp, {"data", "0", "embedding"});
-      arr && arr->kind == ValueKind::Lista && arr->list) {
-    for (const Value& e : *arr->list) out.push_back(static_cast<float>(e.as_number()));
+      arr && arr->kind == ValueKind::Lista && arr->list_ref()) {
+    for (const Value& e : *arr->list_ref()) out.push_back(static_cast<float>(e.as_number()));
   }
   if (out.empty()) throw std::runtime_error("resposta de embeddings em formato inesperado");
   return out;
+}
+
+std::vector<float> llm_embed(const std::string& model, const std::string& text) {
+  return llm_embed_impl(model, text, nullptr);
+}
+
+std::vector<float> llm_embed(const LlmConfig& cfg, const std::string& text) {
+  LlmSpanGuard span(cfg, "llm.embedding", "client",
+                    {{"operacao", "embedding"}, {"prompt_chars", std::to_string(text.size())}});
+  if (cfg.teto_tokens > 0 && uso_total(cfg) >= cfg.teto_tokens) {
+    throw std::runtime_error("teto_tokens " + std::to_string(cfg.teto_tokens) +
+                             " estourado em '" + cfg.nome + "' antes do embedding");
+  }
+  long long tokens = 0;
+  std::vector<float> out = llm_embed_impl(cfg.model, text, &tokens);
+  registrar_uso(cfg, tokens, 0, {}, text, {}, "embedding");
+  return out;
+}
+
+long long llm_uso_total(const LlmConfig& cfg) { return uso_total(cfg); }
+
+Value llm_metricas(const LlmConfig& cfg) {
+  long long entrada = 0;
+  long long saida = 0;
+  double custo = 0.0;
+  long long chamadas = 0;
+  if (!cfg.contabilidade.empty()) {
+    const auto s = ler_ledger(cfg.contabilidade, cfg.nome, &custo, &chamadas);
+    entrada = s.first;
+    saida = s.second;
+  } else {
+    std::lock_guard<std::mutex> lk(g_uso_mu);
+    const auto it = g_uso.find(cfg.nome);
+    if (it != g_uso.end()) {
+      entrada = it->second.first;
+      saida = it->second.second;
+    }
+    custo = g_custo[cfg.nome];
+    chamadas = g_chamadas[cfg.nome];
+  }
+  Value out = Value::mapa();
+  out.map_ref()->set("llm", Value::texto(cfg.nome));
+  out.map_ref()->set("entrada", Value::inteiro(entrada));
+  out.map_ref()->set("saida", Value::inteiro(saida));
+  out.map_ref()->set("total", Value::inteiro(entrada + saida));
+  out.map_ref()->set("custo", Value::decimal(custo));
+  out.map_ref()->set("chamadas", Value::inteiro(chamadas));
+  out.map_ref()->set("custo_entrada_mil", Value::decimal(cfg.custo_entrada_mil));
+  out.map_ref()->set("custo_saida_mil", Value::decimal(cfg.custo_saida_mil));
+  out.map_ref()->set("teto_tokens", Value::inteiro(cfg.teto_tokens));
+  out.map_ref()->set("custo_medio", Value::decimal(
+      chamadas > 0 ? custo / static_cast<double>(chamadas) : 0.0));
+  out.map_ref()->set("tokens_medio", Value::decimal(
+      chamadas > 0 ? static_cast<double>(entrada + saida) / static_cast<double>(chamadas) : 0.0));
+  if (!cfg.contabilidade.empty()) out.map_ref()->set("arquivo", Value::texto(cfg.contabilidade));
+  if (!cfg.observabilidade.empty())
+    out.map_ref()->set("observabilidade", Value::texto(cfg.observabilidade));
+  if (!cfg.otel_exporter.empty()) out.map_ref()->set("otel_exporter", Value::texto(cfg.otel_exporter));
+  return out;
+}
+
+LlmContextoGuard::LlmContextoGuard(std::string agente, std::string sessao, std::string trace_id) {
+  g_contexto.agente = std::move(agente);
+  g_contexto.sessao = std::move(sessao);
+  trace_id_ = trace_id.empty() ? novo_trace_id() : std::move(trace_id);
+  g_contexto.trace_id = trace_id_;
+  ativo_ = true;
+}
+
+LlmContextoGuard::~LlmContextoGuard() {
+  if (!ativo_) return;
+  g_contexto = {};
+}
+
+LlmSpanGuard::LlmSpanGuard(const LlmConfig& cfg, std::string nome, std::string tipo,
+                           std::vector<std::pair<std::string, std::string>> atributos)
+    : cfg_(cfg), nome_(std::move(nome)), tipo_(std::move(tipo)),
+      atributos_(std::move(atributos)), trace_id_(g_contexto.trace_id),
+      previous_trace_id_(g_contexto.trace_id), parent_span_id_(g_contexto.span_id),
+      previous_span_id_(g_contexto.span_id),
+      inicio_(std::chrono::steady_clock::now()), inicio_wall_(std::chrono::system_clock::now()),
+      uncaught_(std::uncaught_exceptions()), ativo_(true) {
+  if (trace_id_.empty()) trace_id_ = novo_trace_id();
+  span_id_ = novo_span_id();
+  g_contexto.trace_id = trace_id_;
+  g_contexto.span_id = span_id_;
+}
+
+void LlmSpanGuard::erro() { erro_ = true; }
+
+LlmSpanGuard::~LlmSpanGuard() {
+  if (!ativo_) return;
+  if (std::uncaught_exceptions() > uncaught_) erro_ = true;
+  g_contexto.trace_id = previous_trace_id_;
+  g_contexto.span_id = previous_span_id_;
+  const std::string path = span_exporter(cfg_);
+  if (path.empty()) return;
+  const auto fim_wall = std::chrono::system_clock::now();
+  const auto fim_steady = std::chrono::steady_clock::now();
+  const auto inicio_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              inicio_wall_.time_since_epoch())
+                              .count();
+  const auto fim_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          fim_wall.time_since_epoch())
+                          .count();
+  const auto duracao_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                              fim_steady - inicio_)
+                              .count();
+  Value span = Value::mapa();
+  span.map_ref()->set("tipo", Value::texto("span"));
+  span.map_ref()->set("name", Value::texto(nome_));
+  span.map_ref()->set("kind", Value::texto(tipo_));
+  span.map_ref()->set("trace_id", Value::texto(trace_id_));
+  span.map_ref()->set("span_id", Value::texto(span_id_));
+  if (!parent_span_id_.empty()) span.map_ref()->set("parent_span_id", Value::texto(parent_span_id_));
+  span.map_ref()->set("start_time_unix_nano", Value::inteiro(inicio_ns));
+  span.map_ref()->set("end_time_unix_nano", Value::inteiro(fim_ns));
+  span.map_ref()->set("duracao_us", Value::inteiro(duracao_us));
+  span.map_ref()->set("status", Value::texto(erro_ ? "ERROR" : "OK"));
+  span.map_ref()->set("llm", Value::texto(cfg_.nome));
+  span.map_ref()->set("provedor", Value::texto(cfg_.provider));
+  span.map_ref()->set("modelo", Value::texto(cfg_.model));
+  if (!g_contexto.agente.empty()) span.map_ref()->set("agente", Value::texto(g_contexto.agente));
+  if (!g_contexto.sessao.empty()) span.map_ref()->set("sessao", Value::texto(g_contexto.sessao));
+  Value attrs = Value::mapa();
+  for (const auto& [key, value] : atributos_) attrs.map_ref()->set(key, Value::texto(value));
+  span.map_ref()->set("attributes", std::move(attrs));
+  std::lock_guard<std::mutex> lk(g_arquivo_mu);
+  std::error_code ec;
+  const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+  if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+  std::ofstream out(path, std::ios::app);
+  if (out) out << json_dump_compacto(span) << '\n';
 }
 
 }  // namespace tilt::rt

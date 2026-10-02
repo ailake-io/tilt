@@ -1,0 +1,5 @@
+funcao dobro x:
+  retornar x * 2
+
+funcao dobrar_todos lista:
+  retornar mapear(lista, funcao x: dobro(x))

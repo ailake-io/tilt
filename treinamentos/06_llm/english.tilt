@@ -1,0 +1,27 @@
+# language: en
+# Offline LLM and RAG: TILT_LLM=mock makes this example deterministic.
+
+llm assistant:
+  provider: "openai"
+  model: "gpt-4o-mini"
+  key: env "OPENAI_API_KEY"
+  accounting:
+    token_cap: 400
+    input_cost_per_thousand: 0.15
+    output_cost_per_thousand: 0.60
+  observability:
+    log_prompts: true
+
+index documents:
+  embeddings: "text-embedding-3-small"
+  storage: "memory"
+
+pipeline question:
+  steps:
+    - documents.insert "Tilt reads CSV, Parquet, Delta and Iceberg."
+    - documents.insert "The runtime uses CPU and can dispatch CUDA or Metal kernels."
+    - context = documents.search "which formats exist", top_k: 2
+    - answer = ask assistant:
+        system: "Answer using only the context."
+        user: "Which formats does Tilt support?"
+    - print answer.text

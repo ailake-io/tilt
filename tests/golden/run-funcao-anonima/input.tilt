@@ -1,0 +1,21 @@
+funcao compor f, g:
+  retornar funcao x: f(g(x))
+
+funcao somador n:
+  retornar funcao x: x + n
+
+pipeline t:
+  passos:
+    - dobro = funcao x: x * 2
+    - imprimir dobro(4), tipo_de(dobro), dobro
+    - imprimir mapear([1, 2, 3], funcao x: x * x)
+    - imprimir filtrar([1, 2, 3, 4], funcao x: x % 2 == 0)
+    - imprimir reduzir([1, 2, 3, 4], funcao acc, x: acc + x, 0), reduzir([2, 3], funcao a, b: a * b)
+    - imprimir qualquer([1, 2], funcao x: x > 1), todos([1, 2], funcao x: x > 1)
+    - fator = 10
+    - imprimir mapear([1, 2], funcao x: x * fator)
+    - mais5 = somador(5)
+    - imprimir mais5(1), compor(dobro, mais5)(1)
+    - imprimir mapear(["a", "b"], funcao s: maiusculas(s) + "!")
+    - imprimir mapear([1, 2], funcao x: "par" se x % 2 == 0 senao "impar")
+    - imprimir mapear([{n: 1}, {n: 2}], funcao r: r.n)

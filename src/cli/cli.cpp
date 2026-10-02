@@ -17,13 +17,15 @@
 #include <utility>
 #include <vector>
 
+#include "cli/dev_cmds.hpp"
+#include "cli/rpc.hpp"
+#include "codegen/codegen_arm64.hpp"
+#include "codegen/codegen_x86_64.hpp"
 #include "common/source.hpp"
 #include "diagnostics/diagnostic.hpp"
+#include "interp/interpreter.hpp"
 #include "lexer/lexer.hpp"
 #include "lexer/token.hpp"
-#include "codegen/codegen_x86_64.hpp"
-#include "codegen/codegen_arm64.hpp"
-#include "interp/interpreter.hpp"
 #include "lsp/completion.hpp"
 #include "lsp/lsp_server.hpp"
 #include "parser/ast_dump.hpp"
@@ -98,10 +100,25 @@ void print_usage(std::ostream& os) {
      << "  executar <arquivo> [--agendar]     roda o programa no interpretador\n"
      << "  executar --vm <arquivo>            roda pipelines pelo bytecode VM\n"
      << "  executar --jit <arquivo>           JIT nativo; fallback para a VM\n"
+     << "  testar [caminho...] [--filtro X]   roda os blocos `teste` (afirmar, afirmar_igual)\n"
+     << "  formatar <caminho...> [--verificar]  normaliza espacos dos .tilt\n"
+     << "  novo <nome>                        cria um projeto (programa, testes, README)\n"
+     << "  adicionar <nome> <arquivo.tilt>    inclui modulo local e atualiza tilt.lock\n"
+     << "  atualizar <nome> <arquivo.tilt>    substitui modulo local e atualiza tilt.lock\n"
+     << "  registrar-modelo <nome> <arquivo>  grava artefato versionado no registry local\n"
+     << "  listar-modelos [--registro DIR]    lista versões do registry local\n"
+     << "  promover-modelo <nome> <versao> <stage>  promove versão (staging/production/archived)\n"
+     << "  rollback-modelo <nome>             reverte production para a versão anterior\n"
+     << "  linhagem-modelo <nome>              exibe a linhagem do artefato resolvido\n"
+     << "  resolver-modelo <nome> [--versao V|--stage S]  resolve artefato registrado\n"
+     << "  repl                               laco interativo com estado entre linhas\n"
+     << "  rpc <arquivo>                      expoe funcoes e pipelines por JSON-lines\n"
+     << "  chamar <arquivo> <funcao> [json]   chama uma funcao e imprime o resultado em JSON\n"
      << "  servir <arquivo> [--porta N]       sobe o 'servico' HTTP declarado\n"
-     << "                                     [--requisicoes N] [--threads N]\n"
+     << "                                     [--requisicoes N] [--threads N] [--pesos ARQUIVO]\n"
+     << "                                     [--modelo N --versao V|--stage S --registro DIR]\n"
      << "  servir-catalogo <dir> [--porta N]  expoe tabelas Iceberg locais via\n"
-     << "                                     REST catalog read-only [--prefixo P]\n"
+     << "                                     REST catalog local [--prefixo P]\n"
      << "                                     [--sem-reecrita-manifests]\n"
      << "  compilar <arquivo> --saida <bin>   gera binario nativo\n"
      << "                                     [--asm] [--arch x86_64|arm64]\n"
@@ -222,26 +239,26 @@ int cmd_ast(const std::vector<std::string_view>& args) {
 
 rt::Value diagnostics_to_json(std::string_view path, const DiagnosticEngine& diag) {
   rt::Value out = rt::Value::mapa();
-  out.map->set("arquivo", rt::Value::texto(std::string(path)));
-  out.map->set("ok", rt::Value::logico(!diag.has_errors()));
+  out.map_ref()->set("arquivo", rt::Value::texto(std::string(path)));
+  out.map_ref()->set("ok", rt::Value::logico(!diag.has_errors()));
   rt::Value arr = rt::Value::lista();
   for (const Diagnostic& d : diag.all()) {
     rt::Value e = rt::Value::mapa();
-    e.map->set("codigo", rt::Value::texto(std::string(diag_code_string(d.code))));
-    e.map->set("severidade",
+    e.map_ref()->set("codigo", rt::Value::texto(std::string(diag_code_string(d.code))));
+    e.map_ref()->set("severidade",
                rt::Value::texto(d.severity == Severity::Error     ? "erro"
                                 : d.severity == Severity::Warning ? "aviso"
                                                                   : "nota"));
-    e.map->set("linha", rt::Value::inteiro(d.span.line));
-    e.map->set("coluna", rt::Value::inteiro(d.span.column));
-    e.map->set("mensagem", rt::Value::texto(d.message));
+    e.map_ref()->set("linha", rt::Value::inteiro(d.span.line));
+    e.map_ref()->set("coluna", rt::Value::inteiro(d.span.column));
+    e.map_ref()->set("mensagem", rt::Value::texto(d.message));
     rt::Value notes = rt::Value::lista();
-    for (const std::string& n : d.notes) notes.list->push_back(rt::Value::texto(n));
-    e.map->set("notas", std::move(notes));
-    if (d.suggestion) e.map->set("sugestao", rt::Value::texto(*d.suggestion));
-    arr.list->push_back(std::move(e));
+    for (const std::string& n : d.notes) notes.list_ref()->push_back(rt::Value::texto(n));
+    e.map_ref()->set("notas", std::move(notes));
+    if (d.suggestion) e.map_ref()->set("sugestao", rt::Value::texto(*d.suggestion));
+    arr.list_ref()->push_back(std::move(e));
   }
-  out.map->set("erros", std::move(arr));
+  out.map_ref()->set("erros", std::move(arr));
   return out;
 }
 
@@ -386,10 +403,10 @@ int cmd_completar(const std::vector<std::string_view>& args) {
     rt::Value arr = rt::Value::lista();
     for (const auto& it : items) {
       rt::Value m = rt::Value::mapa();
-      m.map->set("label", rt::Value::texto(it.label));
-      m.map->set("kind", rt::Value::texto(it.kind));
-      m.map->set("detail", rt::Value::texto(it.detail));
-      arr.list->push_back(std::move(m));
+      m.map_ref()->set("label", rt::Value::texto(it.label));
+      m.map_ref()->set("kind", rt::Value::texto(it.kind));
+      m.map_ref()->set("detail", rt::Value::texto(it.detail));
+      arr.list_ref()->push_back(std::move(m));
     }
     std::cout << rt::json_dump(arr);
   } else {
@@ -444,6 +461,17 @@ BUILTINS
   s3_iniciar_upload s3_enviar_parte s3_concluir_upload s3_abortar_upload
   http_get_json http_post_json  (HTTP generico JSON; ver guia 03)
   ler <fonte> carregador
+  matematica: raiz abs exp logaritmo potencia piso teto arredondar seno cosseno tangente pi
+  conversao:  inteiro decimal texto logico tipo_de
+  texto:      maiusculas minusculas aparar substituir comeca_com termina_com juntar
+              regex_casa regex_extrair regex_substituir
+  listas:     ordenar unicos reverso zip enumerar chaves valores
+  tempo:      agora timestamp formatar_data dormir   (UTC)
+  arquivos:   ler_texto escrever_texto anexar_texto listar_arquivos remover_arquivo
+  testes:     afirmar afirmar_igual   (blocos `teste nome:` + `tilt testar`)
+  rag:        reranquear   (indice.buscar ..., modo: "hibrido" so em memoria)
+  ordem sup.: mapear filtrar reduzir qualquer todos   (com `funcao x: expr`)
+  outros:     sha256 base64_codificar base64_decodificar json_texto json_ler
   executar_sql "<url>" "<sql>" [params]   (postgres://, sqlite://, duckdb://, mysql:// ou clickhouse://; "?" vira $N/{pN}; transacao "<url>" [{sql:, params:?}])
   consultar_sql "<url>" "<sql>" [params]   (SELECT com "?", devolve tabela; mesma ligacao do executar_sql)
   spark_sql "<url-livy>" "<sql>" / spark_executar "<url-livy>" "<codigo>"  ([lingua: "scala"|"pyspark", conf: {...}]; sessao Livy reusada, nao fechada)
@@ -455,7 +483,7 @@ BUILTINS
 CLI
   tilt checar <a> [--json]   ast <a>   executar <a> [--agendar] [--vm]
   tilt servir <a> [--porta N] [--requisicoes N] [--threads N]
-  tilt servir-catalogo <dir> [--porta N] [--prefixo P]  (Iceberg REST read-only;
+  tilt servir-catalogo <dir> [--porta N] [--prefixo P]  (Iceberg REST local;
                                      --sem-reecrita-manifests p/ Spark/Hadoop)
   tilt compilar <a> --saida <bin> [--asm] [--arch x86_64|arm64]
   tilt tokens <a>   referencia   versao
@@ -589,6 +617,11 @@ int cmd_compilar(const std::vector<std::string_view>& args) {
 
 int cmd_servir(const std::vector<std::string_view>& args) {
   std::string_view path;
+  std::string pesos_override;
+  std::string modelo_registro;
+  std::string modelo_versao;
+  std::string modelo_stage;
+  std::string modelo_registry_dir = ".tilt-modelos";
   int port = 0;
   int max_requests = 0;
   int threads = 0;  // 0 = padrao (min(4, cores)); 1 = serial
@@ -599,6 +632,16 @@ int cmd_servir(const std::vector<std::string_view>& args) {
       max_requests = std::atoi(std::string(args[++k]).c_str());
     } else if (args[k] == "--threads" && k + 1 < args.size()) {
       threads = std::atoi(std::string(args[++k]).c_str());
+    } else if (args[k] == "--pesos" && k + 1 < args.size()) {
+      pesos_override = std::string(args[++k]);
+    } else if (args[k] == "--modelo" && k + 1 < args.size()) {
+      modelo_registro = std::string(args[++k]);
+    } else if (args[k] == "--versao" && k + 1 < args.size()) {
+      modelo_versao = std::string(args[++k]);
+    } else if (args[k] == "--stage" && k + 1 < args.size()) {
+      modelo_stage = std::string(args[++k]);
+    } else if (args[k] == "--registro" && k + 1 < args.size()) {
+      modelo_registry_dir = std::string(args[++k]);
     } else if (args[k].rfind("--", 0) == 0) {
       std::cerr << "tilt: opcao desconhecida '" << args[k] << "'\n";
       return kUsage;
@@ -607,7 +650,26 @@ int cmd_servir(const std::vector<std::string_view>& args) {
     }
   }
   if (path.empty()) {
-    std::cerr << "tilt: uso: tilt servir <arquivo> [--porta N] [--requisicoes N] [--threads N]\n";
+    std::cerr << "tilt: uso: tilt servir <arquivo> [--porta N] [--requisicoes N] [--threads N]"
+                 " [--pesos ARQUIVO] [--modelo N --versao V|--stage S --registro DIR]\n";
+    return kUsage;
+  }
+
+  if (!modelo_registro.empty()) {
+    if (!pesos_override.empty()) {
+      std::cerr << "tilt: use --pesos ou --modelo, nao os dois\n";
+      return kUsage;
+    }
+    std::string erro;
+    const auto resolved = resolver_modelo_local(modelo_registro, modelo_versao, modelo_stage,
+                                                modelo_registry_dir, erro);
+    if (!resolved) {
+      std::cerr << "tilt: " << erro << "\n";
+      return kUsage;
+    }
+    pesos_override = *resolved;
+  } else if (!modelo_versao.empty() || !modelo_stage.empty()) {
+    std::cerr << "tilt: --versao/--stage exigem --modelo\n";
     return kUsage;
   }
 
@@ -630,6 +692,13 @@ int cmd_servir(const std::vector<std::string_view>& args) {
     return kDiagnostics;
   }
 
+  if (!pesos_override.empty()) {
+#if defined(_WIN32)
+    _putenv_s("TILT_MODEL_WEIGHTS", pesos_override.c_str());
+#else
+    setenv("TILT_MODEL_WEIGHTS", pesos_override.c_str(), 1);
+#endif
+  }
   Interpreter interp(program, diag, std::cout);
   interp.set_entry_dir(std::filesystem::path(std::string(path)).parent_path().string());
   const int rc = interp.serve(port, max_requests, threads);
@@ -728,6 +797,20 @@ int run_cli(int argc, char** argv) {
   if (cmd == "lsp") return tilt::lsp::run_lsp(std::cin, std::cout);
   if (cmd == "checar") return cmd_checar(args);
   if (cmd == "executar") return cmd_executar(args);
+  if (cmd == "testar") return cmd_testar(args);
+  if (cmd == "formatar") return cmd_formatar(args);
+  if (cmd == "novo") return cmd_novo(args);
+  if (cmd == "adicionar") return cmd_adicionar(args);
+  if (cmd == "atualizar") return cmd_adicionar(args);
+  if (cmd == "registrar-modelo") return cmd_registrar_modelo(args);
+  if (cmd == "listar-modelos") return cmd_listar_modelos(args);
+  if (cmd == "promover-modelo") return cmd_promover_modelo(args);
+  if (cmd == "rollback-modelo") return cmd_rollback_modelo(args);
+  if (cmd == "linhagem-modelo") return cmd_linhagem_modelo(args);
+  if (cmd == "resolver-modelo") return cmd_resolver_modelo(args);
+  if (cmd == "repl") return cmd_repl(args);
+  if (cmd == "rpc") return cmd_rpc(args);
+  if (cmd == "chamar") return cmd_chamar(args);
   if (cmd == "servir") return cmd_servir(args);
   if (cmd == "servir-catalogo") return cmd_servir_catalogo(args);
 

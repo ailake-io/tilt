@@ -15,6 +15,12 @@ llm gpt:
   teto_tokens: 0                    # 0 = sem teto; >0 barra antes de estourar
   cache: verdadeiro               # cache de respostas idênticas no processo (opt-in)
   reserva: [gpt_barato]             # fallback: outro 'llm' se este falhar
+  custo_entrada_mil: 0.0            # moeda por 1.000 tokens
+  custo_saida_mil: 0.0
+  contabilidade: "var/llm.jsonl"   # ledger persistente (opcional)
+  observabilidade: "var/llm.obs.jsonl" # eventos (opcional)
+  otel_exporter: "file:var/otel.jsonl" # spans estruturados (opcional)
+  registrar_prompts: falso          # prompt/resposta somente com opt-in
 
 pipeline declara:
   passos:
@@ -35,7 +41,22 @@ pipeline declara:
 - `cache: verdadeiro` habilita cache em memória por processo para chamadas idênticas
   (provedor, modelo, endpoint, parâmetros e prompt); cache hits devolvem também a
   contabilidade original e não fazem nova chamada nem somam tokens. O padrão é falso.
-- `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}}` —
+- `contabilidade:` grava um evento JSONL por chamada, com tokens, custo, modelo e
+  operação. `teto_tokens:` consulta esse arquivo antes da chamada, preservando o
+  limite entre reinícios. `custo_*_mil` são valores em moeda por 1.000 tokens.
+  Quando um `indice` ou agente informa `llm:`, chamadas de embeddings entram no
+  mesmo ledger como `operacao: "embedding"` e participam de `llm_metricas`.
+- `observabilidade:` grava eventos de prompt/resposta. O conteúdo é omitido por
+  padrão; `registrar_prompts: verdadeiro` é opt-in para ambientes autorizados.
+  Quando omitido, o evento mantém hashes SHA-256 e `trace_id` para correlação
+  sem expor o texto.
+- Cada chamada, embedding, etapa de agente e ferramenta gera um span JSONL com
+  `trace_id`, `span_id`, `parent_span_id`, início/fim em nanossegundos,
+  `duracao_us`, status e atributos. `otel_exporter: "file:..."` ou
+  `TILT_OTEL_EXPORTER=file:...` exporta os spans mesmo sem registrar prompts;
+  o formato pode ser ingerido por coletores OpenTelemetry depois de uma
+  transformação para OTLP.
+- `perguntar` devolve `{texto, modelo, tokens: {entrada, saida}, custo, contabilidade}` —
   `modelo` é o que respondeu (útil com `reserva:`), tokens vêm do `usage`
   da API (Anthropic `input/output_tokens`, OpenAI `prompt/completion_tokens`;
   no mock, heurística chars/4 por lado).
@@ -55,7 +76,23 @@ pipeline robusto:
     - imprimir r.texto
     - imprimir r.tokens.entrada, r.tokens.saida
     - imprimir r.modelo
+    - imprimir llm_metricas "gpt"  # totais persistentes, custo e chamadas
 ```
+
+### Contexto longo e orçamento de agentes
+
+Agentes com `memoria: conversa` compactam automaticamente o histórico quando
+ele ultrapassa `max_contexto:` (em caracteres; default 12000). A compactação
+preserva o início e o fim e insere um marcador de resumo, sem nova chamada ao
+LLM. `resumo_automatico: falso` desliga essa poda. O mesmo limite é aplicado às
+observações do planner e às mensagens de ferramentas; o retorno de
+`.responder` inclui `contexto` com os tamanhos antes/depois.
+
+`politica` aceita `max_contexto:`/`contexto_max_chars:`,
+`resumo_automatico:` e `max_custo:` (ou `limite_custo:`), além de
+`max_tokens:`. O retorno do agente inclui `orcamento` com limite, uso, custo e
+indicação de estouro; `llm_metricas` também informa custo médio, tokens médios,
+preços configurados e teto de tokens.
 
 Cobertura com HTTP de verdade em `tests/llm_retry_test.sh` (mock local com
 429/500/timeout: retry, fallback, teto e `tempo_limite`).
@@ -149,11 +186,55 @@ pipeline textos:
     - imprimir pedacos[0]
 ```
 
+`modo:` escolhe como cortar (o padrão de `dividir_texto` é `"sentenca"`; use
+`"tamanho"` para janela fixa, nunca no meio de um caractere UTF-8):
+`"sentenca"` junta sentenças inteiras (termina em `.` `!` `?` ou linha em
+branco), `"codigo"` preserva blocos e fecha em linhas de declaração,
+`"paragrafo"` respeita blocos separados por linha em branco e `"linha"`
+respeita linhas inteiras. `fragmentar`/`chunk` devolvem mapas
+`{texto, indice, inicio, fim, tokens, modo}`; `dividir_texto` mantém a forma
+legada de lista de textos. `tamanho` é o teto de bytes do pedaço e
+`sobreposicao` repete unidades quando pedida.
+
+```tilt run
+pipeline sentencas:
+  passos:
+    - doc = "Tilt e uma linguagem. Ela e declarativa! Voce gosta? Sim."
+    - imprimir dividir_texto(doc, tamanho: 40, modo: "sentenca")
+```
+
+## Avaliação de recuperação
+
+Índices em memória e backends externos (Qdrant, pgvector, Weaviate, Pinecone e
+Chroma) aceitam `.avaliar`/`.avaliar_recuperacao`. Cada caso informa a consulta
+e os IDs relevantes (ou mapas `{id, grau}` para relevância graduada); a busca
+real do backend calcula `recall`, `precisao`, `mrr`, `ndcg`,
+`latencia_media_ms` e `detalhes` por consulta:
+
+```tilt run
+llm gpt:
+  provedor: local
+  modelo: "text-embedding-3-small"
+
+indice base:
+  armazenamento: "memoria"
+
+pipeline avaliar:
+  passos:
+    - metricas = base.avaliar([{ consulta: "fatura", relevantes: ["a1"] }], top_k: 5)
+    - imprimir metricas.recall, metricas.mrr
+```
+
 ## `indice` — RAG
 
 ```tilt run
+llm gpt:
+  provedor: local
+  modelo: "text-embedding-3-small"
+
 indice base:
   embeddings: "text-embedding-3-small"
+  llm: gpt                         # opcional: contabiliza embeddings neste llm
   armazenamento: "memoria"          # ou qdrant://host:porta/colecao (REST via curl)
                                      # ou pgvector://colecao (Postgres + extensão pgvector)
                                      # ou weaviate://host:porta/classe (REST via curl)
@@ -216,6 +297,33 @@ pipeline indexar:
   `metadatas[].texto` e `documents[]` do ponto.
 
 Exemplo completo: [`../exemplos/rag_llm.tilt`](../exemplos/rag_llm.tilt).
+
+
+### Busca híbrida e reranking
+
+Índice `"memoria"`: `buscar "consulta", modo: "hibrido"` funde (RRF, k = 60) o
+ranking por vetor com o de palavras-chave (BM25 sobre o `texto`); o `score` do hit
+passa a ser o score fundido, não um cosseno. Para qualquer backend (inclusive
+Qdrant, pgvector etc.), busque mais candidatos e reordene:
+`reranquear(consulta, hits, top_k)` faz o mesmo BM25 sobre os candidatos, funde com
+a ordem de entrada e devolve os `top_k` melhores (o `score` antigo vira
+`score_original`). Aceita também uma lista de textos. `modo: "hibrido"` em backend
+externo é erro claro.
+
+```tilt run
+indice base:
+  embeddings: "text-embedding-3-small"
+  armazenamento: "memoria"
+  dimensao: 16
+  metrica: cosseno
+
+pipeline hibrido:
+  passos:
+    - base.inserir([{ id: "a", texto: "o gato dorme no sofa" }, { id: "b", texto: "kafka e streaming" }])
+    - candidatos = base.buscar("gato", top_k: 2)
+    - melhores = reranquear("gato", candidatos, 1)
+    - imprimir tamanho melhores
+```
 
 ## `avaliacao` (evals)
 
@@ -300,5 +408,6 @@ avaliacao com_juiz:
 ```
 
 Limites: o juiz não expõe cadeia de pensamento; o multi-juiz usa voto de maioria ou unanimidade, sem pesos por juiz;
-amostra só por contagem (sem fração); o registro MLflow envia métricas e
-parâmetros, mas ainda não publica artefatos ou detalhes de cada caso.
+amostra só por contagem (sem fração); o registro MLflow envia métricas,
+parâmetros e os artefatos `detalhes.json` e `lineage.json` com os casos e os
+hashes dos insumos.

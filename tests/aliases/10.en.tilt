@@ -1,0 +1,16 @@
+experiment prever_churn:
+  data: [
+    { uso: 10, plano: "a", churn: 1 },
+    { uso: 9, plano: "b", churn: 1 },
+    { uso: 2, plano: "a", churn: 0 },
+    { uso: 1, plano: "b", churn: 0 }
+  ]
+  target: "churn"
+  features: [uso, plano]
+  preprocess:
+    - one_hot: [plano]
+    - standardize: [uso]
+  split: { train: 0.75, test: 0.25 }
+  model: logistic_regression
+  metrics: [accuracy, f1]
+  seed: 7

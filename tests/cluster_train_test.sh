@@ -41,3 +41,75 @@ test -s "$tmp/aggregate-epoch-1.json"
 test -s "$tmp/aggregate-epoch-2.json"
 grep -q "treino M:" "$tmp/out0"
 grep -q "treino M:" "$tmp/out1"
+python3 - "$tmp" <<'PY'
+import json
+import pathlib
+import sys
+
+tmp = pathlib.Path(sys.argv[1])
+aggregate = json.loads((tmp / "aggregate-epoch-2.json").read_text())
+layers = aggregate.get("camadas", [])
+assert layers and all("m_w" in layer and "v_w" in layer and "m_b" in layer and "v_b" in layer
+                      for layer in layers), "checkpoint agregado sem momentos do Adam"
+rank0 = json.loads((tmp / "rank-0-epoch-2.json").read_text())
+rank1 = json.loads((tmp / "rank-1-epoch-2.json").read_text())
+for idx, layer in enumerate(layers):
+    for key in ("m_w", "v_w", "m_b", "v_b"):
+        a = rank0["camadas"][idx][key]["dados"]
+        b = rank1["camadas"][idx][key]["dados"]
+        got = layer[key]["dados"]
+        assert len(a) == len(b) == len(got)
+        for x, y, z in zip(a, b, got):
+            assert abs(z - (x + y) / 2.0) < 2e-5, (idx, key, x, y, z)
+PY
+
+# Parquet com row groups independentes: cada rank do cluster processa apenas
+# os grupos que lhe pertencem nas epocas, mantendo os rotulos globais corretos.
+if python3 -c 'import pyarrow' >/dev/null 2>&1; then
+  python3 - "$root" "$tmp" <<'PY'
+import csv
+import pathlib
+import sys
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+root = pathlib.Path(sys.argv[1])
+tmp = pathlib.Path(sys.argv[2])
+source = (root / "tests/golden/run-treino-fluxo/input.tilt").read_text()
+with (root / "tests/golden/run-treino-fluxo/dados.csv").open() as f:
+    rows = [{k: int(v) for k, v in row.items()} for row in csv.DictReader(f)]
+pq.write_table(pa.Table.from_pylist(rows), tmp / "dados.parquet", row_group_size=4,
+               use_dictionary=False)
+source = source.replace('"dados.csv"', '"' + str(tmp / "dados.parquet") + '"')
+source = source.replace("  epocas: 30\n", "  epocas: 2\n")
+for world in (2, 4):
+    for rank in range(world):
+        config = source.replace(
+            "  semente: 7\n",
+            "  semente: 7\n  cluster: { dir: \"" + str(tmp / f"parquet-cluster{world}") +
+            "\", rank: " + str(rank) + f", mundo: {world}, timeout: 10 }}\n",
+        )
+        (tmp / f"parquet-{world}-rank{rank}.tilt").write_text(config)
+PY
+  for world in 2 4; do
+    pids=""
+    for rank in $(seq 0 $((world - 1))); do
+      "$bin" executar "$tmp/parquet-$world-rank$rank.tilt" \
+        >"$tmp/parquet-$world-out$rank" 2>&1 &
+      pids="$pids $!"
+    done
+    for pid in $pids; do
+      if ! wait "$pid"; then
+        echo "parquet cluster mundo=$world falhou" >&2
+        for rank in $(seq 0 $((world - 1))); do
+          tail -20 "$tmp/parquet-$world-out$rank" >&2 || true
+        done
+        exit 1
+      fi
+    done
+    test -s "$tmp/parquet-cluster$world/aggregate-epoch-2.json"
+    for rank in $(seq 0 $((world - 1))); do
+      grep -q "treino M:" "$tmp/parquet-$world-out$rank"
+    done
+  done
+fi

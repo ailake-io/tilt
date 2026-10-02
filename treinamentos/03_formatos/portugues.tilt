@@ -1,0 +1,11 @@
+# Parquet, Delta e Iceberg locais. Execute em uma pasta descartavel.
+
+pipeline formatos:
+  passos:
+    - dados = ler_csv "exemplos/dados/vendas.csv", colunar: verdadeiro
+    - escrever_parquet dados, "treinamentos/saida/vendas.parquet", codec: "snappy"
+    - parquet = ler_parquet "treinamentos/saida/vendas.parquet", selecionar: ["regiao", "valor"]
+    - escrever_delta parquet, "treinamentos/saida/vendas_delta", particionar_por: ["regiao"]
+    - delta = ler_delta "treinamentos/saida/vendas_delta", onde: { regiao: "Sul" }
+    - escrever_iceberg delta, "treinamentos/saida/vendas_iceberg", particionar_por: ["regiao"]
+    - imprimir "linhas:", tamanho delta

@@ -1,0 +1,8 @@
+== pipeline datas ==
+2024-01-31 2024 1 31
+2024-03-01 2025-01-04 2023-12-31
+60 -60
+nulo nulo
+0 nulo
+1990 sem apelido 0 zé
+erro: dias_entre: dias_entre espera datas ISO (AAAA-MM-DD); use converter_data para normalizar

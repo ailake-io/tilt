@@ -15,6 +15,7 @@ Release do GitHub).
 | make/ninja | qualquer versão recente |
 
 O `tilt` não tem dependências de link: SQLite, zlib (gzip no Parquet),
+libzstd (ZSTD), liblz4 (LZ4_RAW), libbrotlienc/libbrotlidec (Brotli),
 OpenSSL (TLS) e libpq (Postgres) são carregadas em runtime via `dlopen`
 quando o recurso é usado.
 
@@ -26,8 +27,8 @@ O manifesto Snap declara dois pontos opcionais para integrações nativas:
   `$SNAP_COMMON/tilt/drivers`; um snap fornecedor pode publicar ali as
   bibliotecas SQLite, DuckDB, PostgreSQL ou MariaDB/MySQL.
 - `gpu`: plug `opengl` e `hardware-observe`, reservado para o acesso a
-  dispositivos gráficos/compute. A validação CUDA em hardware real continua
-  separada e deferida.
+  dispositivos gráficos/compute. Os kernels CUDA foram validados em RTX 5050;
+  o snap depende de driver e NVRTC acessíveis no ambiente instalado.
 
 O carregador tenta primeiro os nomes normais do sistema e depois os diretórios
 listados em `TILT_DRIVER_PATH` (`:` no Linux/macOS, `;` no Windows). No Snap,
@@ -105,8 +106,8 @@ cpack -G DEB          # pacote Debian: tilt-<versao>-<os>-<arch>.deb
 `share/tilt/exemplos` e a documentação. Instalação manual:
 
 ```bash
-tar xzf tilt-0.1.0-Linux-x86_64.tar.gz
-sudo cp -r tilt-0.1.0-Linux-x86_64/{bin,share} /usr/local/
+tar xzf tilt-0.2.0-Linux-x86_64.tar.gz
+sudo cp -r tilt-0.2.0-Linux-x86_64/{bin,share} /usr/local/
 ```
 
 O binário Linux é portável: linka `libstdc++`/`libgcc` estaticamente
@@ -122,29 +123,29 @@ cd build/release && cpack     # .tar.gz + .deb + .rpm de uma vez
 
 - **Debian** (`tilt-<versao>-<os>-<arch>.deb`) — `Depends: libc6, curl`:
   ```bash
-  sudo dpkg -i tilt-0.1.0-Linux-x86_64.deb
+  sudo dpkg -i tilt-0.2.0-Linux-x86_64.deb
   sudo apt -f install        # se faltar alguma dependência
   sudo dpkg -r tilt          # desinstala
   ```
 - **RPM** (`tilt-<versao>-<os>-<arch>.rpm`) — `Requires: glibc, curl`:
   ```bash
-  sudo dnf install tilt-0.1.0-Linux-x86_64.rpm   # Fedora/RHEL
-  sudo zypper install tilt-0.1.0-Linux-x86_64.rpm # openSUSE
+  sudo dnf install tilt-0.2.0-Linux-x86_64.rpm   # Fedora/RHEL
+  sudo zypper install tilt-0.2.0-Linux-x86_64.rpm # openSUSE
   sudo rpm -e tilt                                 # desinstala
   ```
 
 **Checksum** (para publicar o pacote):
 
 ```bash
-sha256sum tilt-0.1.0-Linux-x86_64.tar.gz > tilt-0.1.0-Linux-x86_64.tar.gz.sha256
+sha256sum tilt-0.2.0-Linux-x86_64.tar.gz > tilt-0.2.0-Linux-x86_64.tar.gz.sha256
 ```
 
 Para verificar a assinatura Sigstore de um artefato Linux (instale o
 [Cosign](https://docs.sigstore.dev/cosign/system_config/installation/) antes):
 
 ```bash
-cosign verify-blob tilt-0.1.0-Linux-x86_64.tar.gz \
-  --bundle tilt-0.1.0-Linux-x86_64.tar.gz.sigstore.json \
+cosign verify-blob tilt-0.2.0-Linux-x86_64.tar.gz \
+  --bundle tilt-0.2.0-Linux-x86_64.tar.gz.sigstore.json \
   --certificate-identity-regexp \
     '^https://github.com/ailake-io/tilt/.github/workflows/release.yml@refs/tags/v' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
@@ -164,19 +165,19 @@ tilt-atualizar               # atualiza ~/.local (prefixo padrão)
 tilt-atualizar --prefix=/usr/local  # pode exigir sudo
 ```
 
-A atualização aceita `--version=vX.Y.Z` para fixar uma release e `--force` para
+A atualização aceita `--version=vX.Y.Z[-beta.N]` para fixar uma release e `--force` para
 reinstalar a versão atual. O updater é POSIX (Linux/macOS); no Windows, use o
 MSI/winget publicado na Release.
 
 O workflow `.github/workflows/release.yml` faz isso sozinho a cada tag `v*`:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0-beta.2
+git push origin v0.2.0-beta.2
 ```
 
 Ele compila em release, roda a suíte de testes e gera/anexa por
-plataforma (Linux x86_64 e macOS arm64):
+plataforma (Linux x86_64, macOS x86_64 e Windows x64 nesta beta):
 
 - `tilt-*.tar.gz` + `.sha256` (todas as plataformas);
 - `tilt-*.sigstore.json` (Linux, bundles Cosign/Sigstore keyless para os
@@ -189,6 +190,9 @@ plataforma (Linux x86_64 e macOS arm64):
 - `tilt_*.snap` (job `snap`, via `snapcraft` em `snap/snapcraft.yaml` —
   publica na Snap Store automaticamente se o secret `SNAPCRAFT_TOKEN`
   estiver configurado, senão só anexa o arquivo);
+
+O backend ARM64 continua disponível para compilação nativa e é exercitado no
+CI, mas o instalador macOS arm64 será publicado em uma atualização posterior.
 - `tilt-<versao>.flatpak` + `.sha256` (job `flatpak` — bundle instalável
   gerado com `flatpak build-bundle` após o `flatpak-builder`);
 - `tilt-*.vsix` (extensão VS Code);
@@ -230,7 +234,7 @@ Instalação pelo usuário final:
 ```powershell
 winget install ailake-io.tilt     # apos o PR de manifestos no winget-pkgs
 # ou, com o .msi baixado da Release:
-msiexec /i tilt-0.1.0-win64.msi
+msiexec /i tilt-0.2.0-win64.msi
 ```
 
 Os manifestos winget moram em `packaging/winget/`. O job `winget` do release

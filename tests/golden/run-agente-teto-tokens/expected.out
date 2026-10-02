@@ -1,0 +1,3 @@
+== pipeline p ==
+[agente] limite de tokens da sessao (30) atingido 1
+[mock] resposta para: um texto razoavelmente longo para gastar tokens 1

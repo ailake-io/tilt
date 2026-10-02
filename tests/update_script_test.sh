@@ -23,7 +23,7 @@ case "$(uname -m)" in
   aarch64|arm64) ARCH=arm64 ;;
   *) ARCH=x86_64 ;;
 esac
-ASSET="tilt-0.1.0-${OS}-${ARCH}.tar.gz"
+ASSET="tilt-0.2.0-${OS}-${ARCH}.tar.gz"
 tar -czf "$TMP/web/$ASSET" -C "$TMP/release" bin share
 ( cd "$TMP/web" && sha256sum "$ASSET" > "$ASSET.sha256" )
 python3 - "$TMP/web" "$PORTA" <<'PY' &
@@ -38,14 +38,14 @@ for _ in $(seq 1 30); do
   sleep 0.1
 done
 cat >"$TMP/release.json" <<EOF
-{"tag_name":"v0.1.0","assets":[
+{"tag_name":"v0.2.0-beta.2","assets":[
   {"name":"$ASSET","browser_download_url":"http://127.0.0.1:$PORTA/$ASSET"},
   {"name":"$ASSET.sha256","browser_download_url":"http://127.0.0.1:$PORTA/$ASSET.sha256"}
 ]}
 EOF
 PREFIX="$TMP/install"
 sh "$ROOT/scripts/update.sh" --api-url="file://$TMP/release.json" --prefix="$PREFIX" --force
-"$PREFIX/bin/tilt" versao | grep -q '^tilt 0.1.0$'
+"$PREFIX/bin/tilt" versao | grep -q '^tilt 0.2.0-beta.2$'
 [ -f "$PREFIX/share/tilt/stdlib/io.tilt" ] || {
   echo "stdlib nao instalada pelo atualizador"; exit 1;
 }

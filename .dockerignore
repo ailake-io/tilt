@@ -1,0 +1,17 @@
+.git
+.github
+.codex
+.agents
+/build/
+/bench/
+/cmake-build-*/
+node_modules
+__pycache__
+*.pyc
+*.o
+*.a
+*.d
+*.log
+/tests/golden/
+/tests/fixtures/
+docs/_build

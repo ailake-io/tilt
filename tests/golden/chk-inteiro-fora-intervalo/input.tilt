@@ -1,0 +1,4 @@
+pipeline p:
+  passos:
+    - x = 123456789012345678901234567890
+    - imprimir x

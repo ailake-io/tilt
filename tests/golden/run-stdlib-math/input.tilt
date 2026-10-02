@@ -1,0 +1,12 @@
+funcao principal:
+  imprimir raiz(16), raiz(2)
+  imprimir abs(-3), abs(-2.5), abs(4)
+  imprimir potencia(2, 10), potencia(2, -1), potencia(2.5, 2)
+  imprimir piso(3.7), piso(-3.2), teto(3.2), teto(-3.7)
+  imprimir arredondar(3.14159, 2), arredondar(2.5), arredondar(-2.5)
+  imprimir exp(0), logaritmo(100, 10), logaritmo(1), seno(0), cosseno(0)
+  imprimir arredondar(pi(), 4)
+  imprimir inteiro("42") + 1, inteiro(3.9), inteiro(-3.9), inteiro(verdadeiro)
+  imprimir decimal("2.5") * 2, decimal(3)
+  imprimir texto(3) + "x", texto([1, 2]), tipo_de(1), tipo_de(1.5), tipo_de("a"), tipo_de([1])
+  imprimir logico(0), logico("x")

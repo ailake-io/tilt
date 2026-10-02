@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "runtime/vectorstore.hpp"
+
 namespace tilt::rt {
 
 // Indice vetorial hospedado no Pinecone (REST via curl sobre HTTPS, mesmo
@@ -19,9 +21,7 @@ void pinecone_ensure_namespace(const std::string& base, const std::string& ns);
 void pinecone_upsert(const std::string& base, const std::string& ns,
                      const std::string& id, const std::string& text,
                      const std::vector<float>& vec);
-std::vector<std::pair<std::string, double>> pinecone_search(const std::string& base,
-                                                            const std::string& ns,
-                                                            const std::vector<float>& vec,
-                                                            std::size_t k);
+std::vector<VectorHit> pinecone_search(const std::string& base, const std::string& ns,
+                                       const std::vector<float>& vec, std::size_t k);
 
 }  // namespace tilt::rt

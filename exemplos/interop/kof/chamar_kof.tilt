@@ -1,0 +1,7 @@
+# Tilt -> Kof: um servico Kof (`kof serve`) e so um endpoint HTTP para o Tilt.
+#   kof serve servico/servico.kf --port 8091
+#   tilt executar chamar_kof.tilt
+pipeline pontuar:
+  passos:
+    - r = http_post_json "http://127.0.0.1:8091/pontuar", { cliente: "bia", valor: 250 }
+    - imprimir r.cliente, r.pontos

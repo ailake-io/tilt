@@ -1,0 +1,7 @@
+pipeline agregar:
+  passos:
+    - t = ler_csv "vendas.csv"
+    - imprimir "linhas:", tamanho(t)
+    - r = t.agrupar_por "regiao", { total: somar "valor", n: contar }
+    - escrever_parquet r, "saida.parquet"
+    - imprimir r

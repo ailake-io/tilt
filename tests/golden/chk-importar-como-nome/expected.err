@@ -1,0 +1,8 @@
+erro[T030]: nome 'mat_local' nao definido
+  --> input.tilt:6:16
+   |
+ 6 |     - imprimir mat_local.dobro(2)
+   |                ^^^^^^^^^
+   |
+
+1 erro(s) em input.tilt

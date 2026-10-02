@@ -1,21 +1,34 @@
 #include "runtime/parquet.hpp"
+#include "runtime/parquet_key_provider.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <climits>
+#include <cstdio>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "runtime/aws_kms.hpp"
 #include "runtime/compat.hpp"
+#include "runtime/columnar.hpp"
+#include "runtime/json.hpp"
 #include "runtime/sha256.hpp"
 #include "runtime/snappy_codec.hpp"
+#include "tilt/version.hpp"
 
 namespace tilt::rt {
 
@@ -188,6 +201,151 @@ struct Tr {  // reader
   }
 };
 
+// Campos compactos crus usados para combinar row groups produzidos pelo
+// writer nativo. Preservamos todos os campos desconhecidos e reescrevemos
+// apenas os offsets que mudam quando os corpos sao concatenados.
+struct RawField {
+  short id = 0;
+  TType type = T_STOP;
+  std::string value;
+};
+
+std::vector<RawField> parse_struct_fields(const std::string& bytes) {
+  Tr tr{reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size(), 0};
+  std::vector<RawField> fields;
+  short last = 0;
+  while (true) {
+    const std::uint8_t header = tr.byte();
+    const TType type = static_cast<TType>(header & 0xF);
+    if (type == T_STOP) break;
+    const short id = (header >> 4) ? static_cast<short>(last + (header >> 4))
+                                   : static_cast<short>(tr.zz());
+    last = id;
+    const std::size_t begin = tr.pos;
+    tr.skip(type);
+    fields.push_back(RawField{id, type, bytes.substr(begin, tr.pos - begin)});
+  }
+  return fields;
+}
+
+std::vector<std::string> parse_struct_list(const std::string& bytes, TType expected) {
+  Tr tr{reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size(), 0};
+  const std::uint8_t header = tr.byte();
+  const std::size_t count = (header >> 4) == 0xF ? static_cast<std::size_t>(tr.varint())
+                                                : static_cast<std::size_t>(header >> 4);
+  const TType type = static_cast<TType>(header & 0xF);
+  if (type != expected) die("footer Parquet: tipo de lista inesperado");
+  std::vector<std::string> values;
+  values.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::size_t begin = tr.pos;
+    tr.skip(type);
+    values.push_back(bytes.substr(begin, tr.pos - begin));
+  }
+  if (tr.pos != bytes.size()) die("footer Parquet: lista com bytes excedentes");
+  return values;
+}
+
+std::int64_t raw_i64(const std::string& bytes) {
+  Tr tr{reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size(), 0};
+  const std::int64_t value = tr.zz();
+  if (tr.pos != bytes.size()) die("footer Parquet: inteiro com bytes excedentes");
+  return value;
+}
+
+std::string encode_fields(const std::vector<RawField>& fields,
+                          const std::unordered_map<short, std::int64_t>& overrides = {}) {
+  std::string out;
+  Tw tw{out};
+  tw.struct_begin();
+  for (const RawField& field : fields) {
+    const auto override_value = overrides.find(field.id);
+    if (override_value != overrides.end()) {
+      if (field.type != T_I64 && field.type != T_I32) {
+        die("footer Parquet: offset nao e inteiro");
+      }
+      tw.field_i64(field.id, override_value->second);
+      continue;
+    }
+    tw.field(field.id, field.type);
+    tw.raw(field.value.data(), field.value.size());
+  }
+  tw.struct_end();
+  return out;
+}
+
+std::string rewrite_column_chunk(const std::string& bytes, std::int64_t delta) {
+  const std::vector<RawField> fields = parse_struct_fields(bytes);
+  std::vector<RawField> rewritten = fields;
+  std::unordered_map<short, std::int64_t> chunk_offsets;
+  for (const RawField& field : fields) {
+    if (field.id == 2 && field.type == T_I64) {
+      chunk_offsets[field.id] = raw_i64(field.value) + delta;
+    } else if (field.id == 3 && field.type == T_STRUCT) {
+      const std::vector<RawField> metadata = parse_struct_fields(field.value);
+      std::unordered_map<short, std::int64_t> metadata_offsets;
+      for (const RawField& meta : metadata) {
+        if ((meta.id == 9 || meta.id == 11) && meta.type == T_I64)
+          metadata_offsets[meta.id] = raw_i64(meta.value) + delta;
+      }
+      for (RawField& target : rewritten) {
+        if (target.id == 3) target.value = encode_fields(metadata, metadata_offsets);
+      }
+    }
+  }
+  return encode_fields(rewritten, chunk_offsets);
+}
+
+std::string rewrite_row_group(const std::string& bytes, std::int64_t delta) {
+  const std::vector<RawField> fields = parse_struct_fields(bytes);
+  std::vector<RawField> rewritten = fields;
+  for (RawField& field : rewritten) {
+    if (field.id != 1 || field.type != T_LIST) continue;
+    const std::vector<std::string> chunks = parse_struct_list(field.value, T_STRUCT);
+    std::string list;
+    if (chunks.size() < 15) {
+      list.push_back(static_cast<char>((chunks.size() << 4) | T_STRUCT));
+    } else {
+      list.push_back(static_cast<char>(0xF0 | T_STRUCT));
+      std::uint64_t n = chunks.size();
+      while (n >= 0x80) {
+        list.push_back(static_cast<char>((n & 0x7F) | 0x80));
+        n >>= 7;
+      }
+      list.push_back(static_cast<char>(n));
+    }
+    for (const std::string& chunk : chunks) {
+      const std::string rewritten_chunk = rewrite_column_chunk(chunk, delta);
+      list += rewritten_chunk;
+    }
+    field.value = std::move(list);
+  }
+  return encode_fields(rewritten);
+}
+
+struct ParquetRawFile {
+  std::string bytes;
+  std::string footer;
+  std::size_t footer_start = 0;
+};
+
+ParquetRawFile read_raw_parquet(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) die("nao foi possivel abrir arquivo temporario '" + path + "'");
+  ParquetRawFile out;
+  out.bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  if (out.bytes.size() < 12 || out.bytes.compare(0, 4, "PAR1") != 0 ||
+      out.bytes.compare(out.bytes.size() - 4, 4, "PAR1") != 0) {
+    die("writer temporario nao produziu um Parquet PAR1");
+  }
+  std::uint32_t footer_size = 0;
+  std::memcpy(&footer_size, out.bytes.data() + out.bytes.size() - 8, 4);
+  if (footer_size > out.bytes.size() - 8) die("footer temporario maior que o arquivo");
+  out.footer_start = out.bytes.size() - 8 - footer_size;
+  out.footer = out.bytes.substr(out.footer_start, footer_size);
+  return out;
+}
+
 // ---------------------------------------------------------------- criptografia modular Parquet
 // AES-GCM e carregado dinamicamente para manter o runtime sem dependencia de
 // link com OpenSSL (inclusive no build Windows). O formato segue o
@@ -220,6 +378,8 @@ struct AesGcmApi {
     if (lib) return;
 #if defined(_WIN32)
     const char* names[] = {"libcrypto-3-x64.dll", "libcrypto-1_1-x64.dll", "libcrypto.dll"};
+#elif defined(__APPLE__)
+    const char* names[] = {"libcrypto.3.dylib", "libcrypto.dylib", "libcrypto.1.1.dylib"};
 #else
     const char* names[] = {"libcrypto.so.3", "libcrypto.so"};
 #endif
@@ -256,6 +416,11 @@ constexpr int CRYPTO_CTRL_GCM_SET_TAG = 0x11;
 struct ParquetCrypto {
   std::array<std::uint8_t, 32> key{};
   std::string file_unique;
+  std::string key_metadata;
+  ~ParquetCrypto() {
+    volatile std::uint8_t* p = key.data();
+    for (std::size_t i = 0; i < key.size(); ++i) p[i] = 0;
+  }
 };
 
 AesGcmApi& aes_gcm() {
@@ -439,7 +604,17 @@ enum PEncoding : int {
   E_RLE = 3,
   E_RLE_DICTIONARY = 8,
 };
-enum PCodec : int { C_NONE = 0, C_SNAPPY = 1, C_GZIP = 2, C_ZSTD = 6 };
+// Valores definidos pelo enum CompressionCodec do formato Parquet.
+// LZ4_RAW (7) e Brotli (4) sao opcionais porque suas bibliotecas podem nao
+// estar instaladas no ambiente do executavel.
+enum PCodec : int {
+  C_NONE = 0,
+  C_SNAPPY = 1,
+  C_GZIP = 2,
+  C_BROTLI = 4,
+  C_ZSTD = 6,
+  C_LZ4_RAW = 7
+};
 enum PPageType : int { PG_DATA = 0, PG_DICTIONARY = 2, PG_DATA_V2 = 3 };
 
 struct Column {
@@ -545,7 +720,7 @@ void fill_leaf(Column& c, const std::vector<const Value*>& cells) {
       if (cell->kind != ValueKind::Lista) {
         die("coluna '" + c.name + "' mistura listas e escalares em uma das linhas");
       }
-      for (const Value& e : *cell->list) {
+      for (const Value& e : *cell->list_ref()) {
         PType t = PT_BYTE_ARRAY;
         if (!element_type_of(c.name, e, t)) {
           c.elem_nullable = true;  // B3: elemento Nulo -> OPTIONAL
@@ -613,7 +788,7 @@ int scalar_list_depth(const std::string& name, const Value& v, int level = 0) {
   bool saw_list = false;
   bool saw_scalar = false;
   int inner_depth = 0;
-  for (const Value& e : *v.list) {
+  for (const Value& e : *v.list_ref()) {
     if (e.kind == ValueKind::Nulo) continue;
     if (e.kind == ValueKind::Mapa) {
       die("coluna '" + name + "': structs nao sao permitidos em listas de escalares");
@@ -660,7 +835,7 @@ void scan_scalar_list(const std::string& name, Column& c,
   }
   for (const Value* v : cells) {
     if (!v || v->kind == ValueKind::Nulo) continue;
-    for (const Value& e : *v->list) {
+    for (const Value& e : *v->list_ref()) {
       if (e.kind == ValueKind::Nulo) {
         if (deepest) {
           c.elem_nullable = true;
@@ -722,8 +897,8 @@ Column infer_struct_list(const std::string& name, const std::vector<const Value*
   // Coleta todos os elementos definidos em ordem para inferir campos.
   std::vector<const Value*> elems;
   for (const Value* cell : cells) {
-    if (!cell || cell->kind != ValueKind::Lista || !cell->list) continue;
-    for (const Value& e : *cell->list) {
+    if (!cell || cell->kind != ValueKind::Lista || !cell->list_ref()) continue;
+    for (const Value& e : *cell->list_ref()) {
       elems.push_back(&e);
       if (e.kind == ValueKind::Nulo) c.elem_struct_nullable = true;
     }
@@ -732,8 +907,8 @@ Column infer_struct_list(const std::string& name, const std::vector<const Value*
   // Uniao das chaves.
   std::vector<std::string> keys;
   for (const Value* e : elems) {
-    if (!e || e->kind != ValueKind::Mapa || !e->map) continue;
-    for (const auto& kv : e->map->items) {
+    if (!e || e->kind != ValueKind::Mapa || !e->map_ref()) continue;
+    for (const auto& kv : e->map_ref()->items) {
       if (std::find(keys.begin(), keys.end(), kv.first) == keys.end()) keys.push_back(kv.first);
     }
   }
@@ -744,8 +919,8 @@ Column infer_struct_list(const std::string& name, const std::vector<const Value*
     std::vector<const Value*> sub;
     sub.reserve(elems.size());
     for (const Value* e : elems) {
-      if (e && e->kind == ValueKind::Mapa && e->map) {
-        if (const Value* f = e->map->find(k)) {
+      if (e && e->kind == ValueKind::Mapa && e->map_ref()) {
+        if (const Value* f = e->map_ref()->find(k)) {
           sub.push_back(f);
           continue;
         }
@@ -758,7 +933,7 @@ Column infer_struct_list(const std::string& name, const std::vector<const Value*
   // Registra, por elemento, se o struct esta definido (para flattening).
   c.struct_defined.reserve(elems.size());
   for (const Value* e : elems) {
-    c.struct_defined.push_back(e && e->kind == ValueKind::Mapa && e->map);
+    c.struct_defined.push_back(e && e->kind == ValueKind::Mapa && e->map_ref());
   }
   return c;
 }
@@ -769,8 +944,8 @@ Column infer_list_column(const std::string& name, const std::vector<const Value*
   bool has_struct = false;
   bool has_list = false;
   for (const Value* cell : cells) {
-    if (!cell || cell->kind != ValueKind::Lista || !cell->list) continue;
-    for (const Value& e : *cell->list) {
+    if (!cell || cell->kind != ValueKind::Lista || !cell->list_ref()) continue;
+    for (const Value& e : *cell->list_ref()) {
       if (e.kind == ValueKind::Nulo) continue;
       if (e.kind == ValueKind::Mapa) has_struct = true;
       else if (e.kind == ValueKind::Lista) has_list = true;
@@ -782,8 +957,8 @@ Column infer_list_column(const std::string& name, const std::vector<const Value*
       // has_list veio de campos internos, nao de elementos misturados.
       // Verifica se algum elemento direto e lista (nao mapa).
       for (const Value* cell : cells) {
-        if (!cell || cell->kind != ValueKind::Lista || !cell->list) continue;
-        for (const Value& e : *cell->list) {
+        if (!cell || cell->kind != ValueKind::Lista || !cell->list_ref()) continue;
+        for (const Value& e : *cell->list_ref()) {
           if (e.kind == ValueKind::Nulo) continue;
           if (e.kind != ValueKind::Mapa) {
             die("coluna '" + name + "': elementos lista e struct misturados");
@@ -846,8 +1021,8 @@ void infer_struct(Column& c, const std::vector<const Value*>& cells) {
   // mesmas colunas em todas as linhas.
   std::vector<std::string> keys;
   for (const Value* cell : cells) {
-    if (cell->kind != ValueKind::Mapa || !cell->map) continue;
-    for (const auto& kv : cell->map->items) {
+    if (cell->kind != ValueKind::Mapa || !cell->map_ref()) continue;
+    for (const auto& kv : cell->map_ref()->items) {
       if (std::find(keys.begin(), keys.end(), kv.first) == keys.end()) keys.push_back(kv.first);
     }
   }
@@ -857,8 +1032,8 @@ void infer_struct(Column& c, const std::vector<const Value*>& cells) {
     std::vector<const Value*> sub;
     sub.reserve(cells.size());
     for (const Value* cell : cells) {
-      if (cell->kind == ValueKind::Mapa && cell->map) {
-        if (const Value* f = cell->map->find(k)) {
+      if (cell->kind == ValueKind::Mapa && cell->map_ref()) {
+        if (const Value* f = cell->map_ref()->find(k)) {
           sub.push_back(f);
           continue;
         }
@@ -897,7 +1072,7 @@ Column infer_column(const std::string& name, const std::vector<const Value*>& ce
   if (first->kind == ValueKind::Mapa) {
     for (const Value* cell : cells) {
       if (cell->kind != ValueKind::Nulo &&
-          (cell->kind != ValueKind::Mapa || !cell->map)) {
+          (cell->kind != ValueKind::Mapa || !cell->map_ref())) {
         die("coluna '" + name + "' mistura structs e escalares/listas em uma das linhas");
       }
     }
@@ -922,17 +1097,112 @@ std::string table_to_columns(const Value& tabela, std::vector<Column>& cols) {
   if (tabela.kind != ValueKind::Tabela && tabela.kind != ValueKind::Lista) {
     die("esperada uma tabela (lista de mapas)");
   }
-  if (!tabela.list || tabela.list->empty()) die("tabela vazia; parquet exige ao menos 1 linha");
-  const Value& first = (*tabela.list)[0];
-  if (first.kind != ValueKind::Mapa || !first.map) die("linhas devem ser mapas { campo: valor }");
+  if (const ColumnarTable* source = tabela.list_ref() ? nullptr : tabela.columnar()) {
+    if (source->rows == 0) die("tabela vazia; parquet exige ao menos 1 linha");
+    std::vector<std::string> names;
+    for (const std::string& name : source->names)
+      if (std::find(names.begin(), names.end(), name) == names.end()) names.push_back(name);
+    for (const std::string& name : names) {
+      const ColumnarColumn* column = source->find(name);
+      // Para folhas escalares, copie os vetores tipados diretamente. O
+      // caminho anterior chamava at() para cada linha, criando um Value
+      // temporario e depois copiando novamente os dados para Column; em
+      // tabelas colunares grandes esse ciclo dominava o pico do writer.
+      if (column && column->type != ColumnarColumn::Type::List &&
+          column->type != ColumnarColumn::Type::Struct &&
+          column->type != ColumnarColumn::Type::Mixed &&
+          column->type != ColumnarColumn::Type::Empty) {
+        Column direct;
+        direct.name = name;
+        direct.rows = source->rows;
+        direct.defined.reserve(source->rows);
+        switch (column->type) {
+          case ColumnarColumn::Type::Integer:
+            direct.type = PT_INT64;
+            direct.has_type = true;
+            direct.nums.reserve(source->rows -
+                                 std::count(column->nulls.begin(), column->nulls.end(), 1));
+            for (std::size_t row = 0; row < source->rows; ++row) {
+              const bool defined = row < column->nulls.size() && !column->nulls[row];
+              direct.defined.push_back(defined);
+              if (defined) direct.nums.push_back(static_cast<double>(column->integers[row]));
+            }
+            direct.optional = std::find(direct.defined.begin(), direct.defined.end(), false) !=
+                              direct.defined.end();
+            cols.push_back(std::move(direct));
+            continue;
+          case ColumnarColumn::Type::Decimal:
+            direct.type = PT_DOUBLE;
+            direct.has_type = true;
+            direct.nums.reserve(source->rows -
+                                 std::count(column->nulls.begin(), column->nulls.end(), 1));
+            for (std::size_t row = 0; row < source->rows; ++row) {
+              const bool defined = row < column->nulls.size() && !column->nulls[row];
+              direct.defined.push_back(defined);
+              if (defined) direct.nums.push_back(column->decimals[row]);
+            }
+            direct.optional = std::find(direct.defined.begin(), direct.defined.end(), false) !=
+                              direct.defined.end();
+            cols.push_back(std::move(direct));
+            continue;
+          case ColumnarColumn::Type::Boolean:
+            direct.type = PT_BOOLEAN;
+            direct.has_type = true;
+            direct.bools.reserve(source->rows -
+                                  std::count(column->nulls.begin(), column->nulls.end(), 1));
+            for (std::size_t row = 0; row < source->rows; ++row) {
+              const bool defined = row < column->nulls.size() && !column->nulls[row];
+              direct.defined.push_back(defined);
+              if (defined) direct.bools.push_back(column->booleans[row] != 0);
+            }
+            direct.optional = std::find(direct.defined.begin(), direct.defined.end(), false) !=
+                              direct.defined.end();
+            cols.push_back(std::move(direct));
+            continue;
+          case ColumnarColumn::Type::Text:
+          case ColumnarColumn::Type::TextPlain:
+            direct.type = PT_BYTE_ARRAY;
+            direct.has_type = true;
+            direct.strings.reserve(source->rows -
+                                   std::count(column->nulls.begin(), column->nulls.end(), 1));
+            for (std::size_t row = 0; row < source->rows; ++row) {
+              const bool defined = row < column->nulls.size() && !column->nulls[row];
+              direct.defined.push_back(defined);
+              if (defined) {
+                direct.strings.push_back(column->type == ColumnarColumn::Type::Text
+                                             ? column->dictionary[column->codes[row]]
+                                             : column->texts[row]);
+              }
+            }
+            direct.optional = std::find(direct.defined.begin(), direct.defined.end(), false) !=
+                              direct.defined.end();
+            cols.push_back(std::move(direct));
+            continue;
+          default:
+            break;
+        }
+      }
+      std::vector<Value> values;
+      std::vector<const Value*> cells;
+      values.reserve(source->rows);
+      cells.reserve(source->rows);
+      for (std::size_t row = 0; row < source->rows; ++row) values.push_back(column->at(row));
+      for (const Value& value : values) cells.push_back(&value);
+      cols.push_back(infer_column(name, cells));
+    }
+    return "";
+  }
+  if (!tabela.list_ref() || tabela.list_ref()->empty()) die("tabela vazia; parquet exige ao menos 1 linha");
+  const Value& first = (*tabela.list_ref())[0];
+  if (first.kind != ValueKind::Mapa || !first.map_ref()) die("linhas devem ser mapas { campo: valor }");
 
-  for (const auto& [k, v] : first.map->items) {
+  for (const auto& [k, v] : first.map_ref()->items) {
     (void)v;
     std::vector<const Value*> cells;
-    cells.reserve(tabela.list->size());
-    for (const Value& row : *tabela.list) {
-      if (row.kind != ValueKind::Mapa || !row.map) die("linhas devem ser mapas { campo: valor }");
-      const Value* cell = row.map->find(k);
+    cells.reserve(tabela.list_ref()->size());
+    for (const Value& row : *tabela.list_ref()) {
+      if (row.kind != ValueKind::Mapa || !row.map_ref()) die("linhas devem ser mapas { campo: valor }");
+      const Value* cell = row.map_ref()->find(k);
       if (!cell) {
         die("coluna '" + k +
             "' ausente em uma das linhas (parquet exige as mesmas colunas em todas as linhas)");
@@ -1192,7 +1462,7 @@ void flatten_list(const Column& c, std::vector<std::string> path, int def_base,
       ++fl.lv.num_values;
       continue;
     }
-    const ValueList& elems = *cell.list;
+    const ValueList& elems = *cell.list_ref();
     if (elems.empty()) {
       fl.lv.defs.push_back(static_cast<std::uint32_t>(def_base + outer));
       fl.lv.reps.push_back(rep0);
@@ -1239,7 +1509,7 @@ void flatten_struct_list(const Column& c, std::vector<std::string> path, int def
     const std::uint32_t rep0 = r < first_rep.size() ? first_rep[r] : 0u;
       const Value& cell = c.cells[r];
       const bool nula_ext = anc >= 0 || cell.kind == ValueKind::Nulo;
-      const bool vazia_ext = !nula_ext && cell.list->empty();
+      const bool vazia_ext = !nula_ext && cell.list_ref()->empty();
 
       if (nula_ext) {
         child_null.push_back(anc >= 0 ? anc : def_base);
@@ -1252,17 +1522,17 @@ void flatten_struct_list(const Column& c, std::vector<std::string> path, int def
         continue;
       }
 
-      const ValueList& elems = *cell.list;
+      const ValueList& elems = *cell.list_ref();
       for (std::size_t j = 0; j < elems.size(); ++j) {
         const std::uint32_t rep_elem = (j == 0) ? rep0 : 1u;
         const Value& e = elems[j];
-        if (e.kind != ValueKind::Mapa || !e.map) {
+        if (e.kind != ValueKind::Mapa || !e.map_ref()) {
           // elemento Nulo: campo inteiro nulo
           child_null.push_back(def_base + outer + 1);
           child_rep.push_back(rep_elem);
           continue;
         }
-        const Value* fv = e.map->find(ch.name);
+        const Value* fv = e.map_ref()->find(ch.name);
         if (!fv || fv->kind == ValueKind::Nulo) {
           // struct definido, campo ausente ou nulo
           child_null.push_back(child_base);
@@ -1360,7 +1630,7 @@ void flatten_nested(const Column& c, std::vector<std::string> path, int def_base
       ++fl.lv.num_values;
       return;
     }
-    if (!v.list || v.list->empty()) {
+    if (!v.list_ref() || v.list_ref()->empty()) {
       const int opt = c.nullable_per_level[level] ? 1 : 0;
       fl.lv.defs.push_back(static_cast<std::uint32_t>(cur_def + opt));
       fl.lv.reps.push_back(rep);
@@ -1368,7 +1638,7 @@ void flatten_nested(const Column& c, std::vector<std::string> path, int def_base
       ++fl.lv.num_values;
       return;
     }
-    const ValueList& elems = *v.list;
+    const ValueList& elems = *v.list_ref();
     const int next_def = cur_def + 1 + (c.nullable_per_level[level] ? 1 : 0);
     const int current_rep = level + 1;
     for (std::size_t k = 0; k < elems.size(); ++k) {
@@ -1591,7 +1861,9 @@ const ZlibApi& zlib() {
 constexpr int kZNoFlush = 0;
 constexpr int kZFinish = 4;
 constexpr int kZStreamEnd = 1;
-constexpr int kZDefaultCompression = -1;
+// Nivel 1: 3-5x mais rapido que o padrao (6) na escrita, com arquivos ~10-20% maiores;
+// leitores de Parquet nao dependem do nivel usado.
+constexpr int kZBestSpeed = 1;
 constexpr int kZDeflated = 8;
 constexpr int kWindowBitsAuto = 15 + 32;      // aceita zlib (RFC1950) e gzip (RFC1952)
 constexpr int kWindowBitsGzip = 15 + 16;      // emite container gzip (RFC1952)
@@ -1638,7 +1910,7 @@ std::string gzip_payload(const std::string& in, const std::string& col) {
     die(zlib_ausente(col));
   }
   ZStream s{};
-  if (z.deflate_init2(&s, kZDefaultCompression, kZDeflated, kWindowBitsGzip, 8, 0, z.version(),
+  if (z.deflate_init2(&s, kZBestSpeed, kZDeflated, kWindowBitsGzip, 8, 0, z.version(),
                       static_cast<int>(sizeof(ZStream))) != 0) {
     die("falha ao inicializar a zlib (deflateInit2)");
   }
@@ -1745,6 +2017,160 @@ std::string unzstd_payload(const std::string& in, const std::string& col, std::s
   die("coluna '" + col + "': falha ao descomprimir pagina zstd");
 }
 
+// LZ4_RAW e carregado dinamicamente para manter o binario utilizavel em
+// ambientes que so precisam de gzip/snappy/zstd. O codec Parquet e o formato
+// de bloco cru do LZ4, sem frame LZ4.
+struct Lz4Api {
+  void* lib = nullptr;
+  int (*compress_bound)(int) = nullptr;
+  int (*compress_default)(const char*, char*, int, int) = nullptr;
+  int (*decompress_safe)(const char*, char*, int, int) = nullptr;
+};
+
+const Lz4Api& lz4() {
+  static const Lz4Api instance = [] {
+    Lz4Api a;
+#if defined(_WIN32)
+    a.lib = tilt_dlopen("liblz4.dll");
+    if (!a.lib) a.lib = tilt_dlopen("lz4.dll");
+#else
+    a.lib = tilt_dlopen("liblz4.so.1");
+    if (!a.lib) a.lib = tilt_dlopen("liblz4.so");
+    if (!a.lib) a.lib = tilt_dlopen("liblz4.1.dylib");
+    if (!a.lib) a.lib = tilt_dlopen("liblz4.dylib");
+#endif
+    if (!a.lib) return a;
+    const bool ok = bind_zstdsym(a.lib, a.compress_bound, "LZ4_compressBound") &&
+                    bind_zstdsym(a.lib, a.compress_default, "LZ4_compress_default") &&
+                    bind_zstdsym(a.lib, a.decompress_safe, "LZ4_decompress_safe");
+    if (!ok) {
+      tilt_dlclose(a.lib);
+      a = Lz4Api{};
+    }
+    return a;
+  }();
+  return instance;
+}
+
+std::string lz4_ausente(const std::string& col) {
+  return "coluna '" + col +
+         "': lz4_raw requer liblz4 (liblz4.so.1, liblz4.dylib ou lz4.dll), "
+         "que nao foi encontrada; instale o pacote lz4";
+}
+
+std::string lz4_payload(const std::string& in, const std::string& col) {
+  const Lz4Api& l = lz4();
+  if (!l.lib) die(lz4_ausente(col));
+  if (in.size() > static_cast<std::size_t>(INT_MAX)) {
+    die("coluna '" + col + "': pagina lz4_raw maior que INT_MAX");
+  }
+  const int input_size = static_cast<int>(in.size());
+  const int bound = l.compress_bound(input_size);
+  if (bound <= 0) die("coluna '" + col + "': LZ4_compressBound falhou");
+  std::string out(static_cast<std::size_t>(bound), '\0');
+  const int n = l.compress_default(in.data(), out.data(), input_size, bound);
+  if (n <= 0) die("coluna '" + col + "': falha ao comprimir pagina lz4_raw");
+  out.resize(static_cast<std::size_t>(n));
+  return out;
+}
+
+std::string unlz4_payload(const std::string& in, const std::string& col, std::size_t expected) {
+  const Lz4Api& l = lz4();
+  if (!l.lib) die(lz4_ausente(col));
+  if (expected == 0 || expected > static_cast<std::size_t>(INT_MAX) ||
+      in.size() > static_cast<std::size_t>(INT_MAX)) {
+    die("coluna '" + col + "': tamanho invalido para pagina lz4_raw");
+  }
+  std::string out(expected, '\0');
+  const int n = l.decompress_safe(in.data(), out.data(), static_cast<int>(in.size()),
+                                  static_cast<int>(expected));
+  if (n < 0) die("coluna '" + col + "': pagina lz4_raw invalida");
+  out.resize(static_cast<std::size_t>(n));
+  return out;
+}
+
+// Brotli tambem e opcional. As assinaturas usam apenas tipos C estaveis, sem
+// incluir headers da dependencia no build do Tilt.
+struct BrotliApi {
+  void* enc_lib = nullptr;
+  void* dec_lib = nullptr;
+  std::size_t (*max_compressed_size)(std::size_t) = nullptr;
+  int (*encoder_compress)(int, int, int, std::size_t, const std::uint8_t*,
+                          std::size_t*, std::uint8_t*) = nullptr;
+  int (*decoder_decompress)(std::size_t, const std::uint8_t*, std::size_t*,
+                            std::uint8_t*) = nullptr;
+};
+
+const BrotliApi& brotli() {
+  static const BrotliApi instance = [] {
+    BrotliApi a;
+#if defined(_WIN32)
+    a.enc_lib = tilt_dlopen("brotlienc.dll");
+    a.dec_lib = tilt_dlopen("brotlidec.dll");
+#else
+    a.enc_lib = tilt_dlopen("libbrotlienc.so.1");
+    if (!a.enc_lib) a.enc_lib = tilt_dlopen("libbrotlienc.so");
+    if (!a.enc_lib) a.enc_lib = tilt_dlopen("libbrotlienc.1.dylib");
+    if (!a.enc_lib) a.enc_lib = tilt_dlopen("libbrotlienc.dylib");
+    a.dec_lib = tilt_dlopen("libbrotlidec.so.1");
+    if (!a.dec_lib) a.dec_lib = tilt_dlopen("libbrotlidec.so");
+    if (!a.dec_lib) a.dec_lib = tilt_dlopen("libbrotlidec.1.dylib");
+    if (!a.dec_lib) a.dec_lib = tilt_dlopen("libbrotlidec.dylib");
+#endif
+    const bool ok = a.enc_lib && a.dec_lib &&
+                    bind_zstdsym(a.enc_lib, a.max_compressed_size,
+                                 "BrotliEncoderMaxCompressedSize") &&
+                    bind_zstdsym(a.enc_lib, a.encoder_compress, "BrotliEncoderCompress") &&
+                    bind_zstdsym(a.dec_lib, a.decoder_decompress, "BrotliDecoderDecompress");
+    if (!ok) {
+      if (a.enc_lib) tilt_dlclose(a.enc_lib);
+      if (a.dec_lib) tilt_dlclose(a.dec_lib);
+      a = BrotliApi{};
+    }
+    return a;
+  }();
+  return instance;
+}
+
+std::string brotli_ausente(const std::string& col) {
+  return "coluna '" + col +
+         "': brotli requer libbrotlienc e libbrotlidec, que nao foram "
+         "encontradas; instale o pacote brotli";
+}
+
+std::string brotli_payload(const std::string& in, const std::string& col) {
+  const BrotliApi& b = brotli();
+  if (!b.enc_lib || !b.dec_lib) die(brotli_ausente(col));
+  const std::size_t bound = b.max_compressed_size(in.size());
+  if (bound == 0) die("coluna '" + col + "': BrotliEncoderMaxCompressedSize falhou");
+  std::string out(bound, '\0');
+  std::size_t encoded = bound;
+  // qualidade 5 oferece uma boa relacao entre custo de CPU e tamanho; modo
+  // genérico evita assumir texto ou UTF-8 para colunas binarias.
+  if (!b.encoder_compress(5, 22, 0, in.size(),
+                          reinterpret_cast<const std::uint8_t*>(in.data()), &encoded,
+                          reinterpret_cast<std::uint8_t*>(out.data()))) {
+    die("coluna '" + col + "': falha ao comprimir pagina brotli");
+  }
+  out.resize(encoded);
+  return out;
+}
+
+std::string unbrotli_payload(const std::string& in, const std::string& col, std::size_t expected) {
+  const BrotliApi& b = brotli();
+  if (!b.enc_lib || !b.dec_lib) die(brotli_ausente(col));
+  if (expected == 0) die("coluna '" + col + "': tamanho ausente para pagina brotli");
+  std::string out(expected, '\0');
+  std::size_t decoded = expected;
+  const int result = b.decoder_decompress(
+      in.size(), reinterpret_cast<const std::uint8_t*>(in.data()), &decoded,
+      reinterpret_cast<std::uint8_t*>(out.data()));
+  // BROTLI_DECODER_RESULT_SUCCESS = 1.
+  if (result != 1) die("coluna '" + col + "': pagina brotli invalida");
+  out.resize(decoded);
+  return out;
+}
+
 std::string decompress_payload(std::string payload, int codec, const std::string& col,
                                std::size_t expected = 0) {
   if (codec == C_GZIP) return gunzip_payload(payload, col);
@@ -1755,14 +2181,18 @@ std::string decompress_payload(std::string payload, int codec, const std::string
       die("coluna '" + col + "': stream snappy invalido (" + e.what() + ")");
     }
   }
+  if (codec == C_BROTLI) return unbrotli_payload(payload, col, expected);
   if (codec == C_ZSTD) return unzstd_payload(payload, col, expected);
+  if (codec == C_LZ4_RAW) return unlz4_payload(payload, col, expected);
   return payload;
 }
 
 std::string compress_payload(const std::string& payload, int codec, const std::string& col) {
   if (codec == C_GZIP) return gzip_payload(payload, col);
   if (codec == C_SNAPPY) return snappy_compress_literals(payload);
+  if (codec == C_BROTLI) return brotli_payload(payload, col);
   if (codec == C_ZSTD) return zstd_payload(payload, col);
+  if (codec == C_LZ4_RAW) return lz4_payload(payload, col);
   return payload;
 }
 
@@ -2006,11 +2436,14 @@ struct ColMeta {
   std::int64_t num_values = 0;
   std::int64_t data_page_offset = -1;
   std::int64_t dictionary_page_offset = -1;
+  std::string min_value;
+  std::string max_value;
 };
 
 struct ParsedParquetCrypto {
   bool encrypted = false;
   ParquetCrypto material;
+  std::string key_metadata;
 };
 
 // Descritor de coluna extraido da arvore de schema: nome exposto (grupo
@@ -2047,6 +2480,71 @@ struct ColDesc {
   int fixed_len = 0;
 };
 
+// Campos escalares PLAIN mais frequentes vao da pagina diretamente para os
+// vetores tipados. Os outros tipos continuam usando plain_values, que tambem
+// cuida das conversoes logicas para texto e dos formatos variaveis.
+bool plain_numeric_to_column(const ColDesc& cd, const std::uint8_t* data,
+                             std::size_t avail, std::size_t defined_count,
+                             const std::vector<std::uint32_t>& defs,
+                             ColumnarColumn& target) {
+  if ((cd.type == PT_INT32 && (cd.conv == 2 || cd.conv == 4)) ||
+      (cd.type == PT_INT64 && (cd.conv == 3 || cd.conv == 4))) return false;
+  if (cd.type != PT_BOOLEAN && cd.type != PT_INT32 && cd.type != PT_INT64 &&
+      cd.type != PT_FLOAT && cd.type != PT_DOUBLE) return false;
+
+  const auto visit = [&](auto consume) {
+    std::size_t value_index = 0;
+    for (std::uint32_t def : defs) {
+      if (static_cast<int>(def) == cd.max_def) consume(value_index++);
+      else target.append(Value::nulo());
+    }
+  };
+  const auto require_bytes = [&](std::size_t width, const char* name) {
+    if (avail / width < defined_count)
+      die("coluna '" + cd.name + "': pagina de " + name + " truncada");
+  };
+  if (cd.type == PT_BOOLEAN) {
+    if (avail < (defined_count + 7) / 8)
+      die("coluna '" + cd.name + "': pagina de boolean truncada");
+    visit([&](std::size_t i) { target.append_boolean((data[i / 8] >> (i % 8)) & 1); });
+  } else if (cd.type == PT_INT32) {
+    require_bytes(4, "int32");
+    double scale = 1.0;
+    if (cd.conv == 1) for (int i = 0; i < cd.dec_scale; ++i) scale *= 10.0;
+    visit([&](std::size_t i) {
+      std::int32_t value;
+      std::memcpy(&value, data + i * 4, 4);
+      if (cd.conv == 1) target.append_decimal(static_cast<double>(value) / scale);
+      else target.append_integer(value);
+    });
+  } else if (cd.type == PT_INT64) {
+    require_bytes(8, "int64");
+    double scale = 1.0;
+    if (cd.conv == 1) for (int i = 0; i < cd.dec_scale; ++i) scale *= 10.0;
+    visit([&](std::size_t i) {
+      std::int64_t value;
+      std::memcpy(&value, data + i * 8, 8);
+      if (cd.conv == 1) target.append_decimal(static_cast<double>(value) / scale);
+      else target.append_integer(value);
+    });
+  } else if (cd.type == PT_FLOAT) {
+    require_bytes(4, "float");
+    visit([&](std::size_t i) {
+      float value;
+      std::memcpy(&value, data + i * 4, 4);
+      target.append_decimal(static_cast<double>(value));
+    });
+  } else {
+    require_bytes(8, "double");
+    visit([&](std::size_t i) {
+      double value;
+      std::memcpy(&value, data + i * 8, 8);
+      target.append_decimal(value);
+    });
+  }
+  return true;
+}
+
 // Le um chunk de coluna (todas as paginas entre dictionary/data_page_offset)
 // e anexa UM valor por linha em `out` (lista -> Value::lista, nulo ->
 // Value::nulo). Quando `row_def` e dado, anexa tambem o definition level
@@ -2056,15 +2554,64 @@ struct ColDesc {
 // campos OPTIONAL e REPEATED (listas aninhadas de escalares, anotacao LIST
 // de 3 ou 2 niveis, structs), multiplas paginas por chunk e codecs
 // gzip/deflate (zlib dlopen) e snappy (codec proprio).
+struct ParquetRowGroupAllocator {
+  std::string payload;
+  std::string encrypted_header;
+  // Níveis e índices de dictionary são temporários por página. Mantê-los no
+  // scratch do row group evita uma alocação/reserva por página e continua
+  // limitado ao maior page encontrado no grupo.
+  std::vector<std::uint32_t> reps;
+  std::vector<std::uint32_t> defs;
+  std::vector<std::uint32_t> dictionary_indices;
+  std::size_t transient_peak_bytes = 0;
+
+  void reset() {
+    payload.clear();
+    encrypted_header.clear();
+    reps.clear();
+    defs.clear();
+    dictionary_indices.clear();
+    transient_peak_bytes = 0;
+  }
+  std::size_t capacity_bytes() const {
+    return payload.capacity() + encrypted_header.capacity() +
+           reps.capacity() * sizeof(std::uint32_t) + defs.capacity() * sizeof(std::uint32_t) +
+           dictionary_indices.capacity() * sizeof(std::uint32_t) + transient_peak_bytes;
+  }
+};
+
+struct ParquetPageScratchPeak {
+  ParquetRowGroupAllocator* allocator = nullptr;
+  const std::vector<std::uint32_t>* reps = nullptr;
+  const std::vector<std::uint32_t>* defs = nullptr;
+  const std::vector<std::uint32_t>* dictionary_indices = nullptr;
+  bool enabled = false;
+  ~ParquetPageScratchPeak() {
+    if (!allocator || enabled || !reps || !defs || !dictionary_indices) return;
+    const std::size_t bytes = reps->capacity() * sizeof(std::uint32_t) +
+                              defs->capacity() * sizeof(std::uint32_t) +
+                              dictionary_indices->capacity() * sizeof(std::uint32_t);
+    allocator->transient_peak_bytes = std::max(allocator->transient_peak_bytes, bytes);
+  }
+};
+
 void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
                   std::int64_t expected_rows, std::vector<Value>& out,
                   std::vector<int>* row_def = nullptr,
                   const ParsedParquetCrypto* crypto_info = nullptr,
-                  std::uint32_t column_index = 0) {
+                  std::uint32_t column_index = 0,
+                  ColumnarColumn* columnar_out = nullptr,
+                  ParquetRowGroupAllocator* allocator = nullptr) {
+  if (columnar_out && row_def) die("decodificacao colunar direta nao usa definition levels externos");
+  const auto emit_row = [&](Value value) {
+    if (columnar_out) columnar_out->append(std::move(value));
+    else out.push_back(std::move(value));
+  };
   const std::string ctx = "coluna '" + cd.name + "'";
-  if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY && cm.codec != C_ZSTD) {
+  if (cm.codec != C_NONE && cm.codec != C_GZIP && cm.codec != C_SNAPPY &&
+      cm.codec != C_BROTLI && cm.codec != C_ZSTD && cm.codec != C_LZ4_RAW) {
     die(ctx + ": codec " + std::to_string(cm.codec) +
-        " nao suportado (suportados: sem compressao, gzip/deflate, snappy, zstd)");
+        " nao suportado (suportados: sem compressao, gzip/deflate, snappy, brotli, zstd, lz4_raw)");
   }
   const int max_def = cd.max_def;
   const int max_rep = cd.max_rep;
@@ -2080,10 +2627,19 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
 
   std::vector<Value> dict;
   bool has_dict = false;
-  const std::size_t start = out.size();
+  const std::size_t start = columnar_out ? columnar_out->nulls.size() : out.size();
+  const auto rows_read = [&] {
+    return (columnar_out ? columnar_out->nulls.size() : out.size()) - start;
+  };
+  // Com allocator, as capacidades atravessam as colunas do mesmo row group;
+  // o modo desabilitado recria os vetores por página para servir de baseline.
+  const bool scratch_reutilizavel =
+      !std::getenv("TILT_PARQUET_SCRATCH") || std::string(std::getenv("TILT_PARQUET_SCRATCH")) != "0";
   std::uint32_t page_ordinal = 0;
-  while (static_cast<std::int64_t>(out.size() - start) < expected_rows) {
-    std::string encrypted_header;
+  while (static_cast<std::int64_t>(rows_read()) < expected_rows) {
+    std::string encrypted_header_local;
+    std::string& encrypted_header = allocator ? allocator->encrypted_header : encrypted_header_local;
+    encrypted_header.clear();
     const bool is_encrypted = crypto_info && crypto_info->encrypted;
     if (is_encrypted) {
       const bool dictionary = cm.dictionary_page_offset >= 0 &&
@@ -2166,7 +2722,9 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       }
     }
     (void)uncompressed;
-    std::string payload;
+    std::string payload_local;
+    std::string& payload = allocator ? allocator->payload : payload_local;
+    payload.clear();
     if (is_encrypted) {
       const unsigned char module = page_type == PG_DICTIONARY ? 3 : 2;
       const std::size_t consumed = decrypt_page(file, pos, module, crypto_info->material,
@@ -2215,7 +2773,17 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
     // de 4 bytes e o restante da pagina e o payload comprimido; em v2 as
     // secoes tem comprimento explicito no header e so os valores podem estar
     // comprimidos.
-    std::vector<std::uint32_t> reps, defs;
+    std::vector<std::uint32_t> reps_page;
+    std::vector<std::uint32_t> defs_page;
+    std::vector<std::uint32_t> dictionary_indices_page;
+    std::vector<std::uint32_t>& reps =
+        allocator && scratch_reutilizavel ? allocator->reps : reps_page;
+    std::vector<std::uint32_t>& defs =
+        allocator && scratch_reutilizavel ? allocator->defs : defs_page;
+    reps.clear();
+    defs.clear();
+    ParquetPageScratchPeak page_peak{allocator, &reps, &defs, &dictionary_indices_page,
+                                     allocator && scratch_reutilizavel};
     const std::uint8_t* vdata = base;
     std::size_t vavail = psize;
     if (v2) {
@@ -2300,6 +2868,11 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       if (static_cast<int>(defs[k]) == max_def) ++defined_count;
     }
 
+    if (columnar_out && !row_def && !cd.repeated && encoding == E_PLAIN &&
+        plain_numeric_to_column(cd, vdata, vavail, defined_count, defs, *columnar_out)) {
+      continue;
+    }
+
     std::vector<Value> vals;
     if (encoding == E_PLAIN) {
       vals = plain_values(cd.type, vdata, vavail, defined_count, cd.name, cd.conv, cd.dec_scale,
@@ -2313,8 +2886,26 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       // prefix — o stream termina quando `defined_count` valores sao lidos)
       const unsigned bw = vdata[0];
       if (bw > 32) die(ctx + ": bit width de dictionary invalido (" + std::to_string(bw) + ")");
-      std::vector<std::uint32_t> idx;
+      std::vector<std::uint32_t>& idx =
+          allocator && scratch_reutilizavel ? allocator->dictionary_indices
+                                             : dictionary_indices_page;
       rle_decode(vdata + 1, vavail - 1, bw, defined_count, idx, ctx);
+      if (columnar_out && !row_def && !cd.repeated) {
+        std::size_t vi = 0;
+        for (std::uint32_t def : defs) {
+          if (static_cast<int>(def) != max_def) {
+            columnar_out->append(Value::nulo());
+            continue;
+          }
+          const std::uint32_t ix = idx[vi++];
+          if (ix >= dict.size()) {
+            die(ctx + ": indice de dictionary " + std::to_string(ix) + " fora do intervalo (0.." +
+                std::to_string(dict.size() - 1) + ")");
+          }
+          columnar_out->append(dict[ix]);
+        }
+        continue;
+      }
       vals.reserve(defined_count);
       for (std::uint32_t ix : idx) {
         if (ix >= dict.size()) {
@@ -2333,11 +2924,149 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       for (std::int64_t k = 0; k < page_values; ++k) {
         const int def = static_cast<int>(defs[static_cast<std::size_t>(k)]);
         if (def == max_def) {
-          out.push_back(vals[vi++]);
+          emit_row(std::move(vals[vi++]));
         } else {
-          out.push_back(Value::nulo());
+          emit_row(Value::nulo());
         }
         if (row_def) row_def->push_back(def);
+      }
+      continue;
+    }
+    // Listas escalares com quatro ou mais niveis. Os niveis Dremel sao
+    // regulares: cada grupo LIST acrescenta um nivel pela presenca do grupo
+    // REPEATED e, quando opcional, mais um pela presenca do proprio grupo.
+    // A remontagem abaixo acompanha o caminho de listas corrente em vez de
+    // codificar uma profundidade fixa.
+    if (cd.nesting_depth >= 4 && cd.nested_list) {
+      const int depth = cd.nesting_depth;
+      std::vector<int> base(static_cast<std::size_t>(depth));
+      std::vector<int> empty_def(static_cast<std::size_t>(depth));
+      std::vector<int> present_def(static_cast<std::size_t>(depth));
+      int cur_base = cd.def_base;
+      for (int level = 0; level < depth; ++level) {
+        base[static_cast<std::size_t>(level)] = cur_base;
+        const int optional = cd.nullable_per_level[static_cast<std::size_t>(level)] ? 1 : 0;
+        empty_def[static_cast<std::size_t>(level)] = cur_base + optional;
+        present_def[static_cast<std::size_t>(level)] = cur_base + optional + 1;
+        cur_base = present_def[static_cast<std::size_t>(level)];
+      }
+      const int element_null_def = cd.elem_nullable ? max_def - 1 : -1;
+
+      std::size_t vi = 0;
+      std::size_t k = 0;
+      const std::size_t npg = static_cast<std::size_t>(page_values);
+      bool have_row = false;
+      bool top_finished = false;
+      Value row = Value::lista();
+      int row_max = 0;
+      std::vector<long> path(static_cast<std::size_t>(depth - 1), -1);
+
+      auto list_at = [&](int level) -> ValueList* {
+        if (level < 0 || level >= depth || row.kind != ValueKind::Lista) return nullptr;
+        Value* current = &row;
+        for (int parent = 0; parent < level; ++parent) {
+          const long index = path[static_cast<std::size_t>(parent)];
+          if (index < 0 || !current->list_ref() ||
+              static_cast<std::size_t>(index) >= current->list_ref()->size()) {
+            return nullptr;
+          }
+          current = &(*current->list_ref())[static_cast<std::size_t>(index)];
+          if (current->kind != ValueKind::Lista) return nullptr;
+        }
+        return current->list_ref().get();
+      };
+      auto ensure_path = [&](int deepest) {
+        for (int level = 1; level <= deepest; ++level) {
+          ValueList* parent = list_at(level - 1);
+          if (!parent) die(ctx + ": caminho de lista inconsistente");
+          long& selected = path[static_cast<std::size_t>(level - 1)];
+          if (selected < 0) {
+            parent->push_back(Value::lista());
+            selected = static_cast<long>(parent->size() - 1);
+          }
+        }
+      };
+      auto flush = [&] {
+        if (!have_row) return;
+        emit_row(std::move(row));
+        if (row_def) row_def->push_back(row_max);
+        have_row = false;
+      };
+
+      while (k < npg) {
+        const std::uint32_t rep = reps[k];
+        const int def = static_cast<int>(defs[k]);
+        if (rep == 0) {
+          flush();
+          have_row = true;
+          row = Value::lista();
+          path.assign(static_cast<std::size_t>(depth - 1), -1);
+          top_finished = false;
+          row_max = def;
+        } else if (!have_row || top_finished) {
+          die(ctx + ": repetition level apos uma linha vazia/nula em lista aninhada");
+        }
+        row_max = std::max(row_max, def);
+        if (rep > 0) {
+          if (rep < static_cast<std::uint32_t>(depth)) {
+            std::fill(path.begin() + static_cast<std::ptrdiff_t>(rep - 1), path.end(), -1);
+          }
+        }
+
+        // O primeiro nivel pode ser nulo ou vazio e encerra a linha atual.
+        if (def < present_def[0]) {
+          if (def < empty_def[0]) {
+            if (!cd.nullable_per_level[0]) {
+              die(ctx + ": definition level invalido para lista externa");
+            }
+            row = Value::nulo();
+          } else {
+            row = Value::lista();
+          }
+          top_finished = true;
+          ++k;
+          continue;
+        }
+
+        int deficient = -1;
+        for (int level = 1; level < depth; ++level) {
+          if (def < present_def[static_cast<std::size_t>(level)]) {
+            deficient = level;
+            break;
+          }
+        }
+        if (deficient >= 1) {
+          ensure_path(deficient - 1);
+          ValueList* parent = list_at(deficient - 1);
+          if (!parent) die(ctx + ": caminho de lista inconsistente");
+          const bool is_null = def < empty_def[static_cast<std::size_t>(deficient)];
+          if (is_null && !cd.nullable_per_level[static_cast<std::size_t>(deficient)]) {
+            die(ctx + ": definition level invalido para lista interna");
+          }
+          parent->push_back(is_null ? Value::nulo() : Value::lista());
+          path[static_cast<std::size_t>(deficient - 1)] =
+              static_cast<long>(parent->size() - 1);
+          std::fill(path.begin() + static_cast<std::ptrdiff_t>(deficient), path.end(), -1);
+          ++k;
+          continue;
+        }
+
+        ensure_path(depth - 1);
+        ValueList* leaf_list = list_at(depth - 1);
+        if (!leaf_list) die(ctx + ": caminho de lista folha inconsistente");
+        if (def == max_def) {
+          if (vi >= vals.size()) die(ctx + ": valores definidos insuficientes");
+          leaf_list->push_back(std::move(vals[vi++]));
+        } else if (element_null_def >= 0 && def == element_null_def) {
+          leaf_list->push_back(Value::nulo());
+        } else {
+          die(ctx + ": definition level inesperado em lista aninhada");
+        }
+        ++k;
+      }
+      flush();
+      if (vi != vals.size()) {
+        die(ctx + ": valores definidos excedentes em lista aninhada");
       }
       continue;
     }
@@ -2365,7 +3094,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
       Value cur = Value::lista();
       bool tags_open = false;
       auto flush = [&] {
-        out.push_back(cur_null ? Value::nulo() : cur);
+        emit_row(cur_null ? Value::nulo() : cur);
         if (row_def) row_def->push_back(cur_maxdef);
       };
       while (!no_fim()) {
@@ -2391,38 +3120,38 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
         }
         if (rep == 0 || rep == 1) tags_open = false;  // elemento novo
         if (def == d_enull && cd.elem_null_level >= 0) {
-          cur.list->push_back(Value::nulo());
+          cur.list_ref()->push_back(Value::nulo());
           ++k;
           continue;
         }
         if (def == d_tn) {
           // Tags indefinidas: Nulo com o_t (sem o_t, nulas marcariam o_t).
-          cur.list->push_back(o_t ? Value::nulo() : Value::lista());
+          cur.list_ref()->push_back(o_t ? Value::nulo() : Value::lista());
           tags_open = false;
           ++k;
           continue;
         }
         if (o_t && def == d_te) {
-          cur.list->push_back(Value::lista());
+          cur.list_ref()->push_back(Value::lista());
           tags_open = false;
           ++k;
           continue;
         }
         if (def == max_def) {
           if (!tags_open) {
-            cur.list->push_back(Value::lista());
+            cur.list_ref()->push_back(Value::lista());
             tags_open = true;
           }
-          cur.list->back().list->push_back(vals[vi++]);
+          cur.list_ref()->back().list_ref()->push_back(std::move(vals[vi++]));
           ++k;
           continue;
         }
         if (cd.elem_nullable && def == max_def - 1) {
           if (!tags_open) {
-            cur.list->push_back(Value::lista());
+            cur.list_ref()->push_back(Value::lista());
             tags_open = true;
           }
-          cur.list->back().list->push_back(Value::nulo());
+          cur.list_ref()->back().list_ref()->push_back(Value::nulo());
           ++k;
           continue;
         }
@@ -2455,7 +3184,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           die(ctx + ": repetition level inicial de linha != 0 em lista aninhada");
         }
         if (def0 < d_outer) {
-          out.push_back(Value::nulo());
+          emit_row(Value::nulo());
           if (row_def) row_def->push_back(def0);
           ++k;
           continue;
@@ -2467,7 +3196,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           const bool sozinha =
               (k + 1 >= npg) || (reps[k + 1] == 0);
           if (sozinha) {
-            out.push_back(Value::lista());
+            emit_row(Value::lista());
             if (row_def) row_def->push_back(def0);
             ++k;
             continue;
@@ -2483,14 +3212,14 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
             die(ctx + ": definition level de lista externa vazia com entradas a seguir");
           }
           if (def == d_inner_null && o2) {
-            row.list->push_back(Value::nulo());  // interna nula
+            row.list_ref()->push_back(Value::nulo());  // interna nula
             primeira = false;
             ++k;
             continue;
           }
           if (def == d_inner_vazia && (o2 || def < max_def)) {
             // Interna vazia (O2=0: cai aqui com def==d_inner_vazia).
-            row.list->push_back(Value::lista());
+            row.list_ref()->push_back(Value::lista());
             primeira = false;
             ++k;
             continue;
@@ -2498,9 +3227,9 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           if (def == max_def) {
             // Elemento: abre a interna corrente se preciso.
             if (primeira || reps[k] == 1) {
-              row.list->push_back(Value::lista());
+              row.list_ref()->push_back(Value::lista());
             }
-            row.list->back().list->push_back(vals[vi++]);
+            row.list_ref()->back().list_ref()->push_back(std::move(vals[vi++]));
             primeira = false;
             ++k;
             continue;
@@ -2510,16 +3239,16 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
               die(ctx + ": elementos nulos dentro de listas ainda nao suportados");
             }
             if (primeira || reps[k] == 1) {
-              row.list->push_back(Value::lista());
+              row.list_ref()->push_back(Value::lista());
             }
-            row.list->back().list->push_back(Value::nulo());
+            row.list_ref()->back().list_ref()->push_back(Value::nulo());
             primeira = false;
             ++k;
             continue;
           }
           die(ctx + ": definition level inesperado em lista aninhada");
         }
-        out.push_back(std::move(row));
+        emit_row(std::move(row));
         if (row_def) row_def->push_back(row_max);
       }
       continue;
@@ -2554,7 +3283,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           die(ctx + ": repetition level inicial de linha != 0 em lista 3 niveis");
         }
         if (def0 < d_outer) {
-          out.push_back(Value::nulo());
+          emit_row(Value::nulo());
           if (row_def) row_def->push_back(def0);
           ++k;
           continue;
@@ -2562,7 +3291,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
         if (def0 == d_outer) {
           const bool sozinha = (k + 1 >= npg) || (reps[k + 1] == 0);
           if (sozinha) {
-            out.push_back(Value::lista());
+            emit_row(Value::lista());
             if (row_def) row_def->push_back(def0);
             ++k;
             continue;
@@ -2575,14 +3304,14 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
         // Abre middle/inner sob demanda, reindexando a cada acesso (o
         // push_back pode realocar; nunca guarda referencia).
         auto abre_mid = [&] {
-          row.list->push_back(Value::lista());
-          mid = static_cast<long>(row.list->size()) - 1;
+          row.list_ref()->push_back(Value::lista());
+          mid = static_cast<long>(row.list_ref()->size()) - 1;
           inr = -1;
         };
         auto abre_inr = [&] {
           if (mid < 0) abre_mid();
-          (*row.list)[static_cast<std::size_t>(mid)].list->push_back(Value::lista());
-          inr = static_cast<long>((*row.list)[static_cast<std::size_t>(mid)].list->size()) - 1;
+          (*row.list_ref())[static_cast<std::size_t>(mid)].list_ref()->push_back(Value::lista());
+          inr = static_cast<long>((*row.list_ref())[static_cast<std::size_t>(mid)].list_ref()->size()) - 1;
         };
         while (!no_fim() && (primeira || reps[k] != 0)) {
           const std::uint32_t rep = reps[k];
@@ -2601,7 +3330,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           }
           if (def == d_mid) {
             // Middle nulo (o2) ou vazio (sem o2: nulo marcaria o2).
-            row.list->push_back(o2 ? Value::nulo() : Value::lista());
+            row.list_ref()->push_back(o2 ? Value::nulo() : Value::lista());
             mid = -1;
             inr = -1;
             primeira = false;
@@ -2610,7 +3339,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           }
           if (def == d_mid2) {
             // Middle vazio (so distinto do nulo com o2; sem o2 cai acima).
-            row.list->push_back(Value::lista());
+            row.list_ref()->push_back(Value::lista());
             mid = -1;
             inr = -1;
             primeira = false;
@@ -2620,7 +3349,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           if (def == d_in) {
             // Inner nulo (o2b) ou vazio (sem o2b): garante o middle.
             if (rep == 0 || rep == 1 || mid < 0) abre_mid();
-            (*row.list)[static_cast<std::size_t>(mid)].list->push_back(
+            (*row.list_ref())[static_cast<std::size_t>(mid)].list_ref()->push_back(
                 o2b ? Value::nulo() : Value::lista());
             inr = -1;
             primeira = false;
@@ -2630,7 +3359,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           if (def == d_in2) {
             // Inner vazio (so distinto do nulo com o2b).
             if (rep == 0 || rep == 1 || mid < 0) abre_mid();
-            (*row.list)[static_cast<std::size_t>(mid)].list->push_back(Value::lista());
+            (*row.list_ref())[static_cast<std::size_t>(mid)].list_ref()->push_back(Value::lista());
             inr = -1;
             primeira = false;
             ++k;
@@ -2639,8 +3368,8 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           if (def == max_def) {
             if (rep == 0 || rep == 1 || mid < 0) abre_mid();
             if (rep == 0 || rep == 1 || rep == 2 || inr < 0) abre_inr();
-            (*(*row.list)[static_cast<std::size_t>(mid)].list)[static_cast<std::size_t>(inr)]
-                .list->push_back(vals[vi++]);
+            (*(*row.list_ref())[static_cast<std::size_t>(mid)].list_ref())[static_cast<std::size_t>(inr)]
+                .list_ref()->push_back(std::move(vals[vi++]));
             primeira = false;
             ++k;
             continue;
@@ -2648,15 +3377,15 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
           if (cd.elem_nullable && def == max_def - 1) {
             if (rep == 0 || rep == 1 || mid < 0) abre_mid();
             if (rep == 0 || rep == 1 || rep == 2 || inr < 0) abre_inr();
-            (*(*row.list)[static_cast<std::size_t>(mid)].list)[static_cast<std::size_t>(inr)]
-                .list->push_back(Value::nulo());
+            (*(*row.list_ref())[static_cast<std::size_t>(mid)].list_ref())[static_cast<std::size_t>(inr)]
+                .list_ref()->push_back(Value::nulo());
             primeira = false;
             ++k;
             continue;
           }
           die(ctx + ": definition level inesperado em lista 3 niveis");
         }
-        out.push_back(std::move(row));
+        emit_row(std::move(row));
         if (row_def) row_def->push_back(row_max);
       }
       continue;
@@ -2667,7 +3396,7 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
     int cur_maxdef = 0;
     Value cur = Value::lista();
     auto flush = [&] {
-      out.push_back(cur_null ? Value::nulo() : cur);
+      emit_row(cur_null ? Value::nulo() : cur);
       if (row_def) row_def->push_back(cur_maxdef);
     };
     for (std::int64_t k = 0; k < page_values; ++k) {
@@ -2687,12 +3416,12 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
         cur_maxdef = static_cast<int>(def);
       }
       if (static_cast<int>(def) == max_def) {
-        cur.list->push_back(vals[vi++]);
+        cur.list_ref()->push_back(std::move(vals[vi++]));
       } else if (cd.elem_null_level >= 0 && static_cast<int>(def) == cd.elem_null_level) {
-        cur.list->push_back(Value::nulo());  // marcador de elemento Nulo (B2b)
+        cur.list_ref()->push_back(Value::nulo());  // marcador de elemento Nulo (B2b)
       } else if (cd.elem_nullable && static_cast<int>(def) == max_def - 1) {
         if (cd.allow_null_element) {
-          cur.list->push_back(Value::nulo());  // valor Nulo em mapa
+          cur.list_ref()->push_back(Value::nulo());  // valor Nulo em mapa
         } else {
           die(ctx + ": elementos nulos dentro de listas ainda nao suportados");
         }
@@ -2700,8 +3429,8 @@ void decode_chunk(const std::string& file, const ColMeta& cm, const ColDesc& cd,
     }
     if (have_row) flush();
   }
-  if (static_cast<std::int64_t>(out.size() - start) != expected_rows) {
-    die("coluna '" + cd.name + "': chunk com " + std::to_string(out.size() - start) +
+  if (static_cast<std::int64_t>(rows_read()) != expected_rows) {
+    die("coluna '" + cd.name + "': chunk com " + std::to_string(rows_read()) +
         " linhas, esperado " + std::to_string(expected_rows));
   }
 }
@@ -3044,19 +3773,20 @@ std::optional<DictBuild> build_dict(const Column& c, bool permitido) {
   const std::size_t definidos = texto ? c.strings.size() : c.nums.size();
   if (definidos < 8) return std::nullopt;
   DictBuild db;
-  std::vector<std::string> chaves;  // PLAIN de cada distinto
+  // PLAIN de cada distinto -> indice (ordem de 1a aparicao). Busca por hash: a varredura
+  // linear anterior custava O(linhas x distintos) (ate 1024 comparacoes por valor).
+  std::unordered_map<std::string, std::uint32_t> chaves;
   chaves.reserve(64);
   auto indice_de = [&](const std::string& raw, bool& novo) -> std::uint32_t {
-    for (std::uint32_t k = 0; k < chaves.size(); ++k) {
-      if (chaves[k] == raw) {
-        novo = false;
-        return k;
-      }
+    if (const auto it = chaves.find(raw); it != chaves.end()) {
+      novo = false;
+      return it->second;
     }
     if (chaves.size() >= 1024) return 0xFFFFFFFFu;  // teto: desiste
-    chaves.push_back(raw);
+    const auto indice = static_cast<std::uint32_t>(chaves.size());
+    chaves.emplace(raw, indice);
     novo = true;
-    return static_cast<std::uint32_t>(chaves.size() - 1);
+    return indice;
   };
   if (texto) {
     for (const std::string& s : c.strings) {
@@ -3085,22 +3815,83 @@ std::optional<DictBuild> build_dict(const Column& c, bool permitido) {
   return db;
 }
 
-void parquet_write(const std::string& path, const Value& tabela,
-                   const std::vector<int>* field_ids, const ParquetWriteOpts& opts) {
+void parquet_write_single(const std::string& path, const Value& tabela,
+                          const std::vector<int>* field_ids, const ParquetWriteOpts& opts) {
   std::vector<Column> cols;
   table_to_columns(tabela, cols);
   aplicar_tipos(cols, opts.tipos);
   const std::size_t nrows = cols[0].rows;
   const int codec = opts.codec;
-  if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY && codec != C_ZSTD) {
+  if (codec != C_NONE && codec != C_GZIP && codec != C_SNAPPY &&
+      codec != C_BROTLI && codec != C_ZSTD && codec != C_LZ4_RAW) {
     die("codec " + std::to_string(codec) +
-        " invalido (use 0=sem compressao, 1=snappy, 2=gzip, 6=zstd)");
+        " invalido (use 0=sem compressao, 1=snappy, 2=gzip, 4=brotli, 6=zstd, 7=lz4_raw)");
   }
 
   ParquetCrypto crypto;
-  const bool encrypted = !opts.chave.empty();
+  const int key_sources = (!opts.chave.empty() ? 1 : 0) + (!opts.chave_kms.empty() ? 1 : 0) +
+                          (!opts.chave_env.empty() ? 1 : 0) + (!opts.chave_arquivo.empty() ? 1 : 0) +
+                          (!opts.chave_azure.empty() ? 1 : 0) + (!opts.chave_gcp.empty() ? 1 : 0) +
+                          (!opts.chave_vault.empty() ? 1 : 0);
+  if (key_sources > 1) {
+    die("use apenas um provedor entre chave, chave_kms, chave_env, chave_arquivo, "
+        "chave_azure, chave_gcp e chave_vault");
+  }
+  const bool local_key = !opts.chave.empty();
+  const bool kms_key = !opts.chave_kms.empty();
+  const bool env_key = !opts.chave_env.empty();
+  const bool file_key = !opts.chave_arquivo.empty();
+  const bool azure_key = !opts.chave_azure.empty();
+  const bool gcp_key = !opts.chave_gcp.empty();
+  const bool vault_key = !opts.chave_vault.empty();
+  const bool encrypted = local_key || kms_key || env_key || file_key || azure_key || gcp_key || vault_key;
   if (encrypted) {
-    crypto.key = parquet_key(opts.chave);
+    if (local_key) {
+      crypto.key = parquet_key(opts.chave);
+      crypto.key_metadata = "tilt-local-key-v1";
+    } else if (env_key) {
+      const char* secret = std::getenv(opts.chave_env.c_str());
+      if (!secret || !*secret) {
+        die("provedor de chave env: variavel '" + opts.chave_env + "' nao definida");
+      }
+      crypto.key = parquet_key(secret);
+      Value metadata = Value::mapa();
+      metadata.map_ref()->set("provider", Value::texto("tilt-env-v1"));
+      metadata.map_ref()->set("env", Value::texto(opts.chave_env));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    } else if (file_key) {
+      std::ifstream key_file(opts.chave_arquivo, std::ios::binary);
+      if (!key_file) die("provedor de chave arquivo: nao foi possivel abrir '" + opts.chave_arquivo + "'");
+      std::string secret((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
+      while (!secret.empty() && (secret.back() == '\n' || secret.back() == '\r')) secret.pop_back();
+      if (secret.empty()) die("provedor de chave arquivo: arquivo vazio");
+      crypto.key = parquet_key(secret);
+      Value metadata = Value::mapa();
+      metadata.map_ref()->set("provider", Value::texto("tilt-file-v1"));
+      metadata.map_ref()->set("path", Value::texto(opts.chave_arquivo));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    } else if (azure_key || gcp_key || vault_key) {
+      const std::string provider = azure_key ? "azure-key-vault-v1" :
+                                   (gcp_key ? "gcp-kms-v1" : "vault-transit-v1");
+      const std::string key_id = azure_key ? opts.chave_azure : (gcp_key ? opts.chave_gcp : opts.chave_vault);
+      std::string ciphertext;
+      std::string resolved_key_id;
+      parquet_cloud_generate(provider, key_id, crypto.key, ciphertext, resolved_key_id);
+      Value metadata = Value::mapa();
+      metadata.map_ref()->set("provider", Value::texto(provider));
+      metadata.map_ref()->set("key_id", Value::texto(resolved_key_id));
+      metadata.map_ref()->set("ciphertext", Value::texto(ciphertext));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    } else {
+      std::string ciphertext_blob;
+      std::string resolved_key_id;
+      aws_kms_generate_data_key(opts.chave_kms, crypto.key, ciphertext_blob, resolved_key_id);
+      Value metadata = Value::mapa();
+      metadata.map_ref()->set("provider", Value::texto("aws-kms-v1"));
+      metadata.map_ref()->set("key_id", Value::texto(resolved_key_id));
+      metadata.map_ref()->set("ciphertext_blob", Value::texto(ciphertext_blob));
+      crypto.key_metadata = json_dump_compacto(metadata);
+    }
     crypto.file_unique = random_bytes(16);
   }
   std::string body = encrypted ? "PARE" : "PAR1";
@@ -3127,7 +3918,12 @@ void parquet_write(const std::string& path, const Value& tabela,
   std::deque<Column> owned;  // folhas sinteticas (refs estaveis)
   const std::vector<FlatLeaf> leaves = flatten_columns(cols, owned);
 
-  for (std::size_t leaf_index = 0; leaf_index < leaves.size(); ++leaf_index) {
+  // Cada folha vira um pedaco de bytes independente (offsets relativos ao pedaco); o
+  // arquivo e montado na ordem, somando o deslocamento. Com muitas colunas grandes e sem
+  // criptografia (nonce aleatorio compartilhado) os pedacos sao gerados em threads.
+  using FolhaGerada = std::pair<std::string, ChunkInfo>;
+  const auto gerar_folha = [&](std::size_t leaf_index) -> FolhaGerada {
+    std::string corpo;
     const FlatLeaf& fl = leaves[leaf_index];
     const Column& c = *fl.leaf;
     const ColumnLevels& lv = fl.lv;
@@ -3194,7 +3990,7 @@ void parquet_write(const std::string& path, const Value& tabela,
 
     // Dictionary page antes da data page (valores do dicionario em PLAIN).
     if (dict) {
-      ci.dict_page_offset = static_cast<std::int64_t>(body.size());
+      ci.dict_page_offset = static_cast<std::int64_t>(corpo.size());
       const std::string dict_comp = compress_payload(values_plain, codec, c.name);
       std::string dict_header;
       Tw dw{dict_header};
@@ -3213,18 +4009,18 @@ void parquet_write(const std::string& path, const Value& tabela,
                                             static_cast<std::uint32_t>(leaf_index));
         const std::string ep = encrypt_page(dict_comp, 3, crypto,
                                             static_cast<std::uint32_t>(leaf_index));
-        body += eh;
-        body += ep;
+        corpo += eh;
+        corpo += ep;
         ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
         ci.dict_compressed = static_cast<std::int64_t>(eh.size() + ep.size());
       } else {
-        body += dict_header;
-        body += dict_comp;
+        corpo += dict_header;
+        corpo += dict_comp;
         ci.dict_uncompressed = static_cast<std::int64_t>(dict_header.size() + values_plain.size());
         ci.dict_compressed = static_cast<std::int64_t>(dict_header.size() + dict_comp.size());
       }
     }
-    ci.data_page_offset = static_cast<std::int64_t>(body.size());
+    ci.data_page_offset = static_cast<std::int64_t>(corpo.size());
 
     std::string data_header;
     Tw hw{data_header};
@@ -3268,21 +4064,85 @@ void parquet_write(const std::string& path, const Value& tabela,
                                           dict ? 1u : 0u);
       ci.uncompressed_size = static_cast<std::int64_t>(data_header.size() + payload_uncompressed);
       ci.compressed_size = static_cast<std::int64_t>(eh.size() + ep.size());
-      body += eh;
-      body += ep;
+      corpo += eh;
+      corpo += ep;
     } else {
       ci.uncompressed_size = static_cast<std::int64_t>(data_header.size()) + payload_uncompressed;
       ci.compressed_size = static_cast<std::int64_t>(data_header.size()) +
                            static_cast<std::int64_t>(payload.size());
-      body += data_header;
-      body += payload;
+      corpo += data_header;
+      corpo += payload;
     }
     if (ci.dict) {
       // Tamanhos cobrem dictionary + data page (mesmo ColumnChunk).
       ci.uncompressed_size += ci.dict_uncompressed;
       ci.compressed_size += ci.dict_compressed;
     }
-    infos.push_back(ci);
+    return {std::move(corpo), std::move(ci)};
+  };
+  std::vector<FolhaGerada> geradas;
+  std::size_t linhas_grandes = nrows;
+  // Gerar todos os corpos de folhas em paralelo reduz o tempo de CPU, mas
+  // duplica temporariamente a memória do writer (cada string permanece viva
+  // até a montagem do footer). Para cargas grandes, emitir uma folha por vez
+  // mantém somente o corpo corrente e evita picos de RSS de centenas de MiB.
+  // O limite é conservador e pode ser ajustado quando o benchmark da máquina
+  // alvo justificar outro ponto de troca.
+  constexpr std::size_t kLimiteCorposParalelos = 256u * 1024u * 1024u;
+  std::size_t estimativa_corpos = 0;
+  for (const FlatLeaf& fl : leaves) {
+    estimativa_corpos += fl.lv.defs.capacity() * sizeof(std::uint32_t);
+    estimativa_corpos += fl.lv.reps.capacity() * sizeof(std::uint32_t);
+    const Column& c = *fl.leaf;
+    estimativa_corpos += c.nums.capacity() * sizeof(double);
+    estimativa_corpos += c.bools.capacity() * sizeof(bool);
+    estimativa_corpos += c.strings.capacity() * sizeof(std::string);
+    for (const std::string& s : c.strings) estimativa_corpos += s.capacity();
+  }
+  const std::size_t nthreads_folhas =
+      std::min<std::size_t>(std::max(1u, std::thread::hardware_concurrency()), leaves.size());
+  const bool gerar_paralelo = !encrypted && leaves.size() > 1 && linhas_grandes >= 50000 &&
+                              nthreads_folhas > 1 && estimativa_corpos < kLimiteCorposParalelos;
+  if (gerar_paralelo) {
+    geradas.resize(leaves.size());
+    std::atomic<std::size_t> proxima{0};
+    std::vector<std::exception_ptr> erros(nthreads_folhas);
+    std::vector<std::thread> threads;
+    for (std::size_t t = 0; t < nthreads_folhas; ++t) {
+      threads.emplace_back([&, t] {
+        try {
+          for (std::size_t i = proxima.fetch_add(1); i < leaves.size(); i = proxima.fetch_add(1)) {
+            geradas[i] = gerar_folha(i);
+          }
+        } catch (...) {
+          erros[t] = std::current_exception();
+          proxima = leaves.size();
+        }
+      });
+    }
+    for (std::thread& th : threads) th.join();
+    for (const std::exception_ptr& e : erros) {
+      if (e) std::rethrow_exception(e);
+    }
+    for (FolhaGerada& g : geradas) {
+      const auto base = static_cast<std::int64_t>(body.size());
+      ChunkInfo& ci = g.second;
+      if (ci.dict) ci.dict_page_offset += base;
+      ci.data_page_offset += base;
+      body += g.first;
+      infos.push_back(std::move(ci));
+    }
+  } else {
+    // Caminho de baixa memória: o corpo da folha é anexado imediatamente.
+    for (std::size_t i = 0; i < leaves.size(); ++i) {
+      FolhaGerada g = gerar_folha(i);
+      const auto base = static_cast<std::int64_t>(body.size());
+      ChunkInfo& ci = g.second;
+      if (ci.dict) ci.dict_page_offset += base;
+      ci.data_page_offset += base;
+      body += g.first;
+      infos.push_back(std::move(ci));
+    }
   }
 
   const std::int64_t total_bytes = static_cast<std::int64_t>(body.size()) - 4;
@@ -3354,8 +4214,10 @@ void parquet_write(const std::string& path, const Value& tabela,
     fw.struct_end();
   }
   const char* codec_nome = codec == C_GZIP ? "gzip" : codec == C_SNAPPY ? "snappy" :
-                           codec == C_ZSTD ? "zstd" : "sem compressao";
-  fw.field_str(6, std::string("tilt 0.1.0 (parquet: plain/dictionary, paginas ") +
+                           codec == C_BROTLI ? "brotli" : codec == C_ZSTD ? "zstd" :
+                           codec == C_LZ4_RAW ? "lz4_raw" : "sem compressao";
+  fw.field_str(6, std::string("tilt ") + kVersion +
+                       " (parquet: plain/dictionary, paginas " +
                        (opts.paginas_v2 ? "v2" : "v1") + ", " + codec_nome +
                        ", opcionais com nulos, listas" +
                        (encrypted ? ", AES_GCM_V1 local)" : ")"));
@@ -3381,7 +4243,7 @@ void parquet_write(const std::string& path, const Value& tabela,
   cmw.field_str(2, crypto.file_unique);
   cmw.struct_end();
   cmw.struct_end();
-  cmw.field_str(2, "tilt-local-key-v1");
+  cmw.field_str(2, crypto.key_metadata);
   cmw.struct_end();
   const std::string encrypted_footer = encrypt_footer(footer, crypto);
   out.write(crypto_meta.data(), static_cast<std::streamsize>(crypto_meta.size()));
@@ -3391,6 +4253,134 @@ void parquet_write(const std::string& path, const Value& tabela,
   const std::uint32_t flen = static_cast<std::uint32_t>(crypto_meta.size() + 4 + encrypted_footer.size());
   out.write(reinterpret_cast<const char*>(&flen), 4);
   out.write("PARE", 4);
+}
+
+namespace {
+
+const RawField* raw_field(const std::vector<RawField>& fields, short id) {
+  for (const RawField& field : fields)
+    if (field.id == id) return &field;
+  return nullptr;
+}
+
+std::size_t parquet_value_rows(const Value& tabela) {
+  if (tabela.kind == ValueKind::Tabela && tabela.columnar()) return tabela.columnar()->rows;
+  if ((tabela.kind == ValueKind::Tabela || tabela.kind == ValueKind::Lista) && tabela.list_ref())
+    return tabela.list_ref()->size();
+  die("esperada uma tabela (lista de mapas)");
+}
+
+Value parquet_row_group_value(const Value& tabela, std::size_t begin, std::size_t end) {
+  if (tabela.kind == ValueKind::Tabela && tabela.columnar()) {
+    std::vector<std::size_t> positions;
+    positions.reserve(end - begin);
+    for (std::size_t row = begin; row < end; ++row) positions.push_back(row);
+    return Value::tabela_colunar(tabela.columnar()->take_rows(positions));
+  }
+  ValueList rows;
+  rows.reserve(end - begin);
+  for (std::size_t row = begin; row < end; ++row) rows.push_back((*tabela.list_ref())[row]);
+  return Value::tabela(std::move(rows));
+}
+
+}  // namespace
+
+void parquet_write(const std::string& path, const Value& tabela,
+                   const std::vector<int>* field_ids, const ParquetWriteOpts& opts) {
+  const std::size_t total_rows = parquet_value_rows(tabela);
+  if (opts.row_group_size == 0 || opts.row_group_size >= total_rows) {
+    ParquetWriteOpts single = opts;
+    single.row_group_size = 0;
+    parquet_write_single(path, tabela, field_ids, single);
+    return;
+  }
+  if (!opts.chave.empty() || !opts.chave_kms.empty()) {
+    die("row_group: escrita particionada nao pode usar criptografia; "
+        "use um arquivo por grupo ou remova a chave");
+  }
+
+  std::string body("PAR1");
+  std::vector<std::string> row_groups;
+  std::string schema_raw;
+  std::string created_by_raw;
+  std::size_t written_rows = 0;
+  std::vector<std::string> temporarios;
+  bool schema_incompativel = false;
+  try {
+    std::size_t ordinal = 0;
+    while (written_rows < total_rows) {
+      const std::size_t end = std::min(total_rows, written_rows + opts.row_group_size);
+      const std::string temp = path + ".tilt-row-group-" + std::to_string(ordinal++) + ".tmp";
+      temporarios.push_back(temp);
+      ParquetWriteOpts single = opts;
+      single.row_group_size = 0;
+      parquet_write_single(temp, parquet_row_group_value(tabela, written_rows, end),
+                           field_ids, single);
+      const ParquetRawFile raw = read_raw_parquet(temp);
+      const std::vector<RawField> fields = parse_struct_fields(raw.footer);
+      const RawField* schema = raw_field(fields, 2);
+      const RawField* groups = raw_field(fields, 4);
+      const RawField* created = raw_field(fields, 6);
+      if (!schema || schema->type != T_LIST || !groups || groups->type != T_LIST) {
+        die("footer temporario sem schema ou row groups");
+      }
+      if (schema_raw.empty()) {
+        schema_raw = schema->value;
+        if (created) created_by_raw = created->value;
+      } else if (schema_raw != schema->value) {
+        schema_incompativel = true;
+        break;
+      }
+      const std::int64_t delta = static_cast<std::int64_t>(body.size() - 4);
+      const std::vector<std::string> groups_raw = parse_struct_list(groups->value, T_STRUCT);
+      for (const std::string& group : groups_raw)
+        row_groups.push_back(rewrite_row_group(group, delta));
+      body.append(raw.bytes.data() + 4, raw.footer_start - 4);
+      written_rows = end;
+      std::remove(temp.c_str());
+      temporarios.pop_back();
+    }
+    if (schema_incompativel) {
+      // Um grupo que nao contem a mesma opcionalidade/tipo do primeiro nao
+      // pode compartilhar o schema no footer. Nesse caso preservamos a
+      // semantica anterior e gravamos um unico grupo com o schema global.
+      for (const std::string& temp : temporarios) std::remove(temp.c_str());
+      ParquetWriteOpts single = opts;
+      single.row_group_size = 0;
+      parquet_write_single(path, tabela, field_ids, single);
+      return;
+    }
+    std::string footer;
+    Tw fw{footer};
+    fw.struct_begin();
+    fw.field_i32(1, 1);
+    fw.field(2, T_LIST);
+    fw.raw(schema_raw.data(), schema_raw.size());
+    fw.field_i64(3, static_cast<std::int64_t>(total_rows));
+    fw.list_begin(4, T_STRUCT, row_groups.size());
+    for (const std::string& group : row_groups) fw.raw(group.data(), group.size());
+    if (!created_by_raw.empty()) {
+      fw.field(6, T_BINARY);
+      fw.raw(created_by_raw.data(), created_by_raw.size());
+    }
+    fw.struct_end();
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) die("nao foi possivel gravar '" + path + "'");
+    out.write(body.data(), static_cast<std::streamsize>(body.size()));
+    out.write(footer.data(), static_cast<std::streamsize>(footer.size()));
+    const std::uint32_t footer_size = static_cast<std::uint32_t>(footer.size());
+    out.write(reinterpret_cast<const char*>(&footer_size), 4);
+    out.write("PAR1", 4);
+  } catch (...) {
+    for (const std::string& temp : temporarios) std::remove(temp.c_str());
+    // O schema de um lote pode ser insuficiente para inferir uma coluna que
+    // só tem nulos naquele intervalo. Reutilize o caminho de grupo único
+    // para manter a compatibilidade do writer anterior; erros reais desse
+    // caminho continuam sendo propagados.
+    ParquetWriteOpts single = opts;
+    single.row_group_size = 0;
+    parquet_write_single(path, tabela, field_ids, single);
+  }
 }
 
 // No de schema achatado (usa ColDesc para as folhas). Era local de
@@ -3466,27 +4456,28 @@ Value montar_no(const RField& f, std::size_t r,
     std::size_t n = 0;
     for (const RField& ch : f.children) {
       const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
-      if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list) {
-        n = std::max(n, col[r].list->size());
+      if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list_ref()) {
+        n = std::max(n, col[r].list_ref()->size());
       }
     }
     for (std::size_t j = 0; j < n; ++j) {
       bool algum = false;
       Value m = Value::mapa();
+      m.map_ref()->items.reserve(f.children.size());
       for (const RField& ch : f.children) {
         const auto& col = columns[static_cast<std::size_t>(ch.leaf_idx)];
         Value v;
-        if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list &&
-            j < col[r].list->size()) {
-          v = (*col[r].list)[j];
+        if (r < col.size() && col[r].kind == ValueKind::Lista && col[r].list_ref() &&
+            j < col[r].list_ref()->size()) {
+          v = (*col[r].list_ref())[j];
         }
         if (v.kind != ValueKind::Nulo) algum = true;
-        m.map->set(ch.name, std::move(v));
+        m.map_ref()->items.emplace_back(ch.name, std::move(v));
       }
       if (f.elem_struct_nullable && !algum) {
-        out.list->push_back(Value::nulo());
+        out.list_ref()->push_back(Value::nulo());
       } else {
-        out.list->push_back(std::move(m));
+        out.list_ref()->push_back(std::move(m));
       }
     }
     return out;
@@ -3501,16 +4492,17 @@ Value montar_no(const RField& f, std::size_t r,
     if (k.kind != ValueKind::Lista || v.kind != ValueKind::Lista) {
       return Value::nulo();
     }
-    if (k.list->size() != v.list->size()) {
+    if (k.list_ref()->size() != v.list_ref()->size()) {
       die("coluna '" + f.name + "': chaves e valores do mapa com tamanhos diferentes");
     }
     Value m = Value::mapa();
-    for (std::size_t i = 0; i < k.list->size(); ++i) {
-      const Value& key = (*k.list)[i];
+    m.map_ref()->items.reserve(k.list_ref()->size());
+    for (std::size_t i = 0; i < k.list_ref()->size(); ++i) {
+      const Value& key = (*k.list_ref())[i];
       if (key.kind != ValueKind::Texto) {
         die("coluna '" + f.name + "': chave de mapa nao-texto");
       }
-      m.map->set(key.s, (*v.list)[i]);
+      m.map_ref()->items.emplace_back(key.s, (*v.list_ref())[i]);
     }
     return m;
   }
@@ -3531,8 +4523,109 @@ Value montar_no(const RField& f, std::size_t r,
     if (!definido) return Value::nulo();
   }
   Value m = Value::mapa();
-  for (const RField& ch : f.children) m.map->set(ch.name, montar_no(ch, r, columns, coldefs));
+  m.map_ref()->items.reserve(f.children.size());
+  for (const RField& ch : f.children)
+    m.map_ref()->items.emplace_back(ch.name, montar_no(ch, r, columns, coldefs));
   return m;
+}
+
+// Caminho colunar para structs comuns. As folhas já foram decodificadas por
+// row group; em vez de montar um mapa temporário e depois desmontá-lo em
+// ColumnarColumn::append, preenchemos os campos diretamente. Listas e mapas
+// continuam usando montar_no, pois seus níveis de repetição exigem o zip
+// entre folhas antes de formar o valor lógico.
+void append_struct_row(ColumnarColumn& target, const RField& field, std::size_t row,
+                       const std::vector<std::vector<Value>>& columns,
+                       const std::vector<std::vector<int>>& coldefs,
+                       bool parent_defined = true) {
+  if (target.type == ColumnarColumn::Type::Empty) {
+    target.type = ColumnarColumn::Type::Struct;
+    target.field_names.reserve(field.children.size());
+    target.fields.reserve(field.children.size());
+    for (const RField& child : field.children) {
+      target.field_names.push_back(child.name);
+      target.fields.push_back(std::make_unique<ColumnarColumn>());
+    }
+  }
+  bool defined = parent_defined;
+  if (defined && field.optional) {
+    defined = false;
+    for (int leaf : field.sub_leaves) {
+      const auto& defs = coldefs[static_cast<std::size_t>(leaf)];
+      if (row < defs.size() && defs[row] > field.null_level) {
+        defined = true;
+        break;
+      }
+    }
+  }
+  target.nulls.push_back(defined ? 0 : 1);
+  for (std::size_t i = 0; i < field.children.size(); ++i) {
+    const RField& child = field.children[i];
+    ColumnarColumn& out = *target.fields[i];
+    if (child.is_struct && !child.struct_list && !child.is_map) {
+      append_struct_row(out, child, row, columns, coldefs, defined);
+    } else {
+      if (!defined) {
+        out.append_null();
+      } else if (!child.is_list && !child.struct_list && !child.is_map && child.leaf_idx >= 0) {
+        const auto& values = columns[static_cast<std::size_t>(child.leaf_idx)];
+        if (row >= values.size()) die("coluna '" + child.name + "' tem menos valores que 'num_rows'");
+        out.append_ref(values[row]);
+      } else {
+        out.append(montar_no(child, row, columns, coldefs));
+      }
+    }
+  }
+}
+
+void append_struct_list_row(ColumnarColumn& target, const RField& field, std::size_t row,
+                            const std::vector<std::vector<Value>>& columns) {
+  if (target.type == ColumnarColumn::Type::Empty) {
+    target.type = ColumnarColumn::Type::List;
+    target.elements = std::make_unique<ColumnarColumn>();
+    target.elements->type = ColumnarColumn::Type::Struct;
+    target.elements->field_names.reserve(field.children.size());
+    target.elements->fields.reserve(field.children.size());
+    for (const RField& child : field.children) {
+      target.elements->field_names.push_back(child.name);
+      target.elements->fields.push_back(std::make_unique<ColumnarColumn>());
+    }
+  }
+  bool qualquer_lista = false;
+  std::size_t tamanho = 0;
+  for (const RField& child : field.children) {
+    const auto& values = columns[static_cast<std::size_t>(child.leaf_idx)];
+    if (row < values.size() && values[row].kind == ValueKind::Lista && values[row].list_ref()) {
+      qualquer_lista = true;
+      tamanho = std::max(tamanho, values[row].list_ref()->size());
+    }
+  }
+  target.nulls.push_back(qualquer_lista ? 0 : 1);
+  if (target.offsets.empty()) target.offsets.push_back(0);
+  for (std::size_t element = 0; element < tamanho; ++element) {
+    bool algum = false;
+    for (const RField& child : field.children) {
+      const auto& values = columns[static_cast<std::size_t>(child.leaf_idx)];
+      const Value* value = nullptr;
+      if (row < values.size() && values[row].kind == ValueKind::Lista && values[row].list_ref() &&
+          element < values[row].list_ref()->size()) {
+        value = &(*values[row].list_ref())[element];
+      }
+      if (value && value->kind != ValueKind::Nulo) algum = true;
+    }
+    target.elements->nulls.push_back((field.elem_struct_nullable && !algum) ? 1 : 0);
+    for (std::size_t i = 0; i < field.children.size(); ++i) {
+      const RField& child = field.children[i];
+      const auto& values = columns[static_cast<std::size_t>(child.leaf_idx)];
+      if (row < values.size() && values[row].kind == ValueKind::Lista && values[row].list_ref() &&
+          element < values[row].list_ref()->size()) {
+        target.elements->fields[i]->append_ref((*values[row].list_ref())[element]);
+      } else {
+        target.elements->fields[i]->append_null();
+      }
+    }
+  }
+  target.offsets.push_back(target.offsets.back() + tamanho);
 }
 
 ParsedParquetCrypto parse_crypto_metadata(const std::string& file, std::size_t start,
@@ -3580,15 +4673,73 @@ ParsedParquetCrypto parse_crypto_metadata(const std::string& file, std::size_t s
         }
       }
     } else {
-      tr.skip(tt);
+      if (id == 2 && tt == T_BINARY)
+        out.key_metadata = binary(tr);
+      else
+        tr.skip(tt);
     }
   }
   if (out.material.file_unique.empty()) die("FileCryptoMetaData sem aad_file_unique");
-  const char* secret = std::getenv("TILT_PARQUET_KEY");
-  if (!secret || !*secret) {
-    die("arquivo Parquet criptografado; defina TILT_PARQUET_KEY para ler a chave local");
+  if (out.key_metadata.empty()) die("FileCryptoMetaData sem key metadata");
+  if (out.key_metadata == "tilt-local-key-v1") {
+    const char* secret = std::getenv("TILT_PARQUET_KEY");
+    if (!secret || !*secret) {
+      die("arquivo Parquet criptografado; defina TILT_PARQUET_KEY para ler a chave local");
+    }
+    out.material.key = parquet_key(secret);
+  } else {
+    Value metadata;
+    try {
+      metadata = json_parse(out.key_metadata);
+    } catch (const std::exception&) {
+      die("key metadata Parquet desconhecido ou invalido");
+    }
+    const Value* provider = metadata.map_ref() ? metadata.map_ref()->find("provider") : nullptr;
+    const Value* key_id = metadata.map_ref() ? metadata.map_ref()->find("key_id") : nullptr;
+    const Value* blob = metadata.map_ref() ? metadata.map_ref()->find("ciphertext_blob") : nullptr;
+    const Value* cloud_ciphertext = metadata.map_ref() ? metadata.map_ref()->find("ciphertext") : nullptr;
+    if (metadata.kind != ValueKind::Mapa || !metadata.map_ref() || !provider ||
+        provider->kind != ValueKind::Texto) {
+      die("key metadata Parquet invalido");
+    }
+    if (provider->s == "aws-kms-v1") {
+      if (!key_id || key_id->kind != ValueKind::Texto || key_id->s.empty() || !blob ||
+          blob->kind != ValueKind::Texto || blob->s.empty()) {
+        die("key metadata AWS KMS invalido");
+      }
+      aws_kms_decrypt_data_key(key_id->s, blob->s, out.material.key);
+    } else if (provider->s == "azure-key-vault-v1" || provider->s == "gcp-kms-v1" ||
+               provider->s == "vault-transit-v1") {
+      if (!key_id || key_id->kind != ValueKind::Texto || key_id->s.empty() ||
+          !cloud_ciphertext || cloud_ciphertext->kind != ValueKind::Texto || cloud_ciphertext->s.empty()) {
+        die("key metadata cloud invalido");
+      }
+      parquet_cloud_decrypt(provider->s, key_id->s, cloud_ciphertext->s, out.material.key);
+    } else if (provider->s == "tilt-env-v1") {
+      const Value* env = metadata.map_ref()->find("env");
+      if (!env || env->kind != ValueKind::Texto || env->s.empty()) {
+        die("key metadata env invalido");
+      }
+      const char* secret = std::getenv(env->s.c_str());
+      if (!secret || !*secret) {
+        die("arquivo Parquet criptografado; defina " + env->s + " para ler a chave");
+      }
+      out.material.key = parquet_key(secret);
+    } else if (provider->s == "tilt-file-v1") {
+      const Value* path = metadata.map_ref()->find("path");
+      if (!path || path->kind != ValueKind::Texto || path->s.empty()) {
+        die("key metadata arquivo invalido");
+      }
+      std::ifstream key_file(path->s, std::ios::binary);
+      if (!key_file) die("nao foi possivel abrir o arquivo de chave '" + path->s + "'");
+      std::string secret((std::istreambuf_iterator<char>(key_file)), std::istreambuf_iterator<char>());
+      while (!secret.empty() && (secret.back() == '\n' || secret.back() == '\r')) secret.pop_back();
+      if (secret.empty()) die("arquivo de chave vazio");
+      out.material.key = parquet_key(secret);
+    } else {
+      die("provedor de chave Parquet nao suportado: " + provider->s);
+    }
   }
-  out.material.key = parquet_key(secret);
   return out;
 }
 
@@ -3890,6 +5041,27 @@ LeitorParquet abrir_parquet(const std::string& path) {
                       else if (mid == 5 && (mt == T_I32 || mt == T_I64)) cm.num_values = tr.zz();
                       else if (mid == 9 && mt == T_I64) cm.data_page_offset = tr.zz();
                       else if (mid == 11 && mt == T_I64) cm.dictionary_page_offset = tr.zz();
+                      else if (mid == 12 && mt == T_STRUCT) {
+                        short slast = 0;
+                        while (true) {
+                          const std::uint8_t sh = tr.byte();
+                          const auto st = static_cast<TType>(sh & 0xF);
+                          if (st == T_STOP) break;
+                          const short sid = (sh >> 4) ? static_cast<short>(slast + (sh >> 4))
+                                                      : static_cast<short>(tr.zz());
+                          slast = sid;
+                          if ((sid == 1 || sid == 2 || sid == 5 || sid == 6) && st == T_BINARY) {
+                            const std::size_t size = static_cast<std::size_t>(tr.varint());
+                            if (size > tr.n - tr.pos) die("estatistica Parquet truncada");
+                            std::string value(reinterpret_cast<const char*>(tr.p + tr.pos), size);
+                            tr.pos += size;
+                            if (sid == 1 || sid == 5) cm.max_value = std::move(value);
+                            else cm.min_value = std::move(value);
+                          } else {
+                            tr.skip(st);
+                          }
+                        }
+                      }
                       else tr.skip(mt);
                     }
                   } else {
@@ -3993,6 +5165,43 @@ LeitorParquet abrir_parquet(const std::string& path) {
     if (e.type == PT_FIXED && flen <= 0) {
       die("coluna '" + col + "': FIXED_LEN_BYTE_ARRAY sem type_length");
     }
+  };
+  // Caminha pela arvore LIST/element recursivamente. O leitor historico tinha
+  // branches especiais para duas e tres listas; manter a forma da arvore aqui
+  // permite decodificar qualquer profundidade sem aumentar a tabela de casos.
+  struct ListaEscalarSchema {
+    std::vector<bool> opcionais;
+    int folha = -1;
+    int base_folha = 0;
+  };
+  std::function<void(int, int, ListaEscalarSchema&)> parse_lista_escalar;
+  parse_lista_escalar = [&](int list_idx, int base, ListaEscalarSchema& out) {
+    const SchemaElem& grupo = selem[static_cast<std::size_t>(list_idx)];
+    if (grupo.type >= 0 || (grupo.converted != 3 && !grupo.logical_list)) {
+      die("lista aninhada: grupo LIST esperado");
+    }
+    if (grupo.rep > 1) die("lista aninhada: repetition_type invalido");
+    out.opcionais.push_back(grupo.rep == 1);
+    const std::vector<int> filhos_grupo = children_of(list_idx);
+    if (filhos_grupo.size() != 1) die("lista aninhada: grupo LIST deve ter um filho 'list'");
+    const int list_node = filhos_grupo[0];
+    const SchemaElem& repetido = selem[static_cast<std::size_t>(list_node)];
+    if (repetido.rep != 2) die("lista aninhada: filho 'list' deve ser REPEATED");
+    const std::vector<int> filhos_element = children_of(list_node);
+    if (filhos_element.size() != 1) die("lista aninhada: grupo 'list' deve ter um filho 'element'");
+    const int element_node = filhos_element[0];
+    const SchemaElem& element = selem[static_cast<std::size_t>(element_node)];
+    const int child_base = base + 1 + (grupo.rep == 1 ? 1 : 0);
+    if (element.type >= 0) {
+      check_leaf_type(grupo.name, element.type);
+      out.folha = element_node;
+      out.base_folha = child_base;
+      return;
+    }
+    if (element.converted != 3 && !element.logical_list) {
+      die("lista aninhada: elemento nao e uma lista escalar");
+    }
+    parse_lista_escalar(element_node, child_base, out);
   };
   // Arvore de campos lidos do schema (Fase 12-5a): escalares, listas e
   // structs aninhados. `max_def/max_rep` acumulam os niveis dos grupos
@@ -4118,6 +5327,29 @@ LeitorParquet abrir_parquet(const std::string& path) {
         return f;
       }
       if (el.type < 0) {
+        // A partir do quarto nivel, usa a arvore recursiva. A codificacao de
+        // niveis Dremel e a mesma das listas de dois/tres niveis; somente a
+        // remontagem e generica (o branch legado abaixo permanece para manter
+        // exatamente o tratamento de nulos dos formatos antigos).
+        if (el.converted == 3 || el.logical_list) {
+          ListaEscalarSchema shape;
+          parse_lista_escalar(idx, def_base, shape);
+          if (shape.opcionais.size() >= 4) {
+            const SchemaElem& folha = selem[static_cast<std::size_t>(shape.folha)];
+            resolve_conv(e.name, folha, f.leaf_type, f.conv, f.dec_scale, f.fixed_len);
+            f.nesting_depth = static_cast<int>(shape.opcionais.size());
+            f.nullable_per_level = std::move(shape.opcionais);
+            f.nested_list = true;
+            f.max_rep = f.nesting_depth;
+            f.def_base = def_base;
+            f.outer_optional = f.nullable_per_level[0];
+            f.elem_nullable = folha.rep == 1;
+            f.max_def = shape.base_folha + (f.elem_nullable ? 1 : 0);
+            f.inner_nullable = f.nesting_depth > 1 && f.nullable_per_level[1];
+            f.inner2_nullable = f.nesting_depth > 2 && f.nullable_per_level[2];
+            return f;
+          }
+        }
         // Lista de listas (B2a): grupo element com anotacao LIST.
         if (el.rep > 1) {
           die("coluna '" + e.name + "': grupo element com repetition_type invalido");
@@ -4340,7 +5572,8 @@ LeitorParquet abrir_parquet(const std::string& path) {
   return lp;
 }
 
-Value parquet_read(const std::string& path) {
+Value parquet_read(const std::string& path, const std::vector<std::string>& selecionar,
+                   bool colunar, const Value* onde, std::size_t limite) {
   LeitorParquet lp = abrir_parquet(path);
   const std::string& file = lp.file;
   const std::vector<RField>& top = lp.top;
@@ -4349,34 +5582,527 @@ Value parquet_read(const std::string& path) {
   const std::vector<std::int64_t>& rg_num_rows = lp.rg_num_rows;
   const std::int64_t num_rows = lp.num_rows;
   const std::size_t ncols = cols_desc.size();
-
-  // decodifica cada coluna: percorre os row groups concatenando os chunks
-  std::vector<std::vector<Value>> columns(ncols);
-  std::vector<std::vector<int>> coldefs(ncols);
-  for (std::size_t ci = 0; ci < ncols; ++ci) {
-    auto& col = columns[ci];
-    auto& defs = coldefs[ci];
-    for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
-      decode_chunk(file, row_groups[rg][ci], cols_desc[ci], rg_num_rows[rg], col, &defs,
-                   &lp.crypto, static_cast<std::uint32_t>(ci));
+  std::vector<const RField*> projetados;
+  std::vector<RField> projetados_nested;
+  std::vector<char> decodificar(ncols, 0);
+  if (selecionar.empty()) {
+    for (const RField& field : top) projetados.push_back(&field);
+    std::fill(decodificar.begin(), decodificar.end(), 1);
+  } else {
+    projetados_nested.reserve(selecionar.size());
+    const auto partes = [](const std::string& nome) {
+      std::vector<std::string> out;
+      std::size_t inicio = 0;
+      while (inicio <= nome.size()) {
+        const std::size_t fim = nome.find('.', inicio);
+        const std::size_t limite = fim == std::string::npos ? nome.size() : fim;
+        if (limite == inicio) die("selecao nested vazia em '" + nome + "'");
+        out.push_back(nome.substr(inicio, limite - inicio));
+        if (fim == std::string::npos) break;
+        inicio = fim + 1;
+      }
+      return out;
+    };
+    const auto projetar = [&](const RField& origem, const std::vector<std::string>& caminho,
+                              std::size_t pos, auto&& projetar_ref, RField& destino) -> bool {
+      destino = origem;
+      if (pos == caminho.size()) return true;
+      if ((!origem.is_struct && !origem.struct_list) || origem.is_map) return false;
+      destino.children.clear();
+      destino.sub_leaves.clear();
+      for (const RField& child : origem.children) {
+        if (child.name != caminho[pos]) continue;
+        RField filtrado;
+        if (!projetar_ref(child, caminho, pos + 1, projetar_ref, filtrado)) return false;
+        destino.children.push_back(std::move(filtrado));
+        destino.sub_leaves.insert(destino.sub_leaves.end(), destino.children.back().sub_leaves.begin(),
+                                  destino.children.back().sub_leaves.end());
+        return true;
+      }
+      return false;
+    };
+    for (const std::string& nome : selecionar) {
+      if (std::find_if(projetados.begin(), projetados.end(),
+                       [&](const RField* field) { return field->name == nome; }) !=
+          projetados.end()) {
+        die("coluna repetida em 'selecionar': '" + nome + "'");
+      }
+      const RField* found = nullptr;
+      for (const RField& field : top) if (field.name == nome) found = &field;
+      if (found) {
+        projetados.push_back(found);
+        for (int leaf : found->sub_leaves) decodificar[static_cast<std::size_t>(leaf)] = 1;
+        continue;
+      }
+      const std::vector<std::string> caminho = partes(nome);
+      if (caminho.size() < 2) die("coluna inexistente em 'selecionar': '" + nome + "'");
+      const RField* raiz = nullptr;
+      for (const RField& field : top) if (field.name == caminho.front()) raiz = &field;
+      if (!raiz) die("coluna inexistente em 'selecionar': '" + nome + "'");
+      RField filtrado;
+      if (!projetar(*raiz, caminho, 1, projetar, filtrado))
+        die("campo nested inexistente em 'selecionar': '" + nome + "'");
+      bool mesclado = false;
+      for (RField& existente : projetados_nested) {
+        if (existente.name != filtrado.name) continue;
+        for (RField& child : filtrado.children) {
+          bool duplicado = false;
+          for (const RField& atual : existente.children)
+            if (atual.name == child.name) duplicado = true;
+          if (!duplicado) {
+            existente.sub_leaves.insert(existente.sub_leaves.end(), child.sub_leaves.begin(),
+                                        child.sub_leaves.end());
+            existente.children.push_back(std::move(child));
+          }
+        }
+        for (int leaf : existente.sub_leaves)
+          decodificar[static_cast<std::size_t>(leaf)] = 1;
+        mesclado = true;
+        break;
+      }
+      if (mesclado) continue;
+      projetados_nested.push_back(std::move(filtrado));
+      projetados.push_back(&projetados_nested.back());
+      for (int leaf : projetados.back()->sub_leaves)
+        decodificar[static_cast<std::size_t>(leaf)] = 1;
     }
   }
 
-  // Remonta os valores: folhas viram escalares/listas; structs viram mapas.
-  // Struct OPTIONAL e Nulo quando nenhum definition level da subarvore passa
-  // do nivel do struct (tudo indefinido a partir dele); senao e mapa (com
-  // Nulo nos campos ausentes). Struct REQUIRED e sempre mapa. Listas de
-  // structs zipam os campos por posicao (elemento todo-Nulo vira Nulo
-  // quando o grupo element e OPTIONAL).
-  // Remontagem via montar_no (funcao de arquivo, reutilizada na leitura por grupo).
+  // Buffers compartilhados pelo caminho colunar para folhas nested; o modo
+  // por linhas usa buffers locais por row group logo abaixo.
+  std::vector<std::vector<Value>> columns(ncols);
+  std::vector<std::vector<int>> coldefs(ncols);
+  if (colunar) {
+    std::vector<char> grupo_ativo(row_groups.size(), 1);
+    std::int64_t linhas_ativas = num_rows;
+    if (onde && onde->kind == ValueKind::Mapa && onde->map_ref() && !onde->map_ref()->items.empty()) {
+      const auto caminho = [](const std::string& nome) {
+        std::vector<std::string> partes;
+        std::size_t inicio = 0;
+        while (inicio < nome.size()) {
+          const std::size_t fim = nome.find('.', inicio);
+          partes.push_back(nome.substr(inicio, fim == std::string::npos ? std::string::npos : fim - inicio));
+          if (fim == std::string::npos) break;
+          inicio = fim + 1;
+        }
+        return partes;
+      };
+      const auto localizar = [&](const RField& raiz, const std::vector<std::string>& partes,
+                                 std::size_t pos, auto&& localizar_ref) -> const RField* {
+        if (pos == partes.size()) return &raiz;
+        for (const RField& child : raiz.children)
+          if (child.name == partes[pos]) return localizar_ref(child, partes, pos + 1, localizar_ref);
+        return nullptr;
+      };
+      const auto pode_conter = [&](std::size_t rg, const std::string& name,
+                                   const Value& expected) {
+        const std::vector<std::string> partes = caminho(name);
+        const RField* field = nullptr;
+        for (const RField& candidate : top)
+          if (!partes.empty() && candidate.name == partes.front())
+            field = localizar(candidate, partes, 1, localizar);
+        if (!field || field->is_struct || field->struct_list || field->is_map ||
+            field->leaf_idx < 0) return true;  // sem estatistica segura
+        const ColDesc& desc = cols_desc[static_cast<std::size_t>(field->leaf_idx)];
+        const ColMeta& meta = row_groups[rg][static_cast<std::size_t>(field->leaf_idx)];
+        if (meta.min_value.empty() || meta.max_value.empty()) return true;
+        std::string op = "==";
+        const Value* wanted = &expected;
+        if (expected.kind == ValueKind::Mapa && expected.map_ref() && expected.map_ref()->items.size() == 1) {
+          const auto& [candidate, value] = expected.map_ref()->items.front();
+          if (candidate == "<" || candidate == "<=" || candidate == ">" ||
+              candidate == ">=" || candidate == "==" || candidate == "!=") {
+            op = candidate;
+            wanted = &value;
+          }
+        }
+        if (desc.type == PT_BYTE_ARRAY && wanted->kind == ValueKind::Texto) {
+          if (op == "!=") return true;
+          if (op == "<") return meta.min_value < wanted->s;
+          if (op == "<=") return meta.min_value <= wanted->s;
+          if (op == ">") return meta.max_value > wanted->s;
+          if (op == ">=") return meta.max_value >= wanted->s;
+          return !(wanted->s < meta.min_value || wanted->s > meta.max_value);
+        }
+        if ((desc.type == PT_INT32 || desc.type == PT_INT64) && wanted->is_number()) {
+          double lo = 0, hi = 0;
+          if (desc.type == PT_INT32) {
+            std::int32_t a = 0, b = 0;
+            if (meta.min_value.size() < 4 || meta.max_value.size() < 4) return true;
+            std::memcpy(&a, meta.min_value.data(), 4); std::memcpy(&b, meta.max_value.data(), 4);
+            lo = a; hi = b;
+          } else {
+            std::int64_t a = 0, b = 0;
+            if (meta.min_value.size() < 8 || meta.max_value.size() < 8) return true;
+            std::memcpy(&a, meta.min_value.data(), 8); std::memcpy(&b, meta.max_value.data(), 8);
+            lo = static_cast<double>(a); hi = static_cast<double>(b);
+          }
+          const double value = wanted->as_number();
+          if (op == "!=") return true;
+          if (op == "<") return lo < value;
+          if (op == "<=") return lo <= value;
+          if (op == ">") return hi > value;
+          if (op == ">=") return hi >= value;
+          return value >= lo && value <= hi;
+        }
+        return true;
+      };
+      std::function<bool(std::size_t, const Value&)> pode_conter_pred;
+      pode_conter_pred = [&](std::size_t rg, const Value& pred) {
+        if (pred.kind != ValueKind::Mapa || !pred.map_ref() || pred.map_ref()->items.empty()) return true;
+        for (const auto& [name, value] : pred.map_ref()->items) {
+          if ((name == "e" || name == "ou") && value.kind == ValueKind::Lista && value.list_ref()) {
+            bool resultado = name == "e";
+            for (const Value& parte : *value.list_ref()) {
+              const bool possivel = pode_conter_pred(rg, parte);
+              if (name == "e") resultado = resultado && possivel;
+              else resultado = resultado || possivel;
+            }
+            if (!resultado) return false;
+          } else if (!pode_conter(rg, name, value)) {
+            return false;
+          }
+        }
+        return true;
+      };
+      linhas_ativas = 0;
+      for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
+        if (!pode_conter_pred(rg, *onde)) grupo_ativo[rg] = 0;
+        if (grupo_ativo[rg]) linhas_ativas += rg_num_rows[rg];
+      }
+    }
+    // Sem predicado, o limite pode descartar grupos inteiros antes da
+    // descompressão. Com filtro, não é seguro parar cedo: as primeiras linhas
+    // aceitas podem estar em grupos posteriores.
+    if (limite > 0 && (!onde || onde->kind != ValueKind::Mapa || !onde->map_ref() ||
+                       onde->map_ref()->items.empty())) {
+      std::size_t restante = limite;
+      for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
+        if (!grupo_ativo[rg]) continue;
+        if (restante == 0) {
+          grupo_ativo[rg] = 0;
+          continue;
+        }
+        const std::size_t linhas = static_cast<std::size_t>(rg_num_rows[rg]);
+        restante = linhas >= restante ? 0 : restante - linhas;
+      }
+      linhas_ativas = 0;
+      for (std::size_t rg = 0; rg < row_groups.size(); ++rg)
+        if (grupo_ativo[rg]) linhas_ativas += rg_num_rows[rg];
+    }
+    std::vector<std::string> names;
+    names.reserve(projetados.size());
+    for (const RField* field : projetados) names.push_back(field->name);
+    auto table = std::make_shared<ColumnarTable>(std::move(names));
+    ParquetRowGroupAllocator row_group_allocator;
+    table->rows = static_cast<std::size_t>(linhas_ativas);
+    for (std::size_t ci = 0; ci < projetados.size(); ++ci) {
+      const RField& field = *projetados[ci];
+      const bool leaf = !field.is_struct && !field.struct_list && !field.is_map;
+      ColumnarColumn& target = table->columns[ci];
+      // Folhas escalares e listas de uma folha alimentam o armazenamento
+      // colunar durante a leitura de cada pagina, sem vetor intermediario.
+      if (leaf) {
+        std::vector<Value> unused;
+        for (std::size_t rg = 0; rg < row_groups.size(); ++rg) {
+          if (!grupo_ativo[rg]) continue;
+          const std::size_t leaf_index = static_cast<std::size_t>(field.leaf_idx);
+          decode_chunk(file, row_groups[rg][leaf_index], cols_desc[leaf_index],
+                       rg_num_rows[rg], unused, nullptr, &lp.crypto,
+                       static_cast<std::uint32_t>(leaf_index), &target,
+                       &row_group_allocator);
+        }
+        if (target.nulls.size() != static_cast<std::size_t>(linhas_ativas))
+          die("coluna '" + field.name + "' tem quantidade de linhas diferente de 'num_rows'");
+        continue;
+      }
+      // Listas e structs precisam do decodificador geral para os níveis de
+      // repetição/definição. Cada grupo é materializado em uma coluna local;
+      // grupos independentes podem ser decodificados em paralelo e depois
+      // concatenados sem converter célula por célula em Value.
+      std::vector<ColumnarColumn> grupos_nested(row_groups.size());
+      std::vector<std::size_t> picos_nested(row_groups.size(), 0);
+      const auto materializar_nested = [&](std::size_t rg) {
+        std::vector<std::vector<Value>> local_columns(ncols);
+        std::vector<std::vector<int>> local_defs(ncols);
+        ParquetRowGroupAllocator allocator;
+        // Structs planos (sem repeticao e sem optional no grupo pai) podem
+        // permanecer colunares de ponta a ponta. O decodificador escreve cada
+        // folha diretamente no campo destino, evitando vetores de Value e a
+        // remontagem geral por linha.
+        bool structo_plano = field.is_struct && !field.optional && !field.struct_list &&
+                             !field.is_map;
+        if (structo_plano) {
+          for (const RField& child : field.children) {
+            if (child.is_struct || child.is_list || child.struct_list || child.is_map ||
+                child.nesting_depth > 0 || child.leaf_idx < 0) {
+              structo_plano = false;
+              break;
+            }
+          }
+        }
+        ColumnarColumn& local = grupos_nested[rg];
+        if (structo_plano) {
+          local.type = ColumnarColumn::Type::Struct;
+          local.field_names.reserve(field.children.size());
+          local.fields.reserve(field.children.size());
+          local.nulls.assign(static_cast<std::size_t>(rg_num_rows[rg]), 0);
+          for (const RField& child : field.children) {
+            local.field_names.push_back(child.name);
+            local.fields.push_back(std::make_unique<ColumnarColumn>());
+            const std::size_t li = static_cast<std::size_t>(child.leaf_idx);
+            std::vector<Value> unused;
+            decode_chunk(file, row_groups[rg][li], cols_desc[li], rg_num_rows[rg], unused,
+                         nullptr, &lp.crypto, static_cast<std::uint32_t>(li),
+                         local.fields.back().get(), &allocator);
+          }
+          picos_nested[rg] = allocator.capacity_bytes();
+          return;
+        }
+        for (int leaf_index : field.sub_leaves) {
+          const std::size_t li = static_cast<std::size_t>(leaf_index);
+          local_columns[li].reserve(static_cast<std::size_t>(rg_num_rows[rg]));
+          local_defs[li].reserve(static_cast<std::size_t>(rg_num_rows[rg]));
+          decode_chunk(file, row_groups[rg][li], cols_desc[li], rg_num_rows[rg],
+                       local_columns[li], &local_defs[li], &lp.crypto,
+                       static_cast<std::uint32_t>(li), nullptr, &allocator);
+        }
+        std::size_t pico_row_group = allocator.capacity_bytes();
+        for (int leaf_index : field.sub_leaves) {
+          const std::size_t li = static_cast<std::size_t>(leaf_index);
+          pico_row_group += local_columns[li].capacity() * sizeof(Value);
+          pico_row_group += local_defs[li].capacity() * sizeof(int);
+        }
+        picos_nested[rg] = pico_row_group;
+        for (std::int64_t row = 0; row < rg_num_rows[rg]; ++row) {
+          if (field.is_struct && !field.struct_list && !field.is_map) {
+            append_struct_row(local, field, static_cast<std::size_t>(row),
+                              local_columns, local_defs);
+          } else if (field.struct_list) {
+            append_struct_list_row(local, field, static_cast<std::size_t>(row), local_columns);
+          } else {
+            local.append(montar_no(field, static_cast<std::size_t>(row),
+                                   local_columns, local_defs));
+          }
+        }
+      };
+      std::vector<std::size_t> ativos;
+      for (std::size_t rg = 0; rg < row_groups.size(); ++rg)
+        if (grupo_ativo[rg]) ativos.push_back(rg);
+      const std::size_t threads_nested =
+          std::min<std::size_t>({std::max(1u, std::thread::hardware_concurrency()), 2,
+                                 ativos.size()});
+      const bool paralelo_nested = ativos.size() > 1 && linhas_ativas >= 100000 &&
+                                   threads_nested > 1;
+      if (!paralelo_nested) {
+        for (std::size_t rg : ativos) materializar_nested(rg);
+      } else {
+        std::atomic<std::size_t> proximo{0};
+        std::vector<std::exception_ptr> erros(threads_nested);
+        std::vector<std::thread> threads;
+        for (std::size_t t = 0; t < threads_nested; ++t) {
+          threads.emplace_back([&, t] {
+            try {
+              for (std::size_t pos = proximo.fetch_add(1); pos < ativos.size();
+                   pos = proximo.fetch_add(1))
+                materializar_nested(ativos[pos]);
+            } catch (...) {
+              erros[t] = std::current_exception();
+              proximo = ativos.size();
+            }
+          });
+        }
+        for (std::thread& thread : threads) thread.join();
+        for (const std::exception_ptr& erro : erros)
+          if (erro) std::rethrow_exception(erro);
+      }
+      for (std::size_t rg : ativos) {
+        target.append_column(grupos_nested[rg]);
+        table->registrar_pico_row_group(picos_nested[rg]);
+      }
+      if (target.nulls.size() != static_cast<std::size_t>(linhas_ativas))
+        die("coluna '" + field.name + "' tem quantidade de linhas diferente de 'num_rows'");
+    }
+    if (onde && onde->kind == ValueKind::Mapa && onde->map_ref() && !onde->map_ref()->items.empty()) {
+      const auto caminho_final = [](const std::string& nome) {
+        std::vector<std::string> partes;
+        std::size_t inicio = 0;
+        while (inicio < nome.size()) {
+          const std::size_t fim = nome.find('.', inicio);
+          partes.push_back(nome.substr(inicio, fim == std::string::npos ? std::string::npos : fim - inicio));
+          if (fim == std::string::npos) break;
+          inicio = fim + 1;
+        }
+        return partes;
+      };
+      std::vector<std::size_t> positions;
+      positions.reserve(table->rows);
+      std::function<bool(const Value&, std::size_t)> corresponde;
+      corresponde = [&](const Value& pred, std::size_t row) {
+        if (pred.kind != ValueKind::Mapa || !pred.map_ref() || pred.map_ref()->items.empty()) return true;
+        for (const auto& [name, expected] : pred.map_ref()->items) {
+          if ((name == "e" || name == "ou") && expected.kind == ValueKind::Lista && expected.list_ref()) {
+            bool resultado = name == "e";
+            for (const Value& parte : *expected.list_ref()) {
+              const bool atual = corresponde(parte, row);
+              if (name == "e") resultado = resultado && atual;
+              else resultado = resultado || atual;
+            }
+            if (!resultado) return false;
+            continue;
+          }
+          const std::vector<std::string> partes = caminho_final(name);
+          const ColumnarColumn* column = partes.empty() ? nullptr : table->find(partes.front());
+          if (!column) die("ler_parquet: coluna de 'onde' nao foi projetada: '" + name + "'");
+          Value atual = column->at(row);
+          for (std::size_t p = 1; p < partes.size(); ++p) {
+            if (atual.kind != ValueKind::Mapa || !atual.map_ref()) { atual = Value::nulo(); break; }
+            const Value* campo = atual.map_ref()->find(partes[p]);
+            atual = campo ? *campo : Value::nulo();
+          }
+          std::string op = "==";
+          const Value* wanted = &expected;
+          if (expected.kind == ValueKind::Mapa && expected.map_ref() && expected.map_ref()->items.size() == 1) {
+            const auto& [candidate, value] = expected.map_ref()->items.front();
+            if (candidate == "<" || candidate == "<=" || candidate == ">" ||
+                candidate == ">=" || candidate == "==" || candidate == "!=") {
+              op = candidate;
+              wanted = &value;
+            }
+          }
+          bool ok = false;
+          if (!rt::apply_binop(op, atual, *wanted, &ok).truthy()) return false;
+        }
+        return true;
+      };
+      for (std::size_t row = 0; row < table->rows; ++row) {
+        if (corresponde(*onde, row)) positions.push_back(row);
+      }
+      table = table->take_rows(positions);
+    }
+    if (limite > 0 && table->rows > limite) {
+      std::vector<std::size_t> positions(limite);
+      std::iota(positions.begin(), positions.end(), std::size_t{0});
+      table = table->take_rows(positions);
+    }
+    return Value::tabela_colunar(std::move(table));
+  }
+  // O modo por linhas decodifica e materializa um row group por vez. Antes,
+  // todas as folhas eram acumuladas no arquivo inteiro e só depois
+  // convertidas em mapas; isso multiplicava o pico de Value e impedia
+  // paralelizar grupos independentes.
+  bool nomes_unicos = true;
+  for (std::size_t a = 0; a < projetados.size() && nomes_unicos; ++a) {
+    for (std::size_t b = a + 1; b < projetados.size(); ++b) {
+      if (projetados[a]->name == projetados[b]->name) nomes_unicos = false;
+    }
+  }
+  std::vector<ValueList> grupos(row_groups.size());
+  const auto materializar_grupo = [&](std::size_t rg) {
+    bool somente_folhas = true;
+    for (const RField* campo : projetados) {
+      if (campo->is_struct || campo->is_list || campo->struct_list || campo->is_map ||
+          campo->nesting_depth > 0) {
+        somente_folhas = false;
+        break;
+      }
+    }
+    if (somente_folhas) {
+      std::vector<ColumnarColumn> typed(ncols);
+      std::vector<Value> unused;
+      ParquetRowGroupAllocator allocator;
+      for (std::size_t ci = 0; ci < ncols; ++ci) {
+        if (!decodificar[ci]) continue;
+        decode_chunk(file, row_groups[rg][ci], cols_desc[ci], rg_num_rows[rg], unused,
+                     nullptr, &lp.crypto,
+                     static_cast<std::uint32_t>(ci), &typed[ci], &allocator);
+      }
+      ValueList& rows = grupos[rg];
+      rows.reserve(static_cast<std::size_t>(rg_num_rows[rg]));
+      for (std::int64_t r = 0; r < rg_num_rows[rg]; ++r) {
+        Value row = Value::mapa();
+        row.map_ref()->items.reserve(projetados.size());
+        for (const RField* campo : projetados) {
+          const auto& col = typed[static_cast<std::size_t>(campo->leaf_idx)];
+          if (static_cast<std::size_t>(r) >= col.nulls.size())
+            die("coluna '" + campo->name + "' tem menos valores que o row group");
+          row.map_ref()->items.emplace_back(campo->name, col.at(static_cast<std::size_t>(r)));
+        }
+        rows.push_back(std::move(row));
+      }
+      return;
+    }
+    std::vector<std::vector<Value>> columns(ncols);
+    std::vector<std::vector<int>> coldefs(ncols);
+    ParquetRowGroupAllocator allocator;
+    for (std::size_t ci = 0; ci < ncols; ++ci) {
+      if (!decodificar[ci]) continue;
+      decode_chunk(file, row_groups[rg][ci], cols_desc[ci], rg_num_rows[rg], columns[ci],
+                   &coldefs[ci], &lp.crypto, static_cast<std::uint32_t>(ci),
+                   nullptr, &allocator);
+    }
+    ValueList& rows = grupos[rg];
+    rows.reserve(static_cast<std::size_t>(rg_num_rows[rg]));
+    for (std::int64_t r = 0; r < rg_num_rows[rg]; ++r) {
+      Value row = Value::mapa();
+      row.map_ref()->items.reserve(projetados.size());
+      for (const RField* campo : projetados) {
+        const RField& t = *campo;
+        const bool folha = !t.is_struct && !t.struct_list && !t.is_map;
+        if (nomes_unicos && folha) {
+          auto& col = columns[static_cast<std::size_t>(t.leaf_idx)];
+          if (static_cast<std::size_t>(r) >= col.size())
+            die("coluna '" + t.name + "' tem menos valores que o row group");
+          row.map_ref()->items.emplace_back(t.name, std::move(col[static_cast<std::size_t>(r)]));
+        } else if (nomes_unicos) {
+          row.map_ref()->items.emplace_back(
+              t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+        } else {
+          row.map_ref()->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+        }
+      }
+      rows.push_back(std::move(row));
+    }
+  };
+
+  const std::size_t hardware = std::max(1u, std::thread::hardware_concurrency());
+  const std::size_t nthreads = std::min<std::size_t>({hardware, 4, row_groups.size()});
+  const bool paralelo = row_groups.size() > 1 && num_rows >= 100000 && nthreads > 1;
+  if (!paralelo) {
+    for (std::size_t rg = 0; rg < row_groups.size(); ++rg) materializar_grupo(rg);
+  } else {
+    std::atomic<std::size_t> proximo{0};
+    std::vector<std::exception_ptr> erros(nthreads);
+    std::vector<std::thread> threads;
+    for (std::size_t t = 0; t < nthreads; ++t) {
+      threads.emplace_back([&, t] {
+        try {
+          for (std::size_t rg = proximo.fetch_add(1); rg < row_groups.size();
+               rg = proximo.fetch_add(1)) {
+            materializar_grupo(rg);
+          }
+        } catch (...) {
+          erros[t] = std::current_exception();
+          proximo = row_groups.size();
+        }
+      });
+    }
+    for (std::thread& thread : threads) thread.join();
+    for (const std::exception_ptr& erro : erros)
+      if (erro) std::rethrow_exception(erro);
+  }
 
   Value tabela = Value::tabela();
-  for (std::int64_t r = 0; r < num_rows; ++r) {
-    Value row = Value::mapa();
-    for (const RField& t : top) {
-      row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
-    }
-    tabela.list->push_back(std::move(row));
+  tabela.list_ref()->reserve(static_cast<std::size_t>(num_rows));
+  for (ValueList& rows : grupos) {
+    tabela.list_ref()->insert(tabela.list_ref()->end(),
+                        std::make_move_iterator(rows.begin()),
+                        std::make_move_iterator(rows.end()));
+    // Libera a capacidade temporaria do grupo depois de mover os registros
+    // para a tabela final; caso contrario os vetores de todos os grupos
+    // permaneceriam reservados ate o retorno da funcao.
+    ValueList vazio;
+    rows.swap(vazio);
   }
   return tabela;
 }
@@ -4401,7 +6127,8 @@ ParquetFluxo parquet_abrir_fluxo(const std::string& path) {
   return fx;
 }
 
-Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo) {
+Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo,
+                             const std::vector<std::string>& selecionar) {
   if (!fx.estado) die("fluxo parquet fechado");
   LeitorParquet& lp = fx.estado->leitor;
   if (grupo < 0 || grupo >= static_cast<std::int64_t>(lp.row_groups.size())) {
@@ -4409,19 +6136,39 @@ Value parquet_ler_grupo_fluxo(ParquetFluxo& fx, std::int64_t grupo) {
   }
   const std::size_t g = static_cast<std::size_t>(grupo);
   const std::size_t ncols = lp.cols_desc.size();
+  std::vector<const RField*> fields;
+  std::vector<char> needed(ncols, 0);
+  if (selecionar.empty()) {
+    for (const RField& field : lp.top) fields.push_back(&field);
+    std::fill(needed.begin(), needed.end(), 1);
+  } else {
+    for (const std::string& name : selecionar) {
+      if (std::find_if(fields.begin(), fields.end(),
+                       [&](const RField* field) { return field->name == name; }) != fields.end()) {
+        die("coluna repetida em 'selecionar': '" + name + "'");
+      }
+      const RField* found = nullptr;
+      for (const RField& field : lp.top) if (field.name == name) found = &field;
+      if (!found) die("coluna inexistente em 'selecionar': '" + name + "'");
+      fields.push_back(found);
+      for (int leaf : found->sub_leaves) needed[static_cast<std::size_t>(leaf)] = 1;
+    }
+  }
   std::vector<std::vector<Value>> columns(ncols);
   std::vector<std::vector<int>> coldefs(ncols);
   for (std::size_t ci = 0; ci < ncols; ++ci) {
+    if (!needed[ci]) continue;
     decode_chunk(lp.file, lp.row_groups[g][ci], lp.cols_desc[ci], lp.rg_num_rows[g], columns[ci],
                  &coldefs[ci], &lp.crypto, static_cast<std::uint32_t>(ci));
   }
   Value tabela = Value::tabela();
   for (std::int64_t r = 0; r < lp.rg_num_rows[g]; ++r) {
     Value row = Value::mapa();
-    for (const RField& t : lp.top) {
-      row.map->set(t.name, montar_no(t, static_cast<std::size_t>(r), columns, coldefs));
+    for (const RField* field : fields) {
+      row.map_ref()->set(field->name,
+                   montar_no(*field, static_cast<std::size_t>(r), columns, coldefs));
     }
-    tabela.list->push_back(std::move(row));
+    tabela.list_ref()->push_back(std::move(row));
   }
   return tabela;
 }

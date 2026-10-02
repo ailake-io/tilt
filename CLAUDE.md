@@ -771,8 +771,8 @@ tilt/
   };
   ```
 - [ ] `Tensor` com `shape`, `stride`, ponteiro host/device e flag de dispositivo.
-- [ ] Kernels: `matmul` (GEMM), `conv2d`, `relu/gelu`, soma vetorial — CUDA + fallback CPU com threads nativas e AVX.
-- [ ] Bindings de GPU via `dlopen`/`LoadLibrary` (`libcuda.so`, `nvcuda.dll`, ROCm, Metal) — sem exigir o SDK CUDA na compilação do compilador.
+- [~] Kernels: `matmul` (GEMM), `conv2d`, `relu/gelu`, soma vetorial — CUDA com fallback CPU implementado e validado em RTX 5050; AVX e residência de tensores no device ainda pendentes.
+- [~] Bindings de GPU via `dlopen`/`LoadLibrary`: CUDA implementada sem SDK na compilação; ROCm e Metal ainda pendentes.
 - [ ] `autograd.cpp`: grafo reverso para gerar o laço de `treino` automaticamente.
 - [ ] `net_server.cpp`: aceitação assíncrona (epoll/kqueue), uma arena por requisição.
 - [ ] Conectores: Postgres (protocolo wire), Kafka, S3 (HTTP+assinatura), CSV/Parquet.

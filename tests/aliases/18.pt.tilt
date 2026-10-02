@@ -1,0 +1,15 @@
+llm gpt:
+  provedor: "anthropic"
+  modelo: "claude-sonnet-5"
+  chave: env "ANTHROPIC_API_KEY"
+
+tipo Resumo:
+  titulo: texto
+  pontos: lista[texto]
+  sentimento: "positivo" | "neutro" | "negativo"
+
+pipeline extrair:
+  passos:
+    - dados = perguntar gpt, formato: Resumo:
+        usuario: "Extraia estrutura de:\ntilt é ótimo"
+    - imprimir dados.titulo   # já validado contra 'Resumo'

@@ -2,6 +2,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace tilt::rt {
 
@@ -10,6 +12,7 @@ struct HttpRequest {
   std::string path;
   std::string body;
   std::string host;         // valor do header Host (authority), quando presente
+  std::string authorization;  // header Authorization, quando presente
   bool keep_alive = false;  // negotiated from the request line + Connection header
 };
 
@@ -17,6 +20,7 @@ struct HttpResponse {
   int status = 200;
   std::string content_type = "application/json";
   std::string body;
+  std::vector<std::pair<std::string, std::string>> headers;
 };
 
 // HTTP/1.1 server.

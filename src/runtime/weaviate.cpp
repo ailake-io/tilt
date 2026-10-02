@@ -68,16 +68,16 @@ std::string motivo_erro(const std::string& body) {
   if (body.empty()) return "erro desconhecido (resposta vazia)";
   try {
     const Value j = json_parse(body);
-    if (j.kind == ValueKind::Mapa && j.map) {
+    if (j.kind == ValueKind::Mapa && j.map_ref()) {
       for (const char* chave : {"error", "errors"}) {
-        const Value* err = j.map->find(chave);
+        const Value* err = j.map_ref()->find(chave);
         if (!err) continue;
         const Value* primeiro = err;
-        if (err->kind == ValueKind::Lista && err->list && !err->list->empty()) {
-          primeiro = &(*err->list)[0];
+        if (err->kind == ValueKind::Lista && err->list_ref() && !err->list_ref()->empty()) {
+          primeiro = &(*err->list_ref())[0];
         }
-        if (primeiro->kind == ValueKind::Mapa && primeiro->map) {
-          const Value* msg = primeiro->map->find("message");
+        if (primeiro->kind == ValueKind::Mapa && primeiro->map_ref()) {
+          const Value* msg = primeiro->map_ref()->find("message");
           if (msg && msg->kind == ValueKind::Texto && !msg->s.empty()) return msg->s;
         }
         if (primeiro->kind == ValueKind::Texto && !primeiro->s.empty()) return primeiro->s;
@@ -146,23 +146,31 @@ void weaviate_upsert(const std::string& base, const std::string& classe,
     die("nome de classe invalido '" + classe + "' (Weaviate exige [A-Z][_a-zA-Z0-9]*)");
   }
   ensure_classe(base, classe);
-  const std::string body = "{\"class\":\"" + json_escape(classe) +
-                           "\",\"properties\":{\"texto\":\"" + json_escape(text) +
+  const std::string body = "{\"class\":\"" + json_escape(classe) + "\",\"id\":\"" +
+                           json_escape(id) + "\",\"properties\":{\"texto\":\"" + json_escape(text) +
                            "\"},\"vector\":" + vec_json(vec) + "}";
-  http_json("PUT", base + "/v1/objects/" + classe + "/" + url_escape(id), body);
+  // PUT so atualiza objeto existente (no Weaviate 1.28 um id novo devolve 500);
+  // para criar e POST /v1/objects com o id no corpo.
+  const std::string url_obj = base + "/v1/objects/" + classe + "/" + url_escape(id);
+  const HttpClientResponse existe = http_request("GET", url_obj, headers(), "", 0);
+  if (existe.status == 200) {
+    http_json("PUT", url_obj, body);
+  } else if (existe.status == 404) {
+    http_json("POST", base + "/v1/objects", body);
+  } else {
+    die_http(existe);
+  }
 }
 
-std::vector<std::pair<std::string, double>> weaviate_search(const std::string& base,
-                                                            const std::string& classe,
-                                                            const std::vector<float>& vec,
-                                                            std::size_t k) {
+std::vector<VectorHit> weaviate_search(const std::string& base, const std::string& classe,
+                                       const std::vector<float>& vec, std::size_t k) {
   if (vec.empty()) die("vetor de consulta vazio");
   if (!classe_valida(classe)) {
     die("nome de classe invalido '" + classe + "' (Weaviate exige [A-Z][_a-zA-Z0-9]*)");
   }
-  const std::string body = "{\"query\":\"{ Get { " + classe + "(nearVector: {vector: " +
-                           vec_json(vec) + "}, limit: " + std::to_string(k) +
-                           ") { _additional { id distance } } } }\"}";
+  const std::string body =
+      "{\"query\":\"{ Get { " + classe + "(nearVector: {vector: " + vec_json(vec) +
+      "}, limit: " + std::to_string(k) + ") { texto _additional { id distance } } } }\"}";
   const std::string resp = http_json("POST", base + "/v1/graphql", body);
   Value parsed;
   try {
@@ -170,28 +178,30 @@ std::vector<std::pair<std::string, double>> weaviate_search(const std::string& b
   } catch (const std::exception& e) {
     die("resposta invalida do servidor: " + std::string(e.what()));
   }
-  std::vector<std::pair<std::string, double>> out;
-  if (parsed.kind != ValueKind::Mapa || !parsed.map) return out;
+  std::vector<VectorHit> out;
+  if (parsed.kind != ValueKind::Mapa || !parsed.map_ref()) return out;
   // Erros GraphQL chegam com status 200: {"errors": [{"message": ...}]}.
-  if (const Value* errs = parsed.map->find("errors");
-      errs && errs->kind == ValueKind::Lista && errs->list && !errs->list->empty()) {
+  if (const Value* errs = parsed.map_ref()->find("errors");
+      errs && errs->kind == ValueKind::Lista && errs->list_ref() && !errs->list_ref()->empty()) {
     die(motivo_erro(resp));
   }
-  const Value* data = parsed.map->find("data");
-  if (!data || data->kind != ValueKind::Mapa || !data->map) return out;
-  const Value* get = data->map->find("Get");
-  if (!get || get->kind != ValueKind::Mapa || !get->map) return out;
-  const Value* hits = get->map->find(classe);
-  if (!hits || hits->kind != ValueKind::Lista || !hits->list) return out;
-  for (const Value& hit : *hits->list) {
-    if (hit.kind != ValueKind::Mapa || !hit.map) continue;
-    const Value* add = hit.map->find("_additional");
-    if (!add || add->kind != ValueKind::Mapa || !add->map) continue;
-    const Value* id = add->map->find("id");
-    const Value* dist = add->map->find("distance");
-    const std::string id_s = id && id->kind == ValueKind::Texto ? id->s : "?";
+  const Value* data = parsed.map_ref()->find("data");
+  if (!data || data->kind != ValueKind::Mapa || !data->map_ref()) return out;
+  const Value* get = data->map_ref()->find("Get");
+  if (!get || get->kind != ValueKind::Mapa || !get->map_ref()) return out;
+  const Value* hits = get->map_ref()->find(classe);
+  if (!hits || hits->kind != ValueKind::Lista || !hits->list_ref()) return out;
+  for (const Value& hit : *hits->list_ref()) {
+    if (hit.kind != ValueKind::Mapa || !hit.map_ref()) continue;
+    const Value* add = hit.map_ref()->find("_additional");
+    if (!add || add->kind != ValueKind::Mapa || !add->map_ref()) continue;
+    const Value* id = add->map_ref()->find("id");
+    const Value* dist = add->map_ref()->find("distance");
+    const std::string id_s = id && id->kind == ValueKind::Texto ? id->s.str() : "?";
     const double d = dist && dist->is_number() ? dist->as_number() : 0.0;
-    out.emplace_back(id_s, 1.0 - d);  // score = 1 - distancia de cosseno
+    const Value* txt = hit.map_ref()->find("texto");
+    // score = 1 - distancia de cosseno
+    out.push_back({id_s, 1.0 - d, txt && txt->kind == ValueKind::Texto ? txt->s.str() : ""});
   }
   return out;
 }

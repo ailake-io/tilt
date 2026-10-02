@@ -1,0 +1,16 @@
+pipeline limpeza:
+  passos:
+    - bruto = [{ id: 1, nome: " Ana ", idade: "30" }, { id: 1, nome: " Ana ", idade: "30" }, { id: 2, nome: "", idade: "x" }]
+    - perfil = bruto.descrever
+    - a = bruto.deduplicar
+    - b = a.limpar_texto "nome", caixa: "minusculas"
+    - c = b.converter { idade: "inteiro" }
+    - d = c.preencher_nulos { idade: 0 }
+    - e = d.remover_nulos "nome"
+    - f = e.renomear { nome: "cliente" }
+    - g = f.remover_colunas "id"
+    - ufs = [{ uf: "sp" }]
+    - j = g.juntar ufs, por: "uf", tipo: "esquerda"
+    - s = g.empilhar(g)
+    - cv = bruto.contar_valores "nome"
+    - am = bruto.amostra 2, semente: 7

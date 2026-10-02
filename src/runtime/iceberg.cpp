@@ -1,13 +1,10 @@
 #include "runtime/iceberg.hpp"
 
-#include "runtime/avro.hpp"
-#include "runtime/compat.hpp"
-
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -23,10 +20,13 @@
 #include <utility>
 #include <vector>
 
-#include "runtime/json.hpp"
+#include "runtime/avro.hpp"
+#include "runtime/compat.hpp"
 #include "runtime/http_client.hpp"
+#include "runtime/json.hpp"
 #include "runtime/parquet.hpp"
 #include "runtime/snappy_codec.hpp"
+#include "runtime/table_lock.hpp"
 
 namespace tilt::rt {
 
@@ -203,12 +203,12 @@ class AvroDecoder {
 };
 
 const Value* map_find(const Value& m, const char* key) {
-  return m.kind == ValueKind::Mapa && m.map ? m.map->find(key) : nullptr;
+  return m.kind == ValueKind::Mapa && m.map_ref() ? m.map_ref()->find(key) : nullptr;
 }
 
 bool is_nullable_union(const Value& schema) {
-  if (schema.kind != ValueKind::Lista || !schema.list || schema.list->empty()) return false;
-  const Value& first = schema.list->front();
+  if (schema.kind != ValueKind::Lista || !schema.list_ref() || schema.list_ref()->empty()) return false;
+  const Value& first = schema.list_ref()->front();
   return first.kind == ValueKind::Texto && first.s == "null";
 }
 
@@ -216,16 +216,16 @@ bool is_nullable_union(const Value& schema) {
 // O discriminant Avro e um long zigzag (indice 1 -> 0x02); escritas ate a
 // fase 25 usavam varint cru (0x01) — ambos sao aceitos na leitura.
 const Value& union_branch(const Value& schema, std::int64_t idx) {
-  if (schema.kind != ValueKind::Lista || !schema.list || idx < 0 ||
-      static_cast<std::size_t>(idx) >= schema.list->size()) {
+  if (schema.kind != ValueKind::Lista || !schema.list_ref() || idx < 0 ||
+      static_cast<std::size_t>(idx) >= schema.list_ref()->size()) {
     throw std::runtime_error("iceberg: avro: indice de uniao invalido");
   }
-  return (*schema.list)[static_cast<std::size_t>(idx)];
+  return (*schema.list_ref())[static_cast<std::size_t>(idx)];
 }
 
 void avro_encode(std::string& out, const Value& schema, const Value& v) {
   if (schema.kind == ValueKind::Lista) {  // uniao
-    if (!schema.list || schema.list->empty()) {
+    if (!schema.list_ref() || schema.list_ref()->empty()) {
       throw std::runtime_error("iceberg: avro: uniao vazia no schema");
     }
     if (v.kind == ValueKind::Nulo) {
@@ -243,11 +243,11 @@ void avro_encode(std::string& out, const Value& schema, const Value& v) {
     throw std::runtime_error("iceberg: avro: tipo de schema invalido");
   }
   const std::string ty = schema.kind == ValueKind::Texto
-                             ? schema.s
+                             ? schema.s.str()
                              : ([&]() {
                                  if (const Value* t = map_find(schema, "type");
                                      t && t->kind == ValueKind::Texto) {
-                                   return t->s;
+                                   return t->s.str();
                                  }
                                  return std::string();
                                })();
@@ -291,12 +291,12 @@ void avro_encode(std::string& out, const Value& schema, const Value& v) {
     if (!fields || fields->kind != ValueKind::Lista) {
       throw std::runtime_error("iceberg: avro: record sem fields");
     }
-    if (v.kind != ValueKind::Mapa || !v.map) throw std::runtime_error("iceberg: avro: esperado record");
-    for (const Value& f : *fields->list) {
+    if (v.kind != ValueKind::Mapa || !v.map_ref()) throw std::runtime_error("iceberg: avro: esperado record");
+    for (const Value& f : *fields->list_ref()) {
       const Value* name = map_find(f, "name");
       const Value* fschema = map_find(f, "type");
       if (!name || !fschema) throw std::runtime_error("iceberg: avro: field sem nome/tipo");
-      const Value* fv = v.map->find(name->s);
+      const Value* fv = v.map_ref()->find(name->s);
       avro_encode(out, *fschema, fv ? *fv : Value::nulo());
     }
     return;
@@ -305,9 +305,9 @@ void avro_encode(std::string& out, const Value& schema, const Value& v) {
     const Value* items = map_find(schema, "items");
     if (!items) throw std::runtime_error("iceberg: avro: array sem items");
     if (v.kind != ValueKind::Lista) throw std::runtime_error("iceberg: avro: esperado array");
-    if (!v.list->empty()) {
-      put_long(out, static_cast<std::int64_t>(v.list->size()));
-      for (const Value& e : *v.list) avro_encode(out, *items, e);
+    if (!v.list_ref()->empty()) {
+      put_long(out, static_cast<std::int64_t>(v.list_ref()->size()));
+      for (const Value& e : *v.list_ref()) avro_encode(out, *items, e);
     }
     put_long(out, 0);
     return;
@@ -315,10 +315,10 @@ void avro_encode(std::string& out, const Value& schema, const Value& v) {
   if (ty == "map") {
     const Value* values = map_find(schema, "values");
     if (!values) throw std::runtime_error("iceberg: avro: map sem values");
-    if (v.kind != ValueKind::Mapa || !v.map) throw std::runtime_error("iceberg: avro: esperado map");
-    if (!v.map->items.empty()) {
-      put_long(out, static_cast<std::int64_t>(v.map->items.size()));
-      for (const auto& kv : v.map->items) {
+    if (v.kind != ValueKind::Mapa || !v.map_ref()) throw std::runtime_error("iceberg: avro: esperado map");
+    if (!v.map_ref()->items.empty()) {
+      put_long(out, static_cast<std::int64_t>(v.map_ref()->items.size()));
+      for (const auto& kv : v.map_ref()->items) {
         put_long(out, static_cast<std::int64_t>(kv.first.size()));
         out += kv.first;
         avro_encode(out, *values, kv.second);
@@ -343,11 +343,11 @@ Value avro_decode(AvroDecoder& dec, const Value& schema) {
     throw std::runtime_error("iceberg: avro: tipo de schema invalido");
   }
   const std::string ty = schema.kind == ValueKind::Texto
-                             ? schema.s
+                             ? schema.s.str()
                              : ([&]() {
                                  if (const Value* t = map_find(schema, "type");
                                      t && t->kind == ValueKind::Texto) {
-                                   return t->s;
+                                   return t->s.str();
                                  }
                                  return std::string();
                                })();
@@ -376,11 +376,11 @@ Value avro_decode(AvroDecoder& dec, const Value& schema) {
       throw std::runtime_error("iceberg: avro: record sem fields");
     }
     Value out = Value::mapa();
-    for (const Value& f : *fields->list) {
+    for (const Value& f : *fields->list_ref()) {
       const Value* name = map_find(f, "name");
       const Value* fschema = map_find(f, "type");
       if (!name || !fschema) throw std::runtime_error("iceberg: avro: field sem nome/tipo");
-      out.map->set(name->s, avro_decode(dec, *fschema));
+      out.map_ref()->set(name->s, avro_decode(dec, *fschema));
     }
     return out;
   }
@@ -394,9 +394,9 @@ Value avro_decode(AvroDecoder& dec, const Value& schema) {
       if (n < 0) {
         const std::int64_t blocks = dec.zig();  // tamanho em bytes; nao usado
         (void)blocks;
-        for (std::int64_t k = 0; k < -n; ++k) out.list->push_back(avro_decode(dec, *items));
+        for (std::int64_t k = 0; k < -n; ++k) out.list_ref()->push_back(avro_decode(dec, *items));
       } else {
-        for (std::int64_t k = 0; k < n; ++k) out.list->push_back(avro_decode(dec, *items));
+        for (std::int64_t k = 0; k < n; ++k) out.list_ref()->push_back(avro_decode(dec, *items));
       }
     }
     return out;
@@ -415,7 +415,7 @@ Value avro_decode(AvroDecoder& dec, const Value& schema) {
       }
       for (std::int64_t k = 0; k < count; ++k) {
         const std::string key = dec.str();
-        out.map->set(key, avro_decode(dec, *values));
+        out.map_ref()->set(key, avro_decode(dec, *values));
       }
     }
     return out;
@@ -989,9 +989,7 @@ int extract_iso_component(const std::string& s, const std::string& component) {
 
 // Aplica um transform de particao a um valor de origem.
 Value apply_transform(const Value& v, const PartitionField& pf) {
-  if (v.kind == ValueKind::Nulo)
-    die("valor nulo em coluna de particao '" + pf.source_name +
-        "' (fase 26: particao com nulo nao e suportada)");
+  if (v.kind == ValueKind::Nulo) return Value::nulo();
   if (pf.transform == "identity" || pf.transform.empty()) return v;
   if (pf.transform.rfind("bucket[", 0) == 0) {
     return Value::inteiro(bucket_of(v, pf.source_type, pf.num_buckets, pf.source_name));
@@ -1034,8 +1032,8 @@ void collect_struct_fields(const std::vector<const Value*>& cells, Column& out) 
   static const Value kNull = Value::nulo();
   std::vector<std::string> keys;
   for (const Value* cell : cells) {
-    if (cell->kind != ValueKind::Mapa || !cell->map) continue;
-    for (const auto& kv : cell->map->items) {
+    if (cell->kind != ValueKind::Mapa || !cell->map_ref()) continue;
+    for (const auto& kv : cell->map_ref()->items) {
       if (std::find(keys.begin(), keys.end(), kv.first) == keys.end()) keys.push_back(kv.first);
     }
   }
@@ -1043,8 +1041,8 @@ void collect_struct_fields(const std::vector<const Value*>& cells, Column& out) 
     Column ch;
     ch.name = k;
     for (const Value* cell : cells) {
-      if (cell->kind != ValueKind::Mapa || !cell->map) continue;
-      const Value* f = cell->map->find(k);
+      if (cell->kind != ValueKind::Mapa || !cell->map_ref()) continue;
+      const Value* f = cell->map_ref()->find(k);
       if (!f || f->kind == ValueKind::Nulo) continue;
       if (f->kind == ValueKind::Lista) {
         die("coluna struct com campo lista '" + k +
@@ -1056,8 +1054,8 @@ void collect_struct_fields(const std::vector<const Value*>& cells, Column& out) 
         ch.sample = *f;
         std::vector<const Value*> sub;
         for (const Value* c2 : cells) {
-          if (c2->kind == ValueKind::Mapa && c2->map) {
-            if (const Value* f2 = c2->map->find(k)) {
+          if (c2->kind == ValueKind::Mapa && c2->map_ref()) {
+            if (const Value* f2 = c2->map_ref()->find(k)) {
               sub.push_back(f2);
               continue;
             }
@@ -1079,21 +1077,30 @@ void collect_struct_fields(const std::vector<const Value*>& cells, Column& out) 
   }
 }
 
+bool column_has_null_value(const Value& tabela, const std::string& col) {
+  for (const Value& row : *tabela.list_ref()) {
+    if (row.kind != ValueKind::Mapa || !row.map_ref()) return true;
+    const Value* cell = row.map_ref()->find(col);
+    if (!cell || cell->kind == ValueKind::Nulo) return true;
+  }
+  return false;
+}
+
 std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
   if (tabela.kind != ValueKind::Lista && tabela.kind != ValueKind::Tabela) {
     die(std::string(ctx) + " espera uma tabela (lista de mapas)");
   }
-  if (tabela.list->empty()) die(std::string(ctx) + ": tabela vazia (sem schema deduzivel)");
-  const Value& first = tabela.list->front();
-  if (first.kind != ValueKind::Mapa || !first.map) die("linhas devem ser mapas { campo: valor }");
+  if (tabela.list_ref()->empty()) die(std::string(ctx) + ": tabela vazia (sem schema deduzivel)");
+  const Value& first = tabela.list_ref()->front();
+  if (first.kind != ValueKind::Mapa || !first.map_ref()) die("linhas devem ser mapas { campo: valor }");
   std::vector<Column> cols;
-  for (const auto& kv : first.map->items) {
+  for (const auto& kv : first.map_ref()->items) {
     // Tipo pela 1a celula nao nula (struct Nulo na 1a linha e mapa depois).
     const Value* rep = &kv.second;
     if (rep->kind == ValueKind::Nulo) {
-      for (const Value& row : *tabela.list) {
-        if (row.kind != ValueKind::Mapa || !row.map) break;
-        const Value* f = row.map->find(kv.first);
+      for (const Value& row : *tabela.list_ref()) {
+        if (row.kind != ValueKind::Mapa || !row.map_ref()) break;
+        const Value* f = row.map_ref()->find(kv.first);
         if (f && f->kind != ValueKind::Nulo) {
           rep = f;
           break;
@@ -1107,9 +1114,9 @@ std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
       c.is_struct = true;
       c.sample = *rep;
       std::vector<const Value*> cells;
-      for (const Value& row : *tabela.list) {
-        if (row.kind == ValueKind::Mapa && row.map) {
-          if (const Value* f = row.map->find(kv.first)) {
+      for (const Value& row : *tabela.list_ref()) {
+        if (row.kind == ValueKind::Mapa && row.map_ref()) {
+          if (const Value* f = row.map_ref()->find(kv.first)) {
             cells.push_back(f);
             continue;
           }
@@ -1119,8 +1126,8 @@ std::vector<Column> table_columns(const Value& tabela, const char* ctx) {
       }
       collect_struct_fields(cells, c);
     } else {
-      c.type = iceberg_type_name(kv.second);
-      c.sample = kv.second;
+      c.type = iceberg_type_name(*rep);
+      c.sample = *rep;
     }
     cols.push_back(std::move(c));
   }
@@ -1277,13 +1284,12 @@ std::vector<PartitionField> make_spec(const std::vector<Column>& cols,
   return spec;
 }
 
-// Valor de particao como string (path hive-style no data file). Erro claro
-// em nulo e em texto com '/' (fase 26: sem escaping de caracteres especiais).
+constexpr const char* kHiveNullPartition = "__HIVE_DEFAULT_PARTITION__";
+
+// Null usa o marcador Hive no path; o marcador literal e reservado.
 std::string partition_value_string(const Value& v, const std::string& col) {
   switch (v.kind) {
-    case ValueKind::Nulo:
-      die("valor nulo em coluna de particao '" + col +
-          "' (fase 26: particao com nulo nao e suportada)");
+    case ValueKind::Nulo: return kHiveNullPartition;
     case ValueKind::Logico: return v.b ? "true" : "false";
     case ValueKind::Inteiro: return std::to_string(v.i);
     case ValueKind::Decimal: {
@@ -1295,6 +1301,10 @@ std::string partition_value_string(const Value& v, const std::string& col) {
       if (v.s.find('/') != std::string::npos) {
         die("valor da coluna de particao '" + col +
             "' contem '/' (fase 26: caracteres especiais nao suportados)");
+      }
+      if (v.s == kHiveNullPartition) {
+        die("valor da coluna de particao '" + col +
+            "' e reservado para representar nulo no layout Hive");
       }
       return v.s;
     default:
@@ -1308,12 +1318,12 @@ std::string partition_value_string(const Value& v, const std::string& col) {
 // permanece no arquivo e o valor de particao e derivado.
 Value strip_partition_columns(const Value& row, const std::vector<PartitionField>& spec) {
   Value m = Value::mapa();
-  for (const auto& kv : row.map->items) {
+  for (const auto& kv : row.map_ref()->items) {
     bool eh_particao = false;
     for (const PartitionField& pf : spec) {
       if (pf.transform == "identity" && kv.first == pf.name) eh_particao = true;
     }
-    if (!eh_particao) m.map->set(kv.first, kv.second);
+    if (!eh_particao) m.map_ref()->set(kv.first, kv.second);
   }
   return m;
 }
@@ -1329,17 +1339,17 @@ struct PartitionGroup {
 std::vector<PartitionGroup> partition_rows(const Value& tabela,
                                            const std::vector<PartitionField>& spec) {
   std::vector<PartitionGroup> grupos;
-  for (const Value& row : *tabela.list) {
-    if (row.kind != ValueKind::Mapa || !row.map) die("linhas devem ser mapas { campo: valor }");
+  for (const Value& row : *tabela.list_ref()) {
+    if (row.kind != ValueKind::Mapa || !row.map_ref()) die("linhas devem ser mapas { campo: valor }");
     PartitionGroup candidato;
     candidato.part_map = Value::mapa();
     for (const PartitionField& pf : spec) {
-      const Value* cell = row.map->find(pf.source_name);
+      const Value* cell = row.map_ref()->find(pf.source_name);
       const Value& v = cell ? *cell : Value::nulo();
       const Value part_val = apply_transform(v, pf);
       const std::string valor = partition_value_string(part_val, pf.name);
       candidato.key += (candidato.key.empty() ? "" : "/") + pf.name + "=" + valor;
-      candidato.part_map.map->set(pf.name, part_val);
+      candidato.part_map.map_ref()->set(pf.name, part_val);
     }
     auto it = std::find_if(grupos.begin(), grupos.end(),
                            [&](const PartitionGroup& g) { return g.key == candidato.key; });
@@ -1347,7 +1357,28 @@ std::vector<PartitionGroup> partition_rows(const Value& tabela,
       candidato.rows = Value::tabela();
       it = grupos.insert(grupos.end(), std::move(candidato));
     }
-    it->rows.list->push_back(strip_partition_columns(row, spec));
+    it->rows.list_ref()->push_back(strip_partition_columns(row, spec));
+  }
+  // Em grupos onde a origem de um transform e totalmente null, omite-se essa
+  // coluna opcional do Parquet. O schema Iceberg mantem o tipo declarado e os
+  // leitores projetam null; isso evita inferir o tipo de uma coluna sem valores.
+  for (const PartitionField& pf : spec) {
+    if (pf.transform == "identity") continue;
+    for (PartitionGroup& group : grupos) {
+      const bool all_null = std::all_of(
+          group.rows.list_ref()->begin(), group.rows.list_ref()->end(), [&](const Value& r) {
+            const Value* cell = r.map_ref() ? r.map_ref()->find(pf.source_name) : nullptr;
+            return !cell || cell->kind == ValueKind::Nulo;
+          });
+      if (!all_null) continue;
+      for (Value& r : *group.rows.list_ref()) {
+        Value projected = Value::mapa();
+        for (const auto& kv : r.map_ref()->items) {
+          if (kv.first != pf.source_name) projected.map_ref()->set(kv.first, kv.second);
+        }
+        r = std::move(projected);
+      }
+    }
   }
   return grupos;
 }
@@ -1429,7 +1460,7 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
   } catch (const std::exception& e) {
     die("metadata invalido em '" + path + "': " + e.what());
   }
-  if (md.kind != ValueKind::Mapa || !md.map) die("'" + path + "' nao e um metadata json");
+  if (md.kind != ValueKind::Mapa || !md.map_ref()) die("'" + path + "' nao e um metadata json");
   if (const Value* fv = map_find(md, "format-version"); !fv || fv->kind != ValueKind::Inteiro) {
     die("'" + path + "' sem format-version");
   }
@@ -1460,17 +1491,17 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     // Campos recursivos (structs aninhados tem "type" objeto).
     std::function<void(const Value&, std::vector<Column>&)> le_campos =
         [&](const Value& lista, std::vector<Column>& dst) {
-          if (lista.kind != ValueKind::Lista || !lista.list) return;
-          for (const Value& f : *lista.list) {
+          if (lista.kind != ValueKind::Lista || !lista.list_ref()) return;
+          for (const Value& f : *lista.list_ref()) {
             const Value* fid = map_find(f, "id");
             const Value* name = map_find(f, "name");
             const Value* type = map_find(f, "type");
             const Value* req = map_find(f, "required");
             Column c;
             c.id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 0;
-            c.name = name && name->kind == ValueKind::Texto ? name->s : "";
+            c.name = name && name->kind == ValueKind::Texto ? name->s.str() : "";
             c.required = req ? (req->kind == ValueKind::Logico ? req->b : true) : true;
-            if (type && type->kind == ValueKind::Mapa && type->map) {
+            if (type && type->kind == ValueKind::Mapa && type->map_ref()) {
               const Value* st = map_find(*type, "type");
               const Value* sub = map_find(*type, "fields");
               if (st && st->kind == ValueKind::Texto && st->s == "struct" && sub) {
@@ -1481,7 +1512,7 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
                 c.type = "string";
               }
             } else {
-              c.type = type && type->kind == ValueKind::Texto ? type->s : "string";
+              c.type = type && type->kind == ValueKind::Texto ? type->s.str() : "string";
             }
             out.last_column_id = std::max(out.last_column_id, c.id);
             std::function<void(const Column&)> max_filho = [&](const Column& x) {
@@ -1494,7 +1525,7 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
             dst.push_back(std::move(c));
           }
         };
-    for (const Value& s : *schemas->list) {
+    for (const Value& s : *schemas->list_ref()) {
       const Value* sid = map_find(s, "schema-id");
       if (!sid || sid->kind != ValueKind::Inteiro) continue;
       SchemaVer ver;
@@ -1524,10 +1555,10 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
     const Value* fid = map_find(f, "field-id");
     const Value* sid = map_find(f, "source-id");
     const Value* tr = map_find(f, "transform");
-    pf.name = name && name->kind == ValueKind::Texto ? name->s : "";
+    pf.name = name && name->kind == ValueKind::Texto ? name->s.str() : "";
     pf.field_id = fid && fid->kind == ValueKind::Inteiro ? fid->i : 1000;
     pf.source_id = sid && sid->kind == ValueKind::Inteiro ? sid->i : 0;
-    const std::string transform = tr && tr->kind == ValueKind::Texto ? tr->s : "";
+    const std::string transform = tr && tr->kind == ValueKind::Texto ? tr->s.str() : "";
     if (transform == "identity" || transform.empty()) {
       pf.transform = "identity";
     } else if (transform.rfind("bucket[", 0) == 0) {
@@ -1571,19 +1602,19 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
   bool found_spec = false;
   if (const Value* specs = map_find(md, "partition-specs");
       specs && specs->kind == ValueKind::Lista) {
-    for (const Value& s : *specs->list) {
+    for (const Value& s : *specs->list_ref()) {
       const Value* sid = map_find(s, "spec-id");
       if (!sid || sid->kind != ValueKind::Inteiro || sid->i != default_spec) continue;
       found_spec = true;
       if (const Value* fields = map_find(s, "fields"); fields && fields->kind == ValueKind::Lista) {
-        for (const Value& f : *fields->list) field_from_json(f);
+        for (const Value& f : *fields->list_ref()) field_from_json(f);
       }
     }
   }
   if (!found_spec) {
     if (const Value* legacy = map_find(md, "partition-spec");
         legacy && legacy->kind == ValueKind::Lista) {
-      for (const Value& n : *legacy->list) {
+      for (const Value& n : *legacy->list_ref()) {
         if (n.kind != ValueKind::Texto) continue;
         PartitionField pf;
         pf.name = n.s;
@@ -1600,7 +1631,7 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
   }
 
   if (const Value* snaps = map_find(md, "snapshots"); snaps && snaps->kind == ValueKind::Lista) {
-    for (const Value& s : *snaps->list) {
+    for (const Value& s : *snaps->list_ref()) {
       Snapshot snap;
       const Value* id = map_find(s, "snapshot-id");
       const Value* ts = map_find(s, "timestamp-ms");
@@ -1629,7 +1660,7 @@ Value parse_metadata(const std::string& path, TableMeta& out) {
   }
 
   if (const Value* log = map_find(md, "snapshot-log"); log && log->kind == ValueKind::Lista) {
-    for (const Value& e : *log->list) {
+    for (const Value& e : *log->list_ref()) {
       const Value* ts = map_find(e, "timestamp-ms");
       const Value* id = map_find(e, "snapshot-id");
       if (ts && ts->kind == ValueKind::Inteiro && id && id->kind == ValueKind::Inteiro) {
@@ -1696,34 +1727,34 @@ Value make_manifest_entry(int status, std::int64_t snapshot_id,
                           const std::vector<PartitionField>& spec, const Value& part_map,
                           const std::vector<std::int64_t>& equality_ids) {
   Value e = Value::mapa();
-  e.map->set("status", Value::inteiro(status));
-  e.map->set("snapshot_id", Value::inteiro(snapshot_id));
-  e.map->set("sequence_number",
+  e.map_ref()->set("status", Value::inteiro(status));
+  e.map_ref()->set("snapshot_id", Value::inteiro(snapshot_id));
+  e.map_ref()->set("sequence_number",
              sequence_number > 0 ? Value::inteiro(sequence_number) : Value::nulo());
-  e.map->set("file_sequence_number",
+  e.map_ref()->set("file_sequence_number",
              file_sequence_number > 0 ? Value::inteiro(file_sequence_number) : Value::nulo());
   Value df = Value::mapa();
-  df.map->set("content", Value::inteiro(content));
-  df.map->set("file_path", Value::texto(file_path));
-  df.map->set("file_format", Value::texto("PARQUET"));
+  df.map_ref()->set("content", Value::inteiro(content));
+  df.map_ref()->set("file_path", Value::texto(file_path));
+  df.map_ref()->set("file_format", Value::texto("PARQUET"));
   Value part = Value::mapa();
   for (const PartitionField& pf : spec) {
     // valor no tipo da coluna (string/long/double/boolean) ou null
-    const Value* v = part_map.map ? part_map.map->find(pf.name) : nullptr;
-    part.map->set(pf.name, v ? *v : Value::nulo());
+    const Value* v = part_map.map_ref() ? part_map.map_ref()->find(pf.name) : nullptr;
+    part.map_ref()->set(pf.name, v ? *v : Value::nulo());
   }
-  df.map->set("partition", std::move(part));
-  df.map->set("record_count", Value::inteiro(record_count));
-  df.map->set("file_size_in_bytes", Value::inteiro(file_size));
+  df.map_ref()->set("partition", std::move(part));
+  df.map_ref()->set("record_count", Value::inteiro(record_count));
+  df.map_ref()->set("file_size_in_bytes", Value::inteiro(file_size));
   if (content == 2 && !equality_ids.empty()) {
     Value ids = Value::lista();
-    for (const std::int64_t id : equality_ids) ids.list->push_back(Value::inteiro(id));
-    df.map->set("equality_ids", std::move(ids));
+    for (const std::int64_t id : equality_ids) ids.list_ref()->push_back(Value::inteiro(id));
+    df.map_ref()->set("equality_ids", std::move(ids));
   } else {
-    df.map->set("equality_ids", Value::nulo());
+    df.map_ref()->set("equality_ids", Value::nulo());
   }
-  df.map->set("sort_order_id", Value::nulo());
-  e.map->set("data_file", std::move(df));
+  df.map_ref()->set("sort_order_id", Value::nulo());
+  e.map_ref()->set("data_file", std::move(df));
   return e;
 }
 
@@ -1735,7 +1766,7 @@ struct FileInfo {
   Value part_map;  // valores de particao (tipados) por coluna; vazio = sem particao
   std::int64_t sequence_number = 0;       // snapshot sequence do data file
   std::int64_t file_sequence_number = 0;  // file sequence number global
-  std::vector<std::int64_t> equality_ids; // field-ids usados por equality delete
+  std::vector<std::int64_t> equality_ids;  // field-ids usados por equality delete
 };
 
 std::string write_manifest(const std::string& meta_dir,
@@ -1790,7 +1821,7 @@ bool partition_less(const Value& a, const Value& b) {
 std::string partition_bound_bytes(const PartitionField& pf, const Value& v) {
   std::string out;
   if (pf.avro_ty == "string") {
-    return v.kind == ValueKind::Texto ? v.s : std::string();
+    return v.kind == ValueKind::Texto ? v.s.str() : std::string();
   }
   if (pf.avro_ty == "boolean") {
     out += (v.kind == ValueKind::Logico && v.b) ? '\1' : '\0';
@@ -1833,10 +1864,10 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
   if (manifest_length < 0) die("manifest ausente em '" + manifest_path + "'");
 
   Value rec = Value::mapa();
-  rec.map->set("manifest_path", Value::texto("file://" + manifest_path));
-  rec.map->set("manifest_length", Value::inteiro(manifest_length));
-  rec.map->set("partition_spec_id", Value::inteiro(0));
-  rec.map->set("content", Value::inteiro(list_content));  // 0 DATA, 1 DELETES
+  rec.map_ref()->set("manifest_path", Value::texto("file://" + manifest_path));
+  rec.map_ref()->set("manifest_length", Value::inteiro(manifest_length));
+  rec.map_ref()->set("partition_spec_id", Value::inteiro(0));
+  rec.map_ref()->set("content", Value::inteiro(list_content));  // 0 DATA, 1 DELETES
   // sequence numbers reais da spec v2: sequence_number do snapshot e
   // min_sequence_number entre todas as entradas do manifest.
   std::int64_t min_sequence_number = sequence_number;
@@ -1845,15 +1876,15 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
       min_sequence_number = f.sequence_number;
     }
   }
-  rec.map->set("sequence_number", Value::inteiro(sequence_number));
-  rec.map->set("min_sequence_number", Value::inteiro(min_sequence_number));
-  rec.map->set("added_snapshot_id", Value::inteiro(snapshot_id));
-  rec.map->set("added_files_count", Value::inteiro(added));
-  rec.map->set("existing_files_count", Value::inteiro(existing));
-  rec.map->set("deleted_files_count", Value::inteiro(deleted));
-  rec.map->set("added_rows_count", Value::inteiro(added_rows));
-  rec.map->set("existing_rows_count", Value::inteiro(existing_rows));
-  rec.map->set("deleted_rows_count", Value::inteiro(0));
+  rec.map_ref()->set("sequence_number", Value::inteiro(sequence_number));
+  rec.map_ref()->set("min_sequence_number", Value::inteiro(min_sequence_number));
+  rec.map_ref()->set("added_snapshot_id", Value::inteiro(snapshot_id));
+  rec.map_ref()->set("added_files_count", Value::inteiro(added));
+  rec.map_ref()->set("existing_files_count", Value::inteiro(existing));
+  rec.map_ref()->set("deleted_files_count", Value::inteiro(deleted));
+  rec.map_ref()->set("added_rows_count", Value::inteiro(added_rows));
+  rec.map_ref()->set("existing_rows_count", Value::inteiro(existing_rows));
+  rec.map_ref()->set("deleted_rows_count", Value::inteiro(0));
   // Summaries por campo de particao (field-id 507): readers reais (Spark)
   // consultam contains_null/lower/upper para podar manifests por predicado
   // de particao — lista vazia em tabela particionada estoura no evaluator.
@@ -1867,7 +1898,7 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
       Value lower;
       Value upper;
       for (const FileInfo& f : files) {
-        const Value* pv = f.part_map.map ? f.part_map.map->find(pf.name) : nullptr;
+        const Value* pv = f.part_map.map_ref() ? f.part_map.map_ref()->find(pf.name) : nullptr;
         if (!pv || pv->kind == ValueKind::Nulo) {
           contains_null = true;
           continue;
@@ -1881,17 +1912,17 @@ std::string write_manifest_list(const std::string& meta_dir, const std::string& 
         if (partition_less(upper, *pv)) upper = *pv;
       }
       Value s = Value::mapa();
-      s.map->set("contains_null", Value::logico(contains_null));
-      s.map->set("contains_nan", Value::nulo());
-      s.map->set("lower_bound",
+      s.map_ref()->set("contains_null", Value::logico(contains_null));
+      s.map_ref()->set("contains_nan", Value::nulo());
+      s.map_ref()->set("lower_bound",
                  has ? Value::texto(partition_bound_bytes(pf, lower)) : Value::nulo());
-      s.map->set("upper_bound",
+      s.map_ref()->set("upper_bound",
                  has ? Value::texto(partition_bound_bytes(pf, upper)) : Value::nulo());
-      parts.list->push_back(std::move(s));
+      parts.list_ref()->push_back(std::move(s));
     }
   }
-  rec.map->set("partitions", std::move(parts));
-  rec.map->set("key_metadata", Value::nulo());
+  rec.map_ref()->set("partitions", std::move(parts));
+  rec.map_ref()->set("key_metadata", Value::nulo());
 
   const std::string name = "snap-" + std::to_string(snapshot_id) + "-0-" + new_uuid() + ".avro";
   const std::string path = meta_dir + "/" + name;
@@ -1993,6 +2024,10 @@ void commit_metadata(const std::string& dir, std::int64_t version, const std::st
   // segue aceito na leitura (metadata_version_from_name).
   const std::string final_path =
       meta_dir + "/v" + std::to_string(version) + ".metadata.json";
+  if (tilt_file_exists(final_path)) {
+    die("conflito de concorrencia otimista: metadata v" + std::to_string(version) +
+        " ja foi commitado por outro writer");
+  }
   const std::string tmp_path =
       meta_dir + "/.commit-" + std::to_string(tilt::rt::tilt_getpid()) + ".tmp";
   {
@@ -2036,7 +2071,7 @@ struct ActiveEntry {
   std::int64_t size = 0;
   std::int64_t sequence_number = 0;      // snapshot sequence do data file
   std::int64_t file_sequence_number = 0;  // file_sequence_number global do data file
-  std::vector<std::int64_t> equality_ids; // field-ids usados por equality delete
+  std::vector<std::int64_t> equality_ids;  // field-ids usados por equality delete
 };
 
 // Maior file_sequence_number ja atribuido em qualquer snapshot (para novos
@@ -2101,8 +2136,8 @@ void collect_manifest_entries(const Snapshot& snap, std::vector<ActiveEntry>& ou
       const Value* fseq = map_find(e, "file_sequence_number");
       entry.file_sequence_number = fseq && fseq->kind == ValueKind::Inteiro ? fseq->i : 0;
       const Value* eqids = map_find(*df, "equality_ids");
-      if (eqids && eqids->kind == ValueKind::Lista && eqids->list) {
-        for (const Value& id : *eqids->list) {
+      if (eqids && eqids->kind == ValueKind::Lista && eqids->list_ref()) {
+        for (const Value& id : *eqids->list_ref()) {
           if (id.is_number()) entry.equality_ids.push_back(static_cast<std::int64_t>(id.as_number()));
         }
       }
@@ -2225,6 +2260,10 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
         if (std::find(removidas.begin(), removidas.end(), col.name) != removidas.end()) {
           continue;  // identity fora do parquet
         }
+        if (g.rows.list_ref()->empty() || !g.rows.list_ref()->front().map_ref() ||
+            !g.rows.list_ref()->front().map_ref()->find(col.name)) {
+          continue;  // campo opcional totalmente nulo, omitido neste data file
+        }
         std::vector<int> tmp;
         leaf_ids(std::vector<Column>{col}, tmp);
         field_ids.insert(field_ids.end(), tmp.begin(), tmp.end());
@@ -2235,7 +2274,7 @@ std::vector<FileInfo> write_data_files(const std::string& dir, const Value& tabe
     if (size <= 0) die("falha ao gravar '" + path + "'");
     FileInfo info;
     info.path = "file://" + path;
-    info.records = static_cast<std::int64_t>(g.rows.list->size());
+    info.records = static_cast<std::int64_t>(g.rows.list_ref()->size());
     info.size = size;
     if (spec != nullptr) info.part_map = g.part_map;
     out.push_back(std::move(info));
@@ -2306,6 +2345,10 @@ MergedSchema merge_append_schema(const TableMeta& meta, const Value& tabela) {
                 "' ausente na tabela anexada (evolucao de schema suporta apenas adicao de "
                 "colunas)");
           }
+          if (ctx.empty() && old.required && column_has_null_value(tabela, old.name)) {
+            old.required = false;
+            merged.evolved = true;
+          }
           if (old.is_struct || ty->is_struct) {
             if (!old.is_struct || !ty->is_struct) {
               die("anexar_iceberg: coluna '" + ctx + old.name +
@@ -2316,9 +2359,9 @@ MergedSchema merge_append_schema(const TableMeta& meta, const Value& tabela) {
           }
           std::string ty_s;
           if (ctx.empty()) {
-            for (const Value& row : *tabela.list) {
-              if (row.kind != ValueKind::Mapa || !row.map) break;
-              const Value* cell = row.map->find(ty->name);
+            for (const Value& row : *tabela.list_ref()) {
+              if (row.kind != ValueKind::Mapa || !row.map_ref()) break;
+              const Value* cell = row.map_ref()->find(ty->name);
               if (cell && cell->kind != ValueKind::Nulo) {
                 ty_s = iceberg_type_name(*cell);
                 break;
@@ -2396,11 +2439,14 @@ WriteCore write_core(const std::string& dir, const Value& tabela,
   // reais so reidratam campo optional)
   std::int64_t proximo = 0;
   assign_ids(wc.cols, proximo);
-  for (std::size_t k = 0; k < wc.cols.size(); ++k) {
-    wc.cols[k].required = std::find(part_cols.begin(), part_cols.end(), wc.cols[k].name) ==
-                          part_cols.end();
-  }
   const std::vector<PartitionField> spec = make_spec(wc.cols, part_cols, "escrever_iceberg");
+  for (std::size_t k = 0; k < wc.cols.size(); ++k) {
+    const bool partition_source =
+        std::any_of(spec.begin(), spec.end(), [&](const PartitionField& pf) {
+          return pf.source_name == wc.cols[k].name;
+        });
+    wc.cols[k].required = !partition_source && !column_has_null_value(tabela, wc.cols[k].name);
+  }
   const std::vector<PartitionField>* pspec = spec.empty() ? nullptr : &spec;
   mkdir_if_missing(dir);
   const std::string meta_dir = dir + "/metadata";
@@ -2619,8 +2665,8 @@ struct OndeFilter {
 
 OndeFilter split_onde(const Value* onde, const std::vector<PartitionField>& spec) {
   OndeFilter f;
-  if (onde && onde->kind == ValueKind::Mapa && onde->map) {
-    for (const auto& kv : onde->map->items) {
+  if (onde && onde->kind == ValueKind::Mapa && onde->map_ref()) {
+    for (const auto& kv : onde->map_ref()->items) {
       // Predicado direto no nome do campo de particao (ex.: ano=2024).
       bool eh_particao = false;
       for (const PartitionField& pf : spec) {
@@ -2649,13 +2695,13 @@ OndeFilter split_onde(const Value* onde, const std::vector<PartitionField>& spec
   return f;
 }
 
-// Data file passa no pruning se bater com TODOS os predicados de particao
-// (valor ausente/nulo no record `partition` nunca bate igualdade).
+// Data file passa no pruning se bater com TODOS os predicados de particao;
+// um predicado `nulo` casa com o null tipado do record `partition`.
 bool passa_pruning(const ActiveEntry& e, const std::vector<std::pair<std::string, Value>>& prune,
                    const std::vector<PartitionField>& spec) {
   for (const auto& [col, pred] : prune) {
-    const Value* pv = e.partition.map ? e.partition.map->find(col) : nullptr;
-    if (!pv || pv->kind == ValueKind::Nulo) return false;
+    const Value* pv = e.partition.map_ref() ? e.partition.map_ref()->find(col) : nullptr;
+    if (!pv) return false;
     // texto divergente e convertido pelo tipo declarado no spec (tabelas de
     // outros escritores podem serializar o valor de particao como string)
     std::string ty = "string";
@@ -2696,16 +2742,16 @@ LoadedDeletes load_deletes(const std::vector<ActiveEntry>& deletes) {
     }
     if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) continue;
     if (d.content == 1) {
-      for (const Value& row : *chunk.list) {
-        if (row.kind != ValueKind::Mapa || !row.map) continue;
-        const Value* fp = row.map->find("file_path");
-        const Value* ps = row.map->find("pos");
+      for (const Value& row : *chunk.list_ref()) {
+        if (row.kind != ValueKind::Mapa || !row.map_ref()) continue;
+        const Value* fp = row.map_ref()->find("file_path");
+        const Value* ps = row.map_ref()->find("pos");
         if (!fp || fp->kind != ValueKind::Texto || !ps || !ps->is_number()) continue;
         out.pos[strip_scheme(fp->s)].insert(static_cast<std::int64_t>(ps->as_number()));
       }
     } else if (d.content == 2) {
-      for (const Value& row : *chunk.list) {
-        if (row.kind != ValueKind::Mapa || !row.map) continue;
+      for (const Value& row : *chunk.list_ref()) {
+        if (row.kind != ValueKind::Mapa || !row.map_ref()) continue;
         EqualityDelete ed;
         ed.row = row;
         ed.equality_ids = d.equality_ids;
@@ -2723,7 +2769,7 @@ bool apagada_por_delete(const std::string& fpath_norm, std::int64_t pos, const V
                         const LoadedDeletes& dels) {
   const auto itp = dels.pos.find(fpath_norm);
   if (itp != dels.pos.end() && itp->second.count(pos)) return true;
-  if (row.kind != ValueKind::Mapa || !row.map) return false;
+  if (row.kind != ValueKind::Mapa || !row.map_ref()) return false;
 
   for (const EqualityDelete& d : dels.eq) {
     // Equality deletes so afetam data files com sequence number menor ou
@@ -2744,8 +2790,8 @@ bool apagada_por_delete(const std::string& fpath_norm, std::int64_t pos, const V
           bate = false;
           break;
         }
-        const Value* expected = d.row.map->find(col->name);
-        const Value* actual = row.map->find(col->name);
+        const Value* expected = d.row.map_ref()->find(col->name);
+        const Value* actual = row.map_ref()->find(col->name);
         if (!expected || !actual) {
           bate = false;
           break;
@@ -2759,8 +2805,8 @@ bool apagada_por_delete(const std::string& fpath_norm, std::int64_t pos, const V
     } else {
       // Compatibilidade com delete files antigos que nao declaravam
       // equality_ids: nesse caso, todas as colunas presentes sao a chave.
-      for (const auto& kv : d.row.map->items) {
-        const Value* cell = row.map->find(kv.first);
+      for (const auto& kv : d.row.map_ref()->items) {
+        const Value* cell = row.map_ref()->find(kv.first);
         if (!cell) continue;
         ++compartilhadas;
         if (!pred_eq(*cell, kv.second)) {
@@ -2781,21 +2827,21 @@ Value project_schema(const Value& row, const std::vector<Column>& schema, const 
                      const std::string& fpath) {
   Value m = Value::mapa();
   for (const Column& c : schema) {
-    const Value* cell = (row.kind == ValueKind::Mapa && row.map) ? row.map->find(c.name) : nullptr;
+    const Value* cell = (row.kind == ValueKind::Mapa && row.map_ref()) ? row.map_ref()->find(c.name) : nullptr;
     if (c.is_struct) {
       if (!cell || cell->kind == ValueKind::Nulo) {
-        m.map->set(c.name, Value::nulo());
-      } else if (cell->kind != ValueKind::Mapa || !cell->map) {
+        m.map_ref()->set(c.name, Value::nulo());
+      } else if (cell->kind != ValueKind::Mapa || !cell->map_ref()) {
         die("schema divergente em '" + fpath + "' (coluna '" + path + c.name + "' nao e struct)");
       } else {
-        m.map->set(c.name, project_schema(*cell, c.children, path + c.name + ".", fpath));
+        m.map_ref()->set(c.name, project_schema(*cell, c.children, path + c.name + ".", fpath));
       }
       continue;
     }
-    m.map->set(c.name, cell ? *cell : Value::nulo());
+    m.map_ref()->set(c.name, cell ? *cell : Value::nulo());
   }
-  if (row.kind == ValueKind::Mapa && row.map) {
-    for (const auto& kv : row.map->items) {
+  if (row.kind == ValueKind::Mapa && row.map_ref()) {
+    for (const auto& kv : row.map_ref()->items) {
       bool known = false;
       for (const Column& c : schema) {
         if (c.name == kv.first) known = true;
@@ -2813,7 +2859,7 @@ Value project_schema(const Value& row, const std::vector<Column>& schema, const 
 bool residual_match(const Value& row,
                     const std::vector<std::pair<std::string, Value>>& residual) {
   for (const auto& [col, val] : residual) {
-    const Value* cell = row.map ? row.map->find(col) : nullptr;
+    const Value* cell = row.map_ref() ? row.map_ref()->find(col) : nullptr;
     if (!pred_eq(cell ? *cell : Value::nulo(), val)) return false;
   }
   return true;
@@ -2824,14 +2870,14 @@ bool residual_match(const Value& row,
 Value project_row(const ActiveEntry& f, const Value& row, const TableMeta& meta) {
   if (!meta.spec.empty() && !meta.schema_cols.empty()) {
     Value base = Value::mapa();
-    if (row.kind == ValueKind::Mapa && row.map) {
-      for (const auto& kv : row.map->items) base.map->set(kv.first, kv.second);
+    if (row.kind == ValueKind::Mapa && row.map_ref()) {
+      for (const auto& kv : row.map_ref()->items) base.map_ref()->set(kv.first, kv.second);
     }
     for (const Column& c : meta.schema_cols) {
       if (c.is_struct) continue;  // particao nunca e struct
-      if (!base.map->find(c.name)) {
-        const Value* pv = f.partition.map ? f.partition.map->find(c.name) : nullptr;
-        base.map->set(c.name, pv ? partition_rehydrate(*pv, c.type) : Value::nulo());
+      if (!base.map_ref()->find(c.name)) {
+        const Value* pv = f.partition.map_ref() ? f.partition.map_ref()->find(c.name) : nullptr;
+        base.map_ref()->set(c.name, pv ? partition_rehydrate(*pv, c.type) : Value::nulo());
       }
     }
     const std::string path = strip_scheme(f.path);
@@ -2867,7 +2913,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
   // Filtro residual aplicado sobre a linha final (reidratada ou legado).
   auto passa_residual = [&](const Value& row) {
     for (const auto& [col, val] : filtro.residual) {
-      const Value* cell = row.map ? row.map->find(col) : nullptr;
+      const Value* cell = row.map_ref() ? row.map_ref()->find(col) : nullptr;
       if (!pred_eq(cell ? *cell : Value::nulo(), val)) return false;
     }
     return true;
@@ -2886,15 +2932,15 @@ Value read_core(const TableMeta& meta, const Value* onde) {
         die("arquivo '" + path + "' nao e uma tabela parquet");
       }
       std::int64_t pos = 0;
-      for (Value& row : *chunk.list) {
-        if (row.kind != ValueKind::Mapa || !row.map) {
+      for (Value& row : *chunk.list_ref()) {
+        if (row.kind != ValueKind::Mapa || !row.map_ref()) {
           die("linha de '" + path + "' nao e um mapa");
         }
         const Value m = project_row(f, row, meta);
         const bool apagada = apagada_por_delete(path, pos, m, f.sequence_number, meta.schema_cols, dels);
         ++pos;
         if (apagada) continue;
-        if (passa_residual(m)) out.list->push_back(m);
+        if (passa_residual(m)) out.list_ref()->push_back(m);
       }
     }
     return out;
@@ -2912,15 +2958,15 @@ Value read_core(const TableMeta& meta, const Value* onde) {
         die("arquivo '" + path + "' nao e uma tabela parquet");
       }
       std::int64_t pos = 0;
-      for (Value& row : *chunk.list) {
-        if (row.kind != ValueKind::Mapa || !row.map) {
+      for (Value& row : *chunk.list_ref()) {
+        if (row.kind != ValueKind::Mapa || !row.map_ref()) {
           die("linha de '" + path + "' nao e um mapa");
         }
         const Value m = project_schema(row, meta.schema_cols, "", path);
         const bool apagada = apagada_por_delete(path, pos, m, f.sequence_number, meta.schema_cols, dels);
         ++pos;
         if (apagada) continue;
-        if (passa_residual(m)) out.list->push_back(m);
+        if (passa_residual(m)) out.list_ref()->push_back(m);
       }
     }
     return out;
@@ -2936,10 +2982,10 @@ Value read_core(const TableMeta& meta, const Value* onde) {
       die("arquivo '" + path + "' nao e uma tabela parquet");
     }
     std::int64_t pos = 0;
-    for (Value& row : *chunk.list) {
-      if (row.kind != ValueKind::Mapa || !row.map) die("linha de '" + path + "' nao e um mapa");
+    for (Value& row : *chunk.list_ref()) {
+      if (row.kind != ValueKind::Mapa || !row.map_ref()) die("linha de '" + path + "' nao e um mapa");
       if (schema_cols.empty()) {
-        for (const auto& kv : row.map->items) {
+        for (const auto& kv : row.map_ref()->items) {
           Column nc;
           nc.name = kv.first;
           nc.type = iceberg_type_name(kv.second);
@@ -2947,11 +2993,11 @@ Value read_core(const TableMeta& meta, const Value* onde) {
           schema_cols.push_back(std::move(nc));
         }
       } else {
-        if (row.map->items.size() != schema_cols.size()) {
+        if (row.map_ref()->items.size() != schema_cols.size()) {
           die("schema divergente em '" + path + "' (colunas diferentes da 1a versao)");
         }
         for (std::size_t k = 0; k < schema_cols.size(); ++k) {
-          if (row.map->items[k].first != schema_cols[k].name) {
+          if (row.map_ref()->items[k].first != schema_cols[k].name) {
             die("schema divergente em '" + path + "' (ordem/nome de colunas difere)");
           }
         }
@@ -2959,7 +3005,7 @@ Value read_core(const TableMeta& meta, const Value* onde) {
       const bool apagada = apagada_por_delete(path, pos, row, f.sequence_number, meta.schema_cols, dels);
       ++pos;
       if (apagada) continue;
-      if (passa_residual(row)) out.list->push_back(std::move(row));
+      if (passa_residual(row)) out.list_ref()->push_back(std::move(row));
     }
   }
   return out;
@@ -3060,7 +3106,20 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
   std::string cmd = "curl -s ";
   if (falhar) cmd += "--fail-with-body ";
   cmd += "-w " + tilt_shell_quote("%{http_code}") + " -X " + method;
-  cmd += " -H " + tilt_shell_quote("Content-Type: application/json");
+  // URL (pode ter userinfo) e header vao num arquivo -K 0600, fora do argv.
+  std::string cfg_path;
+  std::vector<std::string> headers = {"Content-Type: application/json"};
+  const char* token = std::getenv("ICEBERG_OAUTH_TOKEN");
+  if (!token || !*token) token = std::getenv("ICEBERG_TOKEN");
+  if (token && *token) headers.push_back(std::string("Authorization: Bearer ") + token);
+  if (!tilt_curl_config(url, headers, cfg_path)) {
+    die("nao foi possivel montar a configuracao do curl (URL invalida)");
+  }
+  struct RemoveAoSair {  // die() lanca: o arquivo com URL/header some em qualquer saida
+    std::string path;
+    ~RemoveAoSair() { std::remove(path.c_str()); }
+  } remove_cfg{cfg_path};
+  cmd += " -K " + tilt_shell_quote(cfg_path);
   if (!body.empty()) {
     std::string body_path;
     const int fd = tilt_tempfile("iceberg_body", body_path);
@@ -3084,7 +3143,7 @@ int rest_http(const std::string& method, const std::string& url, const std::stri
     die("nao foi possivel criar arquivo temporario");
   }
   tilt_close_file(ofd);
-  cmd += " -o " + tilt_shell_quote(out_file) + " " + tilt_shell_quote(url);
+  cmd += " -o " + tilt_shell_quote(out_file);
 
   std::string resp;
   {
@@ -3436,8 +3495,8 @@ std::string avro_schema_registry_get(const std::string& base_url, std::int32_t s
   std::string url = base_url;
   while (!url.empty() && url.back() == '/') url.pop_back();
   const Value body = http_get_json(url + "/schemas/ids/" + std::to_string(schema_id));
-  if (body.kind != ValueKind::Mapa || !body.map) die("avro: resposta do registry nao e um objeto");
-  const Value* schema = body.map->find("schema");
+  if (body.kind != ValueKind::Mapa || !body.map_ref()) die("avro: resposta do registry nao e um objeto");
+  const Value* schema = body.map_ref()->find("schema");
   if (!schema || schema->kind != ValueKind::Texto) {
     die("avro: resposta do registry nao contem 'schema'");
   }
@@ -3451,11 +3510,11 @@ std::int32_t avro_schema_registry_register(const std::string& base_url,
   std::string url = base_url;
   while (!url.empty() && url.back() == '/') url.pop_back();
   Value request = Value::mapa();
-  request.map->set("schema", Value::texto(schema_json));
+  request.map_ref()->set("schema", Value::texto(schema_json));
   const Value body = http_post_json(url + "/subjects/" + subject + "/versions", request,
                                     {{"Content-Type", "application/vnd.schemaregistry.v1+json"}});
-  if (body.kind != ValueKind::Mapa || !body.map) die("avro: resposta do registry nao e um objeto");
-  const Value* id = body.map->find("id");
+  if (body.kind != ValueKind::Mapa || !body.map_ref()) die("avro: resposta do registry nao e um objeto");
+  const Value* id = body.map_ref()->find("id");
   if (!id || id->kind != ValueKind::Inteiro || id->i < 0 || id->i > 2147483647) {
     die("avro: resposta do registry nao contem id valido");
   }
@@ -3464,6 +3523,9 @@ std::int32_t avro_schema_registry_register(const std::string& base_url,
 
 void iceberg_write(const std::string& dir, const Value& tabela,
                    const std::vector<std::string>& part_cols) {
+  const std::string lock_location = abs_path(dir);
+  mkdir_if_missing(lock_location);
+  TableLock table_lock(lock_location, "Iceberg");
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
     iceberg_write_rest(rc, dir, tabela, part_cols);
@@ -3484,6 +3546,8 @@ void iceberg_write(const std::string& dir, const Value& tabela,
 
 void iceberg_append(const std::string& dir, const Value& tabela,
                     const std::vector<std::string>& part_cols_req) {
+  const std::string lock_location = abs_path(dir);
+  TableLock table_lock(lock_location, "Iceberg");
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
     iceberg_append_rest(rc, dir, tabela, part_cols_req);
@@ -3539,8 +3603,8 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
     Value chunk = parquet_read(path);
     if (chunk.kind != ValueKind::Lista && chunk.kind != ValueKind::Tabela) continue;
     std::int64_t pos = 0;
-    for (Value& row : *chunk.list) {
-      if (row.kind != ValueKind::Mapa || !row.map) {
+    for (Value& row : *chunk.list_ref()) {
+      if (row.kind != ValueKind::Mapa || !row.map_ref()) {
         die("linha de '" + path + "' nao e um mapa");
       }
       Value m = project_row(f, row, meta);
@@ -3554,8 +3618,8 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
   if (alvos.empty()) return dc;  // sem commit
 
   std::vector<std::int64_t> equality_ids;
-  if (igualdade && onde.kind == ValueKind::Mapa && onde.map) {
-    for (const auto& kv : onde.map->items) {
+  if (igualdade && onde.kind == ValueKind::Mapa && onde.map_ref()) {
+    for (const auto& kv : onde.map_ref()->items) {
       for (const Column& c : meta.schema_cols) {
         if (c.name == kv.first && c.id > 0) equality_ids.push_back(c.id);
       }
@@ -3568,8 +3632,8 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
   // cada particao. Tabela sem particao: um unico arquivo.
   auto part_chave = [](const Value& part) {
     std::string k;
-    if (part.kind == ValueKind::Mapa && part.map) {
-      for (const auto& kv : part.map->items) {
+    if (part.kind == ValueKind::Mapa && part.map_ref()) {
+      for (const auto& kv : part.map_ref()->items) {
         k += "|" + kv.first + "=";
         if (kv.second.kind == ValueKind::Texto) k += "t:" + kv.second.s;
         else if (kv.second.kind == ValueKind::Inteiro) k += "i:" + std::to_string(kv.second.i);
@@ -3604,12 +3668,12 @@ DeleteCore delete_core(const std::string& location, const std::string& dir_displ
     if (!igualdade) {
       for (const DeleteAlvo* a : g.itens) {
         Value r = Value::mapa();
-        r.map->set("file_path", Value::texto(a->path));
-        r.map->set("pos", Value::inteiro(a->pos));
-        del_table.list->push_back(std::move(r));
+        r.map_ref()->set("file_path", Value::texto(a->path));
+        r.map_ref()->set("pos", Value::inteiro(a->pos));
+        del_table.list_ref()->push_back(std::move(r));
       }
     } else {
-      for (const DeleteAlvo* a : g.itens) del_table.list->push_back(a->row);
+      for (const DeleteAlvo* a : g.itens) del_table.list_ref()->push_back(a->row);
     }
     const std::string del_name = std::string("00000-1-") + new_uuid() +
                                  (igualdade ? ".eq-deletes.parquet" : ".pos-deletes.parquet");
@@ -3723,6 +3787,8 @@ void iceberg_delete_rest(const RestCfg& rc, const std::string& dir, const Value&
 }
 
 std::int64_t iceberg_delete(const std::string& dir, const Value& onde, bool igualdade) {
+  const std::string lock_location = abs_path(dir);
+  TableLock table_lock(lock_location, "Iceberg");
   const RestCfg rc = rest_cfg();
   if (rc.ativo) {
     std::int64_t apagadas = 0;
@@ -3761,6 +3827,10 @@ std::string optimize_partition_column(const PartitionField& pf) {
 
 void iceberg_optimize(const std::string& dir) {
   const std::string location = abs_path(dir);
+  if (!tilt_is_directory(location)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
+  }
+  TableLock table_lock(location, "Iceberg");
   TableMeta meta;
   latest_metadata_path(location, meta);
   const Value tabela = iceberg_read(dir, nullptr);
@@ -3774,6 +3844,10 @@ void iceberg_optimize(const std::string& dir) {
 
 std::int64_t iceberg_vacuum(const std::string& dir) {
   const std::string location = abs_path(dir);
+  if (!tilt_is_directory(location)) {
+    die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");
+  }
+  TableLock table_lock(location, "Iceberg");
   const std::vector<std::string> metadata = list_metadata_files(location + "/metadata");
   if (metadata.empty()) {
     die("tabela nao existe em '" + dir + "' (use escrever_iceberg para criar)");

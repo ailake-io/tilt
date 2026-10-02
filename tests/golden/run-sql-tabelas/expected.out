@@ -1,0 +1,9 @@
+== pipeline sql_local ==
+norte 120 1
+sul 35 2
+ana 35 bia 120
+2 30
+0.75
+2
+1
+erro: sqlite: falha ao preparar consulta: no such table: nao_existe

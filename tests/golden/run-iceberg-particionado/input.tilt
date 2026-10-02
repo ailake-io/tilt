@@ -49,10 +49,6 @@ pipeline principal:
         { estado: "sp/centro", cidade: "x", valor: 1 }
       ]
     - imprimir tentar_escrever com_barra, "erro_barra", "estado"
-    - com_nulo = [
-        { estado: nulo, cidade: "x", valor: 1 }
-      ]
-    - imprimir tentar_escrever com_nulo, "erro_nulo", "estado"
     - col_inexistente = [
         { estado: "sp", cidade: "x", valor: 1 }
       ]

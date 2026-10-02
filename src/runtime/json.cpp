@@ -1,6 +1,9 @@
 #include "runtime/json.hpp"
 
 #include <cerrno>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
@@ -137,7 +140,7 @@ struct Reader {
       return arr;
     }
     while (true) {
-      arr.list->push_back(parse_value());
+      arr.list_ref()->push_back(parse_value());
       skip_ws();
       char c = take();
       if (c == ']') break;
@@ -159,7 +162,7 @@ struct Reader {
       std::string key = parse_string();
       skip_ws();
       if (take() != ':') die("esperado ':'");
-      obj.map->set(key, parse_value());
+      obj.map_ref()->set(key, parse_value());
       skip_ws();
       char c = take();
       if (c == '}') break;
@@ -208,15 +211,15 @@ void dump_value(const Value& v, std::string& out, int indent) {
       break;
     case ValueKind::Lista:
     case ValueKind::Tabela: {
-      if (!v.list || v.list->empty()) {
+      if (!v.list_ref() || v.list_ref()->empty()) {
         out += "[]";
         break;
       }
       out += "[\n";
-      for (std::size_t k = 0; k < v.list->size(); ++k) {
+      for (std::size_t k = 0; k < v.list_ref()->size(); ++k) {
         out += pad_in;
-        dump_value((*v.list)[k], out, indent + 1);
-        if (k + 1 < v.list->size()) out += ',';
+        dump_value((*v.list_ref())[k], out, indent + 1);
+        if (k + 1 < v.list_ref()->size()) out += ',';
         out += '\n';
       }
       out += pad + "]";
@@ -224,39 +227,154 @@ void dump_value(const Value& v, std::string& out, int indent) {
     }
     case ValueKind::Tensor: {
       out += "{ \"forma\": [";
-      if (v.tensor) {
-        for (std::size_t k = 0; k < v.tensor->shape.size(); ++k) {
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->shape.size(); ++k) {
           if (k) out += ", ";
-          out += std::to_string(v.tensor->shape[k]);
+          out += std::to_string(v.tensor_ref()->shape[k]);
         }
       }
       out += "], \"dados\": [";
-      if (v.tensor) {
-        for (std::size_t k = 0; k < v.tensor->data.size(); ++k) {
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->data.size(); ++k) {
           if (k) out += ", ";
           std::ostringstream ss;
-          ss << std::setprecision(9) << v.tensor->data[k];  // round-trip exato de f32
+          ss << std::setprecision(9) << v.tensor_ref()->data[k];  // round-trip exato de f32
           out += ss.str();
         }
       }
       out += "] }";
       break;
     }
+    case ValueKind::Funcao:
+      out += "null";  // funcoes nao tem representacao JSON
+      break;
     case ValueKind::Mapa: {
-      if (!v.map || v.map->items.empty()) {
+      if (!v.map_ref() || v.map_ref()->items.empty()) {
         out += "{}";
         break;
       }
       out += "{\n";
-      for (std::size_t k = 0; k < v.map->items.size(); ++k) {
+      for (std::size_t k = 0; k < v.map_ref()->items.size(); ++k) {
         out += pad_in;
-        dump_string(v.map->items[k].first, out);
+        dump_string(v.map_ref()->items[k].first, out);
         out += ": ";
-        dump_value(v.map->items[k].second, out, indent + 1);
-        if (k + 1 < v.map->items.size()) out += ',';
+        dump_value(v.map_ref()->items[k].second, out, indent + 1);
+        if (k + 1 < v.map_ref()->items.size()) out += ',';
         out += '\n';
       }
       out += pad + "}";
+      break;
+    }
+  }
+}
+
+// Codificador compacto (uma linha) para o protocolo `tilt rpc`.
+void compacto_string(const std::string& v, std::string& out) {
+  out += '"';
+  for (const char ch : v) {
+    const auto c = static_cast<unsigned char>(ch);
+    if (c == '"') {
+      out += "\\\"";
+    } else if (c == '\\') {
+      out += "\\\\";
+    } else if (c == '\n') {
+      out += "\\n";
+    } else if (c == '\t') {
+      out += "\\t";
+    } else if (c == '\r') {
+      out += "\\r";
+    } else if (c < 0x20) {
+      char buf[8];
+      std::snprintf(buf, sizeof buf, "\\u%04x", c);
+      out += buf;
+    } else {
+      out += ch;
+    }
+  }
+  out += '"';
+}
+
+void compacto_decimal(double d, std::string& out) {
+  if (!std::isfinite(d)) {
+    out += "null";  // JSON nao tem NaN/Infinity
+    return;
+  }
+  char buf[40];
+  std::snprintf(buf, sizeof buf, "%.17g", d);
+  // Tenta a menor representacao que volta ao mesmo double (0.1 e nao 0.10000000000000001).
+  for (int prec = 6; prec < 17; ++prec) {
+    char curto[40];
+    std::snprintf(curto, sizeof curto, "%.*g", prec, d);
+    if (std::strtod(curto, nullptr) == d) {
+      std::snprintf(buf, sizeof buf, "%s", curto);
+      break;
+    }
+  }
+  std::string txt = buf;
+  // Decimal inteiro (2.0) mantem o ponto para nao virar `inteiro` do outro lado.
+  if (txt.find_first_of(".eEn") == std::string::npos) txt += ".0";
+  out += txt;
+}
+
+void compacto_value(const Value& v, std::string& out) {
+  switch (v.kind) {
+    case ValueKind::Nulo:
+    case ValueKind::Funcao:
+      out += "null";
+      break;
+    case ValueKind::Logico:
+      out += v.b ? "true" : "false";
+      break;
+    case ValueKind::Inteiro:
+      out += std::to_string(v.i);
+      break;
+    case ValueKind::Decimal:
+      compacto_decimal(v.d, out);
+      break;
+    case ValueKind::Texto:
+      compacto_string(v.s, out);
+      break;
+    case ValueKind::Lista:
+    case ValueKind::Tabela: {
+      out += '[';
+      if (v.list_ref()) {
+        for (std::size_t k = 0; k < v.list_ref()->size(); ++k) {
+          if (k) out += ',';
+          compacto_value((*v.list_ref())[k], out);
+        }
+      }
+      out += ']';
+      break;
+    }
+    case ValueKind::Tensor: {
+      out += "{\"forma\":[";
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->shape.size(); ++k) {
+          if (k) out += ',';
+          out += std::to_string(v.tensor_ref()->shape[k]);
+        }
+      }
+      out += "],\"dados\":[";
+      if (v.tensor_ref()) {
+        for (std::size_t k = 0; k < v.tensor_ref()->data.size(); ++k) {
+          if (k) out += ',';
+          compacto_decimal(static_cast<double>(v.tensor_ref()->data[k]), out);
+        }
+      }
+      out += "]}";
+      break;
+    }
+    case ValueKind::Mapa: {
+      out += '{';
+      if (v.map_ref()) {
+        for (std::size_t k = 0; k < v.map_ref()->items.size(); ++k) {
+          if (k) out += ',';
+          compacto_string(v.map_ref()->items[k].first, out);
+          out += ':';
+          compacto_value(v.map_ref()->items[k].second, out);
+        }
+      }
+      out += '}';
       break;
     }
   }
@@ -270,6 +388,12 @@ Value json_parse(const std::string& text) {
   r.skip_ws();
   if (r.i != text.size()) throw std::runtime_error("JSON invalido: lixo apos o valor");
   return v;
+}
+
+std::string json_dump_compacto(const Value& value) {
+  std::string out;
+  compacto_value(value, out);
+  return out;
 }
 
 std::string json_dump(const Value& value) {

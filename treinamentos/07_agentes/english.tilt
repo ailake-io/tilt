@@ -1,0 +1,20 @@
+# language: en
+# Agent with a tool, cost policy and observable steps.
+
+tool lookup_status:
+  description: "Looks up the status of a demo order."
+  input:
+    id: text
+  execute:
+    - return { id: input.id, state: "packing" }
+
+agent support:
+  role: "Answer clearly and use the tool when needed."
+  tools: [lookup_status]
+  max_steps: 3
+  max_cost: 0.02
+
+pipeline customer_service:
+  steps:
+    - answer = support.respond "What is the status of order 42?"
+    - print answer.text

@@ -276,13 +276,13 @@ Value parse_json_each_row(const std::string& body) {
       die("resposta nao e JSONEachRow (linha invalida); remova o FORMAT do SQL "
           "ou use FORMAT JSONEachRow");
     }
-    if (j.kind != ValueKind::Mapa || !j.map) {
+    if (j.kind != ValueKind::Mapa || !j.map_ref()) {
       die("resposta nao e JSONEachRow (linha sem objeto); remova o FORMAT do SQL "
           "ou use FORMAT JSONEachRow");
     }
     Value row = Value::mapa();
-    for (const auto& [chave, valor] : j.map->items) {
-      row.map->set(chave, valor_de_json(valor));
+    for (const auto& [chave, valor] : j.map_ref()->items) {
+      row.map_ref()->set(chave, valor_de_json(valor));
     }
     rows.push_back(std::move(row));
   }

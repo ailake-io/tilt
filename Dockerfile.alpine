@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1.7
+
+FROM alpine:3.22 AS build
+
+ARG TILT_VERSION=0.2.0-beta.2
+
+RUN apk add --no-cache \
+      build-base \
+      ca-certificates \
+      cmake \
+      curl \
+      curl-dev \
+      ninja \
+      python3
+
+WORKDIR /src
+COPY . .
+
+RUN cmake -S . -B /tmp/tilt-build -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=/usr/local \
+      -DTILT_VERSION="${TILT_VERSION}" \
+    && cmake --build /tmp/tilt-build --target tilt --parallel \
+    && DESTDIR=/tmp/tilt-root cmake --install /tmp/tilt-build
+
+FROM alpine:3.22 AS runtime
+
+ARG TILT_VERSION=0.2.0-beta.2
+LABEL org.opencontainers.image.title="Tilt" \
+      org.opencontainers.image.description="Linguagem Tilt para dados, IA e serviços" \
+      org.opencontainers.image.source="https://github.com/ailake-io/tilt" \
+      org.opencontainers.image.version="${TILT_VERSION}" \
+      org.opencontainers.image.variant="alpine" \
+      org.opencontainers.image.licenses="MIT"
+
+ENV TILT_VERSION="${TILT_VERSION}"
+
+RUN apk add --no-cache \
+      ca-certificates \
+      curl \
+      libgcc \
+      libstdc++ \
+    && adduser -D -u 10001 -s /sbin/nologin tilt
+
+COPY --from=build /tmp/tilt-root/usr/local/ /usr/local/
+
+WORKDIR /workspace
+VOLUME ["/workspace"]
+USER tilt
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD ["tilt", "versao"]
+
+ENTRYPOINT ["tilt"]

@@ -1,0 +1,7 @@
+pipeline p:
+  passos:
+    - t = ler_csv "dados.csv"
+    - imprimir tamanho(t)
+    - para cada l em t:
+        imprimir l.a, l.b, l.c
+    - imprimir tamanho(ler_csv("vazio.csv")), tamanho(ler_csv("."))

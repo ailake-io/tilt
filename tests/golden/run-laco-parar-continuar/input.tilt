@@ -1,0 +1,36 @@
+funcao achar lista, alvo:
+  pos = -1
+  i = 0
+  para cada x em lista:
+    se x == alvo:
+      pos = i
+      parar
+    i = i + 1
+  retornar pos
+
+funcao soma_impares lista:
+  total = 0
+  para cada x em lista:
+    se x % 2 == 0:
+      continuar
+    total = total + x
+  retornar total
+
+pipeline t:
+  passos:
+    - imprimir achar([5, 6, 7], 6), achar([1], 9)
+    - imprimir soma_impares([1, 2, 3, 4, 5])
+    - n = 0
+    - enquanto verdadeiro:
+        n = n + 1
+        se n < 3:
+          continuar
+        se n >= 5:
+          parar
+        imprimir "n", n
+    - para cada i em [1, 2, 3]:
+        para cada j em [10, 20]:
+          se j == 20:
+            parar
+          imprimir i, j
+    - imprimir "fim"
