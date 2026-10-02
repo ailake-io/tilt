@@ -46,13 +46,13 @@ parts:
       - -DCMAKE_INSTALL_PREFIX=/usr
     build-snaps: [cmake]
     # adopt-info exige que a part publique a versao (da tag, ex.: v0.1.0-rc1).
-    # GITHUB_REF_NAME nao chega dentro da instancia LXD: com fallback para
-    # git describe e para 0.1.0.
+    # GITHUB_REF_NAME nao chega dentro da instancia LXD. O workflow injeta a
+    # versao em snap/release-version.txt antes de iniciar o build; git describe
+    # continua como fallback para builds locais.
     override-pull: |
       craftctl default
-      ver="${GITHUB_REF_NAME:-}"
-      ver="${ver#v}"
+      ver="$(cat snap/release-version.txt 2>/dev/null || true)"
       if [ -z "$ver" ]; then
         ver="$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//' || true)"
       fi
-      craftctl set version="${ver:-0.1.0}"
+      craftctl set version="${ver:-0.2.0-beta.2}"

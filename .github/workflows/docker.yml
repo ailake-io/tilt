@@ -18,6 +18,15 @@ on:
       - 'stdlib/**'
       - 'exemplos/**'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag de release adicional a publicar (ex.: v0.2.0-beta.2)'
+        required: false
+        type: string
+      version:
+        description: 'Versão exibida dentro da imagem, sem o prefixo v (ex.: 0.2.0-beta.2)'
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -55,6 +64,19 @@ jobs:
             type=ref,event=branch,suffix=${{ matrix.suffix }}
             type=sha,format=short,suffix=${{ matrix.suffix }}
             type=raw,value=${{ matrix.latest_tag }},enable={{is_default_branch}}
+            type=raw,value=${{ inputs.release_tag }},suffix=${{ matrix.suffix }},enable=${{ inputs.release_tag != '' }}
+
+      - name: resolver versão
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          version="$INPUT_VERSION"
+          if [ -z "$version" ]; then version="${REF_NAME#v}"; fi
+          if [ -z "$version" ]; then version="0.2.0-beta.2"; fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
 
       - name: setup buildx
         uses: docker/setup-buildx-action@v3
@@ -76,7 +98,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            TILT_VERSION=${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.2.0-beta.2' }}
+            TILT_VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -84,6 +106,6 @@ jobs:
         run: |
           docker build --tag tilt:ci \
             --file "${{ matrix.dockerfile }}" \
-            --build-arg TILT_VERSION=0.2.0-beta.2 .
+            --build-arg TILT_VERSION=${{ steps.version.outputs.value }} .
           docker run --rm tilt:ci versao
           docker run --rm tilt:ci checar /usr/local/share/tilt/exemplos/soma.tilt

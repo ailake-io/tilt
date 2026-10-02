@@ -3,9 +3,14 @@ name: release
 on:
   push:
     tags: ['v*']
-  # Execucao manual: constroi e empacota (valida o release) mas NAO publica nada;
-  # so uma tag `v*` publica Release, Snap, Flatpak, Homebrew, VS Code e winget.
+  # Execucao manual sem release_tag apenas valida o empacotamento; com
+  # release_tag, complementa uma Release existente (Snap e VS Code).
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release existente a complementar (ex.: v0.2.0-beta.2)'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -172,10 +177,15 @@ jobs:
   # contrário da action que escondia o erro). Publicação na Snap Store exige
   # SNAPCRAFT_TOKEN; falha no build vira skip com aviso, não derruba o release.
   snap:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: preparar versão do Snap
+        run: echo "${RELEASE_TAG#v}" > snap/release-version.txt
 
       - name: instalar LXD + snapcraft
         run: |
@@ -218,10 +228,11 @@ jobs:
           snap: ${{ steps.snapfile.outputs.snap }}
           release: stable
 
-      - if: startsWith(github.ref, 'refs/tags/') && steps.snapfile.outputs.snap != ''
+      - if: (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '') && steps.snapfile.outputs.snap != ''
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ contains(github.ref_name, '-beta.') }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-beta.') }}
           files: ${{ steps.snapfile.outputs.snap }}
 
   # --- Flatpak: valida o manifesto e o metainfo com flatpak-builder
@@ -285,8 +296,10 @@ jobs:
   # Empacota a extensão VS Code e publica no Marketplace quando o secret
   # VSCE_PAT está configurado (sem o secret, só anexa o .vsix ao release).
   vscode:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     runs-on: ubuntu-24.04
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -298,6 +311,8 @@ jobs:
         working-directory: editors/vscode
         run: |
           npm ci
+          version="${RELEASE_TAG#v}"
+          npm version "$version" --no-git-tag-version --ignore-scripts
           npm run package
 
       # secrets nao sao acessiveis em 'if:'; exporta-se um flag via output.
@@ -314,12 +329,18 @@ jobs:
         working-directory: editors/vscode
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
-        run: npx @vscode/vsce publish -p "$VSCE_PAT"
+        run: |
+          if [[ "$RELEASE_TAG" == *-beta.* ]]; then
+            npx @vscode/vsce publish -p "$VSCE_PAT" --pre-release
+          else
+            npx @vscode/vsce publish -p "$VSCE_PAT"
+          fi
 
-      - if: startsWith(github.ref, 'refs/tags/')
+      - if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          prerelease: ${{ contains(github.ref_name, '-beta.') }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-beta.') }}
           files: editors/vscode/*.vsix
 
   # --- winget: atualiza o manifesto ailake-io.tilt no microsoft/winget-pkgs.
