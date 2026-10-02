@@ -7,7 +7,7 @@ trap 'kill "$srv" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 PORT_FILE="$TMP/port"
 python3 - "$PORT_FILE" <<'PY' >"$TMP/server.log" 2>&1 &
 import http.server, json, sys
-from http.server import ThreadingHTTPServer
+from http.server import HTTPServer
 
 port_file = sys.argv[1]
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -66,7 +66,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
-srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+srv = HTTPServer(("127.0.0.1", 0), Handler)
 with open(port_file, "w") as f:
     f.write(str(srv.server_address[1]))
 srv.serve_forever()
