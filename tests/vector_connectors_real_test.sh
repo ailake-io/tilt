@@ -14,8 +14,14 @@ command -v curl >/dev/null 2>&1 || {
 
 wait_http() {
   url="$1"
+  sucessos=0
   for _ in $(seq 1 "${TILT_VECTOR_WAIT_ATTEMPTS:-15}"); do
-    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then return 0; fi
+    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+      sucessos=$((sucessos + 1))
+      [ "$sucessos" -ge 3 ] && return 0
+    else
+      sucessos=0
+    fi
     sleep 1
   done
   return 1
@@ -38,7 +44,21 @@ if ! command -v pg_isready >/dev/null 2>&1 || \
 fi
 
 run_fixture() {
-  env TILT_LLM=mock "$BIN" executar "$1"
+  fixture="$1"
+  ultima_saida=""
+  for tentativa in 1 2 3 4 5; do
+    if ultima_saida=$(env TILT_LLM=mock "$BIN" executar "$fixture" 2>&1); then
+      printf '%s\n' "$ultima_saida"
+      return 0
+    fi
+    if ! printf '%s\n' "$ultima_saida" | grep -Eq 'curl codigo|libcurl codigo|servidor'; then
+      printf '%s\n' "$ultima_saida"
+      return 1
+    fi
+    sleep 2
+  done
+  printf '%s\n' "$ultima_saida"
+  return 1
 }
 
 check_common() {

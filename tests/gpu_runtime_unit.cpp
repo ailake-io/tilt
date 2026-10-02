@@ -102,7 +102,7 @@ int main() {
     // Todas as operações abaixo permanecem no device depois do upload. O
     // mesmo bloco roda no backend fake para garantir que o fallback CPU tenha
     // exatamente a mesma semântica.
-    tilt::rt::GpuBuffer va, vb, vc, vm, vv, vg, vz, vn, vp, vr;
+    tilt::rt::GpuBuffer va, vb, vc, vm, vv, vg, vz, vn, vr;
     const float ra2[] = {-1, 2, -3, 4};
     const float rb2[] = {4, 3, 2, 1};
     const float stats[] = {0, 0};
