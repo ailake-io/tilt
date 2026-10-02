@@ -244,6 +244,30 @@ Testes de ouro em `tests/golden/` (`entrada.tilt` → `esperado.*`); regenerar:
 CI: `.github/workflows/ci.yml` (Linux gcc + macOS + sanitizers) e
 `release.yml` (tag `v*` → tarballs no GitHub Release).
 
+### Imagem Docker
+
+A imagem oficial instala o `tilt`, a stdlib e os exemplos em um runtime Ubuntu
+enxuto. Para gerar e usar localmente:
+
+```bash
+docker build -t tilt:0.2.0-beta.2 --build-arg TILT_VERSION=0.2.0-beta.2 .
+docker run --rm tilt:0.2.0-beta.2 versao
+docker run --rm -v "$PWD:/workspace:ro" -w /workspace \
+  tilt:0.2.0-beta.2 checar exemplos/soma.tilt
+
+docker compose run --rm tilt-alpine
+```
+
+O `docker compose run --rm tilt` executa o smoke test local. Em cada tag
+`v*`, o workflow `.github/workflows/docker.yml` publica a imagem versionada e
+`latest` no GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/ailake-io/tilt:v0.2.0-beta.2
+docker run --rm ghcr.io/ailake-io/tilt:v0.2.0-beta.2 versao
+docker pull ghcr.io/ailake-io/tilt:v0.2.0-beta.2-alpine
+```
+
 ---
 
 ## Roadmap

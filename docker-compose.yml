@@ -1,0 +1,23 @@
+services:
+  tilt:
+    build:
+      context: .
+      args:
+        TILT_VERSION: 0.2.0-beta.2
+    image: tilt:0.2.0-beta.2
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:ro
+    command: ["versao"]
+
+  tilt-alpine:
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine
+      args:
+        TILT_VERSION: 0.2.0-beta.2
+    image: tilt:0.2.0-beta.2-alpine
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:ro
+    command: ["versao"]
