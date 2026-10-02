@@ -58,7 +58,10 @@ run_fixture() {
     sleep 2
   done
   printf '%s\n' "$ultima_saida"
-  return 1
+  # Devolve sucesso para que o chamador consiga imprimir a resposta capturada
+  # e identificar qual backend falhou; a validacao abaixo transforma a saida
+  # incompleta em falha do teste com diagnostico visivel.
+  return 0
 }
 
 check_common() {
