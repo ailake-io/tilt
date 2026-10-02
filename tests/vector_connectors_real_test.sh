@@ -108,7 +108,7 @@ echo "$weaviate_out" | grep -q "top1: 00000000-0000-4000-8000-000000000002" || {
   echo "weaviate ranking inesperado: $weaviate_out"; exit 1;
 }
 
-chroma_out=$(run_fixture "$FIXTURES/chroma_rag.tilt")
+chroma_out=$(run_fixture "$FIXTURES/chroma_real_rag.tilt")
 check_common "$chroma_out"
 echo "$chroma_out" | grep -q "top1: b1" || {
   echo "chroma ranking inesperado: $chroma_out"; exit 1;
