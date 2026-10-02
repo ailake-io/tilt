@@ -378,6 +378,8 @@ struct AesGcmApi {
     if (lib) return;
 #if defined(_WIN32)
     const char* names[] = {"libcrypto-3-x64.dll", "libcrypto-1_1-x64.dll", "libcrypto.dll"};
+#elif defined(__APPLE__)
+    const char* names[] = {"libcrypto.3.dylib", "libcrypto.dylib", "libcrypto.1.1.dylib"};
 #else
     const char* names[] = {"libcrypto.so.3", "libcrypto.so"};
 #endif

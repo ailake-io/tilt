@@ -22,14 +22,24 @@ namespace {
 inline Value copiar_valor(const Value& v) {
   if (v.kind <= ValueKind::Decimal) {
     const ValueKind k = v.kind;
-    const bool b = v.b;
-    const std::int64_t i = v.i;
-    const double d = v.d;
     Value r;
     r.kind = k;
-    r.b = b;
-    r.i = i;
-    r.d = d;
+    switch (k) {
+      case ValueKind::Logico:
+        r.b = v.b;
+        break;
+      case ValueKind::Inteiro:
+        r.i = v.i;
+        break;
+      case ValueKind::Decimal:
+        r.d = v.d;
+        break;
+      case ValueKind::Nulo:
+        r.b = false;
+        break;
+      default:
+        break;
+    }
     return r;
   }
   return v;

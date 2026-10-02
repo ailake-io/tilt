@@ -249,7 +249,11 @@ jobs:
       - name: build
         run: cmake --build --preset debug
       - name: test
-        run: ctest --preset debug --output-on-failure --timeout 300
+        run: |
+          # O teste de recursao profunda valida a protecao da VM em 4000 niveis.
+          # Reserve espaco suficiente para chegar ao limite sob AddressSanitizer.
+          ulimit -s 65536
+          ctest --preset debug --output-on-failure --timeout 300
 
   coverage:
     runs-on: ubuntu-24.04
