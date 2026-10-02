@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0-beta.2] - 2026-10-02
+
+Release beta com correções de estabilidade e empacotamento:
+
+- corrige acessos inválidos detectados por UBSan na cópia de valores da VM;
+- estabiliza testes de cloud provider no macOS e os mocks de conectores;
+- corrige a preparação do benchmark, incluindo a dependência `pyarrow`;
+- atualiza fixtures, golden tests e referências de distribuição para beta.2.
+
 ## [0.2.0-beta.1] - 2026-10-01
 
 Primeira versão beta pública do Tilt.

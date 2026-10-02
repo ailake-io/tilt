@@ -10,7 +10,7 @@
 class Tilt < Formula
   desc "Linguagem de programação para dados e IA (dados, ML/DL, LLM/RAG, agentes, HTTP)"
   homepage "https://github.com/ailake-io/tilt"
-  url "https://github.com/ailake-io/tilt/archive/refs/tags/v0.2.0-beta.1.tar.gz"
+  url "https://github.com/ailake-io/tilt/archive/refs/tags/v0.2.0-beta.2.tar.gz"
   sha256 "TROCAR_PELA_SHA256_DO_TARBALL_DA_RELEASE"
   license "MIT"
 

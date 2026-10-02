@@ -67,7 +67,7 @@ PY
 )
 VERSION=${TAG#v}
 # CPack recebe a versão numérica (0.2.0) mesmo quando a tag é um pre-release
-# semver (0.2.0-beta.1). O binário continua exibindo a versão completa.
+# semver (0.2.0-beta.2). O binário continua exibindo a versão completa.
 PACKAGE_VERSION=${VERSION%%-*}
 ASSET="tilt-${PACKAGE_VERSION}-${OS}-${ARCH}.tar.gz"
 

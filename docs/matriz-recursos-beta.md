@@ -1,4 +1,4 @@
-# Matriz de recursos — `v0.2.0-beta.1`
+# Matriz de recursos — `v0.2.0-beta.2`
 
 | Área | Estado | Fallback/execução | Limite conhecido |
 |---|---|---|---|

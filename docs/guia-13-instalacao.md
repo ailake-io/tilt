@@ -172,8 +172,8 @@ MSI/winget publicado na Release.
 O workflow `.github/workflows/release.yml` faz isso sozinho a cada tag `v*`:
 
 ```bash
-git tag v0.2.0-beta.1
-git push origin v0.2.0-beta.1
+git tag v0.2.0-beta.2
+git push origin v0.2.0-beta.2
 ```
 
 Ele compila em release, roda a suíte de testes e gera/anexa por
