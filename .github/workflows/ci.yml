@@ -88,6 +88,8 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
+      - name: dependencias dos benchmarks
+        run: python3 -m pip install --user --disable-pip-version-check pyarrow
       - name: configure release
         run: cmake --preset release
       - name: build tilt
