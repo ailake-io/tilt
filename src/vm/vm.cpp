@@ -210,11 +210,25 @@ rt::Value Vm::executar(const Chunk& chunk, std::size_t base) {
         Value& dst = pilha_[base + static_cast<std::size_t>(in.a)];
         Value& src = pilha_.back();
         if (src.kind <= ValueKind::Decimal && dst.kind <= ValueKind::Decimal) {
-          // escalar -> escalar: copia so os 4 campos (evita mover string + 4 shared_ptr)
+          // escalar -> escalar: copia somente o membro ativo da union (evita mover
+          // string + 4 shared_ptr sem ler membros inativos sob UBSan).
           dst.kind = src.kind;
-          dst.b = src.b;
-          dst.i = src.i;
-          dst.d = src.d;
+          switch (src.kind) {
+            case ValueKind::Logico:
+              dst.b = src.b;
+              break;
+            case ValueKind::Inteiro:
+              dst.i = src.i;
+              break;
+            case ValueKind::Decimal:
+              dst.d = src.d;
+              break;
+            case ValueKind::Nulo:
+              dst.b = false;
+              break;
+            default:
+              break;
+          }
         } else {
           dst = std::move(src);
         }

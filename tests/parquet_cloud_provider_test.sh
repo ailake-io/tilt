@@ -88,12 +88,36 @@ pipeline cloud:
     - v = ler_parquet "vault.parquet"
     - imprimir a[0].id, g[0].id, v[0].id
 EOF
-(cd "$TMP" && AZURE_ACCESS_TOKEN_FILE="$TMP/azure.token" GCP_ACCESS_TOKEN=x GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
-  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN_FILE="$TMP/vault.token" "$BIN" executar cloud.tilt) >"$TMP/out"
-grep -F '9 9 9' "$TMP/out" >/dev/null
+if ! (cd "$TMP" && AZURE_ACCESS_TOKEN_FILE="$TMP/azure.token" GCP_ACCESS_TOKEN=x GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
+  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN_FILE="$TMP/vault.token" "$BIN" executar cloud.tilt) >"$TMP/out"; then
+  echo "cloud provider command failed (explicit tokens):" >&2
+  sed -n '1,120p' "$TMP/out" >&2
+  echo "cloud provider server log:" >&2
+  sed -n '1,120p' "$TMP/server.log" >&2
+  exit 1
+fi
+if ! grep -F '9 9 9' "$TMP/out" >/dev/null; then
+  echo "cloud provider output (explicit tokens):" >&2
+  sed -n '1,120p' "$TMP/out" >&2
+  echo "cloud provider server log:" >&2
+  sed -n '1,120p' "$TMP/server.log" >&2
+  exit 1
+fi
 rm -f "$TMP/azure.token" "$TMP/vault.token"
-(cd "$TMP" && AZURE_IMDS_ENDPOINT="http://127.0.0.1:$PORT/azure-token" \
+if ! (cd "$TMP" && AZURE_IMDS_ENDPOINT="http://127.0.0.1:$PORT/azure-token" \
   GCP_METADATA_HOST="http://127.0.0.1:$PORT" GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
-  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN=x "$BIN" executar cloud.tilt) >"$TMP/out-discovery"
-grep -F '9 9 9' "$TMP/out-discovery" >/dev/null
+  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN=x "$BIN" executar cloud.tilt) >"$TMP/out-discovery"; then
+  echo "cloud provider command failed (discovery):" >&2
+  sed -n '1,120p' "$TMP/out-discovery" >&2
+  echo "cloud provider server log:" >&2
+  sed -n '1,120p' "$TMP/server.log" >&2
+  exit 1
+fi
+if ! grep -F '9 9 9' "$TMP/out-discovery" >/dev/null; then
+  echo "cloud provider output (discovery):" >&2
+  sed -n '1,120p' "$TMP/out-discovery" >&2
+  echo "cloud provider server log:" >&2
+  sed -n '1,120p' "$TMP/server.log" >&2
+  exit 1
+fi
 echo "parquet_cloud_provider_test ok"
