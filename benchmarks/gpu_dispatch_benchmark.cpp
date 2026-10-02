@@ -1,6 +1,3 @@
-#include "runtime/gpu_runtime.hpp"
-#include "runtime/tensor.hpp"
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -11,6 +8,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "runtime/gpu_runtime.hpp"
+#include "runtime/tensor.hpp"
 
 namespace {
 
@@ -36,8 +36,9 @@ float checksum(const std::vector<float>& data) {
 
 void fill(tilt::rt::Tensor& t, int period) {
   for (std::size_t i = 0; i < t.data.size(); ++i)
-    t.data[i] = static_cast<float>(static_cast<int>(i % static_cast<std::size_t>(period)) -
-                                    period / 2) * 0.003F;
+    t.data[i] =
+        static_cast<float>(static_cast<int>(i % static_cast<std::size_t>(period)) - period / 2) *
+        0.003F;
 }
 
 bool close(const tilt::rt::Tensor& expected, const std::vector<float>& actual) {
@@ -66,8 +67,8 @@ int main(int argc, char** argv) {
     tilt::rt::Tensor expected;
     const double cpu_ms = median_ms([&] { expected = tilt::rt::matmul(a, b); }, repetitions);
     std::vector<float> cpu_values(expected.data.begin(), expected.data.end());
-    std::cout << "cpu,gemm," << n << "x" << n << "," << cpu_ms << ","
-              << checksum(cpu_values) << "\n";
+    std::cout << "cpu,gemm," << n << "x" << n << "," << cpu_ms << "," << checksum(cpu_values)
+              << "\n";
     if (has_gpu) {
       std::vector<float> output(static_cast<std::size_t>(n) * n);
       const auto run = [&] {
@@ -76,8 +77,8 @@ int main(int argc, char** argv) {
       };
       const double gpu_ms = median_ms(run, repetitions);
       if (!close(expected, output)) return 3;
-      std::cout << "cuda,gemm," << n << "x" << n << "," << gpu_ms << ","
-                << checksum(output) << "\n";
+      std::cout << "cuda,gemm," << n << "x" << n << "," << gpu_ms << "," << checksum(output)
+                << "\n";
     }
   }
 
@@ -97,14 +98,14 @@ int main(int argc, char** argv) {
     if (has_gpu) {
       std::vector<float> output(expected.data.size());
       const auto run = [&] {
-        if (!gpu.conv2d(x.data.data(), w.data.data(), output.data(), 1, ci, side, side,
-                        co, 3, 3, out_side, out_side, 1, 0, 1))
+        if (!gpu.conv2d(x.data.data(), w.data.data(), output.data(), 1, ci, side, side, co, 3, 3,
+                        out_side, out_side, 1, 0, 1))
           throw std::runtime_error("conv2d CUDA falhou");
       };
       const double gpu_ms = median_ms(run, repetitions);
       if (!close(expected, output)) return 4;
-      std::cout << "cuda,conv2d," << side << "x" << side << "," << gpu_ms << ","
-                << checksum(output) << "\n";
+      std::cout << "cuda,conv2d," << side << "x" << side << "," << gpu_ms << "," << checksum(output)
+                << "\n";
     }
   }
   if (!has_gpu) std::cerr << "CUDA indisponivel: resultados CPU apenas\n";

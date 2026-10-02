@@ -1,14 +1,16 @@
-#include "runtime/columnar.hpp"
-#include "runtime/tabela_ops.hpp"
-#include <chrono>
+#include <sys/resource.h>
+
 #include <barrier>
-#include <thread>
-#include <mutex>
-#include <sstream>
+#include <chrono>
 #include <exception>
 #include <iostream>
+#include <mutex>
+#include <sstream>
 #include <stdexcept>
-#include <sys/resource.h>
+#include <thread>
+
+#include "runtime/columnar.hpp"
+#include "runtime/tabela_ops.hpp"
 using namespace tilt::rt;
 int worker(int argc, char** argv, std::barrier<>& gate, std::ostream& output) {
   try {
@@ -34,8 +36,10 @@ int worker(int argc, char** argv, std::barrier<>& gate, std::ostream& output) {
       gate.arrive_and_wait();
       const auto start = std::chrono::steady_clock::now();
       Value result;
-      if (mode == "materialize") result = Value::tabela(columns.materialize());
-      else if (mode == "join") result = tabela_juntar(left, right, Value::texto("id"), "interna");
+      if (mode == "materialize")
+        result = Value::tabela(columns.materialize());
+      else if (mode == "join")
+        result = tabela_juntar(left, right, Value::texto("id"), "interna");
       else {
         ValueList lists;
         lists.reserve(n);
@@ -50,14 +54,15 @@ int worker(int argc, char** argv, std::barrier<>& gate, std::ostream& output) {
       for (int i = 0; i < n; ++i) {
         const auto& row = result.list->at(i);
         if (mode == "lists") {
-          if (!row.list || row.list->size() != 2 || row.list->at(0).i != i || row.list->at(1).i != 2LL*i)
+          if (!row.list || row.list->size() != 2 || row.list->at(0).i != i ||
+              row.list->at(1).i != 2LL * i)
             throw std::runtime_error("incorrect list");
           sum += row.list->at(1).i;
         } else {
           if (!row.map) throw std::runtime_error("missing map");
           const auto* id = row.map->find("id");
           const auto* value = row.map->find("value");
-          if (!id || !value || id->i != i || value->i != 2LL*i)
+          if (!id || !value || id->i != i || value->i != 2LL * i)
             throw std::runtime_error("incorrect row");
           if (mode == "join") {
             const auto* other = row.map->find("value_direita");
@@ -66,24 +71,36 @@ int worker(int argc, char** argv, std::barrier<>& gate, std::ostream& output) {
           sum += value->i;
         }
       }
-      if (sum != 1LL*n*(n-1)) throw std::runtime_error("incorrect checksum");
+      if (sum != 1LL * n * (n - 1)) throw std::runtime_error("incorrect checksum");
       const auto destroy_start = std::chrono::steady_clock::now();
       result = Value{};
       const auto destroy_end = std::chrono::steady_clock::now();
       rusage usage{};
       getrusage(RUSAGE_SELF, &usage);
-      if (run >= 0) output << std::chrono::duration<double, std::milli>(finish-start).count()
-                              << ' ' << std::chrono::duration<double, std::milli>(destroy_end-destroy_start).count()
-                              << ' ' << usage.ru_maxrss << ' ' << sum << '\n';
+      if (run >= 0)
+        output << std::chrono::duration<double, std::milli>(finish - start).count() << ' '
+               << std::chrono::duration<double, std::milli>(destroy_end - destroy_start).count()
+               << ' ' << usage.ru_maxrss << ' ' << sum << '\n';
     }
     return 0;
-  } catch (const std::exception& e) { gate.arrive_and_drop(); std::cerr << e.what() << '\n'; return 1; }
+  } catch (const std::exception& e) {
+    gate.arrive_and_drop();
+    std::cerr << e.what() << '\n';
+    return 1;
+  }
 }
 
 int main(int argc, char** argv) {
-  if (argc != 5) { std::cerr << "usage: benchmark CASE ROWS REPEATS THREADS\n"; return 1; }
+  if (argc != 5) {
+    std::cerr << "usage: benchmark CASE ROWS REPEATS THREADS\n";
+    return 1;
+  }
   int threads;
-  try { threads = std::stoi(argv[4]); } catch (...) { return 1; }
+  try {
+    threads = std::stoi(argv[4]);
+  } catch (...) {
+    return 1;
+  }
   if (threads < 1 || threads > 64) return 1;
   std::barrier gate(threads);
   std::vector<std::thread> workers;
@@ -92,6 +109,7 @@ int main(int argc, char** argv) {
   for (int i = 0; i < threads; ++i)
     workers.emplace_back([&, i] { status[i] = worker(4, argv, gate, outputs[i]); });
   for (auto& thread : workers) thread.join();
-  for (int result : status) if (result) return result;
+  for (int result : status)
+    if (result) return result;
   for (const auto& output : outputs) std::cout << output.str();
 }

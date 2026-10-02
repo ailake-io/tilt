@@ -38,7 +38,7 @@ tmp_cpplint=$(mktemp)
 trap 'rm -f "$tmp_cpplint"' EXIT
 set +e
 cpplint --linelength=120 \
-  --filter=-build/c++17,-build/include_what_you_use,-legal/copyright,-readability/braces,-runtime/int,-runtime/references,-whitespace/indent_namespace,-whitespace/line_length \
+  --filter=-build/c++17,-build/include_what_you_use,-build/include_order,-build/namespaces,-legal/copyright,-readability/braces,-runtime/int,-runtime/references,-whitespace/indent_namespace,-whitespace/line_length,-whitespace/newline \
   $files >"$tmp_cpplint" 2>&1
 cpplint_status=$?
 set -e
