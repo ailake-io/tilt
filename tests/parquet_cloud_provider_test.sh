@@ -11,7 +11,8 @@ from http.server import ThreadingHTTPServer
 
 port_file = sys.argv[1]
 class Handler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *args): pass
+    def log_message(self, fmt, *args):
+        print(fmt % args, file=sys.stderr, flush=True)
     def do_GET(self):
         if self.path.startswith("/azure-token") and self.headers.get("Metadata") == "true":
             out = {"access_token": "x", "expires_in": 60}
@@ -72,7 +73,11 @@ srv.serve_forever()
 PY
 srv=$!
 for _ in $(seq 1 50); do [ -s "$PORT_FILE" ] && break; sleep .1; done
-[ -s "$PORT_FILE" ]
+if [ ! -s "$PORT_FILE" ]; then
+  echo "cloud provider fixture failed to start:" >&2
+  sed -n '1,120p' "$TMP/server.log" >&2
+  exit 1
+fi
 PORT=$(cat "$PORT_FILE")
 printf 'x\n' >"$TMP/azure.token"
 printf 'x\n' >"$TMP/vault.token"
@@ -89,7 +94,7 @@ pipeline cloud:
     - imprimir a[0].id, g[0].id, v[0].id
 EOF
 if ! (cd "$TMP" && AZURE_ACCESS_TOKEN_FILE="$TMP/azure.token" GCP_ACCESS_TOKEN=x GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
-  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN_FILE="$TMP/vault.token" "$BIN" executar cloud.tilt) >"$TMP/out"; then
+  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN_FILE="$TMP/vault.token" "$BIN" executar cloud.tilt) >"$TMP/out" 2>&1; then
   echo "cloud provider command failed (explicit tokens):" >&2
   sed -n '1,120p' "$TMP/out" >&2
   echo "cloud provider server log:" >&2
@@ -106,7 +111,7 @@ fi
 rm -f "$TMP/azure.token" "$TMP/vault.token"
 if ! (cd "$TMP" && AZURE_IMDS_ENDPOINT="http://127.0.0.1:$PORT/azure-token" \
   GCP_METADATA_HOST="http://127.0.0.1:$PORT" GCP_KMS_ENDPOINT="http://127.0.0.1:$PORT" \
-  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN=x "$BIN" executar cloud.tilt) >"$TMP/out-discovery"; then
+  VAULT_ADDR="http://127.0.0.1:$PORT" VAULT_TOKEN=x "$BIN" executar cloud.tilt) >"$TMP/out-discovery" 2>&1; then
   echo "cloud provider command failed (discovery):" >&2
   sed -n '1,120p' "$TMP/out-discovery" >&2
   echo "cloud provider server log:" >&2
