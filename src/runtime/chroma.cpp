@@ -73,9 +73,9 @@ std::string motivo_erro(const std::string& body) {
   return truncar(body, 300);
 }
 
-[[noreturn]] void die_http(const HttpClientResponse& r) {
-  if (!r.error.empty()) die(r.error + ": verifique URL/colecao/servidor. Resposta: " +
-                            truncar(r.body, 200));
+[[noreturn]] void die_http(const std::string& url, const HttpClientResponse& r) {
+  if (!r.error.empty()) die(r.error + ": verifique URL/colecao/servidor (URL: " + url +
+                            "). Resposta: " + truncar(r.body, 200));
   if (r.status == 0) die("resposta sem codigo de status");
   die(motivo_erro(r.body));
 }
@@ -89,7 +89,7 @@ std::vector<std::pair<std::string, std::string>> headers() {
 // transporte ou execucao -> die com a mensagem do servidor.
 std::string http_json(const std::string& method, const std::string& url, const std::string& body) {
   const HttpClientResponse r = http_request(method, url, headers(), body, 0);
-  if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(r);
+  if (r.status >= 400 || r.status == 0 || !r.error.empty()) die_http(url, r);
   return r.body;
 }
 
