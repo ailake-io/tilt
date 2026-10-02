@@ -6,8 +6,12 @@ TMP="$(mktemp -d)"
 trap 'kill "$srv" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 PORT_FILE="$TMP/port"
 python3 - "$PORT_FILE" <<'PY' >"$TMP/server.log" 2>&1 &
-import http.server, json, sys
+import http.server, json, socket as _socket, sys
 from http.server import HTTPServer
+
+# HTTPServer.__init__ chama socket.getfqdn(host): no macOS a resolucao DNS
+# reversa pode travar no runner antes de o fixture escrever o arquivo de porta.
+_socket.getfqdn = lambda host="": "localhost"
 
 port_file = sys.argv[1]
 class Handler(http.server.BaseHTTPRequestHandler):
